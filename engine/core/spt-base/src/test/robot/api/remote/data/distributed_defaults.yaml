@@ -1,0 +1,9 @@
+---
+load:
+  step:
+    node:
+      addrs:
+      - localhost:1098
+  op:
+    wait:
+      finish: false

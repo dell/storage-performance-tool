@@ -1,0 +1,9 @@
+load:
+    op:
+        limit:
+            count: 1000
+output:
+    metrics:
+        average:
+            aggregation:
+                period: 1

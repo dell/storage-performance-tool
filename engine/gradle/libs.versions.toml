@@ -1,0 +1,145 @@
+[versions]
+# Core libraries
+junit = "4.13.2"  # Minor update within JUnit 4 (JUnit 5 requires major test rewrite)
+log4j = "2.19.0"
+scala = "2.13.14"
+slf4j = "1.7.25"
+
+# Apache Commons
+commonsCodec = "1.17.1"  # Updated from 1.11 for security fixes
+commonsLang = "3.14.0"  # MAJOR UPDATE from commons-lang 2.6 to commons-lang3
+commonsText = "1.12.0"  # Added to replace deprecated StrBuilder
+
+# Jackson - SECURITY UPDATE
+jackson = "2.17.2"  # Updated from 2.9.8 - fixes multiple CVEs
+
+# Networking
+jetty = "9.4.56.v20240826"  # Updated from 9.4.14 - security fixes, staying on 9.x for compatibility
+netty = "4.1.115.Final"
+nettyConnectionPool = "1.2.1"
+nettyTcNative = "2.0.69.Final"
+nettyIoUring = "0.0.25.Final"
+
+# Spt internal libraries
+confuse = "1.2.1"
+confuseIoYaml = "1.0.0"
+fiber4j = "1.1.0"
+javaCommons = "2.3.6"
+
+# Performance and utilities
+disruptor = "3.4.2"
+fastutil = "8.2.2"
+javassist = "3.29.2-GA"  # Updated from 3.23.1-GA - minor bug fixes
+prometheus = "0.16.0"  # Updated from 0.6.0 - significant improvements
+nashorn = "15.6"
+
+# Testing utilities
+commonsCsv = "1.11.0"  # Updated from 1.1
+commonsMath3 = "3.6.1"
+guava = "33.3.1-jre"  # Updated from 25.1-jre
+mockito = "5.14.2"  # Updated from 2.23.0
+
+# Build tools
+dockerJava = "3.1.5"
+shadow = "8.1.1"
+spotless = "6.25.0"
+docker = "9.4.0"
+
+[libraries]
+# Testing
+junit = { module = "junit:junit", version.ref = "junit" }
+
+# Logging
+log4j-api = { module = "org.apache.logging.log4j:log4j-api", version.ref = "log4j" }
+log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
+log4j-jul = { module = "org.apache.logging.log4j:log4j-jul", version.ref = "log4j" }
+log4j-slf4j-impl = { module = "org.apache.logging.log4j:log4j-slf4j-impl", version.ref = "log4j" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+slf4j-log4j12 = { module = "org.slf4j:slf4j-log4j12", version.ref = "slf4j" }
+
+# Apache Commons
+commons-codec = { module = "commons-codec:commons-codec", version.ref = "commonsCodec" }
+commons-lang = { module = "org.apache.commons:commons-lang3", version.ref = "commonsLang" }
+commons-text = { module = "org.apache.commons:commons-text", version.ref = "commonsText" }
+
+# Jackson
+jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+
+# Scala
+scala-library = { module = "org.scala-lang:scala-library", version.ref = "scala" }
+scala-compiler = { module = "org.scala-lang:scala-compiler", version.ref = "scala" }
+
+# Networking - Jetty
+jetty-server = { module = "org.eclipse.jetty:jetty-server", version.ref = "jetty" }
+jetty-servlet = { module = "org.eclipse.jetty:jetty-servlet", version.ref = "jetty" }
+jetty-rewrite = { module = "org.eclipse.jetty:jetty-rewrite", version.ref = "jetty" }
+
+# Networking - Netty
+netty-buffer = { module = "io.netty:netty-buffer", version.ref = "netty" }
+netty-codec = { module = "io.netty:netty-codec", version.ref = "netty" }
+netty-codec-http = { module = "io.netty:netty-codec-http", version.ref = "netty" }
+netty-codec-http2 = { module = "io.netty:netty-codec-http2", version.ref = "netty" }
+netty-common = { module = "io.netty:netty-common", version.ref = "netty" }
+netty-handler = { module = "io.netty:netty-handler", version.ref = "netty" }
+netty-transport = { module = "io.netty:netty-transport", version.ref = "netty" }
+netty-transport-native-epoll = { module = "io.netty:netty-transport-native-epoll", version.ref = "netty" }
+netty-transport-native-kqueue = { module = "io.netty:netty-transport-native-kqueue", version.ref = "netty" }
+netty-tcnative-boringssl-static = { module = "io.netty:netty-tcnative-boringssl-static", version.ref = "nettyTcNative" }
+netty-incubator-transport-native-io_uring = { module = "io.netty.incubator:netty-incubator-transport-native-io_uring", version.ref = "nettyIoUring" }
+
+# Spt internal libraries
+confuse = { module = "com.github.akurilov:confuse", version.ref = "confuse" }
+confuse-io-yaml = { module = "com.github.akurilov:confuse-io-yaml", version.ref = "confuseIoYaml" }
+fiber4j = { module = "com.github.akurilov:fiber4j", version.ref = "fiber4j" }
+java-commons = { module = "com.github.akurilov:java-commons", version.ref = "javaCommons" }
+netty-connection-pool = { module = "com.github.akurilov:netty-connection-pool", version.ref = "nettyConnectionPool" }
+
+# Performance and utilities
+disruptor = { module = "com.lmax:disruptor", version.ref = "disruptor" }
+fastutil = { module = "it.unimi.dsi:fastutil", version.ref = "fastutil" }
+javassist = { module = "org.javassist:javassist", version.ref = "javassist" }
+prometheus-simpleclient = { module = "io.prometheus:simpleclient", version.ref = "prometheus" }
+prometheus-simpleclient-common = { module = "io.prometheus:simpleclient_common", version.ref = "prometheus" }
+prometheus-simpleclient-httpserver = { module = "io.prometheus:simpleclient_httpserver", version.ref = "prometheus" }
+prometheus-simpleclient-servlet = { module = "io.prometheus:simpleclient_servlet", version.ref = "prometheus" }
+prometheus-simpleclient-hotspot = { module = "io.prometheus:simpleclient_hotspot", version.ref = "prometheus" }
+nashorn-core = { module = "org.openjdk.nashorn:nashorn-core", version.ref = "nashorn" }
+
+# Testing utilities
+commons-csv = { module = "org.apache.commons:commons-csv", version.ref = "commonsCsv" }
+commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commonsMath3" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
+mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+
+# Docker
+docker-java = { module = "com.github.docker-java:docker-java", version.ref = "dockerJava" }
+
+[bundles]
+# Common logging bundle
+logging = ["log4j-api", "log4j-core", "slf4j-api", "slf4j-log4j12"]
+
+# Jackson bundle
+jackson = ["jackson-annotations", "jackson-core", "jackson-databind", "jackson-dataformat-yaml"]
+
+# Netty core bundle
+netty-core = ["netty-buffer", "netty-codec", "netty-common", "netty-handler", "netty-transport"]
+
+# Netty HTTP bundle
+netty-http = ["netty-codec-http", "netty-codec-http2"]
+
+# Netty platform-specific bundle
+netty-platform = ["netty-transport-native-epoll", "netty-transport-native-kqueue"]
+
+# Prometheus bundle
+prometheus = ["prometheus-simpleclient", "prometheus-simpleclient-common", "prometheus-simpleclient-httpserver"]
+
+# Spt internal bundle
+spt-internal = ["confuse", "confuse-io-yaml", "fiber4j", "java-commons"]
+
+[plugins]
+shadow = { id = "com.github.johnrengelman.shadow", version.ref = "shadow" }
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
+docker = { id = "com.bmuschko.docker-remote-api", version.ref = "docker" }

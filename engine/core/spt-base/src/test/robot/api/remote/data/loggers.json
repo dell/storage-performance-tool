@@ -1,0 +1,11 @@
+{
+  "Cli" : "CLI args",
+  "Errors" : "Errors",
+  "metrics.FileTotal" : "Metrics Total",
+  "Messages" : "Messages",
+  "metrics.threshold.FileTotal" : "Threshold Metrics Total",
+  "Config" : "Base config",
+  "OpTraces" : "Operation Traces",
+  "metrics.File" : "Metrics",
+  "Scenario" : "Scenario"
+}

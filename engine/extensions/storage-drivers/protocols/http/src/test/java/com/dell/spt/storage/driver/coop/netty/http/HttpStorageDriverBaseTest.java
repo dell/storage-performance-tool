@@ -1,0 +1,228 @@
+package com.dell.spt.storage.driver.coop.netty.http;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.Credential;
+import com.github.akurilov.commons.system.SizeInBytes;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
+import com.github.akurilov.confuse.impl.BasicConfig;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpRequest;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+
+/** Tests for HttpStorageDriverBase that do not require any real network. */
+class HttpStorageDriverBaseTest {
+
+	private static Config baseConfig() {
+		try {
+			final java.util.List<java.util.Map<String, Object>> configSchemas = com.dell.spt.base.env.Extension
+							.load(Thread.currentThread().getContextClassLoader())
+							.stream()
+							.map(com.dell.spt.base.env.Extension::schemaProvider)
+							.filter(java.util.Objects::nonNull)
+							.map(sp -> {
+								try {
+									return sp.schema();
+								} catch (Exception e) {
+									throw new RuntimeException(e);
+								}
+							})
+							.filter(java.util.Objects::nonNull)
+							.collect(java.util.stream.Collectors.toList());
+			SchemaProvider
+							.resolve("spt", Thread.currentThread().getContextClassLoader())
+							.stream().findFirst().ifPresent(configSchemas::add);
+			final java.util.Map<String, Object> configSchema = com.github.akurilov.commons.collection.TreeUtil.reduceForest(configSchemas);
+			final Config cfg = new BasicConfig("-", configSchema);
+			cfg.val("load-batch-size", 1024);
+			cfg.val("storage-driver-limit-concurrency", 0);
+			cfg.val("storage-driver-threads", 0);
+			cfg.val("storage-driver-limit-queue-input", 1024);
+			// Net
+			cfg.val("storage-net-transport", "nio");
+			cfg.val("storage-net-ssl-enabled", false);
+			cfg.val("storage-net-node-addrs", List.of("127.0.0.1"));
+			cfg.val("storage-net-node-port", 9024);
+			cfg.val("storage-net-node-connAttemptsLimit", 0);
+			cfg.val("storage-net-ioRatio", 50);
+			cfg.val("storage-net-timeoutMilliSec", 0);
+			cfg.val("storage-net-reuseAddr", true);
+			cfg.val("storage-net-bindBacklogSize", 0);
+			cfg.val("storage-net-keepAlive", true);
+			cfg.val("storage-net-rcvBuf", 0);
+			cfg.val("storage-net-sndBuf", 0);
+			cfg.val("storage-net-ssl-protocols", List.of());
+			cfg.val("storage-net-ssl-provider", "OPENSSL");
+			cfg.val("storage-net-tcpNoDelay", false);
+			cfg.val("storage-net-interestOpQueued", false);
+			cfg.val("storage-net-writeSpinCount", 1);
+			cfg.val("storage-net-linger", 0);
+			cfg.val("storage-net-http-headers", Map.of());
+			cfg.val("storage-net-http-uri-args", Map.of());
+			cfg.val("storage-net-http-read-metadata-only", false);
+			cfg.val("storage-net-http-max-chunk-size", 65536);
+			// Auth minimal
+			cfg.val("storage-auth-uid", "user1");
+			cfg.val("storage-auth-secret", "secret1");
+			return cfg;
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	private static class TestHttpDriver extends HttpStorageDriverBase<DataItemImpl, DataOperation<DataItemImpl>> {
+		TestHttpDriver(final Config storage) throws Exception {
+			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false), storage.configVal("storage"), false, 1024);
+		}
+
+		// Expose dataUriPath for testing
+		String exposeDataUriPath(final DataItemImpl item, final String src, final String dst, final OpType t) {
+			return dataUriPath(item, src, dst, t);
+		}
+
+		// Expose sendRequest for testing
+		void exposeSendRequest(final io.netty.channel.Channel ch, final DataOperation<DataItemImpl> op) {
+			sendRequest(ch, op);
+		}
+
+		@Override
+		protected HttpMethod tokenHttpMethod(final OpType opType) {
+			return HttpMethod.GET;
+		}
+
+		@Override
+		protected HttpMethod pathHttpMethod(final OpType opType) {
+			return HttpMethod.PUT;
+		}
+
+		@Override
+		protected String tokenUriPath(final DataItemImpl item, final String srcPath, final String dstPath, final OpType opType) {
+			return "/token";
+		}
+
+		@Override
+		protected String pathUriPath(final DataItemImpl item, final String srcPath, final String dstPath, final OpType opType) {
+			return exposeDataUriPath(item, srcPath, dstPath, opType);
+		}
+
+		@Override
+		protected void applyChecksum(final HttpHeaders httpHeaders, final DataOperation<DataItemImpl> op) {}
+
+		@Override
+		protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {}
+
+		@Override
+		protected void applyAuthHeaders(final HttpHeaders httpHeaders, final HttpMethod httpMethod, final String dstUriPath, final Credential credential) {}
+
+		@Override
+		protected void applyCopyHeaders(final HttpHeaders httpHeaders, final String srcPath) {
+			httpHeaders.set("x-test-copy-source", srcPath);
+		}
+
+		@Override
+		protected String requestNewAuthToken(final Credential credential) {
+			return null;
+		}
+
+		@Override
+		public String requestNewPath(final String path) {
+			return path;
+		}
+
+		@Override
+		public java.util.List<DataItemImpl> list(
+						final ItemFactory<DataItemImpl> itemFactory,
+						final String path,
+						final String prefix,
+						final int idRadix,
+						final DataItemImpl lastPrevItem,
+						final int count) {
+			return java.util.List.of();
+		}
+	}
+
+	@Test
+	void dataUriPath_prefersDstOverSrc_noDoubleSlash() throws Exception {
+		final var cfg = baseConfig();
+		final var drv = new TestHttpDriver(cfg);
+		final var item = new DataItemImpl("logs/AA/fileA", 0, 128);
+		final String uri = drv.exposeDataUriPath(item, "/srcBucket", "dstBucket", OpType.CREATE);
+		assertEquals("/dstBucket/logs/AA/fileA", uri);
+	}
+
+	@Test
+	void dataUriPath_usesSrcWhenDstNull() throws Exception {
+		final var cfg = baseConfig();
+		final var drv = new TestHttpDriver(cfg);
+		final var item = new DataItemImpl("fileB", 0, 64);
+		final String uri = drv.exposeDataUriPath(item, "srcBucket", null, OpType.CREATE);
+		assertEquals("/srcBucket/fileB", uri);
+	}
+
+	@Test
+	void sendRequest_create_writesPayload_whenNoSrcPath() throws Exception {
+		final var cfg = baseConfig();
+		final var drv = new TestHttpDriver(cfg);
+
+		// Prepare a data item with in-memory generator and non-zero size
+		final var item = new DataItemImpl("payload.bin", 0, 1024);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucket", null, null, 0);
+
+		final var ch = new EmbeddedChannel();
+		// Minimal headers for HOST are injected by httpRequest path (when node address null, none is set)
+		// Call the protected sendRequest via the public wrapper
+		drv.exposeSendRequest(ch, op);
+
+		// Grab outbound writes: HttpRequest, Data payload region/stream, LastHttpContent
+		Object first = ch.readOutbound();
+		Object second = ch.readOutbound();
+		Object third = ch.readOutbound();
+
+		assertTrue(first instanceof HttpRequest, "First outbound must be HttpRequest");
+		final HttpRequest req = (HttpRequest) first;
+		assertEquals(HttpMethod.PUT, req.method());
+		assertEquals("/bucket/payload.bin", req.uri());
+		final String cl = req.headers().get(HttpHeaderNames.CONTENT_LENGTH);
+		assertNotNull(cl, "Content-Length must be present for CREATE");
+		assertTrue(Integer.parseInt(cl) > 0, "Content-Length should reflect payload size (>0)");
+		assertNotNull(second, "Expected a payload write after the headers");
+		assertNotNull(third, "Expected terminating LastHttpContent after payload");
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void sendRequest_create_writesPayload_whenNoSrcPath_sslEnabled() throws Exception {
+		final var cfg = baseConfig();
+		cfg.val("storage-net-ssl-enabled", true);
+		cfg.val("storage-net-ssl-provider", "JDK");
+		final var drv = new TestHttpDriver(cfg);
+
+		final var item = new DataItemImpl("payloadSSL.bin", 0, 1024);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucket", null, null, 0);
+
+		final var ch = new EmbeddedChannel();
+		drv.exposeSendRequest(ch, op);
+
+		Object first = ch.readOutbound();
+		Object second = ch.readOutbound();
+		Object third = ch.readOutbound();
+		assertTrue(first instanceof HttpRequest);
+		assertNotNull(second);
+		assertNotNull(third);
+		ch.finishAndReleaseAll();
+	}
+}

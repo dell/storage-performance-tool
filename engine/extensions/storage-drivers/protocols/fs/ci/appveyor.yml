@@ -1,0 +1,62 @@
+image:
+  - Visual Studio 2017
+
+environment:
+  JAVA_HOME: "C:\\Progra~1\\Java\\jdk21"
+  MAVEN_HOME: "C:\\Users\\appveyor\\.m2\\repository\\com\\github\\dell-spt"
+  HOME_DIR: "C:\\Users\\appveyor\\"
+  DRIVER_DIR: "C:\\projects\\spt-storage-driver-fs\\"
+  PATH_TO_TEST_LOGS: "C:\\projects\\spt-storage-driver-fs\\build\\robotest"
+  PYTHON: "C:\\Python37-x64"
+  PYTHON_VERSION: 3.7
+  PYTHON_ARCH: 64
+
+before_build:
+  - ps: >
+      $env:BASE_VERSION=$(type build.gradle
+      |  where { $_ -match "sptBase"} | Select-String -Pattern '\b\d\.\d\.\d\b' -AllMatches
+      | % { $_.Matches } | % { $_.Value })
+  - ps: >
+      $env:COOP_VERSION=$(type build.gradle
+      |  where { $_ -match "sptStorageDriverCoop"} | Select-String -Pattern '\b\d\.\d\.\d\b' -AllMatches
+      | % { $_.Matches } | % { $_.Value })
+  - ps: >
+      $env:NIO_VERSION=$(type build.gradle
+      |  where { $_ -match "sptStorageDriverNio"} | Select-String -Pattern '\b\d\.\d\.\d\b' -AllMatches
+      | % { $_.Matches } | % { $_.Value })
+  - cmd: ECHO %BASE_VERSION% %COOP_VERSION% %NIO_VERSION%
+  - cmd: mvn -v
+  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-storage-driver-nio:%NIO_VERSION%
+  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-storage-driver-coop:%COOP_VERSION%
+  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-base:%BASE_VERSION%
+
+build: off
+build_script:
+  - cmd: cd %DRIVER_DIR%
+# build driver fs
+  - cmd: gradlew.bat clean jar
+
+before_test:
+  - cmd: set EXT_DIR=C:\Users\appveyor\.spt\%BASE_VERSION%\ext\
+  - cmd: mkdir %EXT_DIR%
+  #  copy coop, nio drivers to .spt/ext
+  - cmd: for /R %MAVEN_HOME% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
+  #  copy fs driver to .spt/ext
+  - cmd: for /R %DRIVER_DIR% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
+  #  copy spt-base.jar to home dir
+  - cmd: for /R %MAVEN_HOME% %%f in (spt-base-*.jar) do COPY %%f %HOME_DIR%
+
+  - cmd: set PYTHONPATH=%DRIVER_DIR%\src\test\robot\lib;C:\Python37-x64\lib\site-packages
+  - cmd: set PATH=%PATH%;C:\Python37-x64;C:\Python37-x64\Scripts
+  - cmd: "%PYTHON%\\python.exe -m pip install --upgrade pip"
+  - cmd: "%PYTHON%\\python.exe -m pip install -U virtualenv"
+  - cmd: "%PYTHON%\\python.exe -m pip install -U requests"
+  - cmd: "%PYTHON%\\python.exe -m pip install -U robotframework"
+  - cmd: "%PYTHON%\\python.exe -m pip install -U robotframework-requests"
+  - cmd: mkdir %PATH_TO_TEST_LOGS%
+
+test_script:
+  - cmd: robot --outputdir %PATH_TO_TEST_LOGS% --suite api.storage --include "fs" src\test\robot
+
+on_failure:
+  - cmd: appveyor PushArtifact %PATH_TO_TEST_LOGS%\log.html

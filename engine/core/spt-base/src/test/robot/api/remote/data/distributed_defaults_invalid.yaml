@@ -1,0 +1,9 @@
+---
+load:
+  step:
+    node:
+      addrs:
+      - abc
+  op:
+    wait:
+      finish: false

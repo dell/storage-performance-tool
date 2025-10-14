@@ -1,0 +1,165 @@
+plugins {
+    id 'java-library'
+    id 'scala'
+    id 'com.diffplug.spotless'
+}
+
+description = 'Spt is a high-load storage performance testing tool'
+group = 'com.github.dell-spt'
+
+// Shared Java configuration
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+// Common repositories
+repositories {
+	mavenCentral()
+}
+
+// Common configurations
+configurations {
+	testImplementation {
+		extendsFrom(compileOnly)
+	}
+}
+
+// Common dependencies for all extensions
+dependencies {
+    // All extensions depend on spt-base - compileOnly to avoid transitive deps in fat JARs
+    compileOnly project(':core:spt-base')
+    
+    // Common test dependencies
+    testImplementation libs.scala.compiler
+    testImplementation libs.scala.library
+    testImplementation libs.docker.java
+}
+
+// Common test configuration
+tasks.withType(Test) {
+    // Align on JUnit 5 runner
+    useJUnitPlatform()
+    jvmArgs "-XX:MaxDirectMemorySize=2g"
+    jvmArgs "-XX:+HeapDumpOnOutOfMemoryError"
+    maxHeapSize = "2g"
+    testLogging {
+        events = [
+            "standardOut", "skipped", "started", "failed",
+        ]
+        showExceptions = true
+        showStandardStreams = true
+    }
+}
+
+// Split unit and integration tests
+test {
+    // Fast path: exclude integration and perf tests in default unit test run
+    exclude "com/dell/spt/integration/*"
+    exclude "com/dell/spt/perf/*"
+    exclude "**/*PerfTest.*"
+    useJUnitPlatform {
+        excludeTags 'integration', 'perf', 'slow'
+        if (project.hasProperty('includeTags')) {
+            includeTags project.property('includeTags').toString().split(',') as String[]
+        }
+        if (project.hasProperty('excludeTags')) {
+            excludeTags project.property('excludeTags').toString().split(',') as String[]
+        }
+    }
+}
+
+task integrationTest(type: Test) {
+    include "com/dell/spt/integration/*"
+    exclude "**/RollingAppenderTest*"
+    useJUnitPlatform {
+        includeTags 'integration'
+    }
+}
+
+// Performance/soak tests
+task perfTest(type: Test) {
+    include "com/dell/spt/perf/*"
+    include "**/*PerfTest.*"
+    shouldRunAfter integrationTest
+    useJUnitPlatform {
+        includeTags 'perf'
+    }
+}
+
+// Common JAR configuration
+jar {
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	excludes = [
+		"**/*.css",
+		"**/*.html",
+		"META-INF/*.DSA",
+		"META-INF/*.LIST",
+		"META-INF/*.RSA",
+		"META-INF/*.SF",
+		"OSGI-INF/*",
+		"module-info.class",
+	]
+	manifest {
+		def attrs = [
+			"Implementation-Title": project.name,
+			"Implementation-Version": project.version,
+		]
+		if (project.hasProperty('rootPkg')) {
+			attrs["Automatic-Module-Name"] = project.rootPkg
+		}
+		attributes(attrs)
+	}
+}
+
+// Shadow JAR configuration - only if the extension wants to build a fat JAR
+// Extensions should apply the shadow plugin in their own build.gradle if needed
+project.afterEvaluate {
+	if (project.plugins.hasPlugin('com.github.johnrengelman.shadow')) {
+		shadowJar {
+			archiveClassifier = 'all'
+			// Exclude spt-base classes - they should come from parent classloader
+			dependencies {
+				exclude(dependency {
+					it.moduleGroup == 'com.github.dell-spt' && it.moduleName == 'spt-base'
+				})
+			}
+			// API packages are now compileOnly so no need to exclude
+			// Merge service files
+			mergeServiceFiles()
+			// Exclude signing files that might cause conflicts
+			exclude 'META-INF/*.DSA'
+			exclude 'META-INF/*.SF'
+			exclude 'META-INF/*.RSA'
+			exclude 'META-INF/MANIFEST.MF'
+			exclude 'module-info.class'
+			// Preserve the manifest from the main jar task
+			manifest {
+				from jar.manifest
+			}
+		}
+		
+		// Make shadowJar run automatically with build
+		assemble.dependsOn shadowJar
+	}
+}
+
+// Javadoc configuration
+javadoc {
+	failOnError = false
+}
+
+// Spotless configuration
+spotless {
+	format "misc", {
+		target "**/*.gradle", "**/*.js", "**/*.groovy", "**/*.py", "**/*.scala"
+		indentWithTabs()
+		endWithNewline()
+	}
+	java {
+		target "**/*.java"
+		endWithNewline()
+		removeUnusedImports()
+		eclipse().configFile rootProject.file("core/spt-base/spotless.eclipseformat.xml")
+	}
+}

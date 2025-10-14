@@ -1,0 +1,26 @@
+rootProject.name = 'spt'
+
+// Core
+include 'core:spt-base'
+
+// Load steps
+include 'extensions:load-steps:pipeline'
+include 'extensions:load-steps:weighted'
+
+// Storage drivers - primitives
+include 'extensions:storage-drivers:primitives:coop'
+include 'extensions:storage-drivers:primitives:netty'
+include 'extensions:storage-drivers:primitives:nio'
+
+// Storage drivers - protocols
+include 'extensions:storage-drivers:protocols:http'
+include 'extensions:storage-drivers:protocols:fs'
+
+// Storage drivers - implementations
+include 'extensions:storage-drivers:implementations:atmos'
+include 'extensions:storage-drivers:implementations:s3'
+include 'extensions:storage-drivers:implementations:swift'
+
+// Bundle
+include 'bundle'
+

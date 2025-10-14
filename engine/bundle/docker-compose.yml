@@ -1,0 +1,92 @@
+# Docker Compose example for Spt
+# 
+# This example shows various ways to run Spt with Docker Compose,
+# including volume mounts for scenarios and logs.
+#
+# Note: You need to provide your own S3-compatible storage endpoint.
+# 
+# Quick start:
+#   cp .env.example .env
+#   # Edit .env with your S3 credentials
+#   docker-compose up spt-basic
+
+version: '3.8'
+
+services:
+  # Basic Spt service with built-in scenario
+  spt-basic:
+    image: dcr.octo.dell.com/spt/spt:latest
+    command: 
+      - --run-scenario=/opt/spt/scenarios/js/default.js
+      - --storage-driver-type=s3
+      - --storage-net-node-addrs=${SPT_S3_ENDPOINT:-your-s3-endpoint:9000}
+      - --storage-auth-uid=${SPT_S3_ACCESS_KEY:-your-access-key}
+      - --storage-auth-secret=${SPT_S3_SECRET_KEY:-your-secret-key}
+      - --item-output-path=/${SPT_S3_BUCKET:-test-bucket}
+      - --item-data-size=1MB
+      - --load-op-limit-count=1000
+    volumes:
+      - ./logs:/home/spt/log
+
+  # Spt with custom scenario from local filesystem
+  spt-custom:
+    image: dcr.octo.dell.com/spt/spt:latest
+    command:
+      - --run-scenario=/workspace/my-custom-scenario.js
+      - --storage-driver-type=s3
+      - --storage-net-node-addrs=${SPT_S3_ENDPOINT:-your-s3-endpoint:9000}
+      - --storage-auth-uid=${SPT_S3_ACCESS_KEY:-your-access-key}
+      - --storage-auth-secret=${SPT_S3_SECRET_KEY:-your-secret-key}
+    volumes:
+      - ./scenarios:/workspace:ro  # Mount local scenarios directory as read-only
+      - ./logs:/home/spt/log
+      - ./data:/data               # For input/output files
+
+  # Spt with weighted load scenario
+  spt-weighted:
+    image: dcr.octo.dell.com/spt/spt:latest
+    command:
+      - --run-scenario=/opt/spt/scenarios/js/types/weighted.js
+      - --storage-driver-type=s3
+      - --storage-net-node-addrs=${SPT_S3_ENDPOINT:-your-s3-endpoint:9000}
+      - --storage-auth-uid=${SPT_S3_ACCESS_KEY:-your-access-key}
+      - --storage-auth-secret=${SPT_S3_SECRET_KEY:-your-secret-key}
+    volumes:
+      - ./logs:/home/spt/log
+      - ./data:/data
+    environment:
+      - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
+
+  # Example: File system storage driver
+  spt-filesystem:
+    image: dcr.octo.dell.com/spt/spt:latest
+    command:
+      - --run-scenario=/opt/spt/scenarios/js/default.js
+      - --storage-driver-type=fs
+      - --item-output-path=/data/output
+      - --item-data-size=1MB
+      - --load-op-limit-count=1000
+    volumes:
+      - ./logs:/home/spt/log
+      - ./data:/data
+
+# Usage examples:
+#
+# 1. Run basic test with environment variables:
+#    export SPT_S3_ENDPOINT=your-s3-endpoint:9000
+#    export SPT_S3_ACCESS_KEY=your-access-key
+#    export SPT_S3_SECRET_KEY=your-secret-key
+#    export SPT_S3_BUCKET=your-bucket-name
+#    docker-compose up spt-basic
+#
+# 2. Run with custom scenario (create scenarios/my-custom-scenario.js first):
+#    docker-compose up spt-custom
+#
+# 3. Run weighted load test:
+#    docker-compose up spt-weighted
+#
+# 4. Run filesystem driver test:
+#    docker-compose up spt-filesystem
+#
+# 5. View logs:
+#    ls -la ./logs/

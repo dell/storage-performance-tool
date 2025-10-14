@@ -1,0 +1,18 @@
+FROM docker:dind
+
+RUN apk add --no-cache --update openjdk-21-jdk
+
+ADD ci /root/spt/ci
+ADD gradle /root/spt/gradle
+ADD load /root/spt/load
+ADD src /root/spt/src
+ADD storage /root/spt/storage
+ADD build.gradle /root/spt/build.gradle
+ADD gradlew /root/spt/gradlew
+ADD settings.gradle /root/spt/settings.gradle
+
+RUN chmod ugo+x /root/spt/ci/docker/entrypoint_legacy_systest.sh
+
+WORKDIR /root/spt
+
+ENTRYPOINT ["/root/spt/docker/entrypoint_legacy_systest.sh"]

@@ -1,0 +1,12 @@
+ARG SPT_VERSION=latest
+
+FROM dellspt/spt:${SPT_VERSION}
+
+EXPOSE 5005
+
+RUN apk --no-cache add openjdk-21-jdk --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+
+ADD ci/docker/entrypoint_debug.sh /opt/spt/entrypoint_debug.sh
+RUN chmod +x /opt/spt/entrypoint_debug.sh;
+
+ENTRYPOINT ["/opt/spt/entrypoint_debug.sh"]
