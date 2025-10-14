@@ -1,0 +1,20 @@
+FROM docker:dind
+
+RUN apk add --no-cache --update python3 py-pip \
+    && pip install -U virtualenv --ignore-installed distlib\
+    && pip install -U requests \
+    && pip install -U robotframework \
+    && pip install -U robotframework-requests \
+    && pip install -U robotframework-csvlib
+
+ENV PYTHONPATH=$PYTHONPATH:/usr/lib/python2.7/site-packages:/root/spt/base/src/test/robot/lib
+
+ADD build /root/spt/build
+ADD ci/docker/entrypoint_robotest.sh /root/spt/ci/docker/entrypoint_robotest.sh
+ADD src/test/robot /root/spt/src/test/robot
+
+RUN chmod ugo+x /root/spt/ci/docker/entrypoint_robotest.sh
+
+WORKDIR /root/spt
+
+ENTRYPOINT ["/root/spt/ci/docker/entrypoint_robotest.sh"]

@@ -1,0 +1,731 @@
+/*
+Copyright © 2025 Dell Technologies
+*/
+
+package verification
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
+)
+
+// NewVerifier creates a new verifier instance with default implementations
+func NewVerifier(hosts []*hostparse.HostInfo, config Config) *Verifier {
+	return NewVerifierWithDeps(hosts, config, command.NewCommandExecutor(), &RealNetworkChecker{}, &RealTimeProvider{})
+}
+
+// NewVerifierWithDeps creates a new verifier instance with custom dependencies (for testing)
+func NewVerifierWithDeps(hosts []*hostparse.HostInfo, config Config, cmdExecutor command.CommandExecutor, netChecker NetworkChecker, timeProvider TimeProvider) *Verifier {
+	return &Verifier{
+		hosts:        hosts,
+		config:       config,
+		results:      make(map[string]*NodeResult),
+		cmdExecutor:  cmdExecutor,
+		netChecker:   netChecker,
+		timeProvider: timeProvider,
+		preflight:    preflight.NewCheckerWithExecutor(cmdExecutor),
+	}
+}
+
+// NewVerifierWithDepsAndPreflight allows injecting a custom preflight.Checker (tests/mocks)
+func NewVerifierWithDepsAndPreflight(hosts []*hostparse.HostInfo, config Config, cmdExecutor command.CommandExecutor, netChecker NetworkChecker, timeProvider TimeProvider, pf preflight.Checker) *Verifier {
+	if pf == nil {
+		pf = preflight.NewCheckerWithExecutor(cmdExecutor)
+	}
+	return &Verifier{
+		hosts:        hosts,
+		config:       config,
+		results:      make(map[string]*NodeResult),
+		cmdExecutor:  cmdExecutor,
+		netChecker:   netChecker,
+		timeProvider: timeProvider,
+		preflight:    pf,
+	}
+}
+
+// VerifyAll performs verification on all hosts and returns a report
+func (v *Verifier) VerifyAll() *Report {
+	startTime := v.timeProvider.Now()
+
+	logging.LogInfo("verifier", "starting verification",
+		"host_count", len(v.hosts),
+		"min_hosts", v.config.MinHosts,
+		"network_mode", v.config.NetworkMode)
+
+	// Verify all nodes in parallel
+	type hostResult struct {
+		host   *hostparse.HostInfo
+		result *NodeResult
+	}
+
+	resultChan := make(chan hostResult, len(v.hosts))
+	var wg sync.WaitGroup
+
+	// Start verification for each host in parallel
+	for _, host := range v.hosts {
+		wg.Add(1)
+		go func(h *hostparse.HostInfo) {
+			defer wg.Done()
+			result := v.verifyNode(h)
+			resultChan <- hostResult{host: h, result: result}
+		}(host)
+	}
+
+	// Wait for all verifications to complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	for hr := range resultChan {
+		v.results[hr.host.Host] = hr.result
+
+		// For multi-host verification, show completion messages
+		if len(v.hosts) > 1 {
+			if hr.result.Overall.Passed {
+				fmt.Printf("  ✅ %s verification complete\n", hr.host.Host)
+			} else {
+				fmt.Printf("  ❌ %s verification failed (%s)\n", hr.host.Host, hr.result.Overall.Message)
+			}
+		}
+	}
+
+	// Add blank line after multi-host progress messages
+	if len(v.hosts) > 1 {
+		fmt.Println()
+	}
+
+	// Generate report
+	report := &Report{
+		Results:  v.results,
+		Duration: v.timeProvider.Since(startTime),
+		Config:   v.config,
+	}
+
+	report.assess()
+	return report
+}
+
+// verifyNode performs all checks on a single node
+func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
+	result := &NodeResult{Host: host.Host, HostInfo: host}
+	logging.LogInfo("verifier", "verifying node", "host", host.Host)
+
+	if v.stepSSHConnectivity(host, result) {
+		return result
+	}
+	if v.stepDockerDaemon(host, result) {
+		return result
+	}
+	if v.stepImagePull(host, result) {
+		return result
+	}
+	if v.stepPortConflicts(host, result) {
+		return result
+	}
+	if v.stepStartContainer(host, result) {
+		return result
+	}
+	v.stepWaitForServices(result)
+	v.stepVerifyPorts(host, result)
+	v.stepCheckEndpoints(host, result)
+	v.stepCleanup(host, result)
+
+	result.Overall = v.assessNode(result)
+	return result
+}
+
+func (v *Verifier) stepSSHConnectivity(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		if host.IsLocal {
+			fmt.Print("  ⏳ Checking Docker connectivity...")
+		} else {
+			fmt.Print("  ⏳ Checking SSH and Docker connectivity...")
+		}
+	}
+	result.SSHConnectivity = v.checkSSHDocker(host)
+	if !result.SSHConnectivity.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "Cannot connect to Docker"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepDockerDaemon(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Verifying Docker daemon...")
+	}
+	result.DockerAvailable = v.checkDockerDaemon(host)
+	if !result.DockerAvailable.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "Docker not available"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepImagePull(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Pulling latest Spt Docker image...")
+	}
+	result.DockerImagePull = v.pullDockerImage(host)
+	if !result.DockerImagePull.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "Cannot pull Docker image"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepPortConflicts(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking for port conflicts...")
+	}
+	conflictCheck := v.checkForPortConflicts(host)
+	if !conflictCheck.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = conflictCheck
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepStartContainer(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Starting Spt container...")
+	}
+	result.ContainerStart = v.startNodeContainer(host, result)
+	if !result.ContainerStart.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "Cannot start container"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepWaitForServices(result *NodeResult) {
+	if result.containerID == "" {
+		return
+	}
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Waiting for services to initialize (10s)...")
+	}
+	time.Sleep(constants.ServiceInitializationSecs * time.Second)
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+}
+
+func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Printf("  ⏳ Verifying network ports (1099, %d)...", v.config.APIPort)
+	}
+	result.PortsAccessible = v.checkPorts(host)
+	if v.config.ShowProgress {
+		if result.PortsAccessible.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ❌")
+		}
+	}
+}
+
+func (v *Verifier) stepCheckEndpoints(host *hostparse.HostInfo, result *NodeResult) {
+	if result.containerID == "" {
+		return
+	}
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Testing REST API endpoints...")
+	}
+	result.MetricsEndpoint = v.checkMetricsEndpoint(host)
+	result.ControlEndpoint = v.checkControlEndpoint(host)
+	if v.config.ShowProgress {
+		if result.MetricsEndpoint.Passed && result.ControlEndpoint.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ❌")
+		}
+	}
+}
+
+func (v *Verifier) stepCleanup(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Cleaning up test container...")
+	}
+	result.ContainerCleanup = v.stopContainer(host, result.containerID)
+	if v.config.ShowProgress {
+		if result.ContainerCleanup.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ❌")
+		}
+	}
+}
+
+// checkSSHDocker verifies SSH connectivity and Docker access
+func (v *Verifier) checkSSHDocker(host *hostparse.HostInfo) Check {
+	start := time.Now()
+
+	// For local, just return success
+	if host.IsLocal {
+		return Check{
+			Passed:   true,
+			Message:  "Local Docker connection",
+			Duration: time.Since(start),
+		}
+	}
+
+	// Try SSH connection to Docker
+	dockerHost := host.GetDockerHost()
+	logging.LogDebug("verifier", "checking SSH Docker connection",
+		"host", host.Host,
+		"docker_host", dockerHost)
+
+	// We'll validate this during the Docker daemon check
+	return Check{
+		Passed:   true,
+		Message:  "SSH connection will be validated with Docker daemon",
+		Duration: time.Since(start),
+	}
+}
+
+// checkDockerDaemon uses SSH to verify Docker is accessible
+func (v *Verifier) checkDockerDaemon(host *hostparse.HostInfo) Check {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), constants.DockerDaemonTimeoutSecs*time.Second)
+	defer cancel()
+
+	version, err := v.preflight.CheckDocker(ctx, host)
+	if err != nil {
+		msg := "Docker not accessible on remote host"
+		if host.IsLocal {
+			msg = "Local Docker not accessible"
+		}
+		return Check{Passed: false, Message: msg, Duration: v.timeProvider.Since(start), Error: err}
+	}
+
+	version = strings.TrimSpace(version)
+	if host.IsLocal {
+		return Check{Passed: true, Message: fmt.Sprintf("Local Docker %s accessible", version), Duration: v.timeProvider.Since(start)}
+	}
+	return Check{Passed: true, Message: fmt.Sprintf("Docker %s accessible via SSH", version), Duration: v.timeProvider.Since(start)}
+}
+
+// checkLocalDocker tests local Docker availability
+// checkLocalDocker moved to test helpers (unused in production)
+
+// checkRemoteDocker tests Docker on remote host via SSH
+// checkRemoteDocker moved to test helpers (unused in production)
+
+// startNodeContainer starts a Spt container in node mode using SSH
+func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResult) Check {
+	start := v.timeProvider.Now()
+
+	// Determine external IP
+	externalIP := v.getExternalIP(host)
+
+	// Create container name
+	containerName := fmt.Sprintf("spt-verify-%d-%s", time.Now().Unix(), host.Host)
+	containerName = strings.ReplaceAll(containerName, ".", "-") // Replace dots for valid name
+
+	// Create Docker operations instance
+	dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
+
+	// Build container configuration
+	var networkMode command.NetworkMode
+	if v.config.NetworkMode == "host" {
+		networkMode = command.NetworkModeHost
+	} else {
+		networkMode = command.NetworkModeBridge
+	}
+
+	// Build port mappings for bridge mode
+	var portMappings []command.PortMapping
+	if networkMode == command.NetworkModeBridge {
+		// Standard ports
+		portMappings = []command.PortMapping{
+			{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
+			{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
+		}
+
+		// Add RMI object port range
+		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
+		portMappings = append(portMappings, rmiMappings...)
+	}
+
+	config := command.ContainerConfig{
+		Image:        constants.EffectiveSptImage(),
+		Name:         containerName,
+		NetworkMode:  networkMode,
+		PortMappings: portMappings,
+		Environment: map[string]string{
+			constants.JavaOptsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, externalIP),
+		},
+		Command:  []string{constants.SptNodeCommand},
+		Detached: true,
+	}
+
+	// Start the container
+	ctx, cancel := context.WithTimeout(context.Background(), constants.ContainerStartTimeoutSecs*time.Second)
+	defer cancel()
+
+	containerID, cmdResult, err := dockerOps.StartContainer(ctx, config)
+	if err != nil {
+		return Check{
+			Passed:        false,
+			Message:       "Failed to start container",
+			Duration:      v.timeProvider.Since(start),
+			Error:         fmt.Errorf("container start failed: %w", err),
+			CommandResult: &cmdResult,
+		}
+	}
+
+	result.containerID = containerID
+
+	logging.LogInfo("verifier", "started container",
+		"host", host.Host,
+		"container", containerID[:constants.ContainerIDDisplayLength],
+		"external_ip", externalIP)
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("Container started: %s", containerID[:constants.ContainerIDDisplayLength]),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// checkPorts verifies that required ports are accessible
+func (v *Verifier) checkPorts(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+	targetIP := v.getExternalIP(host)
+
+	failed := []string{}
+
+	// Check RMI registry
+	if !v.netChecker.IsPortOpen(targetIP, constants.DefaultRMIRegistryPort, constants.PortCheckTimeoutSecs*time.Second) {
+		failed = append(failed, fmt.Sprintf("%d (RMI registry)", constants.DefaultRMIRegistryPort))
+	}
+
+	// Check REST API
+	if !v.netChecker.IsPortOpen(targetIP, v.config.APIPort, constants.PortCheckTimeoutSecs*time.Second) {
+		failed = append(failed, fmt.Sprintf("%d (REST API)", v.config.APIPort))
+	}
+
+	// NOTE: RMI object ports (40000-40009) are only created during active load testing
+	// For infrastructure verification, we only check the service ports that are always available
+
+	if len(failed) > 0 {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("Ports not accessible: %v", failed),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("Essential service ports accessible (%d RMI registry, %d REST API)", constants.DefaultRMIRegistryPort, v.config.APIPort),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// checkMetricsEndpoint verifies the /metrics/json endpoint works
+func (v *Verifier) checkMetricsEndpoint(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+	url := fmt.Sprintf("http://%s:%d/metrics/json", v.getExternalIP(host), v.config.APIPort)
+
+	ctx, cancel := context.WithTimeout(context.Background(), constants.HTTPRequestTimeoutSecs*time.Second)
+	defer cancel()
+
+	resp, err := v.netChecker.HTTPGet(ctx, url)
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  "Failed to reach /metrics/json endpoint",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("Metrics endpoint returned status %d", resp.StatusCode),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	// Try to parse the response
+	var metrics interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&metrics); err != nil {
+		return Check{
+			Passed:   false,
+			Message:  "Failed to parse metrics JSON",
+			Duration: time.Since(start),
+			Error:    err,
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  "Returns valid JSON metrics",
+		Duration: time.Since(start),
+	}
+}
+
+// checkControlEndpoint verifies the /run endpoint accepts control commands
+func (v *Verifier) checkControlEndpoint(host *hostparse.HostInfo) Check {
+	start := time.Now()
+	baseURL := fmt.Sprintf("http://%s:%d", v.getExternalIP(host), v.config.APIPort)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Try a simple GET to /run (should return current state)
+	resp, err := client.Get(baseURL + "/run")
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  "Failed to reach /run endpoint",
+			Duration: time.Since(start),
+			Error:    err,
+		}
+	}
+	_ = resp.Body.Close()
+
+	// Accept any response code for GET (200, 404, etc. are all valid)
+	return Check{
+		Passed:   true,
+		Message:  "Control endpoint accessible",
+		Duration: time.Since(start),
+	}
+}
+
+// stopContainer stops and removes the test container
+func (v *Verifier) stopContainer(host *hostparse.HostInfo, containerID string) Check {
+	start := time.Now()
+
+	if containerID == "" {
+		return Check{
+			Passed:   true,
+			Message:  "No container to clean up",
+			Duration: time.Since(start),
+		}
+	}
+
+	// Create Docker operations instance
+	dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
+
+	// Stop and remove container
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	err := dockerOps.StopContainer(ctx, containerID)
+	if err != nil {
+		// Log warning but don't fail completely - cleanup is best effort
+		logging.LogWarn("verifier", "failed to remove container",
+			"container", containerID[:12],
+			"host", host.Host,
+			"error", err.Error())
+
+		return Check{
+			Passed:   false,
+			Message:  "Failed to remove container (cleanup incomplete)",
+			Duration: time.Since(start),
+			Error:    fmt.Errorf("container removal failed: %w", err),
+		}
+	}
+
+	logging.LogInfo("verifier", "container removed",
+		"host", host.Host,
+		"container", containerID[:12])
+
+	return Check{
+		Passed:   true,
+		Message:  "Container stopped and removed",
+		Duration: time.Since(start),
+	}
+}
+
+// Helper methods
+
+func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
+	if host.IsLocal {
+		return "127.0.0.1"
+	}
+	return host.Host
+}
+
+// isPortOpen removed as unused (dead code)
+
+func (v *Verifier) assessNode(result *NodeResult) Check {
+	// All critical checks must pass
+	criticalChecks := []Check{
+		result.SSHConnectivity,
+		result.DockerAvailable,
+		result.ContainerStart,
+		result.PortsAccessible,
+		result.ContainerCleanup,
+	}
+
+	for _, check := range criticalChecks {
+		if !check.Passed {
+			return Check{
+				Passed:  false,
+				Message: check.Message,
+			}
+		}
+	}
+
+	// Endpoint checks are nice-to-have but not critical for basic infrastructure
+	endpointIssues := []string{}
+	if !result.MetricsEndpoint.Passed {
+		endpointIssues = append(endpointIssues, "metrics endpoint")
+	}
+	if !result.ControlEndpoint.Passed {
+		endpointIssues = append(endpointIssues, "control endpoint")
+	}
+
+	if len(endpointIssues) > 0 {
+		return Check{
+			Passed:  true, // Still pass overall
+			Message: fmt.Sprintf("READY (issues with: %s)", strings.Join(endpointIssues, ", ")),
+		}
+	}
+
+	return Check{
+		Passed:  true,
+		Message: "READY",
+	}
+}
+
+// checkForPortConflicts checks for port conflicts before attempting container start
+func (v *Verifier) checkForPortConflicts(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+
+	logging.LogInfo("verifier", "checking for port conflicts", "host", host.Host)
+
+	// Check for conflicts
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conflictInfo, err := v.preflight.CheckPorts(ctx, host, v.config.APIPort, v.config.RMIPortStart, v.config.RMIPortCount)
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  "Failed to check for port conflicts",
+			Duration: v.timeProvider.Since(start),
+			Error:    fmt.Errorf("conflict detection failed: %w", err),
+		}
+	}
+
+	// No conflicts - proceed
+	if !conflictInfo.HasConflicts() {
+		return Check{
+			Passed:   true,
+			Message:  "No port conflicts detected",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	// Conflicts detected - show details to user
+	conflictInfo.DisplayConflictInfo()
+
+	// If force cleanup enabled, try to clean up matching containers
+	if v.config.ForceCleanup {
+		sptContainers := conflictInfo.GetSptContainers()
+		if len(sptContainers) > 0 {
+			fmt.Printf("\n[FORCE] Attempting to clean up %d Spt containers...\n", len(sptContainers))
+
+			// Create docker operations to stop containers
+			dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
+
+			cleanedUp := 0
+			for _, container := range sptContainers {
+				fmt.Printf("  Stopping container %s (%s)...\n", container.Name, container.ID[:12])
+				if err := dockerOps.StopContainer(ctx, container.ID); err != nil {
+					logging.LogWarn("verifier", "failed to stop container during force cleanup",
+						"host", host.Host, "container", container.ID, "error", err)
+					fmt.Printf("    Failed to stop %s: %s\n", container.ID[:12], err.Error())
+				} else {
+					cleanedUp++
+				}
+			}
+
+			if cleanedUp > 0 {
+				fmt.Printf("[FORCE] Successfully cleaned up %d containers. Proceeding with verification.\n", cleanedUp)
+				return Check{
+					Passed:   true,
+					Message:  fmt.Sprintf("Port conflicts resolved by cleaning up %d containers", cleanedUp),
+					Duration: v.timeProvider.Since(start),
+				}
+			}
+		}
+
+		// Force cleanup enabled but no matching containers or cleanup failed
+		fmt.Printf("[FORCE] No matching containers found for auto-cleanup. Verification will fail.\n")
+	}
+
+	// Conflicts exist and not resolved - fail the verification
+	return Check{
+		Passed:   false,
+		Message:  fmt.Sprintf("Port conflicts detected on ports %v", conflictInfo.ConflictPorts),
+		Duration: v.timeProvider.Since(start),
+		Error:    fmt.Errorf("ports %v are in use - use --force-cleanup to automatically remove Spt containers or manually stop conflicting containers", conflictInfo.ConflictPorts),
+	}
+}
+
+// pullDockerImage pulls the latest Spt Docker image
+func (v *Verifier) pullDockerImage(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	logging.LogInfo("verifier", "ensuring Docker image present",
+		"host", host.Host,
+		"image", constants.EffectiveSptImage())
+	if err := v.preflight.EnsureImage(ctx, host, constants.EffectiveSptImage()); err != nil {
+		logging.LogError("verifier", "Docker image ensure failed", err,
+			"host", host.Host, "image", constants.EffectiveSptImage())
+		return Check{Passed: false, Message: "Failed to pull Docker image", Duration: v.timeProvider.Since(start), Error: err}
+	}
+	logging.LogInfo("verifier", "Docker image pulled/available",
+		"host", host.Host, "duration", v.timeProvider.Since(start))
+	return Check{Passed: true, Message: "Docker image pulled successfully", Duration: v.timeProvider.Since(start)}
+}

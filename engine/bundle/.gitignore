@@ -1,0 +1,23 @@
+# Environment files with credentials
+.env
+.env.local
+.env.*.local
+
+# Log files
+logs/
+*.log
+
+# Data files
+data/
+
+# Custom scenarios (if sensitive)
+my-*.js
+custom-*.js
+
+# Build artifacts
+build/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,267 @@
+package results
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func newTestServer(t *testing.T, handlers map[string]http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	for p, h := range handlers {
+		mux.HandleFunc(p, h)
+	}
+	return httptest.NewServer(mux)
+}
+
+func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+					{"logger": "metrics.File", "href": "/logs/" + step + "/metrics.File", "size": 5},
+					{"logger": "Scenario", "href": "/logs/" + step + "/Scenario", "size": 3},
+					{"logger": "metrics.threshold.FileTotal", "href": "/logs/" + step + "/metrics.threshold.FileTotal", "size": 2},
+					{"logger": "OpTraces", "href": "/logs/" + step + "/OpTraces", "size": 5},
+					{"logger": "PartsUpload", "href": "/logs/" + step + "/PartsUpload", "size": 10},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal":           func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config":                      func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cfg")) },
+		"/logs/" + step + "/Cli":                         func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages":                    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
+		"/logs/" + step + "/Errors":                      func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("errs")) },
+		"/logs/" + step + "/metrics.File":                func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("mavg")) },
+		"/logs/" + step + "/Scenario":                    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("scn")) },
+		"/logs/" + step + "/metrics.threshold.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("th")) },
+		"/logs/" + step + "/OpTraces":                    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("trace")) },
+		// multipart via one of the aliases
+		"/logs/" + step + "/PartsUpload": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("part,ts\n1,2\n")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {} // no-op
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+
+	// Verify files and manifest
+	required := []string{
+		step + ".metrics.total.csv",
+		step + ".config.yaml",
+		step + ".cli.args.log",
+		step + ".messages.log",
+		step + ".errors.log",
+	}
+	for _, name := range required {
+		p := filepath.Join(out, name)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("missing required file: %s: %v", name, err)
+		}
+	}
+
+	// Verify multipart saved
+	if _, err := os.Stat(filepath.Join(out, step+".multipart.csv")); err != nil {
+		t.Fatalf("missing multipart file: %v", err)
+	}
+
+	// Manifest exists and contains our step
+	data, err := os.ReadFile(filepath.Join(out, "index.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !strings.Contains(string(data), step) {
+		t.Fatalf("manifest does not reference step %s", step)
+	}
+	if man.BaseURL == "" || man.OutputDir == "" || len(man.Steps) != 1 {
+		t.Fatalf("manifest fields not populated correctly: %#v", man)
+	}
+}
+
+func TestFetcher_MissingOptionalFiles(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	// Provide only required files; optional will 404
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cfg")) },
+		"/logs/" + step + "/Cli":               func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages":          func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
+		"/logs/" + step + "/Errors":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("errs")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+
+	// Required files present
+	for _, name := range []string{
+		".metrics.total.csv", ".config.yaml", ".cli.args.log", ".messages.log", ".errors.log",
+	} {
+		if _, statErr := os.Stat(filepath.Join(out, step+name)); statErr != nil {
+			t.Fatalf("required file missing: %s: %v", step+name, statErr)
+		}
+	}
+
+	// Manifest should mark missing optional with status missing
+	b, _ := os.ReadFile(filepath.Join(out, "index.json"))
+	if strings.Count(string(b), "\"status\": \"missing\"") == 0 {
+		t.Fatalf("expected some missing statuses for optional files in manifest: %s", string(b))
+	}
+	_ = man
+}
+
+func TestFetcher_RetryOnServerError(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	var count int32
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) {
+			c := atomic.AddInt32(&count, 1)
+			if c < 3 {
+				http.Error(w, "temporary", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte("total"))
+		},
+		// other required files OK
+		"/logs/" + step + "/Config":   func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cfg")) },
+		"/logs/" + step + "/Cli":      func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
+		"/logs/" + step + "/Errors":   func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("errs")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {} // avoid waiting between retries
+	f.Retries = 5
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+
+	// Verify the retried file exists
+	if _, err := os.Stat(filepath.Join(out, step+".metrics.total.csv")); err != nil {
+		t.Fatalf("metrics.total.csv not saved after retries: %v", err)
+	}
+
+	// Manifest JSON decodes
+	data, err := os.ReadFile(filepath.Join(out, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed Manifest
+	if json.Unmarshal(data, &parsed) != nil {
+		t.Fatalf("manifest not valid JSON: %s", string(data))
+	}
+	_ = man
+}
+
+func TestFetcher_UsesIndexJsonForDiscovery(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	// Provide index.json listing required artifacts; serve those endpoints; omit optionals
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5, "modified": time.Now().UTC().Format(time.RFC1123), "content_type": "text/csv"},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3, "modified": time.Now().UTC().Format(time.RFC1123), "content_type": "text/yaml"},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cfg")) },
+		"/logs/" + step + "/Cli":               func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages":          func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msg")) },
+		"/logs/" + step + "/Errors":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("err")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	// All required files present
+	for _, name := range []string{
+		".metrics.total.csv", ".config.yaml", ".cli.args.log", ".messages.log", ".errors.log",
+	} {
+		if _, statErr := os.Stat(filepath.Join(out, step+name)); statErr != nil {
+			t.Fatalf("required file missing via index.json path: %s: %v", step+name, statErr)
+		}
+	}
+	_ = man
+}

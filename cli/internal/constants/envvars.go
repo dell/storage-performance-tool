@@ -1,0 +1,13 @@
+package constants
+
+// Environment variable keys used by spt
+const (
+	EnvSptImage      = "SPT_IMAGE"
+	EnvHosts         = "HOSTS"
+	EnvS3Endpoint    = "S3_ENDPOINT"
+	EnvS3AccessKey   = "S3_ACCESS_KEY"
+	EnvS3SecretKey   = "S3_SECRET_KEY"
+	EnvS3Bucket      = "S3_BUCKET"
+	EnvS3AuthVersion = "S3_AUTH_VERSION"
+	EnvSkipImagePull = "SPT_SKIP_IMAGE_PULL"
+)

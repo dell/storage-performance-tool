@@ -1,0 +1,376 @@
+plugins {
+	id 'base'
+	id "com.diffplug.spotless"
+	id "com.bmuschko.docker-remote-api" version "9.4.0"
+}
+
+description = "Spt Bundle - Distribution assembly for all components"
+group = "com.github.dell-spt"
+version = "5.0.0-SNAPSHOT"
+
+ext {
+	distDir = layout.buildDirectory.dir("dist").get().asFile.absolutePath
+	sptJar = "spt.jar"
+}
+
+repositories {
+	mavenCentral()
+}
+
+// No longer need configurations since we're directly referencing shadow JARs
+
+// Task to copy example scenarios
+task copyScenarios(type: Copy) {
+	group = 'distribution'
+	description = 'Copies example scenarios to distribution'
+	
+	from("${rootDir}/core/spt-base/src/main/resources/example/scenario")
+	into("${distDir}/scenarios")
+}
+
+// Task to assemble the distribution
+task assembleDist {
+	group = 'distribution'
+	description = 'Assembles the Spt distribution with core and extensions'
+	
+	// Depend on all shadow JAR tasks
+	dependsOn ':core:spt-base:shadowJar'
+	dependsOn ':extensions:load-steps:pipeline:shadowJar'
+	dependsOn ':extensions:load-steps:weighted:shadowJar'
+	dependsOn ':extensions:storage-drivers:primitives:coop:shadowJar'
+	dependsOn ':extensions:storage-drivers:primitives:netty:shadowJar'
+	dependsOn ':extensions:storage-drivers:primitives:nio:shadowJar'
+	dependsOn ':extensions:storage-drivers:protocols:http:shadowJar'
+	dependsOn ':extensions:storage-drivers:protocols:fs:shadowJar'
+	dependsOn ':extensions:storage-drivers:implementations:atmos:shadowJar'
+	dependsOn ':extensions:storage-drivers:implementations:s3:shadowJar'
+	dependsOn ':extensions:storage-drivers:implementations:swift:shadowJar'
+	
+	finalizedBy copyScenarios
+	
+	// Capture project references at configuration time
+	def coreProject = project(':core:spt-base')
+	def extensionProjectsMap = [
+		':extensions:load-steps:pipeline': project(':extensions:load-steps:pipeline'),
+		':extensions:load-steps:weighted': project(':extensions:load-steps:weighted'),
+		':extensions:storage-drivers:primitives:coop': project(':extensions:storage-drivers:primitives:coop'),
+		':extensions:storage-drivers:primitives:netty': project(':extensions:storage-drivers:primitives:netty'),
+		':extensions:storage-drivers:primitives:nio': project(':extensions:storage-drivers:primitives:nio'),
+		':extensions:storage-drivers:protocols:http': project(':extensions:storage-drivers:protocols:http'),
+		':extensions:storage-drivers:protocols:fs': project(':extensions:storage-drivers:protocols:fs'),
+		':extensions:storage-drivers:implementations:atmos': project(':extensions:storage-drivers:implementations:atmos'),
+		':extensions:storage-drivers:implementations:s3': project(':extensions:storage-drivers:implementations:s3'),
+		':extensions:storage-drivers:implementations:swift': project(':extensions:storage-drivers:implementations:swift')
+	]
+	
+	doLast {
+		// Create distribution directory
+		file(distDir).mkdirs()
+		file("${distDir}/ext").mkdirs()
+		
+		// Copy core shadow JAR as spt.jar
+		def coreJar = fileTree("${coreProject.buildDir}/libs").include("*-all.jar").singleFile
+		copy {
+			from coreJar
+			into distDir
+			rename { sptJar }
+		}
+		
+		// Copy all extension shadow JARs to ext/ subdirectory
+		extensionProjectsMap.each { extName, extProject ->
+			def shadowJar = fileTree("${extProject.buildDir}/libs").include("*-all.jar").singleFile
+			copy {
+				from shadowJar
+				into "${distDir}/ext"
+			}
+		}
+		
+		println "Distribution assembled in: ${distDir}"
+		println "Main JAR: ${sptJar}"
+		println "Extensions in: ext/"
+		
+		// List what was copied
+		fileTree(distDir).visit { FileVisitDetails details ->
+			if (!details.directory) {
+				println "  ${details.relativePath}"
+			}
+		}
+	}
+}
+
+// Task to create a runnable script
+task createRunScript {
+	dependsOn assembleDist
+	def outputDir = layout.buildDirectory.dir("dist").get().asFile
+	
+	doLast {
+		def scriptFile = new File(outputDir, "run.sh")
+		scriptFile.text = '''#!/bin/bash
+# Spt run script
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Spt version
+VERSION="5.0.0"
+
+# Set up extension directory in user home
+EXT_DIR="$HOME/.spt/$VERSION/ext"
+echo "Setting up extensions in: $EXT_DIR"
+mkdir -p "$EXT_DIR"
+
+# Link or copy extensions from local ext/ to expected location
+if [ -d "$SCRIPT_DIR/ext" ]; then
+    for ext in "$SCRIPT_DIR/ext"/*.jar; do
+        if [ -f "$ext" ]; then
+            ext_name=$(basename "$ext")
+            # Create symlink if it doesn't exist
+            if [ ! -e "$EXT_DIR/$ext_name" ]; then
+                echo "Linking extension: $ext_name"
+                ln -sf "$ext" "$EXT_DIR/$ext_name" 2>/dev/null || cp "$ext" "$EXT_DIR/$ext_name"
+            fi
+        fi
+    done
+fi
+
+# Run Spt with all arguments passed to this script
+java -jar "$SCRIPT_DIR/spt.jar" "$@"
+'''
+		scriptFile.setExecutable(true)
+		
+		// Also create a Windows batch file
+		def batchFile = new File(outputDir, "run.bat")
+		batchFile.text = """@echo off
+rem Spt run script for Windows
+
+rem Get the directory where this script is located
+set SCRIPT_DIR=%~dp0
+
+rem Detect Spt version from JAR (default to 5.0.0)
+set VERSION=5.0.0
+for /f "tokens=3" %%i in ('java -jar "%SCRIPT_DIR%spt.jar" --version 2^>^&1 ^| findstr "spt v"') do set VERSION=%%i
+
+rem Set up extension directory in user home
+set EXT_DIR=%USERPROFILE%\\.spt\\%VERSION%\\ext
+if not exist "%EXT_DIR%" mkdir "%EXT_DIR%"
+
+rem Copy extensions from local ext\\ to expected location
+if exist "%SCRIPT_DIR%ext" (
+    for %%f in ("%SCRIPT_DIR%ext\\*.jar") do (
+        if not exist "%EXT_DIR%\\%%~nxf" (
+            copy "%%f" "%EXT_DIR%\\%%~nxf" >nul
+        )
+    )
+)
+
+rem Run Spt with all arguments passed to this script
+java -jar "%SCRIPT_DIR%spt.jar" %*
+"""
+	}
+}
+
+// Task to create ZIP distribution
+task distZip(type: Zip) {
+	group = 'distribution'
+	description = 'Creates a ZIP distribution of Spt'
+	
+	dependsOn assembleDist, createRunScript, copyScenarios
+	
+	archiveBaseName = 'spt-bundle'
+	archiveVersion = project.version
+	archiveExtension = 'zip'
+	destinationDirectory = file("${buildDir}/distributions")
+	
+	from(distDir) {
+		into "spt-${project.version}"
+	}
+}
+
+// Task to create launch.json for VS Code
+task createVSCodeLaunch {
+	group = 'ide'
+	description = 'Creates VS Code launch configuration'
+	
+	doLast {
+		def vscodeDir = file("${rootDir}/.vscode")
+		vscodeDir.mkdirs()
+		
+		def launchFile = file("${vscodeDir}/launch.json")
+		launchFile.text = """{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "java",
+			"name": "Debug Spt",
+			"request": "launch",
+			"mainClass": "com.dell.spt.base.Main",
+			"projectName": "spt-base",
+			"args": "--help",
+			"cwd": "\${workspaceFolder}/bundle/build/dist",
+			"classPaths": [
+				"\${workspaceFolder}/bundle/build/dist/spt.jar",
+				"\${workspaceFolder}/bundle/build/dist/ext/*"
+			]
+		},
+		{
+			"type": "java",
+			"name": "Run Spt (S3 Test)",
+			"request": "launch",
+			"mainClass": "com.dell.spt.base.Main",
+			"projectName": "spt-base",
+			"args": [
+				"--storage-driver-type=s3",
+				"--storage-net-node-addrs=localhost:9000",
+				"--storage-auth-uid=minioadmin",
+				"--storage-auth-secret=minioadmin",
+				"--item-data-size=1MB",
+				"--load-op-limit-count=100"
+			],
+			"cwd": "\${workspaceFolder}/bundle/build/dist"
+		}
+	]
+}"""
+		println "Created VS Code launch configuration at: ${launchFile}"
+	}
+}
+
+// Main build task
+build {
+	dependsOn assembleDist, createRunScript, distZip
+}
+
+// Clean task
+clean {
+	delete distDir
+	delete "${buildDir}/distributions"
+}
+
+spotless {
+	java {
+		target "**/*.java"
+		endWithNewline()
+		removeUnusedImports()
+		eclipse().configFile rootProject.file("core/spt-base/spotless.eclipseformat.xml")
+	}
+}
+
+// Docker configuration
+import com.bmuschko.gradle.docker.tasks.image.DockerBuildImage
+import com.bmuschko.gradle.docker.tasks.image.DockerPushImage
+import com.bmuschko.gradle.docker.tasks.image.Dockerfile
+
+ext {
+	// Dell internal Docker registry configuration
+	dockerRegistry = "dcr.octo.dell.com"
+	dockerNamespace = "spt"
+	dockerImageName = "${dockerRegistry}/${dockerNamespace}/spt"
+	dockerImageTag = project.version
+	dockerImageFullName = "${dockerImageName}:${dockerImageTag}"
+}
+
+// Task to build Docker image
+task dockerBuildImage(type: DockerBuildImage) {
+    group = 'docker'
+    description = 'Builds the Spt Docker image'
+
+    dependsOn assembleDist, copyScenarios
+
+    inputDir = projectDir
+    images.add(dockerImageFullName)
+
+    // Also tag as latest for SNAPSHOT versions
+    if (project.version.toString().endsWith('-SNAPSHOT')) {
+        images.add("${dockerImageName}:latest")
+    }
+
+    // Resolve base image overrides at configuration time and set build arg once
+    // Sources (in order): -PbaseImage, BASE_IMAGE env
+    // If no override is provided, defer to the Dockerfile's ARG default
+    def envBase = System.getenv('BASE_IMAGE')
+    def propBase = project.findProperty('baseImage') as String
+    def baseImageOverride = propBase ?: envBase
+    if (baseImageOverride) {
+        buildArgs.set([BASE_IMAGE: baseImageOverride])
+    }
+
+    doFirst {
+        // Ensure the distribution is built
+        if (!file("${distDir}/spt.jar").exists()) {
+            throw new GradleException("Distribution not found. Run 'gradle :bundle:assembleDist' first.")
+        }
+        println "Building Docker image: ${dockerImageFullName}"
+        if (baseImageOverride) {
+            println "Using base image override: ${baseImageOverride}"
+        } else {
+            println "Using Dockerfile default base image"
+        }
+    }
+
+    doLast {
+        println "Docker image built successfully: ${dockerImageFullName}"
+        if (project.version.toString().endsWith('-SNAPSHOT')) {
+            println "Also tagged as: ${dockerImageName}:latest"
+        }
+    }
+}
+
+// Task to push Docker image to Dell registry
+task dockerPushImage(type: DockerPushImage) {
+	group = 'docker'
+	description = 'Pushes the Spt Docker image to Dell internal registry'
+	
+	dependsOn dockerBuildImage
+	
+	images.add(dockerImageFullName)
+	
+	// Also push latest tag for SNAPSHOT versions
+	if (project.version.toString().endsWith('-SNAPSHOT')) {
+		images.add("${dockerImageName}:latest")
+	}
+	
+	doFirst {
+		println "Pushing Docker image to Dell registry: ${dockerImageFullName}"
+		println "Note: Ensure you are logged in to ${dockerRegistry} via 'docker login ${dockerRegistry}'"
+	}
+	
+	doLast {
+		println "Docker image pushed successfully: ${dockerImageFullName}"
+		if (project.version.toString().endsWith('-SNAPSHOT')) {
+			println "Also pushed: ${dockerImageName}:latest"
+		}
+	}
+}
+
+// Task to build testing image (with debug support)
+task dockerBuildTestingImage(type: DockerBuildImage) {
+	group = 'docker'
+	description = 'Builds the Spt testing Docker image with debug support'
+	
+	dependsOn assembleDist
+	
+	inputDir = projectDir
+	dockerFile = file('docker/Dockerfile.testing')
+	images.add("${dockerImageName}:testing")
+	
+	doFirst {
+		// Create testing Dockerfile if it doesn't exist
+		if (!dockerFile.exists()) {
+			dockerFile.parentFile.mkdirs()
+			dockerFile.text = """FROM ${dockerImageFullName}
+
+# Enable Java debugging
+ENV JAVA_OPTS="\$JAVA_OPTS -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+
+# Expose debug port
+EXPOSE 5005
+"""
+		}
+	}
+}
+
+// Convenience task to build all Docker images
+task dockerBuildAll {
+	group = 'docker'
+	description = 'Builds all Spt Docker images'
+	dependsOn dockerBuildImage, dockerBuildTestingImage
+}

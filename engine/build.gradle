@@ -1,0 +1,223 @@
+plugins {
+    id 'base'
+    id 'jacoco'
+}
+
+allprojects {
+    group = 'com.github.dell-spt'
+    version = '5.0.0-SNAPSHOT'
+    
+    repositories {
+        mavenCentral()
+        maven { url = "https://jitpack.io" }
+    }
+}
+
+subprojects {
+    if (name != 'bundle') {
+        apply plugin: 'java-library'
+        apply plugin: 'jacoco'
+        
+        java {
+            sourceCompatibility = JavaVersion.VERSION_21
+            targetCompatibility = JavaVersion.VERSION_21
+        }
+        
+        jacoco {
+            toolVersion = "0.8.11"
+        }
+        
+        dependencies {
+            testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.2'
+            testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+        }
+
+        test {
+            useJUnitPlatform {
+                // Tag-based fast path by default
+                excludeTags 'integration', 'perf', 'slow'
+                // Allow ad-hoc overrides via -PincludeTags / -PexcludeTags
+                if (project.hasProperty('includeTags')) {
+                    includeTags project.property('includeTags').toString().split(',') as String[]
+                }
+                if (project.hasProperty('excludeTags')) {
+                    excludeTags project.property('excludeTags').toString().split(',') as String[]
+                }
+            }
+            // Keep unit tests fast: exclude integration and perf categories by default (package safety net)
+            exclude "com/dell/spt/integration/**"
+            exclude "com/dell/spt/perf/**"
+            exclude "**/*PerfTest.*"
+            finalizedBy jacocoTestReport
+            jacoco {
+                destinationFile = file("$buildDir/jacoco/jacocoTest.exec")
+                classDumpDir = file("$buildDir/jacoco/classpathdumps")
+            }
+        }
+
+        // Configure Jacoco output for additional test tasks if they exist
+        afterEvaluate {
+            tasks.matching { it.name == 'integrationTest' && it instanceof Test }.configureEach {
+                // Use JUnit 5 across the board, select integration tag
+                useJUnitPlatform {
+                    includeTags 'integration'
+                }
+                jacoco {
+                    destinationFile = file("$buildDir/jacoco/jacocoIntegrationTest.exec")
+                    classDumpDir = file("$buildDir/jacoco/classpathdumps-integration")
+                }
+            }
+            tasks.matching { it.name == 'perfTest' && it instanceof Test }.configureEach {
+                useJUnitPlatform {
+                    includeTags 'perf'
+                }
+                jacoco {
+                    destinationFile = file("$buildDir/jacoco/jacocoPerfTest.exec")
+                    classDumpDir = file("$buildDir/jacoco/classpathdumps-perf")
+                }
+            }
+        }
+        
+        jacocoTestReport {
+            dependsOn test
+            
+            reports {
+                xml.required = true
+                html.required = true
+                csv.required = false
+            }
+            
+            afterEvaluate {
+                classDirectories.setFrom(files(classDirectories.files.collect {
+                    fileTree(dir: it, exclude: [
+                        '**/Main.class',
+                        '**/*Exception.class',
+                        '**/*Config.class',
+                        '**/model/*',
+                    ])
+                }))
+            }
+        }
+    }
+}
+
+// Aggregate coverage report for all subprojects
+task jacocoRootReport(type: JacocoReport) {
+    description = 'Generate aggregate JaCoCo coverage report for all subprojects'
+    group = 'verification'
+    
+    // Depend on all subproject test tasks
+    def javaProjects = subprojects.findAll { 
+        it.name != 'bundle' && it.plugins.hasPlugin('java') 
+    }
+    dependsOn javaProjects.test
+    
+    // Aggregate source sets
+    sourceDirectories.setFrom(files(javaProjects.sourceSets.main.allSource.srcDirs))
+    classDirectories.setFrom(files(javaProjects.sourceSets.main.output))
+    
+    // Collect execution data from all subprojects
+    executionData.setFrom(files(javaProjects.findAll {
+        it.test.jacoco.destinationFile.exists()
+    }.test.jacoco.destinationFile))
+    
+    reports {
+        html.required = true
+        xml.required = true
+        html.outputLocation = file("${buildDir}/reports/jacoco/aggregate/html")
+        xml.outputLocation = file("${buildDir}/reports/jacoco/aggregate/jacocoTestReport.xml")
+    }
+    
+    // Apply the same exclusions as individual reports
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: [
+                '**/Main.class',
+                '**/*Exception.class',
+                '**/*Config.class',
+                '**/model/*',
+            ])
+        }))
+    }
+}
+
+// Aggregate coverage across unit + integration + perf tests
+task jacocoRootReportAll(type: JacocoReport) {
+    description = 'Generate aggregate JaCoCo coverage (unit + integration + perf)'
+    group = 'verification'
+
+    def javaProjects = subprojects.findAll {
+        it.name != 'bundle' && it.plugins.hasPlugin('java')
+    }
+
+    // Ensure all categories have executed so their exec files exist
+    dependsOn javaProjects.collect { p ->
+        [p.tasks.findByName('test'), p.tasks.findByName('integrationTest'), p.tasks.findByName('perfTest')]
+    }.flatten().findAll { it != null }
+
+    // Aggregate source sets
+    sourceDirectories.setFrom(files(javaProjects.sourceSets.main.allSource.srcDirs))
+    classDirectories.setFrom(files(javaProjects.sourceSets.main.output))
+
+    // Collect execution data from all test types if present
+    executionData.setFrom(files(
+        javaProjects.collectMany { p ->
+            def files = []
+            if (p.tasks.findByName('test')?.jacoco?.destinationFile?.exists()) {
+                files << p.tasks.findByName('test').jacoco.destinationFile
+            }
+            if (p.tasks.findByName('integrationTest')?.jacoco?.destinationFile?.exists()) {
+                files << p.tasks.findByName('integrationTest').jacoco.destinationFile
+            }
+            if (p.tasks.findByName('perfTest')?.jacoco?.destinationFile?.exists()) {
+                files << p.tasks.findByName('perfTest').jacoco.destinationFile
+            }
+            return files
+        }
+    ))
+
+    reports {
+        html.required = true
+        xml.required = true
+        html.outputLocation = file("${buildDir}/reports/jacoco/aggregate-all/html")
+        xml.outputLocation = file("${buildDir}/reports/jacoco/aggregate-all/jacocoAllReport.xml")
+    }
+
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: [
+                '**/Main.class',
+                '**/*Exception.class',
+                '**/*Config.class',
+                '**/model/*',
+            ])
+        }))
+    }
+}
+
+// Aggregate convenience tasks for categories
+tasks.register('testIntegration') {
+    description = 'Run all integration tests in all subprojects'
+    group = 'verification'
+    def targets = subprojects.collect { it.tasks.findByName('integrationTest') }.findAll { it != null }
+    dependsOn targets
+}
+
+tasks.register('testPerformance') {
+    description = 'Run all performance tests in all subprojects'
+    group = 'verification'
+    def targets = subprojects.collect { it.tasks.findByName('perfTest') }.findAll { it != null }
+    dependsOn targets
+}
+
+tasks.register('testAll') {
+    description = 'Run unit, integration, and performance tests across all subprojects'
+    group = 'verification'
+    // Depend on all subprojects' unit tests, plus aggregate integration/perf
+    def unitTargets = subprojects.collect { it.tasks.findByName('test') }.findAll { it != null }
+    dependsOn(unitTargets)
+    dependsOn 'testIntegration', 'testPerformance'
+}
+
+// Add aggregate report to standard build verification
+check.dependsOn jacocoRootReport

@@ -1,0 +1,40 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "4.2.22"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.netty.http"
+}
+
+dependencies {
+	// HTTP driver specific dependencies
+	// Inter-extension dependencies are compileOnly to prevent transitive bundling
+	compileOnly(
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:netty'),
+	)
+	
+	// API dependencies that must come from parent classloader
+	compileOnly(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.fiber4j,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// External dependencies that will be bundled
+	implementation(
+		libs.netty.common,
+		libs.netty.buffer,
+		libs.netty.transport,
+		libs.netty.handler,
+		libs.netty.codec,
+		libs.netty.codec.http,
+		libs.netty.codec.http2,
+	)
+}

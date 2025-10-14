@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+# Pre-commit: format Go code and run golangci-lint on production code.
+# Fails the commit on any error. Bypass with: git commit --no-verify
+
+set -euo pipefail
+
+# Always run from the repository root
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+echo "[pre-commit] Checking staged Go files..."
+staged_go_files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.go$' || true)
+
+if [ -z "$staged_go_files" ]; then
+  echo "[pre-commit] No Go changes staged; skipping fmt/lint."
+  exit 0
+fi
+
+echo "[pre-commit] gofmt -s (staged files)"
+gofmt -s -w $staged_go_files
+# Re-stage any files that were reformatted
+git add $staged_go_files
+
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "[pre-commit] golangci-lint not installed; skipping lint."
+  exit 0
+fi
+
+MIN_VER="2.2.0"
+ACTUAL_VER=$(golangci-lint version 2>&1 | sed -n 's/.*version \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)
+ver_lt() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$2" ]; }
+if [ -z "$ACTUAL_VER" ] || ver_lt "$ACTUAL_VER" "$MIN_VER"; then
+  echo "[pre-commit] golangci-lint $ACTUAL_VER is too old (need $MIN_VER+)."
+  echo "[pre-commit] Install/upgrade: https://golangci-lint.run/welcome/install/"
+  exit 1
+fi
+
+echo "[pre-commit] golangci-lint version: $ACTUAL_VER"
+echo "[pre-commit] using config: $REPO_ROOT/.golangci.yml"
+
+# Keep pre-commit fast and low-friction: disable heavy/subjective linters by default.
+# Use PRECOMMIT_LINT_STRICT=1 to run full production lint locally.
+LINT_OPTS=( -c "$REPO_ROOT/.golangci.yml" --tests=false --timeout=5m )
+if [ "${PRECOMMIT_LINT_STRICT:-0}" != "1" ]; then
+  LINT_OPTS+=( -D cyclop -D nestif -D dupl )
+  echo "[pre-commit] (soft-mode) disabling: cyclop, nestif, dupl"
+else
+  echo "[pre-commit] (strict-mode) running full production linters"
+fi
+
+golangci-lint run "${LINT_OPTS[@]}"
+
+echo "[pre-commit] OK"

@@ -1,0 +1,38 @@
+version: 2
+
+run:
+  timeout: 5m
+  tests: true
+
+# Global linter policy (used for production code in local_ci.sh)
+# Tests are linted in a separate pass with "unused" only.
+linters:
+  preset: none
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - goconst
+    - unparam
+    - revive
+    - copyloopvar
+    - bodyclose
+    - unconvert
+    - prealloc
+    - predeclared
+    - cyclop
+    - nestif
+    - dupl
+    - errorlint
+    - thelper
+    - misspell
+    - unused
+
+issues:
+  exclude-use-default: false
+
+linters-settings:
+  cyclop:
+    max-complexity: 30

@@ -1,0 +1,1912 @@
+/*
+Copyright © 2025 Dell Technologies
+*/
+
+package tui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
+	"github.com/dell/storage-performance-tool/cli/internal/remoteip"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+)
+
+// TestOrchestratorInterface defines the interface that test orchestrators must implement
+type TestOrchestratorInterface interface {
+	SetCallbacks(
+		onStatus func(*TestStatus),
+		onMetrics func(*MultiNodeMetricsUpdate),
+		onOutput func(string),
+		onError func(string),
+	)
+	StartTest(ctx context.Context, image string, params scenario.ScenarioParams) error
+	StopTest() error
+}
+
+// HostConnection represents a connection to a Docker host
+type HostConnection struct {
+	Info          *hostparse.HostInfo
+	DockerManager DockerInterface
+	APIClient     *SptAPIClient
+	ContainerID   string
+	AdvertisedIP  string // Routable IP used for java.rmi.server.hostname and worker address CSV
+	Status        HostStatus
+	Error         error
+	Managed       bool // true when spt launched the container
+	mu            sync.Mutex
+	phase         NodePhase
+}
+
+// HostStatus represents the lifecycle state of a remote host.
+type HostStatus string
+
+const (
+	// HostStatusPending indicates the host has not begun connecting.
+	HostStatusPending HostStatus = "pending"
+	// HostStatusConnecting indicates a connection attempt is in progress.
+	HostStatusConnecting HostStatus = "connecting"
+	// HostStatusReady indicates the host is ready to start workloads.
+	HostStatusReady HostStatus = "ready"
+	// HostStatusRunning indicates the test container is running on the host.
+	HostStatusRunning HostStatus = "running"
+	// HostStatusFailed indicates an error occurred on the host.
+	HostStatusFailed HostStatus = "failed"
+	// HostStatusStopped indicates the test container has been stopped.
+	HostStatusStopped HostStatus = "stopped"
+)
+
+// MultiHostOrchestrator manages tests across multiple Docker hosts
+type MultiHostOrchestrator struct {
+	hosts           []*HostConnection
+	minHosts        int
+	scenarioContent string
+	image           string
+	apiPort         string
+	attachWorkers   bool
+
+	// RMI Configuration
+	networkMode  string
+	rmiPortStart int
+	rmiPortCount int
+
+	mu           sync.Mutex
+	preflight    preflight.Checker
+	forceCleanup bool
+
+	// Detection hook for advertised IP (overridable in tests)
+	detectAdvIP func(ctx context.Context, host *hostparse.HostInfo) (string, error)
+
+	// Optional notifier for user-facing progress messages (TUI-safe).
+	// If nil, messages are printed to stdout as before.
+	notifier func(string)
+}
+
+// RMIConfig holds RMI configuration parameters
+type RMIConfig struct {
+	NetworkMode string
+	PortStart   int
+	PortCount   int
+}
+
+// NewMultiHostOrchestrator creates a new multi-host orchestrator
+func NewMultiHostOrchestrator(hostInfos []*hostparse.HostInfo, minHosts int) *MultiHostOrchestrator {
+	return NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, RMIConfig{
+		NetworkMode: constants.DefaultNetworkMode,
+		PortStart:   constants.DefaultRMIPortStart,
+		PortCount:   constants.DefaultRMIPortCount,
+	})
+}
+
+// NewMultiHostOrchestratorWithRMI creates a new multi-host orchestrator with RMI configuration
+func NewMultiHostOrchestratorWithRMI(hostInfos []*hostparse.HostInfo, minHosts int, rmiConfig RMIConfig) *MultiHostOrchestrator {
+	hosts := make([]*HostConnection, len(hostInfos))
+	for i, info := range hostInfos {
+		hosts[i] = &HostConnection{
+			Info:   info,
+			Status: HostStatusPending,
+			phase:  NodePhasePending,
+		}
+	}
+
+	o := &MultiHostOrchestrator{
+		hosts:        hosts,
+		minHosts:     minHosts,
+		apiPort:      constants.SptAPIPort, // Use Spt standard port on all hosts
+		networkMode:  rmiConfig.NetworkMode,
+		rmiPortStart: rmiConfig.PortStart,
+		rmiPortCount: rmiConfig.PortCount,
+		preflight:    preflight.NewDefaultChecker(),
+	}
+	// Default detection uses remoteip via the command executor (SSH or local)
+	o.detectAdvIP = func(ctx context.Context, host *hostparse.HostInfo) (string, error) {
+		exec := command.NewCommandExecutor()
+		// We import here to avoid a hard dependency in other files
+		return detectAdvertisedIPWrapper(ctx, exec, host)
+	}
+	return o
+}
+
+// SetNotifier configures a callback for progress messages so that callers
+// (like the TUI) can render them inside a messages pane instead of stdout.
+func (o *MultiHostOrchestrator) SetNotifier(fn func(string)) {
+	o.notifier = fn
+}
+
+// notify emits a single-line message either via the notifier callback (if set)
+// or directly to stdout as a fallback for non-TUI contexts.
+func (o *MultiHostOrchestrator) notify(msg string) {
+	if o.notifier != nil {
+		o.notifier(msg)
+		return
+	}
+	fmt.Println(msg)
+}
+
+func (o *MultiHostOrchestrator) notifyf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	// Trim any trailing newline to keep one-line semantics consistent.
+	msg = strings.TrimRight(msg, "\n")
+	o.notify(msg)
+}
+
+// detectAdvertisedIPWrapper bridges to internal/remoteip without exporting it in this file's imports.
+// This indirection makes it easier to stub in tests and keeps imports tidy.
+func detectAdvertisedIPWrapper(ctx context.Context, exec command.CommandExecutor, host *hostparse.HostInfo) (string, error) {
+	return remoteip.DetectAdvertisedIP(ctx, exec, host)
+}
+
+// SetImage sets the image used for distributed runs (used by preflight)
+func (o *MultiHostOrchestrator) SetImage(image string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.image = image
+}
+
+// SetForceCleanup enables stopping conflicting containers during preflight
+func (o *MultiHostOrchestrator) SetForceCleanup(force bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.forceCleanup = force
+}
+
+// SetAttachExistingWorkers toggles attach mode (skip worker launches, do not manage worker lifecycle).
+func (o *MultiHostOrchestrator) SetAttachExistingWorkers(attach bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.attachWorkers = attach
+}
+
+// AttachExistingWorkersEnabled reports if attach mode is enabled.
+func (o *MultiHostOrchestrator) AttachExistingWorkersEnabled() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.attachWorkers
+}
+
+// GetStatus returns the current status of a host connection
+func (hc *HostConnection) GetStatus() HostStatus {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	return hc.Status
+}
+
+// SetStatus updates the status of a host connection
+func (hc *HostConnection) SetStatus(status HostStatus) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.Status = status
+}
+
+// SetError sets an error for the host connection
+func (hc *HostConnection) SetError(err error) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.Error = err
+	hc.Status = HostStatusFailed
+}
+
+// SetManaged records whether the host's container lifecycle is owned by spt.
+func (hc *HostConnection) SetManaged(managed bool) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.Managed = managed
+}
+
+// IsManaged reports whether spt started and should stop the container.
+func (hc *HostConnection) IsManaged() bool {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	return hc.Managed
+}
+
+// GetError returns the last recorded error for the host connection (if any).
+func (hc *HostConnection) GetError() error {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	return hc.Error
+}
+
+// SetPhase records the current node lifecycle phase.
+func (hc *HostConnection) SetPhase(phase NodePhase) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.phase = phase
+}
+
+// GetPhase returns the node lifecycle phase.
+func (hc *HostConnection) GetPhase() NodePhase {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	return hc.phase
+}
+
+// ConnectHosts establishes Docker connections to all hosts
+func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
+	var wg sync.WaitGroup
+	var connectErrors []string
+	var connectErrorsMu sync.Mutex
+
+	o.notifyf("🔗 Connecting to %d Docker host(s)...", len(o.hosts))
+	attachWorkers := o.AttachExistingWorkersEnabled()
+	var entryHost *HostConnection
+	if len(o.hosts) > 0 {
+		entryHost = o.hosts[0]
+	}
+
+	for _, host := range o.hosts {
+		wg.Add(1)
+		go func(h *HostConnection) {
+			defer wg.Done()
+
+			h.SetStatus(HostStatusConnecting)
+			isEntry := entryHost != nil && h == entryHost
+
+			logging.LogInfo("docker-multi", "attempting connection",
+				"host", h.Info.Original)
+
+			dm, err := NewDockerManagerForHost(ctx, h.Info)
+			if err != nil {
+				h.SetError(err)
+
+				connectErrorsMu.Lock()
+				errMsg := fmt.Sprintf("  ❌ %s: %v", h.Info.Original, err)
+				connectErrors = append(connectErrors, errMsg)
+				connectErrorsMu.Unlock()
+
+				logging.LogError("docker-multi", "connection failed",
+					fmt.Errorf("host %s: %w", h.Info.Original, err))
+				return
+			}
+
+			// Run preflight checks (docker availability, image presence, port readiness)
+			if o.preflight != nil {
+				// 1) Docker reachable
+				if ver, derr := o.preflight.CheckDocker(ctx, h.Info); derr != nil {
+					h.SetError(fmt.Errorf("docker check failed: %w", derr))
+					connectErrorsMu.Lock()
+					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Docker check failed: %v", h.Info.Original, derr))
+					connectErrorsMu.Unlock()
+					logging.LogError("docker-multi", "preflight docker check failed", derr, "host", h.Info.Original)
+					return
+				} else { //nolint:revive // keep else for clarity here
+					logging.LogInfo("docker-multi", "docker available", "host", h.Info.Original, "version", ver)
+				}
+				// 2) Ensure image if known
+				o.mu.Lock()
+				img := o.image
+				o.mu.Unlock()
+				if img != "" {
+					if ierr := o.preflight.EnsureImage(ctx, h.Info, img); ierr != nil {
+						h.SetError(fmt.Errorf("image preflight failed: %w", ierr))
+						connectErrorsMu.Lock()
+						connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Image check failed: %v", h.Info.Original, ierr))
+						connectErrorsMu.Unlock()
+						logging.LogError("docker-multi", "preflight image ensure failed", ierr, "host", h.Info.Original, "image", img)
+						return
+					}
+				}
+				// 3) Check ports
+				apiPort := constants.DefaultSptAPIPort
+				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, apiPort, o.rmiPortStart, o.rmiPortCount); perr != nil {
+					h.SetError(fmt.Errorf("port check failed: %w", perr))
+					connectErrorsMu.Lock()
+					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Port check failed: %v", h.Info.Original, perr))
+					connectErrorsMu.Unlock()
+					logging.LogError("docker-multi", "preflight port check failed", perr, "host", h.Info.Original)
+					return
+				} else if len(cinfo.ConflictPorts) > 0 {
+					if attachWorkers && !isEntry {
+						logging.LogInfo("docker-multi", "attach mode: existing container using required ports",
+							"host", h.Info.Original,
+							"ports", cinfo.ConflictPorts)
+						if len(cinfo.Containers) == 0 {
+							logging.LogWarn("docker-multi", "attach mode proceeding with unknown port owner",
+								"host", h.Info.Original,
+								"ports", cinfo.ConflictPorts)
+						} else {
+							logging.LogDebug("docker-multi", "attach mode conflict accepted",
+								"host", h.Info.Original,
+								"containers", cinfo.Containers)
+						}
+					} else {
+						o.mu.Lock()
+						doCleanup := o.forceCleanup
+						o.mu.Unlock()
+
+						resolved := false
+						if doCleanup && len(cinfo.Containers) > 0 {
+							exec := command.NewCommandExecutor()
+							ops := command.NewDockerOperations(exec, h.Info)
+							stopped := 0
+							for _, c := range cinfo.Containers {
+								name := strings.ToLower(c.Name)
+								image := strings.ToLower(c.Image)
+								if strings.Contains(name, "spt") ||
+									strings.Contains(name, "storage-performance-tool") ||
+									strings.Contains(image, strings.ToLower(constants.DefaultSptImage)) {
+									if err := ops.StopContainer(ctx, c.ID); err == nil {
+										stopped++
+									}
+								}
+							}
+							if stopped > 0 {
+								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, apiPort, o.rmiPortStart, o.rmiPortCount); e2 == nil && len(c2.ConflictPorts) == 0 {
+									logging.LogInfo("docker-multi", "resolved port conflicts via cleanup", "host", h.Info.Original)
+									resolved = true
+								} else {
+									h.SetError(fmt.Errorf("ports still in use after cleanup: %v", c2.ConflictPorts))
+									connectErrorsMu.Lock()
+									connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Ports still in use: %v", h.Info.Original, c2.ConflictPorts))
+									connectErrorsMu.Unlock()
+									return
+								}
+							}
+						}
+
+						if !resolved {
+							h.SetError(fmt.Errorf("conflicting ports in use: %v", cinfo.ConflictPorts))
+							connectErrorsMu.Lock()
+							connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Ports in use: %v", h.Info.Original, cinfo.ConflictPorts))
+							connectErrorsMu.Unlock()
+							logging.LogError("docker-multi", "preflight port conflicts", fmt.Errorf("%v", cinfo.ConflictPorts), "host", h.Info.Original)
+							return
+						}
+					}
+				}
+			}
+
+			h.mu.Lock()
+			h.DockerManager = dm
+			h.Status = HostStatusReady
+			h.mu.Unlock()
+			h.SetPhase(NodePhaseContacted)
+
+			o.notifyf("  ✅ Connected to %s", h.Info.Original)
+			logging.LogInfo("docker-multi", "connection successful",
+				"host", h.Info.Original)
+		}(host)
+	}
+
+	wg.Wait()
+
+	// Count successful connections
+	successCount := 0
+	for _, host := range o.hosts {
+		if host.GetStatus() == HostStatusReady {
+			successCount++
+		}
+	}
+
+	// Print summary
+	o.notifyf("Connection Summary: %d/%d hosts connected", successCount, len(o.hosts))
+
+	// Print failures if any
+	if len(connectErrors) > 0 {
+		o.notify("Failed connections:")
+		for _, err := range connectErrors {
+			o.notify(err)
+		}
+	}
+
+	// Check if we met minimum hosts requirement
+	if successCount < o.minHosts {
+		return fmt.Errorf("insufficient hosts connected: %d connected, %d required (--min-hosts=%d)",
+			successCount, o.minHosts, o.minHosts)
+	}
+
+	if successCount < len(o.hosts) {
+		o.notifyf("⚠️  Continuing with %d hosts (minimum threshold met)", successCount)
+	}
+
+	return nil
+}
+
+// GetReadyHosts returns all hosts that are ready for testing
+func (o *MultiHostOrchestrator) GetReadyHosts() []*HostConnection {
+	readyHosts := make([]*HostConnection, 0, len(o.hosts))
+	for _, host := range o.hosts {
+		if host.GetStatus() == HostStatusReady || host.GetStatus() == HostStatusRunning {
+			readyHosts = append(readyHosts, host)
+		}
+	}
+	return readyHosts
+}
+
+// StartContainers starts Spt containers on all ready hosts
+func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string, _ string) error {
+	o.mu.Lock()
+	o.image = image
+	o.mu.Unlock()
+
+	readyHosts := o.GetReadyHosts()
+	if len(readyHosts) == 0 {
+		return fmt.Errorf("no ready hosts available for container startup")
+	}
+
+	o.notifyf("🚀 Starting containers on %d host(s)...", len(readyHosts))
+
+	var wg sync.WaitGroup
+	var startErrors []string
+	var startErrorsMu sync.Mutex
+
+	for _, host := range readyHosts {
+		wg.Add(1)
+		go func(h *HostConnection) {
+			defer wg.Done()
+
+			h.SetStatus(HostStatusConnecting) // Repurpose for container starting
+
+			// Check if DockerManager is nil
+			if h.DockerManager == nil {
+				h.SetError(fmt.Errorf("no Docker manager available for host"))
+
+				startErrorsMu.Lock()
+				errMsg := fmt.Sprintf("  ❌ %s: no Docker manager available", h.Info.Original)
+				startErrors = append(startErrors, errMsg)
+				startErrorsMu.Unlock()
+
+				logging.LogError("docker-multi", "no Docker manager",
+					fmt.Errorf("host %s has no Docker manager", h.Info.Original),
+					"host", h.Info.Original)
+				return
+			}
+
+			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort)
+			if err != nil {
+				h.SetError(fmt.Errorf("failed to start container: %w", err))
+
+				startErrorsMu.Lock()
+				errMsg := fmt.Sprintf("  ❌ %s: failed to start container: %v", h.Info.Original, err)
+				startErrors = append(startErrors, errMsg)
+				startErrorsMu.Unlock()
+
+				logging.LogError("docker-multi", "container start failed",
+					fmt.Errorf("host %s: %w", h.Info.Original, err),
+					"host", h.Info.Original)
+				return
+			}
+
+			h.mu.Lock()
+			h.ContainerID = containerID
+			h.Status = HostStatusRunning
+			h.mu.Unlock()
+			h.SetPhase(NodePhaseContainerStarting)
+
+			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerID[:12])
+			logging.LogInfo("docker-multi", "container started",
+				"host", h.Info.Original,
+				"container_id", containerID)
+		}(host)
+	}
+
+	wg.Wait()
+
+	// Count successful starts
+	runningCount := 0
+	for _, host := range readyHosts {
+		if host.GetStatus() == HostStatusRunning {
+			runningCount++
+		}
+	}
+
+	// Print failures if any
+	if len(startErrors) > 0 {
+		o.notify("Container startup failures:")
+		for _, err := range startErrors {
+			o.notify(err)
+		}
+	}
+
+	o.notifyf("Container Summary: %d/%d containers started successfully", runningCount, len(readyHosts))
+
+	if runningCount == 0 {
+		return fmt.Errorf("failed to start containers on any hosts")
+	}
+
+	if runningCount < len(readyHosts) {
+		o.notifyf("⚠️  Continuing with %d containers (some failed to start)", runningCount)
+	}
+
+	return nil
+}
+
+// WaitForAPIs waits for all container APIs to be ready
+func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Duration) error {
+	runningHosts := make([]*HostConnection, 0)
+	for _, host := range o.hosts {
+		if host.GetStatus() == HostStatusRunning {
+			runningHosts = append(runningHosts, host)
+		}
+	}
+
+	if len(runningHosts) == 0 {
+		return fmt.Errorf("no running containers to wait for")
+	}
+
+	o.notifyf("⏳ Waiting for APIs to be ready on %d host(s)...", len(runningHosts))
+
+	var wg sync.WaitGroup
+	var apiErrors []string
+	var apiErrorsMu sync.Mutex
+
+	for _, host := range runningHosts {
+		wg.Add(1)
+		go func(h *HostConnection) {
+			defer wg.Done()
+
+			apiURL := h.Info.GetAPIURL(o.apiPort)
+			apiClient := NewSptAPIClient(apiURL)
+
+			if err := apiClient.WaitForAPIReady(timeout); err != nil {
+				h.SetError(fmt.Errorf("API not ready: %w", err))
+
+				apiErrorsMu.Lock()
+				errMsg := fmt.Sprintf("  ❌ %s: API timeout: %v", h.Info.Original, err)
+				apiErrors = append(apiErrors, errMsg)
+				apiErrorsMu.Unlock()
+
+				logging.LogError("docker-multi", "API wait failed",
+					fmt.Errorf("host %s: %w", h.Info.Original, err),
+					"host", h.Info.Original,
+					"api_url", apiURL)
+				return
+			}
+
+			h.mu.Lock()
+			h.APIClient = apiClient
+			h.mu.Unlock()
+			h.SetPhase(NodePhaseAPIReady)
+
+			o.notifyf("  ✅ API ready on %s (%s)", h.Info.Original, apiURL)
+			logging.LogInfo("docker-multi", "API ready",
+				"host", h.Info.Original,
+				"api_url", apiURL)
+		}(host)
+	}
+
+	wg.Wait()
+
+	// Count successful APIs
+	apiReadyCount := 0
+	for _, host := range runningHosts {
+		if host.GetStatus() == HostStatusRunning && host.APIClient != nil {
+			apiReadyCount++
+		}
+	}
+
+	// Print failures if any
+	if len(apiErrors) > 0 {
+		o.notify("API readiness failures:")
+		for _, err := range apiErrors {
+			o.notify(err)
+		}
+	}
+
+	o.notifyf("API Summary: %d/%d APIs ready", apiReadyCount, len(runningHosts))
+
+	if apiReadyCount == 0 {
+		return fmt.Errorf("no APIs became ready within timeout")
+	}
+
+	return nil
+}
+
+// StopAllContainers stops all running containers
+func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
+	runningHosts := make([]*HostConnection, 0)
+	for _, host := range o.hosts {
+		if host.GetStatus() == HostStatusRunning && host.DockerManager != nil && host.IsManaged() {
+			runningHosts = append(runningHosts, host)
+		}
+	}
+
+	if len(runningHosts) == 0 {
+		return nil // Nothing to stop
+	}
+
+	o.notifyf("🛑 Stopping containers on %d host(s)...", len(runningHosts))
+
+	var wg sync.WaitGroup
+	for _, host := range runningHosts {
+		wg.Add(1)
+		go func(h *HostConnection) {
+			defer wg.Done()
+
+			if !h.IsManaged() {
+				return
+			}
+
+			containerID := h.ContainerID
+			if containerID == "" {
+				return
+			}
+
+			// Try graceful API shutdown first if API client is available
+			if h.APIClient != nil {
+				labelPrefix := h.Info.Original
+				h.APIClient.LogReadySnapshot("pre-shutdown/" + labelPrefix)
+				if err := h.APIClient.Shutdown(); err != nil {
+					logging.LogError("docker-multi", "graceful API shutdown failed, using container stop",
+						err,
+						"host", h.Info.Original)
+				}
+				// Wait for linger window best-effort
+				_ = h.APIClient.WaitForLinger(constants.APILingerDefault)
+				// Give it a moment to shut down gracefully
+				time.Sleep(constants.ContainerShutdownGrace)
+				h.APIClient.LogReadySnapshot("post-shutdown/" + labelPrefix)
+			}
+
+			// Stop the container - need to use the underlying Docker client
+			// Double-check DockerManager is not nil (defensive programming)
+			if h.DockerManager == nil {
+				logging.LogError("docker-multi", "Docker manager is nil during container stop",
+					fmt.Errorf("host %s has nil Docker manager", h.Info.Original),
+					"host", h.Info.Original,
+					"container_id", containerID)
+				return
+			}
+
+			err := h.DockerManager.Cleanup()
+			if err != nil {
+				logging.LogError("docker-multi", "container stop failed",
+					fmt.Errorf("host %s container %s: %w", h.Info.Original, containerID, err),
+					"host", h.Info.Original,
+					"container_id", containerID)
+			} else {
+				o.notifyf("  ✅ Container stopped on %s", h.Info.Original)
+				logging.LogInfo("docker-multi", "container stopped",
+					"host", h.Info.Original,
+					"container_id", containerID)
+			}
+
+			h.SetStatus(HostStatusStopped)
+			h.SetManaged(false)
+		}(host)
+	}
+
+	wg.Wait()
+	return nil
+}
+
+// GetHostCount returns the total number of hosts
+func (o *MultiHostOrchestrator) GetHostCount() int {
+	return len(o.hosts)
+}
+
+// GetReadyHostCount returns the number of ready hosts
+func (o *MultiHostOrchestrator) GetReadyHostCount() int {
+	count := 0
+	for _, host := range o.hosts {
+		status := host.GetStatus()
+		if status == HostStatusReady || status == HostStatusRunning {
+			count++
+		}
+	}
+	return count
+}
+
+// GetRunningHostCount returns the number of hosts with running containers
+func (o *MultiHostOrchestrator) GetRunningHostCount() int {
+	count := 0
+	for _, host := range o.hosts {
+		if host.GetStatus() == HostStatusRunning {
+			count++
+		}
+	}
+	return count
+}
+
+// GetHostsInfo returns a summary of all hosts and their status
+func (o *MultiHostOrchestrator) GetHostsInfo() []map[string]interface{} {
+	info := make([]map[string]interface{}, len(o.hosts))
+	for i, host := range o.hosts {
+		host.mu.Lock()
+		info[i] = map[string]interface{}{
+			"host":         host.Info.Original,
+			"status":       string(host.Status),
+			"container_id": host.ContainerID,
+			"error":        host.Error,
+		}
+		host.mu.Unlock()
+	}
+	return info
+}
+
+// MultiHostTestOrchestrator wraps MultiHostOrchestrator to provide TestOrchestrator interface
+type MultiHostTestOrchestrator struct {
+	multiHost *MultiHostOrchestrator
+
+	// Callbacks
+	onStatusUpdate func(status *TestStatus)
+	onMetrics      func(update *MultiNodeMetricsUpdate) // Changed to multi-node
+	onOutput       func(line string)
+	onError        func(err string)
+
+	// New fields for multi-node metrics
+	aggregator    *MetricsAggregator
+	metricsPoller MetricsPoller
+	pollInterval  time.Duration
+	pollingCancel context.CancelFunc
+	pollStates    map[string]*nodePollState
+	pollStateMu   sync.Mutex
+	backoffCfg    backoffConfig
+	randMu        sync.Mutex
+	randSource    *rand.Rand
+
+	// Diagnostics
+	logJSONBodies bool
+
+	// Entry node log relay
+	entryRelay *EntryLogRelay
+
+	// Message sink for TUI (e.g., p.Send(sptMessageMsg(...)))
+	messageSink func(string)
+
+	compatOnce sync.Once
+}
+
+// APIMetricsPoller implements MetricsPoller using SptAPIClient
+type APIMetricsPoller struct {
+	timeout time.Duration
+}
+
+// NewAPIMetricsPoller creates a new API-based metrics poller
+func NewAPIMetricsPoller() *APIMetricsPoller {
+	return &APIMetricsPoller{
+		timeout: constants.APIPollingTimeout, // Quick timeout for concurrent polling
+	}
+}
+
+// PollMetrics polls metrics from a specific node using its API client
+func (p *APIMetricsPoller) PollMetrics(_ context.Context, _ string) (*PerformanceMetric, error) {
+	// This is a placeholder - in practice, this would need access to the host's APIClient
+	// For now, we'll implement the actual polling logic in the orchestrator methods
+	return nil, fmt.Errorf("APIMetricsPoller.PollMetrics not implemented - use orchestrator polling")
+}
+
+// NewMultiHostTestOrchestrator creates a wrapper around MultiHostOrchestrator
+func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTestOrchestrator {
+	return &MultiHostTestOrchestrator{
+		multiHost:     multiHost,
+		aggregator:    NewMetricsAggregator(),
+		metricsPoller: NewAPIMetricsPoller(),         // Default implementation
+		pollInterval:  constants.MetricsPollInterval, // Default poll interval
+		pollStates:    make(map[string]*nodePollState),
+		backoffCfg:    multiNodeBackoff,
+		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		logJSONBodies: os.Getenv("SPT_LOG_METRICS_BODY") == "1",
+	}
+}
+
+// BuildBaselineUpdate constructs a status-only update for all configured hosts (no per-node samples).
+func (m *MultiHostTestOrchestrator) BuildBaselineUpdate() *MultiNodeMetricsUpdate {
+	if m.multiHost == nil {
+		return nil
+	}
+	now := time.Now()
+	status := make(map[string]NodeConnectionStatus)
+	for _, h := range m.multiHost.hosts {
+		nodeID := h.Info.Original
+		isConn := h.GetStatus() == HostStatusRunning && h.APIClient != nil
+		phase := h.GetPhase()
+		if phase == "" {
+			phase = NodePhasePending
+		}
+		if phase == NodePhasePending {
+			switch h.GetStatus() {
+			case HostStatusReady:
+				phase = NodePhaseContacted
+			case HostStatusRunning:
+				phase = NodePhaseContainerStarting
+			case HostStatusFailed, HostStatusStopped, HostStatusPending, HostStatusConnecting:
+				phase = NodePhasePending
+			}
+		}
+		if h.APIClient != nil && phase == NodePhaseContainerStarting {
+			phase = NodePhaseAPIReady
+		}
+		s := NodeConnectionStatus{LastSeen: now, IsConnected: isConn, IsActive: false, Phase: phase}
+		if h.GetStatus() == HostStatusFailed && h.Error != nil {
+			s.Error = h.Error
+		}
+		status[nodeID] = s
+	}
+	placeholder := &PerformanceMetric{Timestamp: now}
+	return &MultiNodeMetricsUpdate{
+		Timestamp:  now,
+		Aggregated: placeholder,
+		PerNode:    map[string]*PerformanceMetric{},
+		NodeStatus: status,
+	}
+}
+
+// SetCallbacks sets the callback functions for status, metrics, and output events
+func (m *MultiHostTestOrchestrator) SetCallbacks(
+	onStatusUpdate func(status *TestStatus),
+	onMetrics func(update *MultiNodeMetricsUpdate), // Changed signature
+	onOutput func(line string),
+	onError func(err string),
+) {
+	m.onStatusUpdate = onStatusUpdate
+	m.onMetrics = onMetrics
+	m.onOutput = onOutput
+	m.onError = onError
+}
+
+// SetMessageSink configures a sink for user-visible messages
+// (wired by the TUI to append lines to the Messages viewport).
+func (m *MultiHostTestOrchestrator) SetMessageSink(fn func(string)) {
+	m.messageSink = fn
+}
+
+func (m *MultiHostTestOrchestrator) getPollState(nodeID string) *nodePollState {
+	m.pollStateMu.Lock()
+	defer m.pollStateMu.Unlock()
+	if m.pollStates == nil {
+		m.pollStates = make(map[string]*nodePollState)
+	}
+	state, ok := m.pollStates[nodeID]
+	if !ok {
+		state = newNodePollState()
+		m.pollStates[nodeID] = state
+	}
+	return state
+}
+
+func (m *MultiHostTestOrchestrator) randomJitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	m.randMu.Lock()
+	defer m.randMu.Unlock()
+	return time.Duration(m.randSource.Int63n(int64(limit) + 1))
+}
+
+func (m *MultiHostTestOrchestrator) logVerboseMetrics(nodeID string, client *SptAPIClient, parseErr error) {
+	if client == nil {
+		return
+	}
+	payload, err := client.GetJSONMetricsVerbose()
+	if err != nil {
+		logging.LogDebug("metrics-poll", "failed to fetch verbose metrics payload", "node", nodeID, "error", err.Error(), "parse_error", parseErr.Error())
+		return
+	}
+	head := truncateForLog(payload, metricsPayloadPreviewLen)
+	logging.LogDebug("metrics-poll", "metrics payload (verbose)",
+		"node", nodeID,
+		"len", len(payload),
+		"head", head,
+		"parse_error", parseErr.Error())
+}
+
+func (m *MultiHostTestOrchestrator) warnCompatibilityOnce(err error) {
+	if err == nil {
+		return
+	}
+	m.compatOnce.Do(func() {
+		msg := fmt.Sprintf("Incompatible metrics JSON from one or more nodes: %v. This spt build requires metrics_schema >= 2. Please upgrade the Spt deployment.", err)
+		logging.LogError("metrics-poll", "metrics compatibility error", err)
+		sink := m.messageSink
+		if sink != nil {
+			sink(msg)
+			return
+		}
+		if m.onError != nil {
+			m.onError(msg)
+			return
+		}
+		if m.onOutput != nil {
+			m.onOutput(msg)
+		}
+	})
+}
+
+// StartMetricsPolling begins concurrent metrics collection from all ready hosts
+func (m *MultiHostTestOrchestrator) StartMetricsPolling(ctx context.Context) {
+	if m.pollingCancel != nil {
+		// Already polling
+		return
+	}
+
+	// Create cancellable context for polling
+	pollingCtx, cancel := context.WithCancel(ctx)
+	m.pollingCancel = cancel
+
+	logging.LogInfo("metrics-poll", "starting metrics polling",
+		"interval", m.pollInterval.String(), "hosts", len(m.multiHost.GetReadyHosts()))
+	// Start the polling loop in a goroutine
+	go m.metricsPollingLoop(pollingCtx)
+}
+
+// StopMetricsPolling stops the metrics collection
+func (m *MultiHostTestOrchestrator) StopMetricsPolling() {
+	if m.pollingCancel != nil {
+		m.pollingCancel()
+		m.pollingCancel = nil
+		logging.LogInfo("metrics-poll", "stopped metrics polling")
+	}
+}
+
+// metricsPollingLoop runs the main metrics collection loop
+func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
+	ticker := time.NewTicker(m.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			update := m.collectAllMetrics(ctx)
+			if update != nil && m.onMetrics != nil {
+				m.onMetrics(update)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// collectAllMetrics polls all ready hosts and creates a MultiNodeMetricsUpdate
+func (m *MultiHostTestOrchestrator) collectAllMetrics(ctx context.Context) *MultiNodeMetricsUpdate {
+	readyHosts := m.multiHost.GetReadyHosts()
+	if len(readyHosts) == 0 {
+		return nil
+	}
+
+	// Poll all nodes concurrently
+	results := m.pollNodesConcurrently(ctx, readyHosts)
+
+	// Aggregate the metrics
+	aggregated := m.aggregator.Aggregate(results.Metrics)
+
+	return &MultiNodeMetricsUpdate{
+		Timestamp:  time.Now(),
+		Aggregated: aggregated,
+		PerNode:    results.Metrics,
+		NodeStatus: results.Status,
+	}
+}
+
+// PollResults holds the results of concurrent node polling
+type PollResults struct {
+	Metrics map[string]*PerformanceMetric
+	Status  map[string]NodeConnectionStatus
+}
+
+// pollNodesConcurrently polls metrics from all hosts in parallel
+func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, hosts []*HostConnection) PollResults {
+	results := PollResults{
+		Metrics: make(map[string]*PerformanceMetric),
+		Status:  make(map[string]NodeConnectionStatus),
+	}
+
+	if len(hosts) == 0 {
+		return results
+	}
+
+	pollCtx, cancel := context.WithTimeout(ctx, m.metricsPoller.(*APIMetricsPoller).timeout)
+	defer cancel()
+
+	type nodeResult struct {
+		nodeID       string
+		metrics      *PerformanceMetric
+		err          error
+		skipped      bool
+		apiReachable bool
+		phase        NodePhase
+	}
+
+	resultsChan := make(chan nodeResult, len(hosts))
+
+	for _, host := range hosts {
+		nodeID := host.Info.Original
+		state := m.getPollState(nodeID)
+		now := time.Now()
+		if !state.shouldPoll(now) {
+			logging.LogDebug("metrics-poll", "skipping node poll due to backoff", "node", nodeID)
+			resultsChan <- nodeResult{
+				nodeID:  nodeID,
+				metrics: nil,
+				err:     state.lastErrorSnapshot(),
+				skipped: true,
+				phase:   host.GetPhase(),
+			}
+			continue
+		}
+
+		go func(h *HostConnection, st *nodePollState, nodeID string) {
+			var (
+				metrics      *PerformanceMetric
+				err          error
+				apiReachable bool
+				phase        = h.GetPhase()
+			)
+			kind := pollErrorNone
+
+			if h.APIClient != nil && h.GetStatus() == HostStatusRunning {
+				logging.LogDebug("metrics-poll", "polling node", "node", nodeID)
+				jsonData, apiErr := h.APIClient.GetJSONMetrics()
+				if apiErr != nil {
+					err = apiErr
+					kind = classifyPollError(apiErr)
+				} else if len(jsonData) == 0 {
+					err = fmt.Errorf("empty metrics response")
+					kind = pollErrorRetryable
+					apiReachable = true
+				} else {
+					apiReachable = true
+					metrics, err = h.APIClient.ParseJSONMetrics(jsonData)
+					if err != nil {
+						kind = classifyPollError(err)
+						if m.logJSONBodies {
+							head := truncateForLog(jsonData, metricsPayloadPreviewLen)
+							logging.LogDebug("metrics-poll", "raw json metrics",
+								"node", nodeID,
+								"len", len(jsonData),
+								"head", head,
+							)
+							if kind == pollErrorParse {
+								m.logVerboseMetrics(nodeID, h.APIClient, err)
+							}
+						}
+					}
+				}
+			} else {
+				err = fmt.Errorf("host %s not running or no API client", nodeID)
+				kind = pollErrorFatal
+			}
+
+			nowResult := time.Now()
+			if err == nil && metrics != nil {
+				st.recordSuccess(nowResult)
+			} else if err != nil {
+				delay, warn := st.recordFailure(nowResult, err, kind, m.backoffCfg, m.randomJitter)
+				if warn {
+					logging.LogWarn("metrics-poll", "node metrics polling has been failing", "node", nodeID, "error", err.Error())
+				} else {
+					logging.LogDebug("metrics-poll", "node metrics poll failed", "node", nodeID, "error", err.Error(), "next_delay", delay.String())
+				}
+			}
+
+			if err == nil && metrics != nil {
+				phase = NodePhaseMetricsFlowing
+				h.SetPhase(phase)
+			} else if err != nil {
+				switch {
+				case apiReachable:
+					phase = NodePhaseAPIReady
+				case h.APIClient != nil:
+					phase = NodePhaseContainerStarting
+				case h.GetStatus() == HostStatusReady:
+					phase = NodePhaseContacted
+				default:
+					phase = NodePhasePending
+				}
+				h.SetPhase(phase)
+			}
+
+			resultsChan <- nodeResult{
+				nodeID:       nodeID,
+				metrics:      metrics,
+				err:          err,
+				skipped:      false,
+				apiReachable: apiReachable,
+				phase:        phase,
+			}
+		}(host, state, nodeID)
+	}
+
+collectLoop:
+	for i := 0; i < len(hosts); i++ {
+		select {
+		case result := <-resultsChan:
+			now := time.Now()
+
+			if result.skipped {
+				phase := result.phase
+				if phase == "" {
+					phase = NodePhasePending
+				}
+				results.Status[result.nodeID] = NodeConnectionStatus{
+					LastSeen:    now,
+					IsConnected: false,
+					IsActive:    false,
+					Error:       result.err,
+					Phase:       phase,
+				}
+				continue
+			}
+
+			if result.err == nil && result.metrics != nil {
+				isActive := result.metrics.TestState == constants.TestStateRunning
+				results.Metrics[result.nodeID] = result.metrics
+				results.Status[result.nodeID] = NodeConnectionStatus{
+					LastSeen:    now,
+					IsConnected: true,
+					IsActive:    isActive,
+					Error:       nil,
+					Phase:       result.phase,
+				}
+				logging.LogMetricsParsing("polled node metrics", "node", result.nodeID,
+					"ops_per_sec", result.metrics.OpsPerSec, "mb_per_sec", result.metrics.MBPerSec,
+					"success", result.metrics.SuccessCount)
+			} else {
+				results.Status[result.nodeID] = NodeConnectionStatus{
+					LastSeen:    now,
+					IsConnected: result.apiReachable,
+					IsActive:    false,
+					Error:       result.err,
+					Phase:       result.phase,
+				}
+				if result.err != nil {
+					if errors.Is(result.err, ErrMetricsIncompatible) {
+						m.warnCompatibilityOnce(result.err)
+					}
+				}
+			}
+		case <-pollCtx.Done():
+			break collectLoop
+		}
+	}
+
+	return results
+}
+
+// StartTest starts monitoring tests on all hosts
+func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string, params scenario.ScenarioParams) error {
+	readyHosts := m.multiHost.GetReadyHosts()
+
+	if len(readyHosts) == 0 {
+		return fmt.Errorf("no ready hosts available to start tests")
+	}
+
+	// Determine if this is a single-host or multi-host test
+	if len(readyHosts) == 1 {
+		// Single host test - use regular container execution
+		if m.onStatusUpdate != nil {
+			m.onStatusUpdate(&TestStatus{
+				State:   constants.StateRunning,
+				Message: "Single-host test running",
+			})
+		}
+
+		if m.onOutput != nil {
+			m.onOutput(fmt.Sprintf("Starting single-host test on %s", readyHosts[0].Info.Original))
+		}
+
+		// For single host, we need to generate scenario file and start container
+		// Check if host has a Docker manager configured
+		if readyHosts[0].DockerManager == nil {
+			return fmt.Errorf("host %s has no Docker manager configured", readyHosts[0].Info.Original)
+		}
+
+		// Generate the scenario content first
+		scenarioContent, err := scenario.GenerateScenario(params)
+		if err != nil {
+			return fmt.Errorf("failed to generate scenario content: %w", err)
+		}
+
+		// Store scenario content for API submission - no file creation needed
+		m.multiHost.scenarioContent = scenarioContent
+
+		// Build endpoint arguments from params
+		additionalArgs, err := scenario.BuildEndpointArgs(params)
+		if err != nil {
+			return fmt.Errorf("failed to build endpoint arguments: %w", err)
+		}
+
+		// Start the container as entry node (single-host, no workers) - no file mounting needed
+		containerID, err := readyHosts[0].DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs)
+		if err != nil {
+			return err
+		}
+
+		// Store container ID for this host
+		readyHosts[0].mu.Lock()
+		readyHosts[0].ContainerID = containerID
+		readyHosts[0].mu.Unlock()
+
+		// Start metrics polling for single-host test
+		m.StartMetricsPolling(ctx)
+
+		return nil
+
+	} else { //nolint:revive // keep else for clarity here
+		// Special-case: LIST workload is intentionally single-host for now.
+		// Behavior: run the workload only on the PRIMARY (first) host; start API-only
+		// containers on remaining hosts so they appear in the live view as idle.
+		if strings.EqualFold(params.WorkloadType, scenario.WorkloadTypeList) {
+			// Status/message hooks
+			if m.onStatusUpdate != nil {
+				m.onStatusUpdate(&TestStatus{
+					State:   constants.StateRunning,
+					Message: fmt.Sprintf("LIST workload on primary only; %d worker(s) idle", len(readyHosts)-1),
+				})
+			}
+			if m.onOutput != nil {
+				hostList := make([]string, len(readyHosts))
+				for i, host := range readyHosts {
+					hostList[i] = host.Info.Original
+				}
+				m.onOutput(fmt.Sprintf("LIST workload is single-host; starting primary %s; keeping workers idle: %s",
+					readyHosts[0].Info.Original, strings.Join(hostList[1:], ", ")))
+			}
+
+			// 1) Start API-only containers on all workers so they can report idle status.
+			workers := readyHosts[1:]
+			for _, w := range workers {
+				if w.DockerManager == nil {
+					continue
+				}
+				w.SetPhase(NodePhaseContainerStarting)
+				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort)
+				if err != nil {
+					// Record but continue; non-critical for primary execution
+					w.SetError(err)
+					logging.LogError("orchestrator", "failed to start idle worker API container", err, "host", w.Info.Original)
+					continue
+				}
+				w.mu.Lock()
+				w.ContainerID = cid
+				w.Status = HostStatusRunning
+				w.mu.Unlock()
+				w.SetManaged(true)
+			}
+
+			// 2) Wait for APIs on any running hosts (likely just workers for now)
+			if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+				// Not fatal to the primary run; continue but log
+				logging.LogError("orchestrator", "API readiness wait (workers) returned error", err)
+			}
+
+			// Emit a baseline so the UI shows all configured nodes before metrics flow.
+			if m.onMetrics != nil {
+				if baseline := m.BuildBaselineUpdate(); baseline != nil {
+					m.onMetrics(baseline)
+				}
+			}
+
+			// 3) Generate scenario and start ENTRY container on primary (no worker addrs)
+			scenarioContent, err := scenario.GenerateScenario(params)
+			if err != nil {
+				return fmt.Errorf("failed to generate scenario: %w", err)
+			}
+			m.multiHost.scenarioContent = scenarioContent
+
+			additionalArgs, err := scenario.BuildEndpointArgs(params)
+			if err != nil {
+				return fmt.Errorf("failed to build endpoint args: %w", err)
+			}
+
+			primary := readyHosts[0]
+			if primary.DockerManager == nil {
+				return fmt.Errorf("primary host %s has no Docker manager configured", primary.Info.Original)
+			}
+			primary.SetPhase(NodePhaseContainerStarting)
+			cid, err := primary.DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs)
+			if err != nil {
+				return err
+			}
+			primary.mu.Lock()
+			primary.ContainerID = cid
+			primary.Status = HostStatusRunning
+			primary.mu.Unlock()
+			primary.SetManaged(true)
+
+			// 4) Ensure APIs ready on all running nodes (now includes primary)
+			if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+				return fmt.Errorf("failed waiting for APIs after LIST startup: %w", err)
+			}
+
+			if len(m.multiHost.hosts) > 0 {
+				if entry := m.multiHost.hosts[0]; entry != nil && entry.APIClient != nil {
+					entry.APIClient.LogReadySnapshot("pre-start")
+				}
+			}
+
+			// 5) Start test via entry node API
+			defaultsContent, derr := scenario.GenerateDefaults(params)
+			if derr != nil {
+				return fmt.Errorf("failed to generate defaults: %w", derr)
+			}
+			runID, serr := m.multiHost.hosts[0].APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
+			if serr != nil {
+				return fmt.Errorf("failed to start LIST via entry node API: %w", serr)
+			}
+			if m.onOutput != nil {
+				m.onOutput(fmt.Sprintf("LIST started on primary with run ID: %s", runID))
+			}
+
+			// 6) Start polling metrics
+			m.StartMetricsPolling(ctx)
+
+			// 7) Start entry-node log relay to surface Spt stdout in headless/TUI
+			if len(m.multiHost.hosts) > 0 {
+				entry := m.multiHost.hosts[0]
+				if entry != nil && entry.DockerManager != nil && entry.ContainerID != "" {
+					var relay *EntryLogRelay
+					mode := ""
+					if dm, ok := entry.DockerManager.(*DockerManager); ok {
+						if dm.client != nil {
+							fetcher := newSDKLogFetcher(dm, entry.ContainerID)
+							relay = NewEntryLogRelay(fetcher, true, 0)
+							mode = "stream"
+						} else if dm.remote != nil {
+							fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
+							relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
+							mode = "poll"
+						}
+					}
+					if relay != nil {
+						if m.multiHost != nil && len(m.multiHost.hosts) > 0 {
+							logging.LogInfo("entry-log-relay", "starting entry log relay",
+								"host", m.multiHost.hosts[0].Info.Original,
+								"mode", mode)
+						}
+						sink := m.messageSink
+						if sink == nil {
+							sink = func(s string) {
+								if m.multiHost != nil && m.multiHost.notifier != nil {
+									m.multiHost.notifier(s)
+									return
+								}
+								if m.onOutput != nil {
+									m.onOutput(s)
+								}
+							}
+						}
+						relay.Start(ctx, sink)
+						m.entryRelay = relay
+					}
+				}
+			}
+			return nil
+		}
+		// Multi-host distributed test - use RMI coordination
+		if m.onStatusUpdate != nil {
+			m.onStatusUpdate(&TestStatus{
+				State:   constants.StateRunning,
+				Message: fmt.Sprintf("Multi-host distributed test running on %d hosts", len(readyHosts)),
+			})
+		}
+
+		if m.onOutput != nil {
+			hostList := make([]string, len(readyHosts))
+			for i, host := range readyHosts {
+				hostList[i] = host.Info.Original
+			}
+			m.onOutput(fmt.Sprintf("Starting distributed test on hosts: %s", strings.Join(hostList, ", ")))
+		}
+
+		// Use the full distributed test flow with RMI coordination
+		err := m.multiHost.StartDistributedTest(ctx, image, params)
+		if err != nil {
+			return err
+		}
+
+		// Wait for APIs to be ready on all running hosts (ensures API clients set)
+		if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+			return fmt.Errorf("failed waiting for APIs after distributed start: %w", err)
+		}
+
+		if m.onMetrics != nil {
+			if baseline := m.BuildBaselineUpdate(); baseline != nil {
+				m.onMetrics(baseline)
+			}
+		}
+
+		if len(m.multiHost.hosts) > 0 {
+			if entry := m.multiHost.hosts[0]; entry != nil && entry.APIClient != nil {
+				entry.APIClient.LogReadySnapshot("pre-start")
+			}
+		}
+
+		// Start the distributed test via the entry node API (first host is entry)
+		if len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0].APIClient == nil {
+			return fmt.Errorf("entry node API client not initialized")
+		}
+		defaultsContent, derr := scenario.GenerateDefaults(params)
+		if derr != nil {
+			return fmt.Errorf("failed to generate defaults: %w", derr)
+		}
+		if m.onOutput != nil {
+			m.onOutput("Starting test via entry node API...")
+		}
+		runID, serr := m.multiHost.hosts[0].APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
+		if serr != nil {
+			return fmt.Errorf("failed to start test via entry node API: %w", serr)
+		}
+		if m.onOutput != nil {
+			m.onOutput(fmt.Sprintf("Distributed test started with run ID: %s", runID))
+		}
+
+		// Start metrics polling for multi-host test
+		m.StartMetricsPolling(ctx)
+
+		// Start entry-node log relay
+		if len(m.multiHost.hosts) > 0 {
+			entry := m.multiHost.hosts[0]
+			if entry != nil && entry.DockerManager != nil && entry.ContainerID != "" {
+				var relay *EntryLogRelay
+				mode := ""
+				// Determine fetcher based on underlying DockerManager flavor
+				if dm, ok := entry.DockerManager.(*DockerManager); ok {
+					if dm.client != nil {
+						// Local SDK streaming
+						fetcher := newSDKLogFetcher(dm, entry.ContainerID)
+						relay = NewEntryLogRelay(fetcher, true, 0)
+						mode = "stream"
+					} else if dm.remote != nil {
+						// Remote CLI polling with --since and --timestamps
+						fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
+						relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
+						mode = "poll"
+					}
+				}
+				if relay != nil {
+					// Log relay start for troubleshooting
+					if m.multiHost != nil && len(m.multiHost.hosts) > 0 {
+						logging.LogInfo("entry-log-relay", "starting entry log relay",
+							"host", m.multiHost.hosts[0].Info.Original,
+							"mode", mode)
+					}
+					sink := m.messageSink
+					if sink == nil {
+						// fallback: use notifier if set; otherwise, onOutput
+						sink = func(s string) {
+							if m.multiHost != nil && m.multiHost.notifier != nil {
+								m.multiHost.notifier(s)
+								return
+							}
+							if m.onOutput != nil {
+								m.onOutput(s)
+							}
+						}
+					}
+					relay.Start(ctx, sink)
+					m.entryRelay = relay
+				}
+			}
+		}
+
+		return nil
+	}
+}
+
+// StopTest stops monitoring tests on all hosts
+func (m *MultiHostTestOrchestrator) StopTest() error {
+	if m.onOutput != nil {
+		m.onOutput("Stopping multi-host test monitoring...")
+	}
+
+	// Stop metrics polling first
+	m.StopMetricsPolling()
+
+	// Stop entry log relay if running
+	if m.entryRelay != nil {
+		m.entryRelay.Stop()
+		m.entryRelay = nil
+	}
+
+	// The actual container stopping is handled by MultiHostOrchestrator.StopAllContainers()
+	// This just stops the monitoring
+
+	if m.onStatusUpdate != nil {
+		m.onStatusUpdate(&TestStatus{
+			State:   constants.StateCompleted,
+			Message: "Multi-host test monitoring stopped",
+		})
+	}
+
+	return nil
+}
+
+// attachWorkerNode marks a prestarted worker node as ready for orchestration.
+func (o *MultiHostOrchestrator) attachWorkerNode(host *HostConnection) error {
+	if host.DockerManager == nil {
+		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+	}
+
+	if o.detectAdvIP == nil {
+		return fmt.Errorf("no advertised IP detector configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ip, derr := o.detectAdvIP(ctx, host.Info)
+	if derr != nil || strings.TrimSpace(ip) == "" {
+		return fmt.Errorf("advertised IP detection failed on %s: %w", host.Info.Original, derr)
+	}
+	advIP := strings.TrimSpace(ip)
+
+	host.mu.Lock()
+	host.AdvertisedIP = advIP
+	host.ContainerID = ""
+	host.Status = HostStatusRunning
+	host.mu.Unlock()
+	host.SetManaged(false)
+
+	logging.LogInfo("orchestrator", "attached worker node",
+		"host", host.Info.Host,
+		"rmi_hostname", advIP)
+
+	return nil
+}
+
+// startWorkerNode starts a worker node container with RMI configuration
+func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection) error {
+	// Check if host has a Docker manager configured
+	if host.DockerManager == nil {
+		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+	}
+
+	// Determine advertised IP for java.rmi.server.hostname
+	// Prefer detection; fall back to SSH host if detection fails
+	advIP := ""
+	if o.detectAdvIP == nil {
+		return fmt.Errorf("no advertised IP detector configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ip, derr := o.detectAdvIP(ctx, host.Info)
+	if derr != nil || strings.TrimSpace(ip) == "" {
+		return fmt.Errorf("advertised IP detection failed on %s: %w", host.Info.Original, derr)
+	}
+	advIP = strings.TrimSpace(ip)
+	logging.LogInfo("orchestrator", "advertised IP selected", "host", host.Info.Original, "ip", advIP)
+
+	containerID, err := host.DockerManager.StartWorkerNodeContainer(
+		o.image,
+		advIP,
+		o.rmiPortStart,
+		o.rmiPortCount,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start worker on %s: %w", host.Info.Host, err)
+	}
+
+	host.mu.Lock()
+	host.ContainerID = containerID
+	host.AdvertisedIP = advIP
+	host.Status = HostStatusRunning
+	host.mu.Unlock()
+
+	logging.LogInfo("orchestrator", "started worker node",
+		"host", host.Info.Host,
+		"container", containerID[:12],
+		"rmi_hostname", advIP)
+
+	host.SetManaged(true)
+
+	return nil
+}
+
+// startEntryNode starts an entry node container with worker addresses and scenario
+func (o *MultiHostOrchestrator) startEntryNode(
+	primary *HostConnection,
+	workers []*HostConnection,
+	params scenario.ScenarioParams,
+) error {
+	// Build worker addresses for RMI using detected advertised IPs where available
+	workerAddresses := []string{}
+	for _, worker := range workers {
+		hostOrIP := worker.AdvertisedIP
+		if strings.TrimSpace(hostOrIP) == "" {
+			hostOrIP = worker.Info.Host
+		}
+		addr := fmt.Sprintf("%s:%s", hostOrIP, constants.RMIRegistryPort)
+		workerAddresses = append(workerAddresses, addr)
+	}
+	logging.LogInfo("orchestrator", "entry worker addresses", "csv", strings.Join(workerAddresses, ","))
+
+	// Check if primary host has a Docker manager configured
+	if primary.DockerManager == nil {
+		return fmt.Errorf("primary host %s has no Docker manager configured", primary.Info.Original)
+	}
+
+	// Build additional arguments from scenario parameters
+	additionalArgs, err := scenario.BuildEndpointArgs(params)
+	if err != nil {
+		return fmt.Errorf("failed to build endpoint args: %w", err)
+	}
+
+	containerID, err := primary.DockerManager.StartEntryNodeContainer(
+		o.image,
+		workerAddresses,
+		additionalArgs,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start entry node: %w", err)
+	}
+
+	primary.mu.Lock()
+	primary.ContainerID = containerID
+	primary.Status = HostStatusRunning
+	primary.mu.Unlock()
+	primary.SetManaged(true)
+
+	logging.LogInfo("orchestrator", "started entry node",
+		"host", primary.Info.Host,
+		"workers", strings.Join(workerAddresses, ","),
+		"container", containerID[:12])
+
+	return nil
+}
+
+// StartDistributedTest starts a distributed test using RMI coordination
+func (o *MultiHostOrchestrator) StartDistributedTest(_ context.Context, image string, params scenario.ScenarioParams) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.image = image
+	attachWorkers := o.attachWorkers
+
+	// 1. Determine roles: first host is entry node, rest are workers
+	if len(o.hosts) == 0 {
+		return fmt.Errorf("no hosts available")
+	}
+
+	entryNode := o.hosts[0]
+	workerNodes := o.hosts[1:]
+
+	logging.LogInfo("orchestrator", "starting distributed test",
+		"entry_node", entryNode.Info.Host,
+		"worker_count", len(workerNodes))
+
+	// 2. Generate scenario content (will be sent via API, not mounted as file)
+	scenarioContent, err := scenario.GenerateScenario(params)
+	if err != nil {
+		return fmt.Errorf("failed to generate scenario: %w", err)
+	}
+
+	// Store scenario content for API submission - no file creation needed
+	o.scenarioContent = scenarioContent
+
+	// 3. Start worker nodes first (they need to be ready for entry node)
+	if len(workerNodes) > 0 {
+		logging.LogInfo("orchestrator", "starting worker nodes")
+
+		var wg sync.WaitGroup
+		var errors []error
+		var errorsMu sync.Mutex
+
+		for _, worker := range workerNodes {
+			wg.Add(1)
+			go func(w *HostConnection) {
+				defer wg.Done()
+
+				var err error
+				if attachWorkers {
+					err = o.attachWorkerNode(w)
+				} else {
+					err = o.startWorkerNode(w)
+				}
+
+				if err != nil {
+					errorsMu.Lock()
+					errors = append(errors, err)
+					errorsMu.Unlock()
+					w.SetError(err)
+				}
+			}(worker)
+		}
+		wg.Wait()
+
+		// Check if enough workers started
+		activeWorkers := 0
+		for _, w := range workerNodes {
+			if w.GetStatus() == HostStatusRunning {
+				activeWorkers++
+			}
+		}
+
+		if activeWorkers < (o.minHosts - 1) { // -1 for entry node
+			// Collect per-worker failure details to aid triage
+			var details []string
+			for _, w := range workerNodes {
+				if w.GetStatus() != HostStatusRunning {
+					// Prefer explicit error text when available
+					if err := w.GetError(); err != nil {
+						details = append(details, fmt.Sprintf("%s status=%s error=%v", w.Info.Original, w.GetStatus(), err))
+					} else {
+						details = append(details, fmt.Sprintf("%s status=%s", w.Info.Original, w.GetStatus()))
+					}
+				}
+			}
+
+			msg := fmt.Sprintf("insufficient workers: %d running, %d required", activeWorkers, o.minHosts-1)
+			if len(details) > 0 {
+				msg = fmt.Sprintf("%s; failures: %s", msg, strings.Join(details, "; "))
+			}
+			return fmt.Errorf("%s", msg)
+		}
+
+		// 4. Wait for RMI registries to be ready
+		logging.LogInfo("orchestrator", "waiting for RMI registries to be ready")
+		if err := o.waitForAllWorkersReady(workerNodes, constants.RMIReadinessTimeout); err != nil {
+			return fmt.Errorf("workers not ready for RMI: %w", err)
+		}
+	}
+
+	// 5. Start entry node with worker addresses
+	logging.LogInfo("orchestrator", "starting entry node")
+
+	activeWorkers := []*HostConnection{}
+	for _, w := range workerNodes {
+		if w.GetStatus() == HostStatusRunning {
+			activeWorkers = append(activeWorkers, w)
+		}
+	}
+
+	if err := o.startEntryNode(entryNode, activeWorkers, params); err != nil {
+		return fmt.Errorf("failed to start entry node: %w", err)
+	}
+
+	logging.LogInfo("orchestrator", "distributed test started successfully",
+		"entry_node", entryNode.Info.Host,
+		"active_workers", len(activeWorkers))
+
+	return nil
+}
+
+// checkPort checks if a TCP port is open on the specified host
+func (o *MultiHostOrchestrator) checkPort(host string, port int, timeout time.Duration) bool {
+	// Use net.JoinHostPort to be IPv6-safe
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+
+	logging.LogDebug("orchestrator", "checking port connectivity",
+		"address", address,
+		"timeout", timeout)
+
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		logging.LogDebug("orchestrator", "port connection failed",
+			"address", address,
+			"error", err.Error())
+		return false
+	}
+
+	_ = conn.Close()
+	logging.LogDebug("orchestrator", "port connection successful",
+		"address", address)
+	return true
+}
+
+// waitForRMIReady waits for the RMI registry to be ready on a specific host
+func (o *MultiHostOrchestrator) waitForRMIReady(host *HostConnection, timeout time.Duration) error {
+	rmiRegistryPort := constants.RMIRegistryPortInt
+	retryInterval := constants.RMIRetryInterval
+
+	deadline := time.Now().Add(timeout)
+	// Use the hostname/IP from the connection info - this is what we used for SSH
+	// and what other containers will use to reach this host via RMI
+	rmiAddress := host.Info.Host
+
+	logging.LogInfo("orchestrator", "waiting for RMI registry readiness",
+		"host", host.Info.Host,
+		"address", rmiAddress,
+		"port", rmiRegistryPort,
+		"timeout", timeout)
+
+	for time.Now().Before(deadline) {
+		if o.checkPort(rmiAddress, rmiRegistryPort, constants.PortCheckTimeout) {
+			logging.LogInfo("orchestrator", "RMI registry ready",
+				"host", host.Info.Host,
+				"address", rmiAddress)
+			return nil
+		}
+
+		// Wait before retrying, but check if we still have time
+		if time.Now().Add(retryInterval).After(deadline) {
+			break
+		}
+		time.Sleep(retryInterval)
+	}
+
+	return fmt.Errorf("RMI registry not ready on %s after %v", host.Info.Host, timeout)
+}
+
+// waitForAllWorkersReady waits for all worker nodes to have ready RMI registries
+func (o *MultiHostOrchestrator) waitForAllWorkersReady(workers []*HostConnection, timeout time.Duration) error {
+	if len(workers) == 0 {
+		logging.LogInfo("orchestrator", "no workers to check for readiness")
+		return nil
+	}
+
+	logging.LogInfo("orchestrator", "checking RMI readiness for all workers",
+		"worker_count", len(workers),
+		"timeout", timeout)
+
+	var wg sync.WaitGroup
+	var readinessErrors []error
+	var errorsMu sync.Mutex
+	readyWorkers := 0
+	var readyMu sync.Mutex
+
+	for _, worker := range workers {
+		wg.Add(1)
+		go func(w *HostConnection) {
+			defer wg.Done()
+
+			if err := o.waitForRMIReady(w, timeout); err != nil {
+				errorsMu.Lock()
+				readinessErrors = append(readinessErrors, fmt.Errorf("worker %s: %w", w.Info.Host, err))
+				errorsMu.Unlock()
+				w.SetError(err)
+			} else {
+				readyMu.Lock()
+				readyWorkers++
+				readyMu.Unlock()
+			}
+		}(worker)
+	}
+
+	wg.Wait()
+
+	logging.LogInfo("orchestrator", "worker readiness check complete",
+		"ready_workers", readyWorkers,
+		"total_workers", len(workers),
+		"required_minimum", o.minHosts-1) // -1 for entry node
+
+	// Check if we have enough ready workers (respecting minHosts - 1 for entry node)
+	requiredWorkers := o.minHosts - 1 // Subtract 1 for the entry node
+	if requiredWorkers < 0 {
+		requiredWorkers = 0
+	}
+
+	if readyWorkers < requiredWorkers {
+		errorDetails := ""
+		if len(readinessErrors) > 0 {
+			errorMessages := make([]string, len(readinessErrors))
+			for i, err := range readinessErrors {
+				errorMessages[i] = err.Error()
+			}
+			errorDetails = fmt.Sprintf(": %s", strings.Join(errorMessages, "; "))
+		}
+
+		return fmt.Errorf("insufficient ready workers: %d ready, %d required%s",
+			readyWorkers, requiredWorkers, errorDetails)
+	}
+
+	if readyWorkers < len(workers) {
+		logging.LogInfo("orchestrator", "continuing with partial workers",
+			"ready_workers", readyWorkers,
+			"total_workers", len(workers))
+	}
+
+	return nil
+}

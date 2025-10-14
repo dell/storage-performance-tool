@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+
+  spt-node:
+    image: ${IMAGE:-dellspt/spt-base}:${TAG:-latest}
+    command: ["--run-node"]
+    container_name: spt-node
+    hostname: spt-node
+    ports:
+      - "1099:1099"
+      - "9999:9999"
+      - "5005:5005"
+    deploy:
+      replicas: ${REPLICAS:-1}
+      placement:
+        max_replicas_per_node: 1

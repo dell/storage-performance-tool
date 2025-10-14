@@ -1,0 +1,123 @@
+# -----------------------------------------------------------------------------
+# Global ignore rules for the Storage Performance Tool (SPT)
+# This aggregates the common patterns from cli/.gitignore and engine/.gitignore
+# so contributors can work from the repo root without leaving stray artifacts.
+# -----------------------------------------------------------------------------
+
+# OS & editor detritus
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Log and coverage artifacts
+*.log
+coverage.*
+coverage.html
+coverage.out
+
+# Local environment files
+.env
+.env.*
+!cli/.env.example
+!engine/.env.example
+!engine/bundle/.env.example
+
+
+# -----------------------------------------------------------------------------
+# CLI specific artifacts (Go build/test outputs)
+# -----------------------------------------------------------------------------
+
+# Native binaries and archives
+cli/*.exe
+cli/*.exe~
+cli/*.dll
+cli/*.so
+cli/*.dylib
+cli/mcli
+cli/spt
+
+# Go workspace & modules cache
+cli/vendor/
+cli/go.work
+cli/go.work.sum
+
+# Test & coverage outputs
+cli/*.test
+cli/coverage.*
+cli/cmd_coverage.html
+cli/test-results.json
+cli/test-failures.txt
+cli/coverage.out
+cli/coverage.html
+
+# Generated scenarios and scratch space
+cli/mongoose-scenario-*.js
+cli/*.zst
+cli/tools/work/
+cli/_tmp/
+cli/results/
+
+# Local documentation exports
+cli/*.pdf
+
+# -----------------------------------------------------------------------------
+# Engine specific artifacts (Gradle/Java build outputs)
+# -----------------------------------------------------------------------------
+
+# Java/Gradle build trees
+engine/.gradle/
+engine/build/
+engine/**/build/
+!engine/gradle/wrapper/gradle-wrapper.jar
+!engine/**/src/main/**/build/
+!engine/**/src/test/**/build/
+
+# IDE metadata
+engine/.idea/
+engine/*.iws
+engine/*.iml
+engine/*.ipr
+engine/out/
+!engine/**/src/main/**/out/
+!engine/**/src/test/**/out/
+
+# Eclipse & related
+engine/.apt_generated
+engine/.classpath
+engine/.factorypath
+engine/.project
+engine/.settings
+engine/.springBeans
+engine/.sts4-cache
+engine/bin/
+!engine/**/src/main/**/bin/
+!engine/**/src/test/**/bin/
+
+# J2ME / mobile tooling
+engine/.mtj.tmp/
+
+# JVM crash reports
+engine/hs_err_pid*
+engine/replay_pid*
+
+# Maven leftovers (if gradle <-> maven conversions run)
+engine/pom.xml.tag
+engine/pom.xml.releaseBackup
+engine/pom.xml.versionsBackup
+engine/pom.xml.next
+engine/release.properties
+engine/dependency-reduced-pom.xml
+engine/buildNumber.properties
+engine/.mvn/timing.properties
+engine/.mvn/wrapper/maven-wrapper.jar
+
+# Temporary files
+engine/tmp/
+*.tmp
+
+# Miscellaneous engine logs
+engine/logs/
+engine/mongoose-*.log
+engine/test-output/
+engine/target/

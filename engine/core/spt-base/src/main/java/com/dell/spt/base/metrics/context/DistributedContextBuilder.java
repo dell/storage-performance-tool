@@ -1,0 +1,32 @@
+package com.dell.spt.base.metrics.context;
+
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+
+import java.util.List;
+import java.util.function.IntSupplier;
+import java.util.function.Supplier;
+
+/** @author veronika K. on 21.11.18 */
+public interface DistributedContextBuilder
+				extends ContextBuilder<DistributedContextBuilder, DistributedMetricsContextImpl> {
+
+	DistributedContextBuilder quantileValues(final List<Double> quantileValues);
+
+	DistributedContextBuilder nodeAddrs(final List<String> nodeAddrs);
+
+	DistributedContextBuilder nodeCountSupplier(final IntSupplier nodeCountSupplier);
+
+	DistributedContextBuilder snapshotsSupplier(
+					final Supplier<List<AllMetricsSnapshot>> snapshotsSupplier);
+
+	DistributedContextBuilder avgPersistFlag(final boolean avgPersistFlag);
+
+	DistributedContextBuilder sumPersistFlag(final boolean sumPersistFlag);
+
+	DistributedContextBuilder timingPersistFlag(final boolean timingPersistFlag);
+
+	// Optional: for completion percent calculation
+	DistributedContextBuilder opCountLimit(final long countLimit);
+
+	DistributedContextBuilder timeLimitSec(final long timeLimitSec);
+}

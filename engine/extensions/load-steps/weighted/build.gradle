@@ -1,0 +1,35 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "4.2.13"
+
+ext {
+	rootPkg = "com.dell.spt.load.step.weighted"
+}
+
+dependencies {
+	// Extension-specific dependencies
+	implementation(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// Testing utilities
+	testImplementation(
+		libs.mockito.core,
+		// Needed because MetricsManager extends com.github.akurilov.fiber4j.Fiber
+		libs.fiber4j,
+	)
+
+	testRuntimeOnly(
+		libs.commons.codec,
+		libs.confuse.io.yaml,
+		libs.disruptor,
+		libs.netty.transport.native.epoll,
+	)
+}

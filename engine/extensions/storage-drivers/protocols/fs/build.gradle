@@ -1,0 +1,30 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "4.2.13"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.nio.fs"
+}
+
+dependencies {
+	// File storage driver dependencies
+	// Inter-extension dependencies are compileOnly to prevent transitive bundling
+	compileOnly(
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:nio'),
+	)
+	
+	// API dependencies that must come from parent classloader
+	compileOnly(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// External dependencies that will be bundled (none for FS)
+}
