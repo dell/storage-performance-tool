@@ -435,6 +435,52 @@ func TestErrorHandling_MixedSuccessFailure(t *testing.T) {
 	}
 }
 
+func TestVerifyNode_SSHFailureStopsChecks(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"true": {
+				Stdout: "",
+				Stderr: "ssh: connect to host remote.example.com port 22: Permission denied",
+				Error:  fmt.Errorf("ssh authentication failed"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{
+		Host:     "remote.example.com",
+		User:     "admin",
+		IsLocal:  false,
+		Original: "admin@remote.example.com",
+	}
+
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.verifyNode(host)
+
+	if result == nil {
+		t.Fatal("verifyNode returned nil result")
+	}
+
+	if result.SSHConnectivity.Passed {
+		t.Fatal("Expected SSH connectivity check to fail")
+	}
+	if result.Overall.Passed {
+		t.Fatal("Expected overall result to fail when SSH connectivity fails")
+	}
+	if !strings.Contains(result.SSHConnectivity.Message, "SSH connection failed") {
+		t.Fatalf("Unexpected SSH failure message: %s", result.SSHConnectivity.Message)
+	}
+
+	// Docker checks should not have been attempted
+	if len(mockCmd.ExecutedCommands) != 1 {
+		t.Fatalf("Expected only SSH probe command to run, but saw %d commands", len(mockCmd.ExecutedCommands))
+	}
+	if got := strings.Join(mockCmd.ExecutedCommands[0].Command, " "); got != "true" {
+		t.Fatalf("Expected SSH probe command 'true', got %q", got)
+	}
+}
+
 func TestErrorHandling_CompleteFailures(t *testing.T) {
 	// Test that even complete failures don't break parallel processing
 	mockCmd := &MockCommandExecutor{
@@ -636,6 +682,34 @@ func TestContainerOperations_Success(t *testing.T) {
 	}
 }
 
+func TestStartNodeContainer_FailureCleansUpDanglingContainer(t *testing.T) {
+	mockCmd := &cleanupOnFailureExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	config := Config{
+		NetworkMode:  "bridge",
+		RMIPortStart: 40000,
+		RMIPortCount: 2,
+		APIPort:      constants.DefaultSptAPIPort,
+	}
+
+	host := &hostparse.HostInfo{Host: "test.example.com", IsLocal: false, Original: "admin@test.example.com"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, config, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := &NodeResult{}
+	check := verifier.startNodeContainer(host, result)
+
+	if check.Passed {
+		t.Fatal("Expected startNodeContainer to fail due to simulated port conflict")
+	}
+	if mockCmd.cleanupCalls == 0 {
+		t.Fatal("Expected cleanup command to be invoked after container start failure")
+	}
+	if mockCmd.cleanupTarget == "" || !strings.HasPrefix(mockCmd.cleanupTarget, "spt-verify-") {
+		t.Fatalf("Unexpected cleanup target: %q", mockCmd.cleanupTarget)
+	}
+}
+
 // FlexibleMockCommandExecutor for testing container operations
 type FlexibleMockCommandExecutor struct {
 	ExecutedCommands []MockCommandExecution
@@ -651,6 +725,11 @@ func (m *FlexibleMockCommandExecutor) ExecuteCommand(ctx context.Context, host *
 
 	cmdStr := strings.Join(command, " ")
 
+	// Ignore verification cleanup queries
+	if strings.Join(command, " ") == "docker ps -q --filter label=spt.verify=true" {
+		return "", "", nil
+	}
+
 	// Handle docker run commands
 	if strings.HasPrefix(cmdStr, "docker run") {
 		return "container123456789", "", nil
@@ -663,6 +742,37 @@ func (m *FlexibleMockCommandExecutor) ExecuteCommand(ctx context.Context, host *
 
 	// Default success response
 	return "success", "", nil
+}
+
+type cleanupOnFailureExecutor struct {
+	ExecutedCommands []MockCommandExecution
+	cleanupCalls     int
+	cleanupTarget    string
+}
+
+func (m *cleanupOnFailureExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {
+	m.ExecutedCommands = append(m.ExecutedCommands, MockCommandExecution{
+		Host:    host,
+		Command: command,
+		Context: ctx,
+	})
+
+	cmdStr := strings.Join(command, " ")
+
+	switch {
+	case cmdStr == "docker ps -q --filter label=spt.verify=true":
+		return "", "", nil
+	case strings.HasPrefix(cmdStr, "docker pull "):
+		return "pulled", "", nil
+	case strings.HasPrefix(cmdStr, "docker run "):
+		return "deadbeef", "port in use", fmt.Errorf("docker: Error response from daemon: address already in use")
+	case strings.HasPrefix(cmdStr, "docker rm -f "):
+		m.cleanupCalls++
+		m.cleanupTarget = command[len(command)-1]
+		return "", "", nil
+	default:
+		return "", "", nil
+	}
 }
 
 func TestEdgeCases_EmptyHosts(t *testing.T) {

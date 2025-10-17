@@ -46,6 +46,18 @@ func (b *DockerCommandBuilderImpl) BuildRunCommand(config ContainerConfig) []str
 		}
 	}
 
+	// Labels (stable order for testability)
+	if len(config.Labels) > 0 {
+		labelKeys := make([]string, 0, len(config.Labels))
+		for k := range config.Labels {
+			labelKeys = append(labelKeys, k)
+		}
+		sort.Strings(labelKeys)
+		for _, key := range labelKeys {
+			dockerArgs = append(dockerArgs, "--label", fmt.Sprintf("%s=%s", key, config.Labels[key]))
+		}
+	}
+
 	// Network mode and port mappings
 	if config.NetworkMode == NetworkModeHost {
 		dockerArgs = append(dockerArgs, "--network", "host")

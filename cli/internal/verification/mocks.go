@@ -53,6 +53,11 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 		return response.Stdout, response.Stderr, response.Error
 	}
 
+	// Allow SSH probe command to succeed by default so tests don't need explicit setup.
+	if cmdStr == "true" {
+		return "", "", nil
+	}
+
 	// Default response if not found
 	return "", "", fmt.Errorf("mock: unexpected command %s", cmdStr)
 }
@@ -65,6 +70,13 @@ func (m *MockCommandExecutor) SetupDockerSuccess() {
 
 	m.Commands[fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdVersion, constants.DockerFlagFormat, constants.DockerVersionFormat)] = MockCommandResponse{
 		Stdout: "28.3.3-ce",
+		Stderr: "",
+		Error:  nil,
+	}
+
+	// Ensure verification cleanup queries succeed with empty output.
+	m.Commands[fmt.Sprintf("%s %s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagQuiet, constants.DockerFlagFilter, "label=spt.verify=true")] = MockCommandResponse{
+		Stdout: "",
 		Stderr: "",
 		Error:  nil,
 	}
