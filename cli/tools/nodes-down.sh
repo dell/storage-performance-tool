@@ -71,6 +71,16 @@ IFS=',' read -r -a HOST_ARR <<<"$targets_csv"
 WORKER_CONTAINER_NAME=${WORKER_CONTAINER_NAME:-spt-worker}
 ENTRY_CONTAINER_NAME=${ENTRY_CONTAINER_NAME:-spt-primary}
 
+# Determine which container images should be considered for cleanup.
+declare -a _image_candidates=()
+if [ -n "${SPT_IMAGE:-}" ]; then
+  _image_candidates+=("${SPT_IMAGE}")
+fi
+if [ -n "${MONGOOSE_IMAGE:-}" ]; then
+  _image_candidates+=("${MONGOOSE_IMAGE}")
+fi
+SPT_IMAGE_CANDIDATES="${_image_candidates[*]}"
+
 echo "Comprehensive cleanup on ${#HOST_ARR[@]} host(s)${ALL:+ (including primary)}..."
 failed_nodes=()
 for target in "${HOST_ARR[@]}"; do
@@ -80,9 +90,19 @@ for target in "${HOST_ARR[@]}"; do
   attempt=1
   success=false
   while [ "$attempt" -le "$RETRIES" ]; do
-    if ssh $SSH_OPTS "$target_trimmed" SPT_IMAGE="${SPT_IMAGE:-}" bash -s <<'EOS'
+    if ssh $SSH_OPTS "$target_trimmed" \
+      SPT_IMAGE="${SPT_IMAGE:-}" \
+      SPT_IMAGE_CANDIDATES="${SPT_IMAGE_CANDIDATES:-}" \
+      bash -s <<'EOS'
 set -euo pipefail
-img="${SPT_IMAGE:-}"
+imgs_raw="${SPT_IMAGE_CANDIDATES:-${SPT_IMAGE:-}}"
+declare -a imgs=()
+if [ -n "$imgs_raw" ]; then
+  # shellcheck disable=SC2086 # word-splitting is intentional to separate images
+  for candidate in $imgs_raw; do
+    [ -n "$candidate" ] && imgs+=("$candidate")
+  done
+fi
 # Remove known names first
 for name in spt-worker spt-primary spt-node; do
   docker rm -f "$name" >/dev/null 2>&1 || true
@@ -91,18 +111,32 @@ done
 ids_by_name=$(docker ps -a --format '{{.ID}} {{.Names}}' | awk '$2 ~ /^spt(-|$)/ {print $1}')
 if [ -n "$ids_by_name" ]; then docker rm -f $ids_by_name >/dev/null 2>&1 || true; fi
 # Remove any containers created from the Spt image
-if [ -n "$img" ]; then
-  ids_by_img=$(docker ps -a --filter "ancestor=$img" -q || true)
-  if [ -n "$ids_by_img" ]; then docker rm -f $ids_by_img >/dev/null 2>&1 || true; fi
+if [ ${#imgs[@]} -gt 0 ]; then
+  for img in "${imgs[@]}"; do
+    ids_by_img=$(docker ps -a --filter "ancestor=$img" -q || true)
+    if [ -n "$ids_by_img" ]; then docker rm -f $ids_by_img >/dev/null 2>&1 || true; fi
+  done
 fi
 # Verify clean: no spt-named or image-based containers remain
 left_names=$(docker ps -a --format '{{.Names}}' | awk '/^spt(-|$)/ {print}')
-left_img=""
-if [ -n "$img" ]; then
-  left_img=$(docker ps -a --filter "ancestor=$img" -q || true)
+dangling=()
+if [ -n "$left_names" ]; then
+  while IFS= read -r name; do
+    [ -n "$name" ] && dangling+=("$name")
+  done <<<"$left_names"
 fi
-if [ -n "$left_names$left_img" ]; then
-  echo "ERROR: dangling spt containers remain: $(echo "$left_names" | tr '\n' ' ') $(echo "$left_img" | tr '\n' ' ')" >&2
+if [ ${#imgs[@]} -gt 0 ]; then
+  for img in "${imgs[@]}"; do
+    names_by_img=$(docker ps -a --filter "ancestor=$img" --format '{{.Names}}' || true)
+    if [ -n "$names_by_img" ]; then
+      while IFS= read -r name; do
+        [ -n "$name" ] && dangling+=("$name")
+      done <<<"$names_by_img"
+    fi
+  done
+fi
+if [ ${#dangling[@]} -gt 0 ]; then
+  echo "ERROR: dangling spt containers remain: ${dangling[*]}" >&2
   exit 3
 fi
 echo "clean"
