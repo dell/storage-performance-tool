@@ -35,6 +35,7 @@ type ContainerConfig struct {
 	Name         string            // Container name
 	NetworkMode  NetworkMode       // Network mode (bridge/host)
 	PortMappings []PortMapping     // Port mappings for bridge mode
+	Labels       map[string]string // Optional labels to tag the container
 	Environment  map[string]string // Environment variables
 	Command      []string          // Container command to run
 	ExposedPorts []int             // Ports to expose

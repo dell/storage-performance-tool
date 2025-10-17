@@ -150,9 +150,9 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 func (v *Verifier) stepSSHConnectivity(host *hostparse.HostInfo, result *NodeResult) bool {
 	if v.config.ShowProgress {
 		if host.IsLocal {
-			fmt.Print("  ⏳ Checking Docker connectivity...")
+			fmt.Print("  ⏳ Checking local Docker connectivity...")
 		} else {
-			fmt.Print("  ⏳ Checking SSH and Docker connectivity...")
+			fmt.Print("  ⏳ Checking SSH connectivity...")
 		}
 	}
 	result.SSHConnectivity = v.checkSSHDocker(host)
@@ -160,7 +160,7 @@ func (v *Verifier) stepSSHConnectivity(host *hostparse.HostInfo, result *NodeRes
 		if v.config.ShowProgress {
 			fmt.Println(" ❌")
 		}
-		result.Overall = Check{Passed: false, Message: "Cannot connect to Docker"}
+		result.Overall = result.SSHConnectivity
 		return true
 	}
 	if v.config.ShowProgress {
@@ -291,6 +291,10 @@ func (v *Verifier) stepCleanup(host *hostparse.HostInfo, result *NodeResult) {
 		fmt.Print("  ⏳ Cleaning up test container...")
 	}
 	result.ContainerCleanup = v.stopContainer(host, result.containerID)
+	if result.ContainerCleanup.Passed {
+		dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
+		v.cleanupVerifyContainers(host, dockerOps)
+	}
 	if v.config.ShowProgress {
 		if result.ContainerCleanup.Passed {
 			fmt.Println(" ✅")
@@ -302,28 +306,44 @@ func (v *Verifier) stepCleanup(host *hostparse.HostInfo, result *NodeResult) {
 
 // checkSSHDocker verifies SSH connectivity and Docker access
 func (v *Verifier) checkSSHDocker(host *hostparse.HostInfo) Check {
-	start := time.Now()
+	start := v.timeProvider.Now()
 
 	// For local, just return success
 	if host.IsLocal {
 		return Check{
 			Passed:   true,
 			Message:  "Local Docker connection",
-			Duration: time.Since(start),
+			Duration: v.timeProvider.Since(start),
 		}
 	}
 
-	// Try SSH connection to Docker
-	dockerHost := host.GetDockerHost()
-	logging.LogDebug("verifier", "checking SSH Docker connection",
-		"host", host.Host,
-		"docker_host", dockerHost)
+	ctx, cancel := context.WithTimeout(context.Background(), constants.SSHConnectTimeoutSecs*time.Second)
+	defer cancel()
 
-	// We'll validate this during the Docker daemon check
+	sshTarget := host.GetSSHTarget()
+
+	logging.LogDebug("verifier", "probing ssh connectivity",
+		"host", host.Host,
+		"ssh_target", sshTarget)
+
+	_, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"true"})
+	if err != nil {
+		msg := fmt.Sprintf("SSH connection failed for %s", sshTarget)
+		if stderr != "" {
+			err = fmt.Errorf("%w (stderr: %s)", err, stderr)
+		}
+		return Check{
+			Passed:   false,
+			Message:  msg,
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
 	return Check{
 		Passed:   true,
-		Message:  "SSH connection will be validated with Docker daemon",
-		Duration: time.Since(start),
+		Message:  fmt.Sprintf("SSH connectivity established to %s", sshTarget),
+		Duration: v.timeProvider.Since(start),
 	}
 }
 
@@ -369,6 +389,9 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	// Create Docker operations instance
 	dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
 
+	// Remove any lingering verification containers from prior runs to avoid port conflicts.
+	v.cleanupVerifyContainers(host, dockerOps)
+
 	// Build container configuration
 	var networkMode command.NetworkMode
 	if v.config.NetworkMode == "host" {
@@ -396,6 +419,10 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		Name:         containerName,
 		NetworkMode:  networkMode,
 		PortMappings: portMappings,
+		Labels: map[string]string{
+			"spt.verify":      "true",
+			"spt.verify.host": host.Host,
+		},
 		Environment: map[string]string{
 			constants.JavaOptsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, externalIP),
 		},
@@ -409,6 +436,24 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 
 	containerID, cmdResult, err := dockerOps.StartContainer(ctx, config)
 	if err != nil {
+		// Best-effort cleanup using the generated container name; docker rm accepts names or IDs.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+
+		if cleanupErr := dockerOps.StopContainer(cleanupCtx, containerName); cleanupErr != nil {
+			// Ignore "No such container" errors; these indicate nothing remained to clean up.
+			if cleanupErr != nil && !strings.Contains(strings.ToLower(cleanupErr.Error()), "no such container") {
+				logging.LogWarn("verifier", "failed to clean up container after start error",
+					"host", host.Host,
+					"container", containerName,
+					"error", cleanupErr.Error())
+			}
+		} else {
+			logging.LogInfo("verifier", "cleaned up container after start error",
+				"host", host.Host,
+				"container", containerName)
+		}
+
 		return Check{
 			Passed:        false,
 			Message:       "Failed to start container",
@@ -595,6 +640,47 @@ func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
 }
 
 // isPortOpen removed as unused (dead code)
+
+func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps command.DockerOperations) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		constants.DockerCommand,
+		constants.DockerCmdPS,
+		constants.DockerFlagQuiet,
+		constants.DockerFlagFilter, "label=spt.verify=true",
+	})
+	if err != nil {
+		logging.LogWarn("verifier", "failed to list verification containers",
+			"host", host.Host,
+			"stderr", stderr,
+			"error", err.Error())
+		return
+	}
+
+	ids := strings.Fields(stdout)
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := dockerOps.StopContainer(rmCtx, id)
+		rmCancel()
+		if err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "no such container") {
+				logging.LogWarn("verifier", "failed to remove lingering verification container",
+					"host", host.Host,
+					"container", id,
+					"error", err.Error())
+			}
+		} else {
+			logging.LogInfo("verifier", "removed lingering verification container",
+				"host", host.Host,
+				"container", id)
+		}
+	}
+}
 
 func (v *Verifier) assessNode(result *NodeResult) Check {
 	// All critical checks must pass
