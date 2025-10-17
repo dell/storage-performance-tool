@@ -802,3 +802,45 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 		t.Error("Metric should retain all data through collection pipeline")
 	}
 }
+
+func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
+	older := newTestStep()
+	older.StepID = "create-step"
+	older.OpType = "CREATE"
+	older.Timestamp = 1_700_000_000_000
+	older.SampleTimestampRaw = "2025-10-17T19:30:00Z"
+	older.Operations.SuccessCount = 6000
+	older.Concurrency.Current = 48.0
+
+	newer := newTestStep()
+	newer.StepID = "delete-step"
+	newer.OpType = "DELETE"
+	newer.Timestamp = older.Timestamp + 5_000
+	newer.SampleTimestampRaw = "2025-10-17T19:40:00Z"
+	newer.Operations.SuccessCount = 1000
+	newer.Concurrency.Current = 0.0
+
+	payload := marshalSteps(t, []JSONMetricsStep{older, newer})
+
+	client := NewSptAPIClient("http://test")
+	metric, err := client.ParseJSONMetrics(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if metric.StepID != "delete-step" {
+		t.Fatalf("expected latest step to be selected, got %q", metric.StepID)
+	}
+	if metric.SuccessCount != 1000 {
+		t.Fatalf("expected success count from latest step to be 1000, got %d", metric.SuccessCount)
+	}
+	if metric.ConcurrencyCurrent != 0 {
+		t.Fatalf("expected concurrency current to be 0 from latest sample, got %d", metric.ConcurrencyCurrent)
+	}
+	if metric.Timestamp.UnixMilli() != newer.Timestamp {
+		t.Fatalf("expected timestamp %d, got %d", newer.Timestamp, metric.Timestamp.UnixMilli())
+	}
+	if metric.SampleTimestamp.IsZero() || metric.SampleTimestamp.Format(time.RFC3339) != "2025-10-17T19:40:00Z" {
+		t.Fatalf("expected sample timestamp to match latest sample, got %s", metric.SampleTimestamp.Format(time.RFC3339))
+	}
+}

@@ -50,11 +50,17 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 		constants.DefaultSptImage,
 		"--run-node=true",
 		"--run-port=10080",
+		"--label spt.host=worker1.example.com",
+		"--label spt.managed=true",
+		"--label spt.role=node",
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(cmd, s) {
 			t.Errorf("expected docker run command to contain %q, got: %s", s, cmd)
 		}
+	}
+	if !strings.Contains(cmd, "--name spt-node-") {
+		t.Errorf("expected docker run command to include node name prefix, got: %s", cmd)
 	}
 }
 
@@ -84,11 +90,17 @@ func TestRemoteDocker_StartWorkerNodeContainer_BuildsExpectedCommand(t *testing.
 		"--run-node=true",
 		"--run-port=9999",
 		"--load-step-node-port=1099",
+		"--label spt.host=worker1.example.com",
+		"--label spt.managed=true",
+		"--label spt.role=worker",
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(cmd, s) {
 			t.Errorf("expected worker run command to contain %q, got: %s", s, cmd)
 		}
+	}
+	if !strings.Contains(cmd, "--name spt-worker-") {
+		t.Errorf("expected worker run command to include worker name prefix, got: %s", cmd)
 	}
 }
 
@@ -121,10 +133,16 @@ func TestRemoteDocker_StartEntryNodeContainer_IncludesWorkerAddrsAndArgs(t *test
 		"--run-port=9999",
 		"--storage-driver-type=s3",
 		"--storage-net-node-addrs minio:9000",
+		"--label spt.host=worker1.example.com",
+		"--label spt.managed=true",
+		"--label spt.role=entry",
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(cmd, s) {
 			t.Errorf("expected entry run command to contain %q, got: %s", s, cmd)
 		}
+	}
+	if !strings.Contains(cmd, "--name spt-entry-") {
+		t.Errorf("expected entry run command to include entry name prefix, got: %s", cmd)
 	}
 }

@@ -107,6 +107,9 @@ fi
 for name in spt-worker spt-primary spt-node; do
   docker rm -f "$name" >/dev/null 2>&1 || true
 done
+# Remove any containers tagged as managed by SPT
+ids_by_label=$(docker ps -a --filter "label=spt.managed=true" -q || true)
+if [ -n "$ids_by_label" ]; then docker rm -f $ids_by_label >/dev/null 2>&1 || true; fi
 # Remove any containers with names starting with "spt" (strict)
 ids_by_name=$(docker ps -a --format '{{.ID}} {{.Names}}' | awk '$2 ~ /^spt(-|$)/ {print $1}')
 if [ -n "$ids_by_name" ]; then docker rm -f $ids_by_name >/dev/null 2>&1 || true; fi
@@ -124,6 +127,12 @@ if [ -n "$left_names" ]; then
   while IFS= read -r name; do
     [ -n "$name" ] && dangling+=("$name")
   done <<<"$left_names"
+fi
+label_names=$(docker ps -a --filter "label=spt.managed=true" --format '{{.Names}}' || true)
+if [ -n "$label_names" ]; then
+  while IFS= read -r name; do
+    [ -n "$name" ] && dangling+=("$name")
+  done <<<"$label_names"
 fi
 if [ ${#imgs[@]} -gt 0 ]; then
   for img in "${imgs[@]}"; do

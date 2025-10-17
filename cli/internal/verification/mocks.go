@@ -58,6 +58,10 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 		return "", "", nil
 	}
 
+	if len(command) >= 2 && command[0] == constants.DockerCommand && command[1] == constants.DockerCmdRun {
+		return "abc123def456", "", nil
+	}
+
 	// Default response if not found
 	return "", "", fmt.Errorf("mock: unexpected command %s", cmdStr)
 }

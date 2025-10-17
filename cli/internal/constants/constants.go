@@ -75,6 +75,16 @@ const (
 	JavaToolOptionsEnvVar    = "JAVA_TOOL_OPTIONS"
 	JavaRMIHostnamePrefix    = "-Djava.rmi.server.hostname="
 	SptNodeCommand           = "--run-node"
+
+	DockerLabelManaged = "spt.managed"
+	DockerLabelRole    = "spt.role"
+	DockerLabelHost    = "spt.host"
+	DockerLabelRunID   = "spt.run.id"
+
+	DockerRoleEntry  = "entry"
+	DockerRoleWorker = "worker"
+	DockerRoleVerify = "verify"
+	DockerRoleNode   = "node"
 )
 
 // Docker image references

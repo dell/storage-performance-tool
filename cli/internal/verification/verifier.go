@@ -420,8 +420,11 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		NetworkMode:  networkMode,
 		PortMappings: portMappings,
 		Labels: map[string]string{
-			"spt.verify":      "true",
-			"spt.verify.host": host.Host,
+			"spt.verify":                 "true",
+			"spt.verify.host":            host.Host,
+			constants.DockerLabelManaged: "true",
+			constants.DockerLabelRole:    constants.DockerRoleVerify,
+			constants.DockerLabelHost:    host.Host,
 		},
 		Environment: map[string]string{
 			constants.JavaOptsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, externalIP),

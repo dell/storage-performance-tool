@@ -118,7 +118,7 @@ type JSONMetricsTiming struct {
 
 // JSONMetricsConcurrency contains concurrency-related metrics
 type JSONMetricsConcurrency struct {
-	Current int     `json:"current"`
+	Current float64 `json:"current"`
 	Mean    float64 `json:"mean"`
 }
 
@@ -452,31 +452,71 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error)
 		return nil, fmt.Errorf("no metrics steps found in JSON response: %w", ErrMetricsIncompatible)
 	}
 
-	// Always operate on the most recent element (first entry).
-	step := steps[0]
-
-	if step.MetricsSchema == 0 {
-		return nil, fmt.Errorf("%w: metrics_schema missing", ErrMetricsIncompatible)
-	}
-	if step.MetricsSchema < 2 {
-		return nil, fmt.Errorf("%w: metrics_schema=%d below minimum", ErrMetricsIncompatible, step.MetricsSchema)
+	type candidate struct {
+		step            *JSONMetricsStep
+		scope           string
+		sampleTimestamp time.Time
 	}
 
-	scope := strings.ToLower(step.Scope)
-	if scope != "node" {
-		return nil, fmt.Errorf("%w: metrics scope %q incompatible", ErrMetricsIncompatible, step.Scope)
-	}
-	if strings.TrimSpace(step.Role) == "" {
-		return nil, fmt.Errorf("%w: metrics role missing", ErrMetricsIncompatible)
-	}
-	if strings.TrimSpace(step.SampleTimestampRaw) == "" {
-		return nil, fmt.Errorf("%w: sample_ts missing", ErrMetricsIncompatible)
+	var (
+		best    candidate
+		found   bool
+		lastErr error
+	)
+
+	for i := range steps {
+		step := &steps[i]
+
+		if step.MetricsSchema == 0 {
+			lastErr = fmt.Errorf("%w: metrics_schema missing", ErrMetricsIncompatible)
+			continue
+		}
+		if step.MetricsSchema < 2 {
+			lastErr = fmt.Errorf("%w: metrics_schema=%d below minimum", ErrMetricsIncompatible, step.MetricsSchema)
+			continue
+		}
+
+		scope := strings.ToLower(step.Scope)
+		if scope != "node" {
+			continue
+		}
+		if strings.TrimSpace(step.Role) == "" {
+			lastErr = fmt.Errorf("%w: metrics role missing", ErrMetricsIncompatible)
+			continue
+		}
+		if strings.TrimSpace(step.SampleTimestampRaw) == "" {
+			lastErr = fmt.Errorf("%w: sample_ts missing", ErrMetricsIncompatible)
+			continue
+		}
+
+		sampleTimestamp, err := parseSampleTimestamp(step.SampleTimestampRaw)
+		if err != nil {
+			lastErr = fmt.Errorf("%w: invalid sample_ts value: %s", ErrMetricsIncompatible, err.Error())
+			continue
+		}
+
+		if !found ||
+			step.Timestamp > best.step.Timestamp ||
+			(step.Timestamp == best.step.Timestamp && sampleTimestamp.After(best.sampleTimestamp)) {
+			best = candidate{
+				step:            step,
+				scope:           scope,
+				sampleTimestamp: sampleTimestamp,
+			}
+			found = true
+		}
 	}
 
-	sampleTimestamp, err := parseSampleTimestamp(step.SampleTimestampRaw)
-	if err != nil {
-		return nil, fmt.Errorf("%w: invalid sample_ts value: %s", ErrMetricsIncompatible, err.Error())
+	if !found {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("%w: no compatible node metrics", ErrMetricsIncompatible)
 	}
+
+	step := best.step
+	scope := best.scope
+	sampleTimestamp := best.sampleTimestamp
 
 	// Convert to our standard PerformanceMetric format
 	metric := &PerformanceMetric{
