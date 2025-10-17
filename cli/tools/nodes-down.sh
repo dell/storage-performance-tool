@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Turnkey: stop/remove Spt workers on remote hosts.
+# Turnkey: stop/remove SPT worker containers on remote hosts.
 # Usage:
 #   nodes-down.sh           # stop workers only
 #   nodes-down.sh --all     # stop both PRIMARY_HOST and WORKER_HOSTS
