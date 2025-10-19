@@ -23,15 +23,28 @@ CONTAINER_NAME=${CONTAINER_NAME:-spt-node}
 ALL=false
 RETRIES=${RETRIES:-3}
 RETRY_SLEEP=${RETRY_SLEEP:-1}
+PURGE_IMAGES=${PURGE_IMAGES:-false}
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --all|-a)
       ALL=true; shift ;;
+    --purge-images|--prune-images)
+      PURGE_IMAGES=true; shift ;;
     --retry|-r)
       RETRIES="${2:-}"; shift 2 ;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--all] [--retry N]"; exit 0 ;;
+      cat <<'USAGE'
+Usage: nodes-down.sh [options]
+  --all, -a            Include PRIMARY_HOST in addition to WORKER_HOSTS.
+  --purge-images       Remove cached SPT images so the next run forces a fresh pull.
+  --retry, -r N        Retry failed hosts up to N times (default: 3).
+  --help, -h           Show this help message.
+Environment overrides:
+  PRIMARY_HOST, WORKER_HOSTS, HOSTS, SSH_OPTS, SPT_IMAGE, MONGOOSE_IMAGE,
+  RETRIES, RETRY_SLEEP, PURGE_IMAGES.
+USAGE
+      exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -93,6 +106,7 @@ for target in "${HOST_ARR[@]}"; do
     if ssh $SSH_OPTS "$target_trimmed" \
       SPT_IMAGE="${SPT_IMAGE:-}" \
       SPT_IMAGE_CANDIDATES="${SPT_IMAGE_CANDIDATES:-}" \
+      PURGE_IMAGES="${PURGE_IMAGES}" \
       bash -s <<'EOS'
 set -euo pipefail
 imgs_raw="${SPT_IMAGE_CANDIDATES:-${SPT_IMAGE:-}}"
@@ -148,7 +162,48 @@ if [ ${#dangling[@]} -gt 0 ]; then
   echo "ERROR: dangling spt containers remain: ${dangling[*]}" >&2
   exit 3
 fi
-echo "clean"
+purged=false
+if [ "${PURGE_IMAGES:-false}" = "true" ]; then
+  declared_imgs=("${imgs[@]}")
+  if [ ${#declared_imgs[@]} -eq 0 ]; then
+    # Fallback: gather unique repositories that contain "spt" or "mongoose"
+    while IFS= read -r repo; do
+      [ -n "$repo" ] && declared_imgs+=("$repo")
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'spt|mongoose' || true)
+  fi
+  if [ ${#declared_imgs[@]} -gt 0 ]; then
+    # Deduplicate while preserving order
+    declare -A seen=()
+    for candidate in "${declared_imgs[@]}"; do
+      [ -z "$candidate" ] && continue
+      if [ -n "${seen[$candidate]:-}" ]; then
+        continue
+      fi
+      seen[$candidate]=1
+      if docker image inspect "$candidate" >/dev/null 2>&1; then
+        docker image rm -f "$candidate" >/dev/null 2>&1 || true
+        purged=true
+      else
+        repo="${candidate%%:*}"
+        if [ -n "$repo" ]; then
+          to_remove=$(docker images "$repo" --format '{{.Repository}}:{{.Tag}}' | tr '\n' ' ' || true)
+          if [ -n "$to_remove" ]; then
+            # shellcheck disable=SC2086
+            docker image rm -f $to_remove >/dev/null 2>&1 || true
+            purged=true
+          fi
+        fi
+      fi
+    done
+  fi
+  # Remove dangling layers created during cleanup to reclaim space.
+  docker image prune -f >/dev/null 2>&1 || true
+fi
+if [ "$purged" = "true" ]; then
+  echo "clean (images purged)"
+else
+  echo "clean"
+fi
 EOS
     then
       success=true
