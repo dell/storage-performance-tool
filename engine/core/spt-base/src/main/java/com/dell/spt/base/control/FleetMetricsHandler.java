@@ -20,12 +20,12 @@ public final class FleetMetricsHandler extends HttpServlet {
 
 	@Override
 	protected void doGet(final HttpServletRequest req, final HttpServletResponse resp) throws IOException {
-		if (metricsManager.getDistributedContexts().isEmpty()) {
+		final boolean verbose = NodeMetricsHandler.isVerbose(req);
+		final ArrayNode payload = responder.buildClusterMetrics(verbose);
+		if (payload.isEmpty()) {
 			resp.sendError(HttpServletResponse.SC_NOT_FOUND, "Fleet metrics unavailable on this node");
 			return;
 		}
-		final boolean verbose = NodeMetricsHandler.isVerbose(req);
-		final ArrayNode payload = responder.buildFleetMetrics(verbose);
 		NodeMetricsHandler.writeJson(resp, payload);
 	}
 }

@@ -36,6 +36,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.Map;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,7 +59,8 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	private final Lock outputLock = new ReentrantLock();
 
 	// Terminal entries retention for /metrics/json when idle
-	private final Map<String, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
+	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
+	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 
 	public MetricsManagerImpl(final FibersExecutor instance) {
@@ -82,6 +86,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 
 					final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
 					if (null != snapshot) {
+						recordProgressSnapshot(metricsCtx, snapshot);
 						final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
 						if (null != concurrencySnapshot) {
 							actualConcurrency = (int) concurrencySnapshot.last();
@@ -140,6 +145,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	public void register(final MetricsContext metricsCtx) {
 		try {
 			startIfNotStarted();
+			lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
 			allMetrics.add(metricsCtx);
 			if (metricsCtx instanceof DistributedMetricsContext) {
 				final var distributedMetricsCtx = (DistributedMetricsContext) metricsCtx;
@@ -182,8 +188,10 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 						Loggers.ERR.warn(
 										"Acquire lock timeout while unregistering the metrics context \"{}\"", metricsCtx);
 					}
+					final AllMetricsSnapshot snapshotBefore = metricsCtx.lastSnapshot();
 					metricsCtx.refreshLastSnapshot(); // one last time
-					final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
+					final AllMetricsSnapshot snapshotAfter = metricsCtx.lastSnapshot();
+					final AllMetricsSnapshot snapshot = preferTerminalSnapshot(snapshotAfter, snapshotBefore);
 					// check for the metrics threshold state if entered
 					if (metricsCtx.thresholdStateEntered() && !metricsCtx.thresholdStateExited()) {
 						exitMetricsThresholdState(metricsCtx);
@@ -201,6 +209,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 										timingMetricsFilePattern, metricsCtx.timingPersistEnabled());
 
 						if (null != snapshot) {
+							recordProgressSnapshot(metricsCtx, snapshot);
 							// file output
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
 							// class instance. though this flag is only enabled for distributed context.
@@ -235,34 +244,18 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 
 						// Cache terminal entry for JSON endpoint
 						if (snapshot instanceof DistributedAllMetricsSnapshot && aggregSnapshot != null) {
-							long countLimit = 0L;
-							long timeLimitSec = 0L;
-							try {
-								Object v = distributedMetricsCtx.metadata().get(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT);
-								if (v instanceof Number)
-									countLimit = ((Number) v).longValue();
-							} catch (Exception ignore) {}
-							try {
-								Object v = distributedMetricsCtx.metadata().get(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_TIME_SEC);
-								if (v instanceof Number)
-									timeLimitSec = ((Number) v).longValue();
-							} catch (Exception ignore) {}
+							final var nodesPresent = distributedMetricsCtx.nodeAddrs();
+							final int nodeCount = distributedMetricsCtx.nodeCount();
+							final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
 
-							final TerminalStepEntry entry = new TerminalStepEntry(
-											distributedMetricsCtx.loadStepId(),
-											distributedMetricsCtx.opType(),
-											System.currentTimeMillis(),
-											aggregSnapshot.successSnapshot().count(),
-											aggregSnapshot.failsSnapshot().count(),
-											aggregSnapshot.byteSnapshot().count(),
-											aggregSnapshot.latencySnapshot().mean(),
-											aggregSnapshot.durationSnapshot().mean(),
-											aggregSnapshot.concurrencySnapshot().last(),
-											aggregSnapshot.concurrencySnapshot().mean(),
-											countLimit,
-											timeLimitSec,
-											aggregSnapshot.elapsedTimeMillis());
-							terminalByStepId.put(distributedMetricsCtx.loadStepId(), entry);
+							final TerminalStepEntry entry = buildEntryFromSnapshot(
+											metricsCtx,
+											aggregSnapshot,
+											true,
+											nodeCount,
+											nodesPresent,
+											partial);
+							terminalByStepId.put(ProgressKey.of(metricsCtx.loadStepId(), true), entry);
 						}
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
@@ -273,38 +266,17 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 										&& snapshot.latencySnapshot() != null
 										&& snapshot.durationSnapshot() != null
 										&& snapshot.concurrencySnapshot() != null) {
-							long countLimit = 0L;
-							long timeLimitSec = 0L;
-							try {
-								Object v = metricsCtx.metadata().get(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT);
-								if (v instanceof Number) {
-									countLimit = ((Number) v).longValue();
-								}
-							} catch (Exception ignore) {}
-							try {
-								Object v = metricsCtx.metadata().get(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_TIME_SEC);
-								if (v instanceof Number) {
-									timeLimitSec = ((Number) v).longValue();
-								}
-							} catch (Exception ignore) {}
-
-							final TerminalStepEntry entry = new TerminalStepEntry(
-											metricsCtx.loadStepId(),
-											metricsCtx.opType(),
-											System.currentTimeMillis(),
-											snapshot.successSnapshot().count(),
-											snapshot.failsSnapshot().count(),
-											snapshot.byteSnapshot().count(),
-											snapshot.latencySnapshot().mean(),
-											snapshot.durationSnapshot().mean(),
-											snapshot.concurrencySnapshot().last(),
-											snapshot.concurrencySnapshot().mean(),
-											countLimit,
-											timeLimitSec,
-											snapshot.elapsedTimeMillis());
-							terminalByStepId.put(metricsCtx.loadStepId(), entry);
+							final TerminalStepEntry entry = buildEntryFromSnapshot(
+											metricsCtx,
+											snapshot,
+											false,
+											0,
+											List.of(),
+											false);
+							terminalByStepId.put(ProgressKey.of(metricsCtx.loadStepId(), false), entry);
 						}
 					}
+					lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {
@@ -357,6 +329,19 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	}
 
 	@Override
+	public Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId) {
+		return getLastProgressSnapshot(stepId, false);
+	}
+
+	@Override
+	public Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId, final boolean distributed) {
+		if (stepId == null) {
+			return Optional.empty();
+		}
+		return Optional.ofNullable(lastProgressByStepId.get(ProgressKey.of(stepId, distributed)));
+	}
+
+	@Override
 	public void setTerminalRetentionMillis(final long millis) {
 		this.terminalRetentionMillis = Math.max(0L, millis);
 	}
@@ -364,7 +349,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	@Override
 	public java.util.List<TerminalStepEntry> getTerminalSteps() {
 		if (terminalByStepId.isEmpty())
-			return java.util.List.of();
+			return List.of();
 		final long now = System.currentTimeMillis();
 		final var result = new ArrayList<TerminalStepEntry>(terminalByStepId.size());
 		for (final var e : terminalByStepId.entrySet()) {
@@ -383,5 +368,159 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 		allMetrics.forEach(MetricsContext::close);
 		allMetrics.clear();
 		distributedMetrics.clear();
+	}
+
+	private void recordProgressSnapshot(final MetricsContext metricsCtx, final AllMetricsSnapshot snapshot) {
+		if (snapshot == null
+						|| snapshot.successSnapshot() == null
+						|| snapshot.failsSnapshot() == null
+						|| snapshot.byteSnapshot() == null
+						|| snapshot.latencySnapshot() == null
+						|| snapshot.durationSnapshot() == null
+						|| snapshot.concurrencySnapshot() == null) {
+			return;
+		}
+
+		final long successCount = snapshot.successSnapshot().count();
+		final long failCount = snapshot.failsSnapshot().count();
+		final long bytesTotal = snapshot.byteSnapshot().count();
+		if (successCount <= 0 && failCount <= 0 && bytesTotal <= 0) {
+			return;
+		}
+
+		final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext && snapshot instanceof DistributedAllMetricsSnapshot;
+		final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
+		final TerminalStepEntry existing = lastProgressByStepId.get(progressKey);
+		if (existing != null
+						&& existing.successCount >= successCount
+						&& existing.failedCount >= failCount
+						&& existing.bytesTotal >= bytesTotal) {
+			return;
+		}
+
+		final TerminalStepEntry entry;
+		if (distributedEntry) {
+			final var distributedMetricsCtx = (DistributedMetricsContext<?>) metricsCtx;
+			final var nodesPresent = distributedMetricsCtx.nodeAddrs();
+			final int nodeCount = distributedMetricsCtx.nodeCount();
+			final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
+			entry = buildEntryFromSnapshot(
+							metricsCtx, snapshot, true, nodeCount, nodesPresent, partial);
+		} else {
+			entry = buildEntryFromSnapshot(
+							metricsCtx, snapshot, false, 0, List.of(), false);
+		}
+
+		lastProgressByStepId.put(progressKey, entry);
+		if (Loggers.MSG.isDebugEnabled()) {
+			Loggers.MSG.debug(
+							"{}: cached progress snapshot updated (distributed={}, success={}, fails={}, bytes={})",
+							metricsCtx.loadStepId(),
+							distributedEntry,
+							entry.successCount,
+							entry.failedCount,
+							entry.bytesTotal);
+		}
+	}
+
+	private TerminalStepEntry buildEntryFromSnapshot(
+					final MetricsContext metricsCtx,
+					final AllMetricsSnapshot snapshot,
+					final boolean distributed,
+					final int nodeCount,
+					final List<String> nodesPresent,
+					final boolean partial) {
+		final long countLimit = extractLongMetadata(
+						metricsCtx.metadata(), com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT);
+		final long timeLimitSec = extractLongMetadata(
+						metricsCtx.metadata(), com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_TIME_SEC);
+
+		return new TerminalStepEntry(
+						metricsCtx.loadStepId(),
+						metricsCtx.opType(),
+						metricsCtx.runId(),
+						System.currentTimeMillis(),
+						snapshot.successSnapshot().count(),
+						snapshot.failsSnapshot().count(),
+						snapshot.byteSnapshot().count(),
+						snapshot.latencySnapshot().mean(),
+						snapshot.durationSnapshot().mean(),
+						snapshot.concurrencySnapshot().last(),
+						snapshot.concurrencySnapshot().mean(),
+						countLimit,
+						timeLimitSec,
+						snapshot.elapsedTimeMillis(),
+						distributed,
+						nodeCount,
+						nodesPresent,
+						partial);
+	}
+
+	private long extractLongMetadata(final Map metadata, final String key) {
+		if (metadata == null) {
+			return 0L;
+		}
+		try {
+			final Object value = metadata.get(key);
+			if (value instanceof Number) {
+				return ((Number) value).longValue();
+			}
+		} catch (Exception ignore) {}
+		return 0L;
+	}
+
+	private static final class ProgressKey {
+		private final String stepId;
+		private final boolean distributed;
+
+		private ProgressKey(final String stepId, final boolean distributed) {
+			this.stepId = stepId;
+			this.distributed = distributed;
+		}
+
+		static ProgressKey of(final String stepId, final boolean distributed) {
+			return new ProgressKey(stepId, distributed);
+		}
+
+		@Override
+		public boolean equals(final Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (!(o instanceof ProgressKey)) {
+				return false;
+			}
+			final ProgressKey that = (ProgressKey) o;
+			return distributed == that.distributed && Objects.equals(stepId, that.stepId);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(stepId, distributed);
+		}
+	}
+
+	private static AllMetricsSnapshot preferTerminalSnapshot(
+					final AllMetricsSnapshot primary, final AllMetricsSnapshot fallback) {
+		if (hasProgress(primary)) {
+			return primary;
+		}
+		if (hasProgress(fallback)) {
+			return fallback;
+		}
+		return primary != null ? primary : fallback;
+	}
+
+	private static boolean hasProgress(final AllMetricsSnapshot snapshot) {
+		if (snapshot == null) {
+			return false;
+		}
+		try {
+			return (snapshot.successSnapshot() != null && snapshot.successSnapshot().count() > 0)
+							|| (snapshot.failsSnapshot() != null && snapshot.failsSnapshot().count() > 0)
+							|| (snapshot.byteSnapshot() != null && snapshot.byteSnapshot().count() > 0);
+		} catch (final Exception ignore) {
+			return false;
+		}
 	}
 }

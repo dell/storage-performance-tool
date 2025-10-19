@@ -88,3 +88,6 @@ buildNumber.properties
 
 # Temp files
 tmp/
+
+# Local helper scripts
+tools/legacy-docker-publish.sh

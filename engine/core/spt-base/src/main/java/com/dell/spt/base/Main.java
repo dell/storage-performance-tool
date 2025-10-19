@@ -273,6 +273,7 @@ public final class Main {
 		context.addServlet(new ServletHolder(new NodeMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/json");
 		if (shouldExposeFleetMetrics(fullDefaultConfig)) {
 			context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/fleet/json");
+			context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/cluster/json");
 		}
 		try {
 			final var listenPort = fullDefaultConfig.intVal("load-step-node-port");

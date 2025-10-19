@@ -3,8 +3,9 @@ package com.dell.spt.base.metrics;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.github.akurilov.fiber4j.Fiber;
-import java.util.Set;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 public interface MetricsManager extends Fiber {
 
@@ -32,5 +33,15 @@ public interface MetricsManager extends Fiber {
 	/** Get retained finished step entries (filtered by retention). */
 	default List<TerminalStepEntry> getTerminalSteps() {
 		return List.of();
+	}
+
+	/** Latest non-zero progress for a step that is still registered. */
+	default Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId) {
+		return getLastProgressSnapshot(stepId, false);
+	}
+
+	/** Latest non-zero progress for a step that is still registered, keyed by role. */
+	default Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId, final boolean distributed) {
+		return Optional.empty();
 	}
 }

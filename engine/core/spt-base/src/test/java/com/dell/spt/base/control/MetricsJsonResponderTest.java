@@ -32,7 +32,7 @@ public class MetricsJsonResponderTest {
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	@Test
-	void fleetMetricsIncludesAggregatedFields() throws Exception {
+	void clusterMetricsIncludesAggregatedFields() throws Exception {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot();
 		final DistributedMetricsContext ctx = mockDistributedContext("step-agg", OpType.READ, snapshot,
 						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 200));
@@ -43,12 +43,12 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
-		final ArrayNode payload = responder.buildFleetMetrics(false);
+		final ArrayNode payload = responder.buildClusterMetrics(false);
 		assertEquals(1, payload.size());
 		final JsonNode obj = payload.get(0);
 		assertEquals(2, obj.get("metrics_schema").asInt());
 		assertEquals("fleet", obj.get("scope").asText());
-		assertEquals("entry", obj.get("role").asText());
+		assertEquals("aggregate", obj.get("role").asText());
 		assertEquals("step-agg", obj.get("step_id").asText());
 		assertEquals("READ", obj.get("op_type").asText());
 		assertEquals(200, obj.get("limit").get("op_count").asInt(0));
@@ -61,7 +61,7 @@ public class MetricsJsonResponderTest {
 	}
 
 	@Test
-	void fleetMetricsReflectOpCountLimit() throws Exception {
+	void clusterMetricsReflectOpCountLimit() throws Exception {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot();
 		final DistributedMetricsContext ctx = mockDistributedContext("step-count", OpType.CREATE, snapshot,
 						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1000L,
@@ -73,14 +73,14 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
-		final JsonNode obj = responder.buildFleetMetrics(false).get(0);
+		final JsonNode obj = responder.buildClusterMetrics(false).get(0);
 		assertEquals("op_count", obj.get("limit").get("type").asText());
 		assertEquals(1000L, obj.get("limit").get("op_count").asLong());
 		assertFalse(obj.get("unbounded").asBoolean());
 	}
 
 	@Test
-	void fleetMetricsReflectTimeLimitAndUnbounded() throws Exception {
+	void clusterMetricsReflectTimeLimitAndUnbounded() throws Exception {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot();
 		final DistributedMetricsContext ctxTime = mockDistributedContext("step-time", OpType.CREATE, snapshot,
 						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 0L,
@@ -93,7 +93,7 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
-		final ArrayNode payload = responder.buildFleetMetrics(false);
+		final ArrayNode payload = responder.buildClusterMetrics(false);
 
 		JsonNode objTime = null;
 		JsonNode objUnbounded = null;
@@ -121,6 +121,7 @@ public class MetricsJsonResponderTest {
 		final TerminalStepEntry entry = new TerminalStepEntry(
 						"step-terminal",
 						OpType.UPDATE,
+						777L,
 						System.currentTimeMillis(),
 						10L,
 						2L,
@@ -140,14 +141,55 @@ public class MetricsJsonResponderTest {
 		final JsonNode first = nodePayload.get(0);
 		assertEquals("step-terminal", first.get("step_id").asText());
 		assertEquals("responder-test-node", first.get("node_id").asText());
-		assertEquals("123", first.get("run_id").asText());
+		assertEquals("777", first.get("run_id").asText());
+		assertTrue(first.get("terminal").asBoolean());
 		assertEquals("node", nodePayload.get(0).get("scope").asText());
 		assertEquals(2, nodePayload.get(0).get("metrics_schema").asInt());
-		assertEquals("worker", nodePayload.get(0).get("role").asText());
+		assertEquals("entry", nodePayload.get(0).get("role").asText());
 	}
 
 	@Test
-	void fleetCompletionUsesDistributedSnapshots() {
+	void clusterMetricsIncludeDistributedTerminalEntries() {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		final TerminalStepEntry terminal = new TerminalStepEntry(
+						"step-dist",
+						OpType.CREATE,
+						321L,
+						System.currentTimeMillis(),
+						100L,
+						10L,
+						4096L,
+						120.0,
+						180.0,
+						0L,
+						0.0,
+						1000L,
+						0L,
+						9_000L,
+						true,
+						3,
+						List.of("node-a", "node-b"),
+						true);
+		when(mgr.getTerminalSteps()).thenReturn(List.of(terminal));
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ArrayNode nodePayload = responder.buildNodeMetrics(false);
+		assertEquals(1, nodePayload.size(), "Node metrics should not surface distributed terminal entries");
+		final ArrayNode clusterPayload = responder.buildClusterMetrics(false);
+		assertEquals(1, clusterPayload.size());
+		final JsonNode agg = clusterPayload.get(0);
+		assertEquals("aggregate", agg.get("role").asText());
+		assertEquals(3, agg.get("nodes_count").asInt());
+		assertEquals(2, agg.get("nodes_present").size());
+		assertTrue(agg.get("partial").asBoolean());
+		assertEquals("321", agg.get("run_id").asText());
+		assertEquals(110L, agg.get("operations").get("success_count").asLong() + agg.get("operations").get("failed_count").asLong());
+	}
+
+	@Test
+	void clusterCompletionUsesDistributedSnapshots() {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 20L, 4000L);
 		final DistributedMetricsContext ctx = mockDistributedContext(
 						"step-complete",
@@ -161,14 +203,14 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
-		final JsonNode obj = responder.buildFleetMetrics(false).get(0);
+		final JsonNode obj = responder.buildClusterMetrics(false).get(0);
 		assertEquals(25, obj.get("overall_completion_percent").asInt());
 		assertFalse(obj.get("overall_unbounded").asBoolean());
 		assertEquals(400L, obj.get("limit").get("op_count").asLong());
 	}
 
 	@Test
-	void fleetPartialFlagSetWhenNodesMissing() {
+	void clusterPartialFlagSetWhenNodesMissing() {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(10L, 0L, 1000L);
 		final DistributedMetricsContext ctx = mockDistributedContext(
 						"step-partial",
@@ -184,7 +226,7 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
-		final JsonNode obj = responder.buildFleetMetrics(false).get(0);
+		final JsonNode obj = responder.buildClusterMetrics(false).get(0);
 		assertEquals(3, obj.get("nodes_count").asInt());
 		assertEquals(2, obj.get("nodes_present").size());
 		assertTrue(obj.get("partial").asBoolean());
@@ -207,7 +249,9 @@ public class MetricsJsonResponderTest {
 		when(mgr.getAllContexts()).thenReturn(Set.of(ctx));
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
-		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final Config workerConfig = defaultConfig();
+		workerConfig.val("run-node", false);
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, workerConfig);
 		final JsonNode obj = responder.buildNodeMetrics(false).get(0);
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("worker", obj.get("role").asText());
@@ -255,6 +299,56 @@ public class MetricsJsonResponderTest {
 		assertEquals(900, shard.get("last_page_objects").asInt());
 		assertEquals(1_000, shard.get("last_page_max_keys").asInt());
 		assertEquals(300L, shard.get("last_full_page_millis").asLong());
+	}
+
+	@Test
+	void nodeMetricsReuseCachedProgressWhenSnapshotRegresses() {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		final MetricsContext ctx = mock(MetricsContext.class);
+		final AllMetricsSnapshot zeroSnapshot = mockNodeSnapshot(0L, 0L, 0L);
+		final Map<String, Object> metadata = Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1000L);
+
+		when(ctx.loadStepId()).thenReturn("step-retain");
+		when(ctx.opType()).thenReturn(OpType.CREATE);
+		when(ctx.lastSnapshot()).thenReturn(zeroSnapshot);
+		when(ctx.metadata()).thenReturn(metadata);
+		when(ctx.runId()).thenReturn(42L);
+
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final TerminalStepEntry progress = new TerminalStepEntry(
+						"step-retain",
+						OpType.CREATE,
+						1760907495374L,
+						System.currentTimeMillis() - 1_000L,
+						1000L,
+						0L,
+						1_024L,
+						150.0,
+						200.0,
+						0L,
+						0.0,
+						1000L,
+						0L,
+						12_000L);
+		when(mgr.getLastProgressSnapshot("step-retain", false)).thenReturn(java.util.Optional.of(progress));
+		when(mgr.getLastProgressSnapshot("step-retain")).thenReturn(java.util.Optional.of(progress));
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode nodeVerbose = responder.buildNodeMetrics(true).get(0);
+		assertTrue(nodeVerbose.get("diag_cached_progress").asBoolean());
+
+		final JsonNode node = responder.buildNodeMetrics(false).get(0);
+
+		assertEquals(1000L, node.get("operations").get("success_count").asLong());
+		assertEquals(1_024L, node.get("bandwidth").get("bytes_total").asLong());
+		assertEquals(150.0, node.get("timing").get("latency_mean_us").asDouble(), 0.0001);
+		assertEquals(200.0, node.get("timing").get("duration_mean_us").asDouble(), 0.0001);
+		assertEquals(12.0, node.get("elapsed_time_seconds").asDouble(), 0.0001);
+		assertEquals(100, node.get(MetricsConstants.METRIC_NAME_COMPLETION).asInt());
+		assertEquals(2, node.get("test_state").asInt());
 	}
 
 	@Test
@@ -340,10 +434,10 @@ public class MetricsJsonResponderTest {
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, config);
-		final JsonNode obj = responder.buildFleetMetrics(false).get(0);
+		final JsonNode obj = responder.buildClusterMetrics(false).get(0);
 		assertEquals("comment-node", obj.get("node_id").asText());
 		assertFalse(obj.has("cluster_id"));
-		assertEquals("entry", obj.get("role").asText());
+		assertEquals("aggregate", obj.get("role").asText());
 	}
 
 	private static ListShardMetricsRecorder testRecorder() {

@@ -41,6 +41,7 @@ public class WorkerJsonMetricsIntegrationTest {
 	private static final int JSON_PORT = 2114;
 	private static final String JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
 	private static final String FLEET_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
+	private static final String CLUSTER_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
 
 	private Server jsonServer;
 	private MetricsManager metricsManager;
@@ -65,6 +66,7 @@ public class WorkerJsonMetricsIntegrationTest {
 		jsonContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
 		jsonContext.addServlet(new ServletHolder(new NodeMetricsHandler(metricsManager, config)), "/metrics/json");
 		jsonContext.addServlet(new ServletHolder(new FleetMetricsHandler(metricsManager, config)), "/metrics/fleet/json");
+		jsonContext.addServlet(new ServletHolder(new FleetMetricsHandler(metricsManager, config)), "/metrics/cluster/json");
 		jsonServer.start();
 
 		// Create and register a local metrics context (no distributed contexts)
@@ -127,6 +129,7 @@ public class WorkerJsonMetricsIntegrationTest {
 		assertEquals(10, first.get("completion_percent").asInt());
 		assertEquals(10, first.get("overall_completion_percent").asInt());
 		assertEquals(404, fetchStatus(FLEET_URL), "/metrics/fleet/json should not be available on worker");
+		assertEquals(404, fetchStatus(CLUSTER_URL), "/metrics/cluster/json should not be available on worker");
 	}
 
 	private static String fetch(String url) throws Exception {
