@@ -260,11 +260,18 @@ import com.bmuschko.gradle.docker.tasks.image.DockerPushImage
 import com.bmuschko.gradle.docker.tasks.image.Dockerfile
 
 ext {
-	// Dell internal Docker registry configuration
-	dockerRegistry = "dcr.octo.dell.com"
-	dockerNamespace = "spt"
-	dockerImageName = "${dockerRegistry}/${dockerNamespace}/spt"
-	dockerImageTag = project.version
+	// Dell internal Docker registry configuration with override support
+	dockerRegistry = project.findProperty('dockerRegistry')
+		?: System.getenv('DOCKER_REGISTRY')
+		?: "dcr.octo.dell.com"
+	dockerNamespace = project.findProperty('dockerNamespace')
+		?: System.getenv('DOCKER_NAMESPACE')
+		?: "spt"
+	def dockerImageOverride = project.findProperty('dockerImageName') ?: System.getenv('DOCKER_IMAGE')
+	dockerImageName = dockerImageOverride ?: "${dockerRegistry}/${dockerNamespace}/spt"
+	dockerImageTag = project.findProperty('dockerImageTag')
+		?: System.getenv('DOCKER_TAG')
+		?: project.version
 	dockerImageFullName = "${dockerImageName}:${dockerImageTag}"
 }
 

@@ -46,6 +46,8 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 	private static final String ENTRY_JSON_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/json";
 	private static final String ENTRY_FLEET_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/fleet/json";
 	private static final String WORKER_FLEET_URL = "http://localhost:" + WORKER_JSON_PORT + "/metrics/fleet/json";
+	private static final String ENTRY_CLUSTER_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/cluster/json";
+	private static final String WORKER_CLUSTER_URL = "http://localhost:" + WORKER_JSON_PORT + "/metrics/cluster/json";
 
 	private Server workerJsonServer;
 	private Server entryJsonServer;
@@ -83,6 +85,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
 		workerContext.addServlet(new ServletHolder(new NodeMetricsHandler(workerMgr, workerConfig)), "/metrics/json");
 		workerContext.addServlet(new ServletHolder(new FleetMetricsHandler(workerMgr, workerConfig)), "/metrics/fleet/json");
+		workerContext.addServlet(new ServletHolder(new FleetMetricsHandler(workerMgr, workerConfig)), "/metrics/cluster/json");
 		workerJsonServer.start();
 
 		// Worker local context
@@ -115,6 +118,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		entryContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
 		entryContext.addServlet(new ServletHolder(new NodeMetricsHandler(entryMgr, entryConfig)), "/metrics/json");
 		entryContext.addServlet(new ServletHolder(new FleetMetricsHandler(entryMgr, entryConfig)), "/metrics/fleet/json");
+		entryContext.addServlet(new ServletHolder(new FleetMetricsHandler(entryMgr, entryConfig)), "/metrics/cluster/json");
 		entryJsonServer.start();
 
 		// Entry distributed context that aggregates the worker snapshot
@@ -166,12 +170,10 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 
 	@Test
 	public void entryAndWorkerJsonNonEmpty() throws Exception {
-		final String workerJson = fetch(WORKER_JSON_URL);
-		final String entryJson = fetch(ENTRY_JSON_URL);
-		final String entryFleetJson = fetch(ENTRY_FLEET_URL);
-		final JsonNode arrWorker = om.readTree(workerJson);
-		final JsonNode arrEntry = om.readTree(entryJson);
-		final JsonNode arrFleet = om.readTree(entryFleetJson);
+		final JsonNode arrWorker = om.readTree(fetch(WORKER_JSON_URL));
+		final JsonNode arrEntry = om.readTree(fetch(ENTRY_JSON_URL));
+		final JsonNode arrCluster = om.readTree(fetch(ENTRY_CLUSTER_URL));
+		final JsonNode arrFleet = om.readTree(fetch(ENTRY_FLEET_URL));
 		assertTrue(arrWorker.size() > 0, "Worker /metrics/json should be non-empty");
 		final JsonNode workerObj = arrWorker.get(0);
 		assertEquals(2, workerObj.get("metrics_schema").asInt());
@@ -181,17 +183,20 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		assertEquals("77", workerObj.get("run_id").asText());
 		assertTrue(workerObj.hasNonNull("sample_ts"));
 		assertEquals(1, arrEntry.size(), "Entry /metrics/json should return a single idle sample when no local contexts exist");
-		assertTrue(arrFleet.size() > 0, "Entry /metrics/fleet/json should contain aggregated metrics");
-		final JsonNode fleetObj = arrFleet.get(0);
-		assertEquals(2, fleetObj.get("metrics_schema").asInt());
-		assertEquals("fleet", fleetObj.get("scope").asText());
-		assertEquals("entry", fleetObj.get("role").asText());
-		assertEquals("entry-node", fleetObj.get("node_id").asText());
-		assertEquals("77", fleetObj.get("run_id").asText());
-		assertEquals(1, fleetObj.get("nodes_count").asInt());
-		assertEquals(1, fleetObj.get("nodes_present").size());
-		assertFalse(fleetObj.get("partial").asBoolean());
-		assertTrue(fleetObj.hasNonNull("sample_ts"));
+		assertTrue(arrCluster.size() > 0, "Entry /metrics/cluster/json should contain aggregated metrics");
+		final JsonNode clusterObj = arrCluster.get(0);
+		assertEquals(2, clusterObj.get("metrics_schema").asInt());
+		assertEquals("fleet", clusterObj.get("scope").asText());
+		assertEquals("aggregate", clusterObj.get("role").asText());
+		assertEquals("entry-node", clusterObj.get("node_id").asText());
+		assertEquals("77", clusterObj.get("run_id").asText());
+		assertEquals(1, clusterObj.get("nodes_count").asInt());
+		assertEquals(1, clusterObj.get("nodes_present").size());
+		assertFalse(clusterObj.get("partial").asBoolean());
+		assertTrue(clusterObj.hasNonNull("sample_ts"));
+		assertTrue(arrFleet.size() > 0, "Legacy /metrics/fleet/json should remain available");
+		assertEquals(arrCluster.size(), arrFleet.size(), "Cluster and fleet endpoints should return same number of samples");
+		assertEquals(404, fetchStatus(WORKER_CLUSTER_URL), "Worker /metrics/cluster/json should return 404");
 		assertEquals(404, fetchStatus(WORKER_FLEET_URL), "Worker /metrics/fleet/json should return 404");
 	}
 
@@ -235,6 +240,25 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		final JsonNode verboseObj = om.readTree(fetch(ENTRY_JSON_URL + "?verbose=1")).get(0);
 		assertEquals(1, verboseObj.get("diag_distributed_contexts").asInt());
 		assertEquals(1, verboseObj.get("diag_local_contexts").asInt());
+	}
+
+	@Test
+	public void clusterEndpointRetainsTerminalAggregateWhenDistributedStops() throws Exception {
+		entryMgr.unregister(entryDistCtx);
+		entryDistCtx.close();
+		entryDistCtx = null;
+
+		final JsonNode arrEntry = om.readTree(fetch(ENTRY_JSON_URL));
+		assertEquals(1, arrEntry.size(), "Entry /metrics/json should fall back to idle sample");
+		final JsonNode nodeObj = arrEntry.get(0);
+		assertEquals("entry", nodeObj.get("role").asText(), "Entry node should keep entry role after distributed teardown");
+		assertEquals(0L, nodeObj.get("operations").get("success_count").asLong(), "Node metrics should not expose fleet totals");
+
+		final JsonNode arrCluster = om.readTree(fetch(ENTRY_CLUSTER_URL));
+		assertTrue(arrCluster.size() > 0, "Cluster endpoint should retain terminal aggregate");
+		final JsonNode clusterObj = arrCluster.get(0);
+		assertEquals("aggregate", clusterObj.get("role").asText());
+		assertEquals(20L, clusterObj.get("operations").get("success_count").asLong());
 	}
 
 	private static String fetch(String url) throws Exception {

@@ -326,11 +326,11 @@ Additionally, JSON-formatted endpoints are available for clients that prefer str
   - Progress helpers: `completion_percent`, `overall_completion_percent`, `overall_unbounded`, plus `limit{type,op_count?,time_sec?}`.
   - Terminal entries (`"terminal": true`) persist after a step finishes so idle nodes still return context; their rate gauges are set to zero and `timestamp` reflects completion time.
 
-- `GET /metrics/fleet/json` (entry nodes only, see `server.metrics.expose_fleet` below) returns aggregated fleet snapshots. In addition to the fields above, each object includes `nodes_count`, `nodes_present` (list of node IDs contributing to the sample), and `partial` (true when one or more nodes are missing from the aggregate).
+- `GET /metrics/cluster/json` (entry nodes only, see `server.metrics.expose_fleet` below) returns cluster-wide aggregates. Items reuse the fields above with `scope = "fleet"` and `role = "aggregate"`, and add `nodes_count`, `nodes_present` (list of node IDs contributing to the sample), and `partial` (true when one or more nodes are missing from the aggregate). A legacy alias is still exposed at `/metrics/fleet/json` for older clients.
 
 Distributed vs worker behavior:
-- Entry node `/metrics/json` now emits only the entry’s local workload. Clients should rely on `/metrics/fleet/json` for fleet-wide totals.
-- Worker nodes continue to expose their local snapshot at `/metrics/json`; `/metrics/fleet/json` returns 404 on workers.
+- Entry node `/metrics/json` now emits only the entry’s local workload. Clients should rely on `/metrics/cluster/json` (or the `/metrics/fleet/json` alias) for cluster totals.
+- Worker nodes continue to expose their local snapshot at `/metrics/json`; `/metrics/cluster/json` and `/metrics/fleet/json` return 404 on workers.
 
 Diagnostics:
 - `?verbose=1` on either endpoint appends `diag_distributed_contexts` and `diag_local_contexts` to help debug registry visibility.

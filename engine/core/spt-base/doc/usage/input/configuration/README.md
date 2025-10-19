@@ -76,7 +76,7 @@ reference.
 | run-comment                                    | String | ""                      | A user defined comment to run the scenario via the Control API
 | run-node                                       | Flag | false                     | Run in the slave node or not
 | run-port                                       | Integer > 0 | 9999               | Port for REST API
-| server-metrics-expose_fleet                    | Boolean | true                   | Controls whether the entry node exposes the `/metrics/fleet/json` endpoint.
+| server-metrics-expose_fleet                    | Boolean | true                   | Controls whether the entry node exposes the `/metrics/cluster/json` endpoint (and the legacy `/metrics/fleet/json` alias).
 | run-scenario                                   | Path | null                      | The default file scenario to run, null means invoking the default.js scenario bundled into the distribution
 | run-version                                    | String | 4.2.15                  | The Spt version
 | run-id                                         | long | 0                         | The run identifier (see Runs API). If not specified, it takes the value of timestam

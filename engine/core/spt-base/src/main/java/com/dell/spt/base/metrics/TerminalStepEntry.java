@@ -1,11 +1,13 @@
 package com.dell.spt.base.metrics;
 
 import com.dell.spt.base.item.op.OpType;
+import java.util.List;
 
 /** Cached snapshot of a finished step used to keep /metrics/json non-empty at idle. */
 public final class TerminalStepEntry {
 	public final String stepId;
 	public final OpType opType;
+	public final long runId;
 	public final long recordedAtMillis;
 
 	public final long successCount;
@@ -21,9 +23,15 @@ public final class TerminalStepEntry {
 
 	public final long elapsedTimeMillis;
 
+	public final boolean distributed;
+	public final int nodeCount;
+	public final List<String> nodesPresent;
+	public final boolean partial;
+
 	public TerminalStepEntry(
 					String stepId,
 					OpType opType,
+					long runId,
 					long recordedAtMillis,
 					long successCount,
 					long failedCount,
@@ -35,8 +43,49 @@ public final class TerminalStepEntry {
 					long countLimit,
 					long timeLimitSec,
 					long elapsedTimeMillis) {
+		this(
+						stepId,
+						opType,
+						runId,
+						recordedAtMillis,
+						successCount,
+						failedCount,
+						bytesTotal,
+						latencyMeanUs,
+						durationMeanUs,
+						concurrencyLast,
+						concurrencyMean,
+						countLimit,
+						timeLimitSec,
+						elapsedTimeMillis,
+						false,
+						0,
+						List.of(),
+						false);
+	}
+
+	public TerminalStepEntry(
+					String stepId,
+					OpType opType,
+					long runId,
+					long recordedAtMillis,
+					long successCount,
+					long failedCount,
+					long bytesTotal,
+					double latencyMeanUs,
+					double durationMeanUs,
+					long concurrencyLast,
+					double concurrencyMean,
+					long countLimit,
+					long timeLimitSec,
+					long elapsedTimeMillis,
+					boolean distributed,
+					int nodeCount,
+					List<String> nodesPresent,
+					boolean partial) {
 		this.stepId = stepId;
 		this.opType = opType;
+		this.runId = runId;
 		this.recordedAtMillis = recordedAtMillis;
 		this.successCount = successCount;
 		this.failedCount = failedCount;
@@ -48,5 +97,9 @@ public final class TerminalStepEntry {
 		this.countLimit = countLimit;
 		this.timeLimitSec = timeLimitSec;
 		this.elapsedTimeMillis = elapsedTimeMillis;
+		this.distributed = distributed;
+		this.nodeCount = nodeCount;
+		this.nodesPresent = nodesPresent == null ? List.of() : List.copyOf(nodesPresent);
+		this.partial = partial;
 	}
 }

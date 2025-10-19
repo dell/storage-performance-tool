@@ -17,7 +17,9 @@ import java.net.InetAddress;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import com.dell.spt.base.logging.Loggers;
 
 final class MetricsJsonResponder {
 
@@ -29,6 +31,7 @@ final class MetricsJsonResponder {
 	private final String nodeId;
 	private final String clusterId;
 	private final long configuredRunId;
+	private final boolean entryRoleHint;
 
 	MetricsJsonResponder(final MetricsManager metricsManager, final Config config) {
 		this.metricsManager = metricsManager;
@@ -36,6 +39,7 @@ final class MetricsJsonResponder {
 		this.nodeId = resolveNodeId(config);
 		this.clusterId = resolveClusterId(config);
 		this.configuredRunId = resolveConfiguredRunId(config);
+		this.entryRoleHint = resolveEntryRoleHint(config);
 	}
 
 	ArrayNode buildNodeMetrics(final boolean verbose) {
@@ -68,10 +72,12 @@ final class MetricsJsonResponder {
 		return jsonArray;
 	}
 
-	ArrayNode buildFleetMetrics(final boolean verbose) {
+	ArrayNode buildClusterMetrics(final boolean verbose) {
 		final ArrayNode jsonArray = objectMapper.createArrayNode();
 		final Set<DistributedMetricsContext> distributed = metricsManager.getDistributedContexts();
 		final Set<MetricsContext> allContexts = metricsManager.getAllContexts();
+
+		final Set<String> activeStepIds = new HashSet<>();
 
 		for (DistributedMetricsContext ctx : distributed) {
 			ctx.refreshLastSnapshot();
@@ -80,9 +86,17 @@ final class MetricsJsonResponder {
 				continue;
 			}
 			final ObjectNode jsonObj = buildDistributedNode(ctx, snapshot, distributed, allContexts, verbose);
+			jsonObj.put("role", "aggregate");
 			jsonArray.add(jsonObj);
+			activeStepIds.add(ctx.loadStepId());
 		}
+		appendDistributedTerminalEntries(jsonArray, activeStepIds);
 		return jsonArray;
+	}
+
+	@Deprecated
+	ArrayNode buildFleetMetrics(final boolean verbose) {
+		return buildClusterMetrics(verbose);
 	}
 
 	private ObjectNode buildContextNode(
@@ -91,17 +105,51 @@ final class MetricsJsonResponder {
 					final Set<DistributedMetricsContext> distributed,
 					final Set<MetricsContext> allContexts,
 					final boolean verbose) {
+		final TerminalStepEntry progressEntry = metricsManager.getLastProgressSnapshot(ctx.loadStepId()).orElse(null);
+
+		long successCount = snapshot.successSnapshot().count();
+		long failCount = snapshot.failsSnapshot().count();
+		long bytesTotal = snapshot.byteSnapshot().count();
+		double latencyMean = snapshot.latencySnapshot().mean();
+		double durationMean = snapshot.durationSnapshot().mean();
+		long elapsedMillis = snapshot.elapsedTimeMillis();
+
+		boolean cachedProgress = false;
+		if (progressEntry != null) {
+			successCount = Math.max(successCount, progressEntry.successCount);
+			failCount = Math.max(failCount, progressEntry.failedCount);
+			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
+			if (progressEntry.latencyMeanUs > 0.0) {
+				latencyMean = progressEntry.latencyMeanUs;
+			}
+			if (progressEntry.durationMeanUs > 0.0) {
+				durationMean = progressEntry.durationMeanUs;
+			}
+			elapsedMillis = Math.max(elapsedMillis, progressEntry.elapsedTimeMillis);
+			Loggers.MSG.debug(
+							"{}: node metrics using cached progress (success={}, fails={}, bytes={}, elapsed_ms={})",
+							ctx.loadStepId(),
+							successCount,
+							failCount,
+							bytesTotal,
+							elapsedMillis);
+			cachedProgress = true;
+		}
+
+		final int testState = calculateTestState(snapshot, successCount, failCount);
+		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
+
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
 		applyCommonMetadata(jsonObj, "node", ctx.runId());
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
-		jsonObj.put("elapsed_time_seconds", snapshot.elapsedTimeMillis() / 1000.0);
-		jsonObj.put("test_state", calculateTestState(snapshot));
-		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, calculateCompletionPercent(ctx.metadata(), snapshot));
+		jsonObj.put("elapsed_time_seconds", elapsedMillis / 1000.0);
+		jsonObj.put("test_state", testState);
+		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addMetrics(jsonObj, snapshot);
+		addMetrics(jsonObj, snapshot, successCount, failCount, bytesTotal, latencyMean, durationMean);
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -109,6 +157,9 @@ final class MetricsJsonResponder {
 						calculateOverallCompletionPercentForStep(ctx.loadStepId(), distributed, allContexts));
 		jsonObj.put("overall_unbounded", calculateOverallUnboundedForStep(ctx.loadStepId(), distributed, allContexts));
 
+		if (verbose && cachedProgress) {
+			jsonObj.put("diag_cached_progress", true);
+		}
 		if (verbose) {
 			jsonObj.put("diag_distributed_contexts", distributed.size());
 			jsonObj.put("diag_local_contexts", Math.max(0, allContexts.size() - distributed.size()));
@@ -122,17 +173,51 @@ final class MetricsJsonResponder {
 					final Set<DistributedMetricsContext> distributed,
 					final Set<MetricsContext> allContexts,
 					final boolean verbose) {
+		final TerminalStepEntry progressEntry = metricsManager.getLastProgressSnapshot(ctx.loadStepId(), true).orElse(null);
+
+		long successCount = snapshot.successSnapshot().count();
+		long failCount = snapshot.failsSnapshot().count();
+		long bytesTotal = snapshot.byteSnapshot().count();
+		double latencyMean = snapshot.latencySnapshot().mean();
+		double durationMean = snapshot.durationSnapshot().mean();
+		long elapsedMillis = snapshot.elapsedTimeMillis();
+
+		boolean cachedProgress = false;
+		if (progressEntry != null) {
+			successCount = Math.max(successCount, progressEntry.successCount);
+			failCount = Math.max(failCount, progressEntry.failedCount);
+			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
+			if (progressEntry.latencyMeanUs > 0.0) {
+				latencyMean = progressEntry.latencyMeanUs;
+			}
+			if (progressEntry.durationMeanUs > 0.0) {
+				durationMean = progressEntry.durationMeanUs;
+			}
+			elapsedMillis = Math.max(elapsedMillis, progressEntry.elapsedTimeMillis);
+			Loggers.MSG.debug(
+							"{}: aggregate metrics using cached progress (success={}, fails={}, bytes={}, elapsed_ms={})",
+							ctx.loadStepId(),
+							successCount,
+							failCount,
+							bytesTotal,
+							elapsedMillis);
+			cachedProgress = true;
+		}
+
+		final int testState = calculateTestState(snapshot, successCount, failCount);
+		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
+
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
 		applyCommonMetadata(jsonObj, "fleet", ctx.runId());
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
-		jsonObj.put("elapsed_time_seconds", snapshot.elapsedTimeMillis() / 1000.0);
-		jsonObj.put("test_state", calculateTestState(snapshot));
-		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, calculateCompletionPercent(ctx.metadata(), snapshot));
+		jsonObj.put("elapsed_time_seconds", elapsedMillis / 1000.0);
+		jsonObj.put("test_state", testState);
+		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addMetrics(jsonObj, snapshot);
+		addMetrics(jsonObj, snapshot, successCount, failCount, bytesTotal, latencyMean, durationMean);
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -150,6 +235,9 @@ final class MetricsJsonResponder {
 		final boolean partial = addrs != null && ctx.nodeCount() > addrs.size();
 		jsonObj.put("partial", partial);
 
+		if (verbose && cachedProgress) {
+			jsonObj.put("diag_cached_progress", true);
+		}
 		if (verbose) {
 			jsonObj.put("diag_distributed_contexts", distributed.size());
 			jsonObj.put("diag_local_contexts", Math.max(0, allContexts.size() - distributed.size()));
@@ -191,22 +279,29 @@ final class MetricsJsonResponder {
 		jsonObj.set("limit", limit);
 	}
 
-	private void addMetrics(final ObjectNode jsonObj, final AllMetricsSnapshot snapshot) {
+	private void addMetrics(
+					final ObjectNode jsonObj,
+					final AllMetricsSnapshot snapshot,
+					final long successCount,
+					final long failCount,
+					final long bytesTotal,
+					final double latencyMean,
+					final double durationMean) {
 		final ObjectNode operations = objectMapper.createObjectNode();
-		operations.put("success_count", snapshot.successSnapshot().count());
-		operations.put("failed_count", snapshot.failsSnapshot().count());
+		operations.put("success_count", successCount);
+		operations.put("failed_count", failCount);
 		operations.put("success_rate_last", snapshot.successSnapshot().last());
 		operations.put("failed_rate_last", snapshot.failsSnapshot().last());
 		jsonObj.set("operations", operations);
 
 		final ObjectNode bandwidth = objectMapper.createObjectNode();
-		bandwidth.put("bytes_total", snapshot.byteSnapshot().count());
+		bandwidth.put("bytes_total", bytesTotal);
 		bandwidth.put("bytes_rate_last", snapshot.byteSnapshot().last());
 		jsonObj.set("bandwidth", bandwidth);
 
 		final ObjectNode timing = objectMapper.createObjectNode();
-		timing.put("latency_mean_us", snapshot.latencySnapshot().mean());
-		timing.put("duration_mean_us", snapshot.durationSnapshot().mean());
+		timing.put("latency_mean_us", latencyMean);
+		timing.put("duration_mean_us", durationMean);
 		jsonObj.set("timing", timing);
 
 		final ObjectNode concurrency = objectMapper.createObjectNode();
@@ -320,11 +415,15 @@ final class MetricsJsonResponder {
 
 	private void appendTerminalEntries(final ArrayNode jsonArray, final Set<String> activeStepIds) {
 		for (TerminalStepEntry entry : metricsManager.getTerminalSteps()) {
+			if (entry.distributed) {
+				continue;
+			}
 			if (activeStepIds.contains(entry.stepId)) {
 				continue;
 			}
 			final ObjectNode jsonObj = objectMapper.createObjectNode();
-			applyCommonMetadata(jsonObj, "node", configuredRunId);
+			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
+			applyCommonMetadata(jsonObj, "node", runId);
 			jsonObj.put("step_id", entry.stepId);
 			jsonObj.put("op_type", entry.opType.name());
 			jsonObj.put("timestamp", entry.recordedAtMillis);
@@ -388,9 +487,91 @@ final class MetricsJsonResponder {
 		}
 	}
 
-	private int calculateTestState(final AllMetricsSnapshot snapshot) {
-		final long successCount = snapshot.successSnapshot().count();
-		final long failsCount = snapshot.failsSnapshot().count();
+	private void appendDistributedTerminalEntries(final ArrayNode jsonArray, final Set<String> activeStepIds) {
+		for (TerminalStepEntry entry : metricsManager.getTerminalSteps()) {
+			if (!entry.distributed) {
+				continue;
+			}
+			if (activeStepIds.contains(entry.stepId)) {
+				continue;
+			}
+			final ObjectNode jsonObj = objectMapper.createObjectNode();
+			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
+			applyCommonMetadata(jsonObj, "fleet", runId);
+			jsonObj.put("role", "aggregate");
+			jsonObj.put("step_id", entry.stepId);
+			jsonObj.put("op_type", entry.opType.name());
+			jsonObj.put("timestamp", entry.recordedAtMillis);
+			jsonObj.put("elapsed_time_seconds", entry.elapsedTimeMillis / 1000.0);
+			jsonObj.put("test_state", 2);
+
+			final boolean hasCountLimit = entry.countLimit > 0L;
+			final boolean hasTimeLimit = entry.timeLimitSec > 0L;
+			final boolean unbounded = !(hasCountLimit || hasTimeLimit);
+			jsonObj.put("unbounded", unbounded);
+
+			int completionPercent = 0;
+			if (hasCountLimit && entry.countLimit > 0) {
+				final long done = entry.successCount + entry.failedCount;
+				final double completion = Math.min(1.0, Math.max(0.0, (double) done / (double) entry.countLimit));
+				completionPercent = (int) Math.round(completion * 100.0);
+			} else if (hasTimeLimit && entry.timeLimitSec > 0) {
+				final double completion = Math.min(1.0, Math.max(0.0, (entry.elapsedTimeMillis / 1000.0) / (double) entry.timeLimitSec));
+				completionPercent = (int) Math.round(completion * 100.0);
+			}
+			jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
+
+			final ObjectNode limit = objectMapper.createObjectNode();
+			if (hasCountLimit) {
+				limit.put("type", "op_count");
+				limit.put("op_count", entry.countLimit);
+			} else if (hasTimeLimit) {
+				limit.put("type", "time");
+				limit.put("time_sec", entry.timeLimitSec);
+			} else {
+				limit.put("type", "none");
+			}
+			jsonObj.set("limit", limit);
+
+			final ObjectNode operations = objectMapper.createObjectNode();
+			operations.put("success_count", entry.successCount);
+			operations.put("failed_count", entry.failedCount);
+			operations.put("success_rate_last", 0.0);
+			operations.put("failed_rate_last", 0.0);
+			jsonObj.set("operations", operations);
+
+			final ObjectNode bandwidth = objectMapper.createObjectNode();
+			bandwidth.put("bytes_total", entry.bytesTotal);
+			bandwidth.put("bytes_rate_last", 0.0);
+			jsonObj.set("bandwidth", bandwidth);
+
+			final ObjectNode timing = objectMapper.createObjectNode();
+			timing.put("latency_mean_us", entry.latencyMeanUs);
+			timing.put("duration_mean_us", entry.durationMeanUs);
+			jsonObj.set("timing", timing);
+
+			final ObjectNode concurrency = objectMapper.createObjectNode();
+			concurrency.put("current", entry.concurrencyLast);
+			concurrency.put("mean", entry.concurrencyMean);
+			jsonObj.set("concurrency", concurrency);
+
+			jsonObj.put("overall_completion_percent", completionPercent);
+			jsonObj.put("overall_unbounded", unbounded);
+
+			jsonObj.put("nodes_count", Math.max(0, entry.nodeCount));
+			final ArrayNode nodesPresent = objectMapper.createArrayNode();
+			if (entry.nodesPresent != null) {
+				entry.nodesPresent.forEach(nodesPresent::add);
+			}
+			jsonObj.set("nodes_present", nodesPresent);
+			final boolean partial = entry.partial && entry.nodeCount > 0;
+			jsonObj.put("partial", partial);
+			jsonObj.put("terminal", true);
+			jsonArray.add(jsonObj);
+		}
+	}
+
+	private int calculateTestState(final AllMetricsSnapshot snapshot, final long successCount, final long failsCount) {
 		final long totalOps = successCount + failsCount;
 		if (totalOps > 0) {
 			final long concurrency = snapshot.concurrencySnapshot().last();
@@ -399,7 +580,8 @@ final class MetricsJsonResponder {
 		return 1;
 	}
 
-	private int calculateCompletionPercent(final java.util.Map meta, final AllMetricsSnapshot snapshot) {
+	private int calculateCompletionPercent(
+					final java.util.Map meta, final long successCount, final long failsCount, final long elapsedTimeMillis) {
 		long countLimit = 0L;
 		long timeLimitSec = 0L;
 		try {
@@ -417,11 +599,9 @@ final class MetricsJsonResponder {
 
 		double completion = 0.0;
 		if (countLimit > 0) {
-			final long succ = snapshot.successSnapshot().count();
-			final long fail = snapshot.failsSnapshot().count();
-			completion = Math.min(1.0, Math.max(0.0, (double) (succ + fail) / (double) countLimit));
+			completion = Math.min(1.0, Math.max(0.0, (double) (successCount + failsCount) / (double) countLimit));
 		} else if (timeLimitSec > 0) {
-			completion = Math.min(1.0, Math.max(0.0, (snapshot.elapsedTimeMillis() / 1000.0) / (double) timeLimitSec));
+			completion = Math.min(1.0, Math.max(0.0, (elapsedTimeMillis / 1000.0) / (double) timeLimitSec));
 		}
 		return (int) Math.round(completion * 100.0);
 	}
@@ -441,6 +621,7 @@ final class MetricsJsonResponder {
 		final java.util.List<AllMetricsSnapshot> snaps = new java.util.ArrayList<>();
 		boolean usingDistributed = false;
 
+		final Optional<TerminalStepEntry> distributedProgress = metricsManager.getLastProgressSnapshot(stepId, true);
 		for (DistributedMetricsContext ctx : distributed) {
 			if (!stepId.equals(ctx.loadStepId())) {
 				continue;
@@ -470,6 +651,8 @@ final class MetricsJsonResponder {
 			}
 		}
 
+		final Optional<TerminalStepEntry> localProgress = usingDistributed ? Optional.empty() : metricsManager.getLastProgressSnapshot(stepId);
+
 		for (int i = 0; i < snaps.size(); i++) {
 			final AllMetricsSnapshot snapshot = snaps.get(i);
 			final java.util.Map meta = metas.get(i);
@@ -479,17 +662,36 @@ final class MetricsJsonResponder {
 			}
 			final Object cl = meta.get(MetricsConstants.METADATA_LIMIT_OP_COUNT);
 			final long countLimit = (cl instanceof Number) ? ((Number) cl).longValue() : 0L;
+
+			long successCount = snapshot.successSnapshot().count();
+			long failCount = snapshot.failsSnapshot().count();
+			long elapsedMillis = snapshot.elapsedTimeMillis();
+
+			if (usingDistributed) {
+				if (distributedProgress.isPresent()) {
+					final TerminalStepEntry entry = distributedProgress.get();
+					successCount = Math.max(successCount, entry.successCount);
+					failCount = Math.max(failCount, entry.failedCount);
+					elapsedMillis = Math.max(elapsedMillis, entry.elapsedTimeMillis);
+				}
+			} else if (localProgress.isPresent()) {
+				final TerminalStepEntry entry = localProgress.get();
+				successCount = Math.max(successCount, entry.successCount);
+				failCount = Math.max(failCount, entry.failedCount);
+				elapsedMillis = Math.max(elapsedMillis, entry.elapsedTimeMillis);
+			}
+
 			if (countLimit <= 0) {
 				allHaveCount = false;
 			} else {
 				sumCountLimit += countLimit;
-				sumCompleted += (snapshot.successSnapshot().count() + snapshot.failsSnapshot().count());
+				sumCompleted += (successCount + failCount);
 			}
 			final Object tl = meta.get(MetricsConstants.METADATA_LIMIT_TIME_SEC);
 			if (tl instanceof Number && ((Number) tl).longValue() > 0) {
 				timeLimitSec = Math.max(timeLimitSec, ((Number) tl).longValue());
 			}
-			maxElapsed = Math.max(maxElapsed, snapshot.elapsedTimeMillis());
+			maxElapsed = Math.max(maxElapsed, elapsedMillis);
 		}
 
 		double completion = 0.0;
@@ -557,7 +759,18 @@ final class MetricsJsonResponder {
 	}
 
 	private String resolveRole() {
-		return metricsManager.getDistributedContexts().isEmpty() ? "worker" : "entry";
+		if (!metricsManager.getDistributedContexts().isEmpty() || entryRoleHint) {
+			return "entry";
+		}
+		return "worker";
+	}
+
+	private static boolean resolveEntryRoleHint(final Config config) {
+		try {
+			return config.boolVal("run-node");
+		} catch (Exception ignore) {
+			return false;
+		}
 	}
 
 	private static String resolveNodeId(final Config config) {

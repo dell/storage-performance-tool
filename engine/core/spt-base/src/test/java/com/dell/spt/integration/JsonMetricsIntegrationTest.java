@@ -54,6 +54,7 @@ public class JsonMetricsIntegrationTest {
 	private static final String PROMETHEUS_URL = "http://localhost:" + METRICS_PORT + "/metrics";
 	private static final String NODE_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
 	private static final String FLEET_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
+	private static final String CLUSTER_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
 
 	private static final String STEP_ID = "integration-test-step";
 	private static final int RUN_ID = 12345;
@@ -97,6 +98,7 @@ public class JsonMetricsIntegrationTest {
 		jsonServer.setHandler(jsonContext);
 		jsonContext.addServlet(new ServletHolder(new NodeMetricsHandler(metricsManager, jsonConfig)), "/metrics/json");
 		jsonContext.addServlet(new ServletHolder(new FleetMetricsHandler(metricsManager, jsonConfig)), "/metrics/fleet/json");
+		jsonContext.addServlet(new ServletHolder(new FleetMetricsHandler(metricsManager, jsonConfig)), "/metrics/cluster/json");
 		jsonServer.start();
 
 		// Create basic metrics context (needed for snapshots supplier)
@@ -176,7 +178,7 @@ public class JsonMetricsIntegrationTest {
 			JsonNode jsonObj = jsonArray.get(0);
 			assertEquals(2, jsonObj.get("metrics_schema").asInt());
 			assertEquals("fleet", jsonObj.get("scope").asText());
-			assertEquals("entry", jsonObj.get("role").asText());
+			assertEquals("aggregate", jsonObj.get("role").asText());
 			assertEquals("integration-entry", jsonObj.get("node_id").asText());
 			assertEquals(String.valueOf(RUN_ID), jsonObj.get("run_id").asText());
 			assertTrue(jsonObj.hasNonNull("sample_ts"));
@@ -199,6 +201,59 @@ public class JsonMetricsIntegrationTest {
 				assertTrue(jsonObj.get(obj).isObject(), "Field should be object: " + obj);
 			}
 		}
+	}
+
+	@Test
+	public void testNodeMetricsRetainTerminalTotalsAfterUnregister() throws Exception {
+		final String localStepId = "pause-window-step";
+		final MetricsContextImpl localCtx = (MetricsContextImpl) MetricsContextImpl.builder()
+						.loadStepId(localStepId)
+						.opType(OpType.CREATE)
+						.actualConcurrencyGauge(() -> 8)
+						.concurrencyLimit(8)
+						.concurrencyThreshold(0)
+						.itemDataSize(ITEM_DATA_SIZE)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.comment("integration-local")
+						.runId(RUN_ID)
+						.build();
+
+		localCtx.start();
+		metricsManager.register(localCtx);
+
+		for (int i = 0; i < 1_200; i++) {
+			localCtx.markSucc(ITEM_DATA_SIZE.get(), 1_000_000L, 500_000L);
+		}
+		localCtx.refreshLastSnapshot();
+
+		metricsManager.unregister(localCtx);
+
+		String nodeVerboseResponse = fetchFromUrl(NODE_JSON_URL + "?verbose=true");
+		JsonNode nodeArray = objectMapper.readTree(nodeVerboseResponse);
+		assertTrue(nodeArray.isArray());
+		JsonNode terminalEntry = null;
+		for (JsonNode node : nodeArray) {
+			if (node.path("terminal").asBoolean(false)) {
+				terminalEntry = node;
+				break;
+			}
+		}
+		assertNotNull(terminalEntry, "expected terminal entry in node metrics payload");
+		assertEquals(localStepId, terminalEntry.get("step_id").asText());
+		assertEquals("CREATE", terminalEntry.get("op_type").asText());
+		assertEquals(1_200L, terminalEntry.get("operations").get("success_count").asLong());
+		assertEquals(String.valueOf(RUN_ID), terminalEntry.get("run_id").asText());
+		assertTrue(terminalEntry.get("diag_cached_progress").asBoolean(), "cached progress flag not set");
+
+		localCtx.close();
+	}
+
+	@Test
+	public void testClusterEndpointMatchesFleet() throws Exception {
+		final JsonNode cluster = objectMapper.readTree(fetchFromUrl(CLUSTER_JSON_URL));
+		final JsonNode fleet = objectMapper.readTree(fetchJsonMetrics());
+		assertEquals(fleet, cluster, "Cluster endpoint should mirror fleet aggregates");
 	}
 
 	@Test
@@ -324,19 +379,22 @@ public class JsonMetricsIntegrationTest {
 	 * Fetch JSON metrics via HTTP
 	 */
 	private String fetchJsonMetrics() throws Exception {
-		URL url = new URL(FLEET_JSON_URL);
-		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-		connection.setRequestMethod("GET");
+		return fetchFromUrl(FLEET_JSON_URL);
+	}
 
-		StringBuilder response = new StringBuilder();
-		try (BufferedReader reader = new BufferedReader(
-						new InputStreamReader(connection.getInputStream()))) {
+	private String fetchFromUrl(final String urlString) throws Exception {
+		final URL url = new URL(urlString);
+		final HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+		connection.setRequestMethod("GET");
+		final StringBuilder response = new StringBuilder();
+		try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
 			String line;
 			while ((line = reader.readLine()) != null) {
-				response.append(line).append("\n");
+				response.append(line).append('\n');
 			}
+		} finally {
+			connection.disconnect();
 		}
-		connection.disconnect();
 		return response.toString();
 	}
 
