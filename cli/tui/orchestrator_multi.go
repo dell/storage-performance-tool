@@ -801,9 +801,14 @@ func (p *APIMetricsPoller) PollMetrics(_ context.Context, _ string) (*Performanc
 
 // NewMultiHostTestOrchestrator creates a wrapper around MultiHostOrchestrator
 func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTestOrchestrator {
+	entryAggregator := NewMetricsAggregator()
+	if multiHost != nil && len(multiHost.hosts) > 0 && multiHost.hosts[0] != nil && multiHost.hosts[0].Info != nil {
+		entryAggregator = NewMetricsAggregatorWithEntry(multiHost.hosts[0].Info.Original)
+	}
+
 	return &MultiHostTestOrchestrator{
 		multiHost:     multiHost,
-		aggregator:    NewMetricsAggregator(),
+		aggregator:    entryAggregator,
 		metricsPoller: NewAPIMetricsPoller(),         // Default implementation
 		pollInterval:  constants.MetricsPollInterval, // Default poll interval
 		pollStates:    make(map[string]*nodePollState),

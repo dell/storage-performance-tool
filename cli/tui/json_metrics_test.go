@@ -190,6 +190,8 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 	secondStep := newTestStep()
 	secondStep.StepID = "step2"
 	secondStep.Operations.SuccessCount = 42
+	secondStep.Timestamp = baseStep.Timestamp + 1000
+	secondStep.SampleTimestampRaw = time.UnixMilli(secondStep.Timestamp).Format(time.RFC3339Nano)
 	multipleStepsJSON := marshalSteps(t, []JSONMetricsStep{baseStep, secondStep})
 	missingSchemaJSON := fmt.Sprintf(`[{"scope":"node","role":"entry","node_id":"node-1","run_id":"run-1","sample_ts":"%s","step_id":"legacy","op_type":"create"}]`, testSampleTimestamp)
 	wrappedJSON := marshalWrappedSteps(t, []JSONMetricsStep{baseStep})
@@ -272,11 +274,11 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:     "multiple steps uses first",
+			name:     "multiple steps uses latest sample",
 			jsonData: multipleStepsJSON,
 			assert: func(t *testing.T, metric *PerformanceMetric) {
-				if metric == nil || metric.StepID != baseStep.StepID {
-					t.Fatalf("expected first step to be chosen")
+				if metric == nil || metric.StepID != secondStep.StepID {
+					t.Fatalf("expected latest step to be chosen")
 				}
 			},
 		},

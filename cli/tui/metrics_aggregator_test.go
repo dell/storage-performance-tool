@@ -144,3 +144,61 @@ func TestMetricsAggregatorLatestTimestamp(t *testing.T) {
 		t.Errorf("expected aggregated timestamp to reflect latest sample, got %v", aggregated.Timestamp)
 	}
 }
+
+func TestMetricsAggregatorPrefersEntryTotals(t *testing.T) {
+	aggregator := NewMetricsAggregatorWithEntry("entry")
+
+	entry := newNodeMetric(600, 60, 6000, 0, 50, 70, 8, 7.5)
+	entry.Role = "entry"
+	entry.NodesCount = 6
+	entry.NodesPresent = []string{"node-0", "node-1"}
+	entry.StepID = "create-step"
+
+	worker := newNodeMetric(100, 10, 1000, 0, 40, 60, 8, 7.5)
+	worker.Role = "worker"
+
+	res := aggregator.aggregateNodeMetrics(map[string]*PerformanceMetric{
+		"entry":  entry,
+		"worker": worker,
+	})
+
+	if res.SuccessCount != entry.SuccessCount {
+		t.Fatalf("expected success count from entry metric (%d), got %d", entry.SuccessCount, res.SuccessCount)
+	}
+	if res.OpsPerSec != entry.OpsPerSec {
+		t.Fatalf("expected ops/sec %d from entry metric, got %d", entry.OpsPerSec, res.OpsPerSec)
+	}
+	if res.StepID != entry.StepID {
+		t.Fatalf("expected step id %q from entry metric, got %q", entry.StepID, res.StepID)
+	}
+	if res.ConcurrencyCurrent != entry.ConcurrencyCurrent {
+		t.Fatalf("expected concurrency current %d, got %d", entry.ConcurrencyCurrent, res.ConcurrencyCurrent)
+	}
+	if res.NodesCount != entry.NodesCount {
+		t.Fatalf("expected NodesCount=%d, got %d", entry.NodesCount, res.NodesCount)
+	}
+}
+
+func TestMetricsAggregatorPrefersAggregateWhenRoleMissing(t *testing.T) {
+	aggregator := NewMetricsAggregatorWithEntry("aggregate")
+
+	aggregate := newNodeMetric(600, 60, 6000, 0, 50, 70, 8, 7.5)
+	aggregate.Role = "worker" // simulate aggregate sample missing entry role
+	aggregate.NodesCount = 6
+	aggregate.NodesPresent = []string{"node-0", "node-1"}
+
+	worker := newNodeMetric(100, 10, 1000, 0, 40, 60, 8, 7.5)
+	worker.Role = "worker"
+
+	res := aggregator.aggregateNodeMetrics(map[string]*PerformanceMetric{
+		"aggregate": aggregate,
+		"worker":    worker,
+	})
+
+	if res.SuccessCount != aggregate.SuccessCount {
+		t.Fatalf("expected success count from aggregate metric (%d), got %d", aggregate.SuccessCount, res.SuccessCount)
+	}
+	if res.NodesCount != aggregate.NodesCount {
+		t.Fatalf("expected node count %d, got %d", aggregate.NodesCount, res.NodesCount)
+	}
+}
