@@ -78,10 +78,11 @@ func (l *LiveViewRenderer) RenderLiveView(metrics *MetricsCollector, width int) 
 
 	// Use the most recent aggregated sample for header display
 	latestSample := samples[len(samples)-1]
+	displayAggregate := l.aggregateForDisplay(metrics, &latestSample)
 
 	// Generate header and multi-node table
-	header := l.formatHeader(&latestSample)
-	table := l.formatMultiNodeTable(metrics, &latestSample, width)
+	header := l.formatHeader(displayAggregate)
+	table := l.formatMultiNodeTable(metrics, displayAggregate, width)
 
 	// Return content without additional styling (TUI handles borders)
 	return header + "\n" + table
@@ -195,6 +196,67 @@ func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggre
 	}
 	header := l.renderTableHeader(width, dataRows)
 	return header + "\n" + strings.Join(dataRows, "\n")
+}
+
+func (l *LiveViewRenderer) aggregateForDisplay(metrics *MetricsCollector, fallback *PerformanceMetric) *PerformanceMetric {
+	if metrics == nil {
+		return fallback
+	}
+
+	nodeStatuses := metrics.GetNodeStatus()
+	if len(nodeStatuses) == 0 {
+		return fallback
+	}
+
+	nodeMetrics := make(map[string]*PerformanceMetric, len(nodeStatuses))
+	for nodeID := range nodeStatuses {
+		samples := metrics.GetNodeSamples(nodeID)
+		if len(samples) == 0 {
+			continue
+		}
+		latest := samples[len(samples)-1]
+		copySample := latest
+		nodeMetrics[nodeID] = &copySample
+	}
+
+	if len(nodeMetrics) == 0 {
+		return fallback
+	}
+
+	aggregated := NewMetricsAggregator().Aggregate(nodeMetrics)
+	if aggregated == nil {
+		return fallback
+	}
+
+	display := *aggregated
+	if fallback != nil {
+		if display.StepID == "" {
+			display.StepID = fallback.StepID
+		}
+		if display.OpType == "" {
+			display.OpType = fallback.OpType
+		}
+		if display.RunID == "" {
+			display.RunID = fallback.RunID
+		}
+		if display.ClusterID == "" {
+			display.ClusterID = fallback.ClusterID
+		}
+		if display.SptTimestamp == "" {
+			display.SptTimestamp = fallback.SptTimestamp
+		}
+		if display.Timestamp.IsZero() {
+			display.Timestamp = fallback.Timestamp
+		}
+		if display.SampleTimestamp.IsZero() {
+			display.SampleTimestamp = fallback.SampleTimestamp
+			display.SampleTimestampRaw = fallback.SampleTimestampRaw
+		}
+		// Preserve overall test state so the header reflects current phase.
+		display.TestState = fallback.TestState
+	}
+
+	return &display
 }
 
 // appendHostColumn appends the rightmost Host column to a given prefix row, respecting terminal width.

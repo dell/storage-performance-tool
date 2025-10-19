@@ -145,60 +145,69 @@ func TestMetricsAggregatorLatestTimestamp(t *testing.T) {
 	}
 }
 
-func TestMetricsAggregatorPrefersEntryTotals(t *testing.T) {
+func TestMetricsAggregatorIgnoresAggregateScopedEntrySamples(t *testing.T) {
 	aggregator := NewMetricsAggregatorWithEntry("entry")
 
 	entry := newNodeMetric(600, 60, 6000, 0, 50, 70, 8, 7.5)
 	entry.Role = "entry"
+	entry.Scope = "aggregate" // aggregated payloads should be ignored by node-only reducer
 	entry.NodesCount = 6
-	entry.NodesPresent = []string{"node-0", "node-1"}
-	entry.StepID = "create-step"
+	entry.NodesPresent = []string{"node-0", "node-1", "node-2"}
 
-	worker := newNodeMetric(100, 10, 1000, 0, 40, 60, 8, 7.5)
-	worker.Role = "worker"
+	workerA := newNodeMetric(300, 30, 3000, 0, 40, 60, 8, 7.5)
+	workerB := newNodeMetric(200, 20, 2000, 0, 35, 55, 6, 6.5)
 
-	res := aggregator.aggregateNodeMetrics(map[string]*PerformanceMetric{
+	res := aggregator.Aggregate(map[string]*PerformanceMetric{
+		"entry":    entry,
+		"worker-a": workerA,
+		"worker-b": workerB,
+	})
+
+	if res == nil {
+		t.Fatal("expected aggregated metric")
+	}
+
+	expectedSuccess := workerA.SuccessCount + workerB.SuccessCount
+	if res.SuccessCount != expectedSuccess {
+		t.Fatalf("expected success count %d, got %d", expectedSuccess, res.SuccessCount)
+	}
+	if res.OpsPerSec != workerA.OpsPerSec+workerB.OpsPerSec {
+		t.Fatalf("expected ops/sec %d, got %d", workerA.OpsPerSec+workerB.OpsPerSec, res.OpsPerSec)
+	}
+	if res.NodesCount != 2 {
+		t.Fatalf("expected node count 2 (workers only), got %d", res.NodesCount)
+	}
+}
+
+func TestMetricsAggregatorIncludesEntryWhenNodeScoped(t *testing.T) {
+	aggregator := NewMetricsAggregatorWithEntry("entry")
+
+	entry := newNodeMetric(400, 40, 4000, 0, 45, 65, 10, 8.5)
+	entry.Role = "entry"
+
+	worker := newNodeMetric(200, 20, 2000, 0, 35, 55, 6, 6.5)
+
+	res := aggregator.Aggregate(map[string]*PerformanceMetric{
 		"entry":  entry,
 		"worker": worker,
 	})
 
-	if res.SuccessCount != entry.SuccessCount {
-		t.Fatalf("expected success count from entry metric (%d), got %d", entry.SuccessCount, res.SuccessCount)
+	if res == nil {
+		t.Fatal("expected aggregated metric")
 	}
-	if res.OpsPerSec != entry.OpsPerSec {
-		t.Fatalf("expected ops/sec %d from entry metric, got %d", entry.OpsPerSec, res.OpsPerSec)
-	}
-	if res.StepID != entry.StepID {
-		t.Fatalf("expected step id %q from entry metric, got %q", entry.StepID, res.StepID)
-	}
-	if res.ConcurrencyCurrent != entry.ConcurrencyCurrent {
-		t.Fatalf("expected concurrency current %d, got %d", entry.ConcurrencyCurrent, res.ConcurrencyCurrent)
-	}
-	if res.NodesCount != entry.NodesCount {
-		t.Fatalf("expected NodesCount=%d, got %d", entry.NodesCount, res.NodesCount)
-	}
-}
 
-func TestMetricsAggregatorPrefersAggregateWhenRoleMissing(t *testing.T) {
-	aggregator := NewMetricsAggregatorWithEntry("aggregate")
-
-	aggregate := newNodeMetric(600, 60, 6000, 0, 50, 70, 8, 7.5)
-	aggregate.Role = "worker" // simulate aggregate sample missing entry role
-	aggregate.NodesCount = 6
-	aggregate.NodesPresent = []string{"node-0", "node-1"}
-
-	worker := newNodeMetric(100, 10, 1000, 0, 40, 60, 8, 7.5)
-	worker.Role = "worker"
-
-	res := aggregator.aggregateNodeMetrics(map[string]*PerformanceMetric{
-		"aggregate": aggregate,
-		"worker":    worker,
-	})
-
-	if res.SuccessCount != aggregate.SuccessCount {
-		t.Fatalf("expected success count from aggregate metric (%d), got %d", aggregate.SuccessCount, res.SuccessCount)
+	expectedSuccess := entry.SuccessCount + worker.SuccessCount
+	if res.SuccessCount != expectedSuccess {
+		t.Fatalf("expected success count %d, got %d", expectedSuccess, res.SuccessCount)
 	}
-	if res.NodesCount != aggregate.NodesCount {
-		t.Fatalf("expected node count %d, got %d", aggregate.NodesCount, res.NodesCount)
+	if res.NodesCount != 2 {
+		t.Fatalf("expected node count 2, got %d", res.NodesCount)
+	}
+	if res.OpsPerSec != entry.OpsPerSec+worker.OpsPerSec {
+		t.Fatalf("expected ops/sec %d, got %d", entry.OpsPerSec+worker.OpsPerSec, res.OpsPerSec)
+	}
+	if res.ConcurrencyCurrent != entry.ConcurrencyCurrent+worker.ConcurrencyCurrent {
+		t.Fatalf("expected concurrency current %d, got %d",
+			entry.ConcurrencyCurrent+worker.ConcurrencyCurrent, res.ConcurrencyCurrent)
 	}
 }

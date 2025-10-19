@@ -17,6 +17,8 @@ type MetricsAggregator struct {
 	entryNodeID string
 }
 
+const aggregateLabel = "aggregate"
+
 // NewMetricsAggregator creates a new metrics aggregator.
 func NewMetricsAggregator() *MetricsAggregator {
 	return &MetricsAggregator{}
@@ -59,63 +61,30 @@ func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*Perfor
 		return nil
 	}
 
-	nodesPresent := make([]string, 0, len(nodeMetrics))
+	nodeCount := len(nodeMetrics)
+	nodesPresent := make([]string, 0, nodeCount)
 	for nodeID := range nodeMetrics {
 		nodesPresent = append(nodesPresent, nodeID)
 	}
 	sort.Strings(nodesPresent)
 
-	if aggregateMetric := ma.selectAggregateMetric(nodeMetrics, nodesPresent); aggregateMetric != nil {
-		clone := *aggregateMetric
-		clone.Scope = "aggregate"
-		clone.Role = "aggregate"
-		clone.NodesCount = aggregateMetric.NodesCount
-		if clone.NodesCount == 0 {
-			clone.NodesCount = len(nodesPresent)
-		}
-		if len(aggregateMetric.NodesPresent) > 0 {
-			clone.NodesPresent = append([]string(nil), aggregateMetric.NodesPresent...)
-		} else {
-			clone.NodesPresent = append([]string(nil), nodesPresent...)
-		}
-		if clone.SampleTimestamp.IsZero() {
-			clone.SampleTimestamp = time.Now()
-			clone.SampleTimestampRaw = clone.SampleTimestamp.Format(time.RFC3339Nano)
-		}
-		if clone.Timestamp.IsZero() {
-			clone.Timestamp = clone.SampleTimestamp
-		}
-		return &clone
-	}
+	ma.warnOnAggregateSamples(nodeMetrics, nodeCount)
 
-	return ma.sumWorkerMetrics(nodeMetrics, nodesPresent)
-}
-
-func (ma *MetricsAggregator) selectAggregateMetric(nodeMetrics map[string]*PerformanceMetric, nodesPresent []string) *PerformanceMetric {
-	if ma.entryNodeID != "" {
-		if metric, ok := nodeMetrics[ma.entryNodeID]; ok && metric != nil {
-			return metric
-		}
+	result := ma.sumWorkerMetrics(nodeMetrics, nodesPresent)
+	if result != nil {
+		logging.LogDebug("metrics-aggregator", "summed node metrics",
+			"success", result.SuccessCount,
+			"failed", result.FailedCount,
+			"ops_per_sec", result.OpsPerSec,
+			"nodes", len(nodesPresent))
 	}
-
-	var candidate *PerformanceMetric
-	for _, metric := range nodeMetrics {
-		if metric == nil {
-			continue
-		}
-		if strings.EqualFold(metric.Role, "entry") || metric.NodesCount > 0 || len(metric.NodesPresent) > 0 {
-			if candidate == nil || metric.Timestamp.After(candidate.Timestamp) || (metric.Timestamp.Equal(candidate.Timestamp) && metric.SampleTimestamp.After(candidate.SampleTimestamp)) {
-				candidate = metric
-			}
-		}
-	}
-	return candidate
+	return result
 }
 
 func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*PerformanceMetric, nodesPresent []string) *PerformanceMetric {
 	var result PerformanceMetric
-	result.Scope = "aggregate"
-	result.Role = "aggregate"
+	result.Scope = aggregateLabel
+	result.Role = aggregateLabel
 	result.NodesCount = len(nodesPresent)
 	result.NodesPresent = append([]string(nil), nodesPresent...)
 
@@ -256,6 +225,47 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	return &result
 }
 
+func (ma *MetricsAggregator) warnOnAggregateSamples(nodeMetrics map[string]*PerformanceMetric, nodeCount int) {
+	if ma.entryNodeID != "" {
+		if metric, ok := nodeMetrics[ma.entryNodeID]; ok && looksAggregate(metric, nodeCount) {
+			logging.LogWarn("metrics-aggregator", "unexpected aggregate metrics detected on entry node",
+				"node", ma.entryNodeID,
+				"success", metric.SuccessCount,
+				"failed", metric.FailedCount,
+				"nodes_count", metric.NodesCount,
+				"nodes_present", len(metric.NodesPresent))
+		}
+	}
+	for nodeID, metric := range nodeMetrics {
+		if nodeID == ma.entryNodeID {
+			continue
+		}
+		if looksAggregate(metric, nodeCount) {
+			logging.LogWarn("metrics-aggregator", "unexpected aggregate metrics detected on worker node",
+				"node", nodeID,
+				"success", metric.SuccessCount,
+				"failed", metric.FailedCount,
+				"nodes_count", metric.NodesCount,
+				"nodes_present", len(metric.NodesPresent))
+		}
+	}
+}
+
+func looksAggregate(metric *PerformanceMetric, expectedNodes int) bool {
+	if metric == nil {
+		return false
+	}
+	switch {
+	case strings.EqualFold(metric.Role, aggregateLabel):
+		return true
+	case expectedNodes > 1 && metric.NodesCount >= expectedNodes && metric.NodesCount > 1:
+		return true
+	case expectedNodes > 1 && len(metric.NodesPresent) >= expectedNodes && len(metric.NodesPresent) > 1:
+		return true
+	default:
+		return false
+	}
+}
 func clampPercentage(v float64) float64 {
 	if v < 0 {
 		return 0

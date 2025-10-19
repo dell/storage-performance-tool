@@ -125,6 +125,93 @@ func TestLiveViewRenderer_RenderLiveView_MultiNode(t *testing.T) {
 	}
 }
 
+func TestLiveViewRenderer_RecomputesTotalsFromPerNodeSamples(t *testing.T) {
+	renderer := NewLiveViewRenderer(nil)
+	defer renderer.Stop()
+
+	mc := NewMetricsCollector()
+
+	now := time.Now()
+	// Latest aggregated sample reports zero work but conveys phase metadata.
+	aggregated := PerformanceMetric{
+		MetricsSchema:   2,
+		Scope:           "aggregate",
+		OpType:          "create",
+		TestState:       1,
+		Timestamp:       now,
+		SampleTimestamp: now,
+		StepID:          "create-step",
+	}
+	aggregated.SampleTimestampRaw = aggregated.SampleTimestamp.Format(time.RFC3339Nano)
+	mc.AddSample(aggregated)
+
+	nodeA := &PerformanceMetric{
+		MetricsSchema:   2,
+		Scope:           "node",
+		OpType:          "CREATE",
+		SuccessCount:    600,
+		OpsPerSec:       120,
+		MBPerSec:        45,
+		Timestamp:       now,
+		SampleTimestamp: now,
+	}
+	nodeA.SampleTimestampRaw = nodeA.SampleTimestamp.Format(time.RFC3339Nano)
+
+	nodeB := &PerformanceMetric{
+		MetricsSchema:   2,
+		Scope:           "node",
+		OpType:          "CREATE",
+		SuccessCount:    400,
+		OpsPerSec:       180,
+		MBPerSec:        55,
+		Timestamp:       now,
+		SampleTimestamp: now,
+	}
+	nodeB.SampleTimestampRaw = nodeB.SampleTimestamp.Format(time.RFC3339Nano)
+
+	status := map[string]NodeConnectionStatus{
+		"nodeA": {IsConnected: true, IsActive: true, Phase: NodePhaseMetricsFlowing},
+		"nodeB": {IsConnected: true, IsActive: true, Phase: NodePhaseMetricsFlowing},
+	}
+
+	mc.AddMultiNodeSample(&MultiNodeMetricsUpdate{
+		Aggregated: nil,
+		PerNode: map[string]*PerformanceMetric{
+			"nodeA": nodeA,
+			"nodeB": nodeB,
+		},
+		NodeStatus: status,
+	})
+
+	output := renderer.RenderLiveView(mc, 120)
+	if output == "" {
+		t.Fatal("expected non-empty live view output")
+	}
+
+	var totalRow string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "Total") {
+			totalRow = line
+			break
+		}
+	}
+	if totalRow == "" {
+		t.Fatal("expected Total row in live view output")
+	}
+
+	fields := strings.Fields(totalRow)
+	if len(fields) < 7 {
+		t.Fatalf("expected Total row to have at least 7 columns, got %v", fields)
+	}
+
+	if fields[4] != "300" { // IOPs column (sum of 120 + 180)
+		t.Fatalf("expected Total IOPs to be 300, got %s", fields[4])
+	}
+	if fields[5] != "1000" { // Files column (sum of per-node success counts)
+		t.Fatalf("expected Total Files to be 1000, got %s", fields[5])
+	}
+}
+
 func TestLiveViewRenderer_MultiNodePercentDisplay(t *testing.T) {
 	renderer := NewLiveViewRenderer(nil)
 	defer renderer.Stop()
