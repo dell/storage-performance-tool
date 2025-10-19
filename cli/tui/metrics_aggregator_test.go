@@ -144,3 +144,70 @@ func TestMetricsAggregatorLatestTimestamp(t *testing.T) {
 		t.Errorf("expected aggregated timestamp to reflect latest sample, got %v", aggregated.Timestamp)
 	}
 }
+
+func TestMetricsAggregatorIgnoresAggregateScopedEntrySamples(t *testing.T) {
+	aggregator := NewMetricsAggregatorWithEntry("entry")
+
+	entry := newNodeMetric(600, 60, 6000, 0, 50, 70, 8, 7.5)
+	entry.Role = "entry"
+	entry.Scope = "aggregate" // aggregated payloads should be ignored by node-only reducer
+	entry.NodesCount = 6
+	entry.NodesPresent = []string{"node-0", "node-1", "node-2"}
+
+	workerA := newNodeMetric(300, 30, 3000, 0, 40, 60, 8, 7.5)
+	workerB := newNodeMetric(200, 20, 2000, 0, 35, 55, 6, 6.5)
+
+	res := aggregator.Aggregate(map[string]*PerformanceMetric{
+		"entry":    entry,
+		"worker-a": workerA,
+		"worker-b": workerB,
+	})
+
+	if res == nil {
+		t.Fatal("expected aggregated metric")
+	}
+
+	expectedSuccess := workerA.SuccessCount + workerB.SuccessCount
+	if res.SuccessCount != expectedSuccess {
+		t.Fatalf("expected success count %d, got %d", expectedSuccess, res.SuccessCount)
+	}
+	if res.OpsPerSec != workerA.OpsPerSec+workerB.OpsPerSec {
+		t.Fatalf("expected ops/sec %d, got %d", workerA.OpsPerSec+workerB.OpsPerSec, res.OpsPerSec)
+	}
+	if res.NodesCount != 2 {
+		t.Fatalf("expected node count 2 (workers only), got %d", res.NodesCount)
+	}
+}
+
+func TestMetricsAggregatorIncludesEntryWhenNodeScoped(t *testing.T) {
+	aggregator := NewMetricsAggregatorWithEntry("entry")
+
+	entry := newNodeMetric(400, 40, 4000, 0, 45, 65, 10, 8.5)
+	entry.Role = "entry"
+
+	worker := newNodeMetric(200, 20, 2000, 0, 35, 55, 6, 6.5)
+
+	res := aggregator.Aggregate(map[string]*PerformanceMetric{
+		"entry":  entry,
+		"worker": worker,
+	})
+
+	if res == nil {
+		t.Fatal("expected aggregated metric")
+	}
+
+	expectedSuccess := entry.SuccessCount + worker.SuccessCount
+	if res.SuccessCount != expectedSuccess {
+		t.Fatalf("expected success count %d, got %d", expectedSuccess, res.SuccessCount)
+	}
+	if res.NodesCount != 2 {
+		t.Fatalf("expected node count 2, got %d", res.NodesCount)
+	}
+	if res.OpsPerSec != entry.OpsPerSec+worker.OpsPerSec {
+		t.Fatalf("expected ops/sec %d, got %d", entry.OpsPerSec+worker.OpsPerSec, res.OpsPerSec)
+	}
+	if res.ConcurrencyCurrent != entry.ConcurrencyCurrent+worker.ConcurrencyCurrent {
+		t.Fatalf("expected concurrency current %d, got %d",
+			entry.ConcurrencyCurrent+worker.ConcurrencyCurrent, res.ConcurrencyCurrent)
+	}
+}

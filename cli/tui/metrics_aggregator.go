@@ -13,11 +13,21 @@ import (
 )
 
 // MetricsAggregator produces client-side totals from per-node metrics.
-type MetricsAggregator struct{}
+type MetricsAggregator struct {
+	entryNodeID string
+}
+
+const aggregateLabel = "aggregate"
 
 // NewMetricsAggregator creates a new metrics aggregator.
 func NewMetricsAggregator() *MetricsAggregator {
 	return &MetricsAggregator{}
+}
+
+// NewMetricsAggregatorWithEntry creates a metrics aggregator that treats the
+// provided node identifier as the aggregate (entry) source.
+func NewMetricsAggregatorWithEntry(entryNodeID string) *MetricsAggregator {
+	return &MetricsAggregator{entryNodeID: entryNodeID}
 }
 
 // Aggregate combines node-scoped metrics into a single aggregate view.
@@ -47,62 +57,75 @@ func (ma *MetricsAggregator) Aggregate(nodeMetrics map[string]*PerformanceMetric
 }
 
 func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*PerformanceMetric) *PerformanceMetric {
-	var base *PerformanceMetric
-	for _, metric := range nodeMetrics {
-		base = metric
-		break
-	}
-	if base == nil {
+	if len(nodeMetrics) == 0 {
 		return nil
 	}
 
-	nodesPresent := make([]string, 0, len(nodeMetrics))
+	nodeCount := len(nodeMetrics)
+	nodesPresent := make([]string, 0, nodeCount)
+	for nodeID := range nodeMetrics {
+		nodesPresent = append(nodesPresent, nodeID)
+	}
+	sort.Strings(nodesPresent)
+
+	ma.warnOnAggregateSamples(nodeMetrics, nodeCount)
+
+	result := ma.sumWorkerMetrics(nodeMetrics, nodesPresent)
+	if result != nil {
+		logging.LogDebug("metrics-aggregator", "summed node metrics",
+			"success", result.SuccessCount,
+			"failed", result.FailedCount,
+			"ops_per_sec", result.OpsPerSec,
+			"nodes", len(nodesPresent))
+	}
+	return result
+}
+
+func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*PerformanceMetric, nodesPresent []string) *PerformanceMetric {
+	var result PerformanceMetric
+	result.Scope = aggregateLabel
+	result.Role = aggregateLabel
+	result.NodesCount = len(nodesPresent)
+	result.NodesPresent = append([]string(nil), nodesPresent...)
+
 	var (
-		totalOpsPerSec          int64
-		totalMBPerSec           int64
-		totalSuccess            int64
-		totalFailed             int64
-		totalLatencyOps         int64
-		totalDurationOps        int64
-		weightedLatency         int64
-		weightedDuration        int64
-		totalConcurrencyCurrent int64
-		totalConcurrencyMean    float64
-		allUnbounded            = true
-		allOverallUnbounded     = true
-		completionSum           float64
-		completionWeight        float64
-		overallCompletionSum    float64
-		overallCompletionCount  int
-		latestSample            time.Time
-		latestTimestamp         time.Time
-		limitType               string
-		limitMixed              bool
-		totalLimitOps           int64
-		maxLimitTime            int64
-		limitPresent            bool
-		maxTestState            int
+		totalLatencyWeight   int64
+		totalDurationWeight  int64
+		completionSum        float64
+		completionWeight     float64
+		overallCompletionSum float64
+		overallCount         int
+		allUnbounded         = true
+		allOverallUnbounded  = true
+		latestSample         time.Time
+		latestTimestamp      time.Time
+		limitPresent         bool
+		limitMixed           bool
+		limitType            string
+		totalLimitOps        int64
+		maxLimitTime         int64
 	)
 
-	for nodeID, metric := range nodeMetrics {
-		nodesPresent = append(nodesPresent, nodeID)
+	for _, metric := range nodeMetrics {
+		if metric == nil {
+			continue
+		}
 
-		totalOpsPerSec += metric.OpsPerSec
-		totalMBPerSec += metric.MBPerSec
-		totalSuccess += metric.SuccessCount
-		totalFailed += metric.FailedCount
+		result.OpsPerSec += metric.OpsPerSec
+		result.MBPerSec += metric.MBPerSec
+		result.SuccessCount += metric.SuccessCount
+		result.FailedCount += metric.FailedCount
+		result.ConcurrencyCurrent += metric.ConcurrencyCurrent
+		result.ConcurrencyMean += metric.ConcurrencyMean
 
 		opsWeight := metric.OpsPerSec
 		if opsWeight <= 0 {
 			opsWeight = 1
 		}
-		weightedLatency += metric.MeanLatency * opsWeight
-		weightedDuration += metric.MeanDuration * opsWeight
-		totalLatencyOps += opsWeight
-		totalDurationOps += opsWeight
-
-		totalConcurrencyCurrent += metric.ConcurrencyCurrent
-		totalConcurrencyMean += metric.ConcurrencyMean
+		result.MeanLatency += metric.MeanLatency * opsWeight
+		result.MeanDuration += metric.MeanDuration * opsWeight
+		totalLatencyWeight += opsWeight
+		totalDurationWeight += opsWeight
 
 		if !metric.Unbounded {
 			allUnbounded = false
@@ -113,7 +136,7 @@ func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*Perfor
 			allOverallUnbounded = false
 		}
 		overallCompletionSum += metric.OverallCompletionPercent
-		overallCompletionCount++
+		overallCount++
 
 		if metric.SampleTimestamp.After(latestSample) {
 			latestSample = metric.SampleTimestamp
@@ -122,6 +145,24 @@ func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*Perfor
 			latestTimestamp = metric.Timestamp
 		}
 
+		if result.StepID == "" {
+			result.StepID = metric.StepID
+		}
+		if result.OpType == "" {
+			result.OpType = metric.OpType
+		}
+		if metric.TestState > result.TestState {
+			result.TestState = metric.TestState
+		}
+		if result.RunID == "" {
+			result.RunID = metric.RunID
+		}
+		if result.ClusterID == "" {
+			result.ClusterID = metric.ClusterID
+		}
+		if result.SptTimestamp == "" {
+			result.SptTimestamp = metric.SptTimestamp
+		}
 		if metric.HasLimit {
 			limitPresent = true
 			if limitType == "" {
@@ -136,85 +177,95 @@ func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*Perfor
 				maxLimitTime = metric.LimitTimeSec
 			}
 		}
-
-		if metric.TestState > maxTestState {
-			maxTestState = metric.TestState
-		}
 	}
 
-	sort.Strings(nodesPresent)
-
-	aggregated := &PerformanceMetric{
-		MetricsSchema: base.MetricsSchema,
-		Scope:         "aggregate",
-		Role:          "aggregate",
-		ClusterID:     base.ClusterID,
-		RunID:         base.RunID,
-		StepID:        base.StepID,
-		OpType:        base.OpType,
-		TestState:     maxTestState,
-		SptTimestamp:  base.SptTimestamp,
-		NodesCount:    len(nodesPresent),
-		NodesPresent:  nodesPresent,
+	if totalLatencyWeight > 0 {
+		result.MeanLatency /= totalLatencyWeight
+		result.MeanDuration /= totalDurationWeight
 	}
-
-	aggregated.OpsPerSec = totalOpsPerSec
-	aggregated.MBPerSec = totalMBPerSec
-	aggregated.SuccessCount = totalSuccess
-	aggregated.FailedCount = totalFailed
-
-	if totalLatencyOps > 0 {
-		aggregated.MeanLatency = weightedLatency / totalLatencyOps
-	}
-	if totalDurationOps > 0 {
-		aggregated.MeanDuration = weightedDuration / totalDurationOps
-	}
-
-	aggregated.ConcurrencyCurrent = totalConcurrencyCurrent
-	aggregated.ConcurrencyMean = totalConcurrencyMean
-
-	aggregated.Unbounded = allUnbounded
-	aggregated.OverallUnbounded = allOverallUnbounded
 
 	if completionWeight > 0 {
-		aggregated.CompletionPercent = completionSum / completionWeight
+		result.CompletionPercent = completionSum / completionWeight
 	}
-	if overallCompletionCount > 0 {
-		aggregated.OverallCompletionPercent = overallCompletionSum / float64(overallCompletionCount)
+	if overallCount > 0 {
+		result.OverallCompletionPercent = overallCompletionSum / float64(overallCount)
 	}
+	result.Unbounded = allUnbounded
+	result.OverallUnbounded = allOverallUnbounded
 
 	if !limitMixed && limitPresent {
-		aggregated.HasLimit = true
-		aggregated.LimitType = limitType
+		result.HasLimit = true
+		result.LimitType = limitType
 		switch limitType {
 		case "op_count":
-			aggregated.LimitOpCount = totalLimitOps
+			result.LimitOpCount = totalLimitOps
 			if totalLimitOps > 0 {
-				totalWork := aggregated.SuccessCount + aggregated.FailedCount
-				aggregated.CompletionPercent = (float64(totalWork) / float64(totalLimitOps)) * 100
+				totalWork := result.SuccessCount + result.FailedCount
+				result.CompletionPercent = (float64(totalWork) / float64(totalLimitOps)) * 100
 			}
-			aggregated.Unbounded = false
+			result.Unbounded = false
 		case "time":
-			aggregated.LimitTimeSec = maxLimitTime
+			result.LimitTimeSec = maxLimitTime
 		}
 	}
 
-	aggregated.CompletionPercent = clampPercentage(aggregated.CompletionPercent)
-	aggregated.OverallCompletionPercent = clampPercentage(aggregated.OverallCompletionPercent)
+	result.CompletionPercent = clampPercentage(result.CompletionPercent)
+	result.OverallCompletionPercent = clampPercentage(result.OverallCompletionPercent)
 
 	if latestSample.IsZero() {
 		latestSample = time.Now()
 	}
-	aggregated.SampleTimestamp = latestSample
-	aggregated.SampleTimestampRaw = latestSample.Format(time.RFC3339Nano)
+	result.SampleTimestamp = latestSample
+	result.SampleTimestampRaw = latestSample.Format(time.RFC3339Nano)
 	if latestTimestamp.IsZero() {
 		latestTimestamp = latestSample
 	}
-	aggregated.Timestamp = latestTimestamp
+	result.Timestamp = latestTimestamp
 
-	return aggregated
+	return &result
 }
 
+func (ma *MetricsAggregator) warnOnAggregateSamples(nodeMetrics map[string]*PerformanceMetric, nodeCount int) {
+	if ma.entryNodeID != "" {
+		if metric, ok := nodeMetrics[ma.entryNodeID]; ok && looksAggregate(metric, nodeCount) {
+			logging.LogWarn("metrics-aggregator", "unexpected aggregate metrics detected on entry node",
+				"node", ma.entryNodeID,
+				"success", metric.SuccessCount,
+				"failed", metric.FailedCount,
+				"nodes_count", metric.NodesCount,
+				"nodes_present", len(metric.NodesPresent))
+		}
+	}
+	for nodeID, metric := range nodeMetrics {
+		if nodeID == ma.entryNodeID {
+			continue
+		}
+		if looksAggregate(metric, nodeCount) {
+			logging.LogWarn("metrics-aggregator", "unexpected aggregate metrics detected on worker node",
+				"node", nodeID,
+				"success", metric.SuccessCount,
+				"failed", metric.FailedCount,
+				"nodes_count", metric.NodesCount,
+				"nodes_present", len(metric.NodesPresent))
+		}
+	}
+}
+
+func looksAggregate(metric *PerformanceMetric, expectedNodes int) bool {
+	if metric == nil {
+		return false
+	}
+	switch {
+	case strings.EqualFold(metric.Role, aggregateLabel):
+		return true
+	case expectedNodes > 1 && metric.NodesCount >= expectedNodes && metric.NodesCount > 1:
+		return true
+	case expectedNodes > 1 && len(metric.NodesPresent) >= expectedNodes && len(metric.NodesPresent) > 1:
+		return true
+	default:
+		return false
+	}
+}
 func clampPercentage(v float64) float64 {
 	if v < 0 {
 		return 0

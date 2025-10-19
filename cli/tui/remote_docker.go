@@ -29,6 +29,44 @@ type RemoteDockerManager struct {
 	proberRun   func(ctx context.Context, baseURL string, pollInterval time.Duration) error
 }
 
+func sanitizeHostComponent(host string) string {
+	lowered := strings.ToLower(host)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range lowered {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		result = "host"
+	}
+	if len(result) > 40 {
+		result = result[:40]
+	}
+	return result
+}
+
+func generateRemoteContainerName(prefix, host string) string {
+	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().Unix(), sanitizeHostComponent(host))
+}
+
+func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
+	hostName := m.host.Host
+	return map[string]string{
+		constants.DockerLabelManaged: "true",
+		constants.DockerLabelRole:    role,
+		constants.DockerLabelHost:    hostName,
+	}
+}
+
 // newRemoteDockerManagerWithExecutor allows tests to inject a custom executor.
 func newRemoteDockerManagerWithExecutor(host *hostparse.HostInfo, exec command.CommandExecutor) (*RemoteDockerManager, error) {
 	if host == nil {
@@ -78,11 +116,14 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 		return "", fmt.Errorf("invalid api port: %q", apiPort)
 	}
 
+	name := generateRemoteContainerName("node", m.host.Host)
 	cfg := command.ContainerConfig{
 		Image:        image,
+		Name:         name,
 		NetworkMode:  command.NetworkModeBridge,
 		Detached:     true,
 		PortMappings: []command.PortMapping{{HostPort: port, ContainerPort: port}},
+		Labels:       m.baseLabels(constants.DockerRoleNode),
 		Command:      []string{"--run-node=true", "--run-port=" + apiPort},
 	}
 
@@ -111,10 +152,13 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 	logging.LogInfo("remote-docker", "using advertised IP", "host", m.host.Original, "ip", advIP)
 
 	// Host networking with explicit JVM RMI hostname and explicit ports
+	name := generateRemoteContainerName("worker", m.host.Host)
 	cfg := command.ContainerConfig{
 		Image:       image,
+		Name:        name,
 		NetworkMode: command.NetworkModeHost,
 		Detached:    true,
+		Labels:      m.baseLabels(constants.DockerRoleWorker),
 		Environment: map[string]string{
 			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
@@ -156,10 +200,13 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 	cmd = append(cmd, "--run-node=true", "--run-port="+constants.SptAPIPort)
 	cmd = append(cmd, additionalArgs...)
 
+	name := generateRemoteContainerName("entry", m.host.Host)
 	cfg := command.ContainerConfig{
 		Image:       image,
+		Name:        name,
 		NetworkMode: command.NetworkModeHost,
 		Detached:    true,
+		Labels:      m.baseLabels(constants.DockerRoleEntry),
 		Command:     cmd,
 	}
 

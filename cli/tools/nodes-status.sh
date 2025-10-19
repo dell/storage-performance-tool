@@ -63,17 +63,42 @@ function once() {
       is_primary=true
     fi
 
-    # Container status via SSH
-    c_status=$(ssh $SSH_OPTS "$host" "docker ps --filter name=^/${role_container}$ --format '{{.Status}}|{{.Image}}' || true")
-    if [ -z "$c_status" ]; then
-      c_status=$(ssh $SSH_OPTS "$host" "docker ps -a --filter name=^/${role_container}$ --format '{{.Status}}|{{.Image}}' || true")
-      [ -z "$c_status" ] && c_status="not-found|?"
+    # Prefer managed label when available
+    label_query=$(ssh $SSH_OPTS "$host" "docker ps --filter \"label=spt.managed=true\" --filter \"label=spt.host=$host_no_user\" --format '{{.Status}}|{{.Label \"spt.role\"}}|{{.Names}}|{{.Image}}' | head -n1" || true)
+    cont_role=""
+    cont_state=""
+    cont_image="?"
+    if [ -n "$label_query" ]; then
+      cont_state="${label_query%%|*}"
+      rest="${label_query#*|}"
+      cont_role="${rest%%|*}"
+      rest="${rest#*|}"
+      # we don't currently display the name, but keep parsing to advance
+      cont_image="${rest#*|}"
+    else
+      # Container status via SSH (legacy name-based fallback)
+      c_status=$(ssh $SSH_OPTS "$host" "docker ps --filter name=^/${role_container}$ --format '{{.Status}}|{{.Image}}' || true")
+      if [ -z "$c_status" ]; then
+        c_status=$(ssh $SSH_OPTS "$host" "docker ps -a --filter name=^/${role_container}$ --format '{{.Status}}|{{.Image}}' || true")
+        [ -z "$c_status" ] && c_status="not-found|?"
+      fi
+      cont_state="${c_status%%|*}"
+      cont_image="${c_status#*|}"
     fi
 
-    cont_state="${c_status%%|*}"
-    cont_image="${c_status#*|}"
-
     # API check: workers expose /run; entry does not in our workflow
+    if [ -z "$cont_state" ]; then
+      cont_state="not-found"
+    fi
+
+    if [ -n "$cont_role" ]; then
+      if [ "$cont_role" = "entry" ]; then
+        is_primary=true
+      elif [ "$cont_role" = "worker" ] || [ "$cont_role" = "node" ]; then
+        is_primary=false
+      fi
+    fi
+
     if [ "$is_primary" = true ]; then
       http_code="n/a"
     else

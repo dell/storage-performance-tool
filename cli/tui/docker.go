@@ -78,6 +78,18 @@ func (dm *DockerManager) HostInfo() *hostparse.HostInfo {
 	return dm.hostInfo
 }
 
+func (dm *DockerManager) baseLabels(role string) map[string]string {
+	hostName := "localhost"
+	if dm.hostInfo != nil && strings.TrimSpace(dm.hostInfo.Host) != "" {
+		hostName = dm.hostInfo.Host
+	}
+	return map[string]string{
+		constants.DockerLabelManaged: "true",
+		constants.DockerLabelRole:    role,
+		constants.DockerLabelHost:    hostName,
+	}
+}
+
 // NewDockerManager creates a new Docker manager
 func NewDockerManager() (*DockerManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -259,6 +271,8 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 		)
 	}
 
+	labels := dm.baseLabels(constants.DockerRoleNode)
+
 	// Create container with port mapping
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
 		Image:        image,
@@ -267,6 +281,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          envVars,
+		Labels:       labels,
 	}, &container.HostConfig{
 		PortBindings: portBinding,
 	}, nil, nil, "")
@@ -348,6 +363,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	}
 
 	// Create container configuration
+	labels := dm.baseLabels(constants.DockerRoleWorker)
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
@@ -359,6 +375,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 			fmt.Sprintf("JAVA_OPTS=-Djava.rmi.server.hostname=%s", rmiHostname),
 			fmt.Sprintf("JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=%s", rmiHostname),
 		},
+		Labels: labels,
 	}
 
 	hostConfig := &container.HostConfig{
@@ -418,6 +435,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	// Create container configuration
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "entry_node", "workers", len(workerAddresses), "cmd", cmd)
 
+	labels := dm.baseLabels(constants.DockerRoleEntry)
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
@@ -426,6 +444,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 		ExposedPorts: nat.PortSet{
 			constants.SptAPIPort + "/tcp": struct{}{}, // Only REST API port needed for entry node
 		},
+		Labels: labels,
 	}
 
 	hostConfig := &container.HostConfig{
