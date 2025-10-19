@@ -50,6 +50,7 @@ cli/test-results.json
 cli/test-failures.txt
 cli/coverage.out
 cli/coverage.html
+cli/entry-metrics.json
 
 # Generated scenarios and scratch space
 cli/mongoose-scenario-*.js
@@ -121,3 +122,6 @@ engine/logs/
 engine/mongoose-*.log
 engine/test-output/
 engine/target/
+
+# CLI runtime captures
+cli/entry-metrics.json
