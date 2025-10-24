@@ -18,7 +18,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-/** @author veronika K. on 10.10.18 */
+/** Prometheus collector that exports SPT distributed metrics snapshots. */
 public class PrometheusMetricsExporterImpl extends Collector implements PrometheusMetricsExporter {
 
 	private final List<String> labelValues = new ArrayList<>();

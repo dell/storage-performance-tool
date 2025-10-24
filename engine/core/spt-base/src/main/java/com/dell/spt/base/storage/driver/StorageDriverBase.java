@@ -77,6 +77,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 	}
 
+	@Override
 	public final void operationResultOutput(final Output<O> opResultOut) {
 		this.opResultOut = opResultOut;
 	}

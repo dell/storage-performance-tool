@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 public interface LoadStep extends Daemon {
 
-	/** @return the step id */
+	/** Returns the unique identifier for this step. */
 	String loadStepId() throws RemoteException;
 
 	long runId() throws RemoteException;
@@ -32,5 +32,6 @@ public interface LoadStep extends Daemon {
 	@Override
 	AsyncRunnable stop() throws RemoteException;
 
+	@Override
 	void close() throws IOException;
 }

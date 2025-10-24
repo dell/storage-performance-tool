@@ -49,6 +49,7 @@ public class OperationsBuilderImpl<I extends Item, O extends Operation<I>>
 		return this;
 	}
 
+	@Override
 	public final String inputPath() {
 		return inputPath;
 	}

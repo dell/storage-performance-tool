@@ -264,8 +264,7 @@ class LoadStepClientBaseTest {
 				config.val("load-op-type", opType);
 
 				assertDoesNotThrow(() -> {
-					TestLoadStepClient client = new TestLoadStepClient(
-									config, extensions, ctxConfigs, mockMetricsManager);
+					new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager);
 					assertEquals(opType, config.stringVal("load-op-type"));
 				}, "Should work with operation type: " + opType);
 			}
@@ -371,12 +370,12 @@ class LoadStepClientBaseTest {
 		@DisplayName("remoteNodeAddrs should handle empty node list")
 		void testRemoteNodeAddrsEmpty() {
 			Config config = TestConfigBuilder.config();
-			TestLoadStepClient client = new TestLoadStepClient(
-							config, extensions, ctxConfigs, mockMetricsManager);
+			TestLoadStepClient client = assertDoesNotThrow(
+							() -> new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager));
 
 			// This tests the remoteNodeAddrs method indirectly through construction
 			assertNotNull(client);
-			assertDoesNotThrow(() -> client.loadStepId());
+			assertDoesNotThrow(client::loadStepId);
 		}
 
 		@Test
@@ -468,8 +467,7 @@ class LoadStepClientBaseTest {
 		@DisplayName("Configuration paths used by LoadStepClientBase should be accessible")
 		void testActualConfigurationPaths() {
 			Config config = TestConfigBuilder.config();
-			TestLoadStepClient client = new TestLoadStepClient(
-							config, extensions, ctxConfigs, mockMetricsManager);
+			new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager);
 
 			// Test paths that LoadStepClientBase actually accesses
 			assertAll("Configuration paths should be accessible",
@@ -772,8 +770,8 @@ class LoadStepClientBaseTest {
 		@DisplayName("All major configuration paths should be accessible")
 		void testAllMajorConfigurationPaths() {
 			Config config = TestConfigBuilder.config();
-			TestLoadStepClient client = new TestLoadStepClient(
-							config, extensions, ctxConfigs, mockMetricsManager);
+			assertDoesNotThrow(
+							() -> new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager));
 
 			// Test all the paths that LoadStepClientBase uses
 			assertAll("All configuration paths should be accessible",

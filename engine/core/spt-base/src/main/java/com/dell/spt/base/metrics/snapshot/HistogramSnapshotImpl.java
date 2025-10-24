@@ -3,7 +3,7 @@ package com.dell.spt.base.metrics.snapshot;
 import java.util.Arrays;
 import java.util.List;
 
-/** @author veronika K. on 25.09.18 */
+/** Immutable histogram snapshot backed by a sorted long array. */
 public class HistogramSnapshotImpl implements HistogramSnapshot {
 
 	private static final HistogramSnapshotImpl EMPTY = new HistogramSnapshotImpl(new long[0]);

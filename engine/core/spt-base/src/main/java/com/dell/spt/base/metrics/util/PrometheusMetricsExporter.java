@@ -2,7 +2,7 @@ package com.dell.spt.base.metrics.util;
 
 import java.util.List;
 
-/** @author veronika K. on 10.10.18 */
+/** Fluent builder-style exporter for Prometheus metric families. */
 public interface PrometheusMetricsExporter {
 
 	PrometheusMetricsExporter quantile(final double value);

@@ -26,7 +26,6 @@ final class MetricsJsonResponder {
 	private static final int METRICS_SCHEMA_VERSION = 2;
 
 	private final MetricsManager metricsManager;
-	private final Config config;
 	private final ObjectMapper objectMapper = new ObjectMapper();
 	private final String nodeId;
 	private final String clusterId;
@@ -35,7 +34,6 @@ final class MetricsJsonResponder {
 
 	MetricsJsonResponder(final MetricsManager metricsManager, final Config config) {
 		this.metricsManager = metricsManager;
-		this.config = config;
 		this.nodeId = resolveNodeId(config);
 		this.clusterId = resolveClusterId(config);
 		this.configuredRunId = resolveConfiguredRunId(config);
@@ -638,7 +636,7 @@ final class MetricsJsonResponder {
 
 		if (!usingDistributed) {
 			for (MetricsContext ctx : allContexts) {
-				if (!(stepId.equals(ctx.loadStepId()))) {
+				if (!stepId.equals(ctx.loadStepId())) {
 					continue;
 				}
 				ctx.refreshLastSnapshot();

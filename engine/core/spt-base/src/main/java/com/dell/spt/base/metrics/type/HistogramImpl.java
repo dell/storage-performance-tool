@@ -6,7 +6,7 @@ import com.dell.spt.base.metrics.snapshot.HistogramSnapshot;
 
 import java.util.concurrent.atomic.LongAdder;
 
-/** @author veronika K. on 01.10.18 */
+/** Thread-safe histogram meter backed by a {@link LongReservoir}. */
 public class HistogramImpl implements LongMeter<HistogramSnapshot> {
 
 	private final LongReservoir reservoir;

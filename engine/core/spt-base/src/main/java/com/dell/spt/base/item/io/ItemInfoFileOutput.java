@@ -3,7 +3,6 @@ package com.dell.spt.base.item.io;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.env.FsUtil;
-import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -16,7 +15,7 @@ import java.util.List;
 /** Created by kurila on 09.01.17.
  * Item output to file with support for the single object and batch calls
  */
-public final class ItemInfoFileOutput<I extends Item, O extends Operation> implements Output<O> {
+public final class ItemInfoFileOutput<O extends Operation> implements Output<O> {
 
 	private final Output<String> itemInfoOutput;
 

@@ -6,11 +6,11 @@ import java.lang.reflect.Method;
 
 public interface CompositeExpressionInputBuilder {
 
-	<T extends CompositeExpressionInputBuilder> T expression(final String expr);
+	CompositeExpressionInputBuilder expression(final String expr);
 
-	<T extends CompositeExpressionInputBuilder> T function(final String prefix, final String name, final Method method);
+	CompositeExpressionInputBuilder function(final String prefix, final String name, final Method method);
 
-	<T extends CompositeExpressionInputBuilder> T value(final String name, final Object value, final Class<?> type);
+	CompositeExpressionInputBuilder value(final String name, final Object value, final Class<?> type);
 
 	CompositeStringInput build();
 

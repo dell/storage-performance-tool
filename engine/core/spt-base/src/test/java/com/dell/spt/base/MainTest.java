@@ -68,9 +68,4 @@ class MainTest {
 		ctx.updateLoggers();
 	}
 
-	private static Level currentLoggerLevel() {
-		final LoggerContext ctx = LoggerContext.getContext(false);
-		final var configuration = ctx.getConfiguration();
-		return configuration.getLoggerConfig(Loggers.MSG.getName()).getLevel();
-	}
 }

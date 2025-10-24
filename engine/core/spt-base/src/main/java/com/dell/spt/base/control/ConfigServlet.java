@@ -18,7 +18,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-/** @author veronika K. on 26.10.18 */
+/** Servlet that serves the current configuration and schema over HTTP. */
 public class ConfigServlet extends HttpServlet {
 
 	private static final String SCHEMA_PATH = "schema";

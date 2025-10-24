@@ -2,7 +2,7 @@ package com.dell.spt.base.metrics.snapshot;
 
 import java.io.Serializable;
 
-/** @author veronika K. on 12.10.18 */
+/** Snapshot reporting a simple count metric. */
 public interface CountMetricSnapshot extends Serializable {
 
 	long count();

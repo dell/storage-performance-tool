@@ -24,14 +24,10 @@ public interface ListShardQueue {
 	 */
 	boolean offer(ListShard shard);
 
-	/**
-	 * @return number of shards waiting to be leased.
-	 */
+	/** Returns the number of shards waiting to be leased. */
 	int pendingCount();
 
-	/**
-	 * @return currently configured metrics recorder.
-	 */
+	/** Returns the metrics recorder currently associated with the queue. */
 	ListShardMetricsRecorder metricsRecorder();
 
 	/**

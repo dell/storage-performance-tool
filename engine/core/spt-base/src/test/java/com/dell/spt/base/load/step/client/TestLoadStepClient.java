@@ -28,6 +28,8 @@ public class TestLoadStepClient extends LoadStepClientBase {
 	}
 
 	@Override
+	@SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"
+	})
 	protected <T extends LoadStepClient> T copyInstance(
 					Config config,
 					List<Config> ctxConfigs) {
@@ -35,9 +37,7 @@ public class TestLoadStepClient extends LoadStepClientBase {
 		copyInstanceCallCount++;
 
 		// Return a new instance with the updated config
-		@SuppressWarnings("unchecked")
-		T copy = (T) new TestLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
-		return copy;
+		return (T) new TestLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override

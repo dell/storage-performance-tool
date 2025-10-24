@@ -69,14 +69,14 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		I nextPart;
 		PartialDataOperation<I> nextSubTask;
 		for (int i = 0; i < equalPartsCount; i++) {
-			nextPart = item.slice(i * sizeThreshold, sizeThreshold);
+			nextPart = (I) item.slice(i * sizeThreshold, sizeThreshold);
 			nextSubTask = new PartialDataOperationImpl<>(
 							originIndex, opType, nextPart, srcPath, dstPath, credential, i, this);
 			nextSubTask.srcPath(srcPath);
 			subTasks.add(nextSubTask);
 		}
 		if (tailPartSize > 0) {
-			nextPart = item.slice(equalPartsCount * sizeThreshold, tailPartSize);
+			nextPart = (I) item.slice(equalPartsCount * sizeThreshold, tailPartSize);
 			nextSubTask = new PartialDataOperationImpl<>(
 							originIndex, opType, nextPart, srcPath, dstPath, credential, equalPartsCount, this);
 			nextSubTask.srcPath(srcPath);

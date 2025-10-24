@@ -2,7 +2,7 @@ package com.dell.spt.base.metrics.snapshot;
 
 import java.util.List;
 
-/** @author veronika K. on 12.10.18 */
+/** Immutable summary of timing statistics for a metric. */
 public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 				implements TimingMetricSnapshot {
 

@@ -4,7 +4,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.function.IntSupplier;
 
-/** @author veronika K. on 21.11.18 */
+/** Fluent builder for constructing {@link MetricsContext} implementations. */
 public interface ContextBuilder<B extends ContextBuilder, C extends MetricsContext> {
 
 	C build();

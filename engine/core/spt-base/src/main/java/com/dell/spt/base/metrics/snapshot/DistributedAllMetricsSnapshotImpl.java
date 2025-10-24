@@ -1,6 +1,6 @@
 package com.dell.spt.base.metrics.snapshot;
 
-/** @author veronika K. */
+/** Snapshot aggregating metrics from all nodes in distributed mode. */
 public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotImpl
 				implements DistributedAllMetricsSnapshot {
 
@@ -31,8 +31,4 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 		return nodeCount;
 	}
 
-	@Override
-	public long elapsedTimeMillis() {
-		return elapsedTimeMillis;
-	}
 }

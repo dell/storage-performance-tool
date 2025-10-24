@@ -5,7 +5,7 @@ import static java.lang.Math.min;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** @author veronika K. on 28.09.18 */
+/** Lock-free sliding window reservoir that tracks the latest long measurements. */
 public class ConcurrentSlidingWindowLongReservoir implements LongReservoir {
 
 	private static final int DEFAULT_SIZE = 1028;

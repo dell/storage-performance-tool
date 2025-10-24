@@ -1,8 +1,8 @@
 package com.dell.spt.base.metrics.snapshot;
 
-/** @author veronika K. */
+/** Snapshot of aggregate metrics across all participating nodes. */
 public interface DistributedAllMetricsSnapshot extends AllMetricsSnapshot {
 
-	/** @return values in microseconds */
+	/** Returns the number of nodes represented in the snapshot. */
 	int nodeCount();
 }

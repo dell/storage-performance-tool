@@ -13,5 +13,6 @@ public interface DistributedMetricsContext<S extends DistributedAllMetricsSnapsh
 
 	List<Double> quantileValues();
 
+	@Override
 	S lastSnapshot();
 }
