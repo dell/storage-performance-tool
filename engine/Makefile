@@ -27,7 +27,7 @@ BUILD_OPTS := --no-daemon
 
 # Phony targets (not files)
 .PHONY: all build clean distclean test test-coverage bundle help check lint spotless docker docker-run docker-push
-.PHONY: test-integration test-performance test-all test-coverage-all
+.PHONY: test-integration test-performance test-all test-coverage-all errorprone
 
 # Help target - displays available targets
 help:
@@ -60,6 +60,7 @@ help:
 	@echo "  make docker-scenarios - List built-in scenarios"
 	@echo "  make docker-compose-run - Run Spt with Docker Compose"
 	@echo "  make all        - Clean and build everything"
+	@echo "  make errorprone - Run Error Prone analysis (writes errorprone_scan.txt)"
 	@echo "  make help       - Show this help message"
 
 # Build the complete distribution
@@ -174,6 +175,11 @@ check:
 lint:
 	@echo "Applying spotless formatting..."
 	$(GRADLE) spotlessApply
+
+# Run Error Prone analysis (compile-only)
+errorprone:
+	@echo "Running Error Prone analysis (compileJava + compileTestJava)..."
+	@bash -c 'set -o pipefail; $(GRADLE) -I tools/errorprone-init.gradle :core:spt-base:compileJava :core:spt-base:compileTestJava --rerun-tasks -x test 2>&1 | tee errorprone_scan.txt'
 
 # Alias for spotless formatting (alternative name)
 spotless:
