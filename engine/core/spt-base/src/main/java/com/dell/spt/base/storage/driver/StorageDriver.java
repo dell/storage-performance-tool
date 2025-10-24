@@ -83,20 +83,19 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	 * Creates a storage driver instance using registered extensions.
 	 *
 	 * @param extensions the resolved runtime extensions
-	* @param storageConfig storage sub-config (also specifies the particular storage driver type)
-	* @param dataInput the data input used to produce/reproduce the data
-	* @param verifyFlag verify the data on read or not
-	* @param stepId scenario step id for logging purposes
-	* @param <I> item type
-	* @param <O> load operation type
-	* @param <T> storage driver type
-	* @return the storage driver instance
-	* @throws IllegalArgumentException if load config either storage config is null
-	* @throws InterruptedException may be thrown by a specific storage driver constructor
-	* @throws IllegalConfigurationException if no storage driver implementation was found
-	*/
+	 * @param storageConfig storage sub-config (also specifies the particular storage driver type)
+	 * @param dataInput the data input used to produce/reproduce the data
+	 * @param verifyFlag verify the data on read or not
+	 * @param stepId scenario step id for logging purposes
+	 * @param <I> item type
+	 * @param <O> load operation type
+	 * @return the storage driver instance
+	 * @throws IllegalArgumentException if load config either storage config is null
+	 * @throws InterruptedException may be thrown by a specific storage driver constructor
+	 * @throws IllegalConfigurationException if no storage driver implementation was found
+	 */
 	@SuppressWarnings("unchecked")
-	static <I extends Item, O extends Operation<I>, T extends StorageDriver<I, O>> T instance(
+	static <I extends Item, O extends Operation<I>> StorageDriver<I, O> instance(
 					final List<Extension> extensions,
 					final Config storageConfig,
 					final DataInput dataInput,
@@ -112,8 +111,8 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 			}
 
 			final var factories = extensions.stream()
-							.filter(ext -> ext instanceof StorageDriverFactory)
-							.map(factory -> (StorageDriverFactory<I, O, T>) factory)
+							.filter(StorageDriverFactory.class::isInstance)
+							.map(factory -> (StorageDriverFactory<I, O, ?>) factory)
 							.collect(Collectors.toList());
 
 			final var driverType = storageConfig.stringVal("driver-type");

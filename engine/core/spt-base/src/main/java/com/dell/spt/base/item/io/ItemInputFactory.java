@@ -23,7 +23,8 @@ public interface ItemInputFactory {
 		Input<I> itemInput = null;
 
 		final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
-		final ItemFactory<I> itemFactory = ItemType.getItemFactory(itemType);
+		@SuppressWarnings("unchecked")
+		final ItemFactory<I> itemFactory = (ItemFactory<I>) ItemType.getItemFactory(itemType);
 		final Config itemInputConfig = itemConfig.configVal("input");
 		final String itemInputFile = itemInputConfig.stringVal("file");
 

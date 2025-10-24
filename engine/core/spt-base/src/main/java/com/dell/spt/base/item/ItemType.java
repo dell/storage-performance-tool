@@ -5,14 +5,13 @@ public enum ItemType {
 	DATA, PATH, TOKEN;
 
 	@SuppressWarnings("unchecked")
-	public static <I extends Item, F extends ItemFactory<I>> F getItemFactory(
-					final ItemType itemType) {
+	public static ItemFactory<? extends Item> getItemFactory(final ItemType itemType) {
 		if (ItemType.DATA.equals(itemType)) {
-			return (F) new DataItemFactoryImpl<DataItemImpl>();
+			return new DataItemFactoryImpl<>();
 		} else if (ItemType.PATH.equals(itemType)) {
-			return (F) new PathItemFactoryImpl<PathItemImpl>();
+			return new PathItemFactoryImpl<>();
 		} else if (ItemType.TOKEN.equals(itemType)) {
-			return (F) new TokenItemFactoryImpl<TokenItemImpl>();
+			return new TokenItemFactoryImpl<>();
 		} else {
 			throw new AssertionError("Item type \"" + itemType + "\" is not supported");
 		}

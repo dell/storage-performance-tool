@@ -98,7 +98,7 @@ public interface Operation<I extends Item> {
 		}
 	}
 
-	<O extends Operation<I>> O result();
+	Operation<I> result();
 
 	void reset();
 }

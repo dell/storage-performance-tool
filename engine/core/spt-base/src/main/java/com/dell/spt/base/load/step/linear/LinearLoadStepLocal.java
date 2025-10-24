@@ -105,7 +105,7 @@ public class LinearLoadStepLocal
 								extensions, storageConfig, dataInput, dataConfig.boolVal("verify"), batchSize, testStepId);
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
-				final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 				final double rateLimit = opConfig.doubleVal("limit-rate");
 
 				try {

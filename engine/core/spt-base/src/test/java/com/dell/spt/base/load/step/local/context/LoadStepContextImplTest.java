@@ -70,7 +70,7 @@ public class LoadStepContextImplTest {
 	Config testConfig = TestConfigBuilder.config();
 	private int batchSize = 4096; // default value given in the schema
 	final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
-	final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+	final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 	final DummyStorageDriverMock mockDriver = DummyStorageDriverMock.create();
 
 	@BeforeEach

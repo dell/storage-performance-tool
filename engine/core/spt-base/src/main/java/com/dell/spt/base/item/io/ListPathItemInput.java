@@ -50,7 +50,7 @@ public final class ListPathItemInput<I extends PathItem> implements Input<I> {
 			return 0;
 		}
 		final long skipped = Math.min(count, seedCount - emitted);
-		emitted += skipped;
+		emitted = (int) (emitted + skipped);
 		return skipped;
 	}
 

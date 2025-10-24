@@ -31,7 +31,7 @@ final class DelayedTransferBufferPerfTest {
 	@Before @throws[Exception]
 	def setUp(): Unit = {
 		itemInput = new NewDataItemInput[DataItem](
-			ItemType.getItemFactory(ItemType.DATA),
+			ItemType.getItemFactory(ItemType.DATA).asInstanceOf[ItemFactory[DataItem]],
 			new ItemNameInputImpl(
 				new Long2LongFunction {
 					override def get(v: Long): Long = v + 1

@@ -23,7 +23,7 @@ public class ItemTypeFactoryTest {
 	public void dataItemFactoryTest() {
 		testConfig.val("item-type", "data");
 		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
-		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+		final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(DataItemFactoryImpl.class, itemFactory);
 	}
 
@@ -39,7 +39,7 @@ public class ItemTypeFactoryTest {
 	public void pathItemFactoryTest() {
 		testConfig.val("item-type", "path");
 		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
-		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+		final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(PathItemFactoryImpl.class, itemFactory);
 	}
 
@@ -55,7 +55,7 @@ public class ItemTypeFactoryTest {
 	public void tokenItemFactoryTest() {
 		testConfig.val("item-type", "token");
 		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
-		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+		final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(TokenItemFactoryImpl.class, itemFactory);
 	}
 }
