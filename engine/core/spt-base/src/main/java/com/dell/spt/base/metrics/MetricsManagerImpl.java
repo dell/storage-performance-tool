@@ -44,7 +44,6 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -56,7 +55,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	private final Set<MetricsContext> allMetrics = new ConcurrentSkipListSet<>();
 	private final Map<DistributedMetricsContext, PrometheusMetricsExporter> distributedMetrics = new ConcurrentHashMap<>();
 	private final Set<MetricsContext> selectedMetrics = new TreeSet<>();
-	private final Lock outputLock = new ReentrantLock();
+	private final ReentrantLock outputLock = new ReentrantLock();
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
@@ -69,7 +68,11 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 		try {
 			CollectorRegistry.defaultRegistry.register(
 							new CombinedCompletionCollector(() -> (Set<DistributedMetricsContext>) (Set) distributedMetrics.keySet()));
-		} catch (Exception ignore) {}
+		} catch (final IllegalArgumentException alreadyRegistered) {
+			Loggers.MSG.debug("CombinedCompletionCollector already registered, skipping duplicate registration");
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "Failed to register CombinedCompletionCollector");
+		}
 	}
 
 	@Override
@@ -125,7 +128,9 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 					Loggers.METRICS_STD_OUT.info(new MetricsAsciiTableLogMessage(selectedMetrics));
 					selectedMetrics.clear();
 				}
-			} catch (final ConcurrentModificationException ignored) {} catch (final Throwable cause) {
+			} catch (final ConcurrentModificationException cme) {
+				Loggers.MSG.debug("Metrics context set modified during sweep; will retry in next cycle");
+			} catch (final Throwable cause) {
 				throwUncheckedIfInterrupted(cause);
 				LogUtil.exception(Level.DEBUG, cause, "Metrics manager failure");
 			} finally {
@@ -147,8 +152,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 			startIfNotStarted();
 			lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
 			allMetrics.add(metricsCtx);
-			if (metricsCtx instanceof DistributedMetricsContext) {
-				final var distributedMetricsCtx = (DistributedMetricsContext) metricsCtx;
+			if (metricsCtx instanceof DistributedMetricsContext<?> distributedMetricsCtx) {
 				final String[] labelValues = {
 						metricsCtx.loadStepId(),
 						metricsCtx.opType().name(),
@@ -183,8 +187,10 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 			if (allMetrics.remove(metricsCtx)) {
 				TimingMetricQuantileResultsImpl latencyQuantiles = null;
 				TimingMetricQuantileResultsImpl durationQuantiles = null;
+				boolean lockAcquired = false;
 				try {
-					if (!outputLock.tryLock(Fiber.WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
+					lockAcquired = outputLock.tryLock(Fiber.WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS);
+					if (!lockAcquired) {
 						Loggers.ERR.warn(
 										"Acquire lock timeout while unregistering the metrics context \"{}\"", metricsCtx);
 					}
@@ -292,15 +298,18 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {
-					try {
+					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
-						if (null != latencyQuantiles && null != durationQuantiles) {
+					}
+					try {
+						if (null != latencyQuantiles) {
 							latencyQuantiles.close();
+						}
+						if (null != durationQuantiles) {
 							durationQuantiles.close();
 						}
-					} catch (final IllegalMonitorStateException ignored) {} catch (final IOException e) {
-						LogUtil.exception(Level.WARN, e,
-										"probably failed to delete one of the tmp local files");
+					} catch (final IOException e) {
+						LogUtil.exception(Level.WARN, e, "Failed to delete one of the temporary timing metrics files");
 					}
 				}
 			} else {
@@ -364,12 +373,14 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 			return List.of();
 		final long now = System.currentTimeMillis();
 		final var result = new ArrayList<TerminalStepEntry>(terminalByStepId.size());
-		for (final var e : terminalByStepId.entrySet()) {
-			final TerminalStepEntry v = e.getValue();
+		final var iterator = terminalByStepId.entrySet().iterator();
+		while (iterator.hasNext()) {
+			final var entry = iterator.next();
+			final TerminalStepEntry v = entry.getValue();
 			if (now - v.recordedAtMillis <= terminalRetentionMillis) {
 				result.add(v);
 			} else {
-				terminalByStepId.remove(e.getKey());
+				iterator.remove();
 			}
 		}
 		return result;
@@ -472,12 +483,25 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 		if (metadata == null) {
 			return 0L;
 		}
-		try {
-			final Object value = metadata.get(key);
-			if (value instanceof Number) {
-				return ((Number) value).longValue();
+		final Object value = metadata.get(key);
+		if (value == null) {
+			return 0L;
+		}
+		if (value instanceof Number number) {
+			return number.longValue();
+		}
+		if (value instanceof String str) {
+			if (str.isBlank()) {
+				return 0L;
 			}
-		} catch (Exception ignore) {}
+			try {
+				return Long.parseLong(str.trim());
+			} catch (final NumberFormatException nfe) {
+				Loggers.MSG.debug("Ignoring non-numeric metadata value \"{}\" for key {}", str, key);
+				return 0L;
+			}
+		}
+		Loggers.MSG.debug("Ignoring unsupported metadata value type {} for key {}", value.getClass(), key);
 		return 0L;
 	}
 
@@ -531,7 +555,8 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 			return (snapshot.successSnapshot() != null && snapshot.successSnapshot().count() > 0)
 							|| (snapshot.failsSnapshot() != null && snapshot.failsSnapshot().count() > 0)
 							|| (snapshot.byteSnapshot() != null && snapshot.byteSnapshot().count() > 0);
-		} catch (final Exception ignore) {
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("Unable to determine snapshot progress due to {}", e.toString());
 			return false;
 		}
 	}
