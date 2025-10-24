@@ -83,11 +83,15 @@ public interface DataItem extends Item, SeekableByteChannel {
 	void verify(final ByteBuffer inBuff) throws DataCorruptionException;
 
 	static int rangeCount(final long size) {
-		return (int) Math.ceil(Math.log(size + 1) / LOG2);
+		if (size < 0) {
+			throw new IllegalArgumentException("size must be non-negative");
+		}
+		final double span = (double) size + 1.0d;
+		return (int) Math.ceil(Math.log(span) / LOG2);
 	}
 
 	static long rangeOffset(final int i) {
-		return (1 << i) - 1;
+		return (1L << i) - 1L;
 	}
 
 	long rangeSize(int rangeIdx);
