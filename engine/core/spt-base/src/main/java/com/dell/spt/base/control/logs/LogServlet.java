@@ -9,6 +9,7 @@ import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -260,7 +261,7 @@ public final class LogServlet extends HttpServlet {
 						.configure(Feature.FLUSH_PASSED_TO_STREAM, false)
 						.writerWithDefaultPrettyPrinter()
 						.writeValue(out, Loggers.DESCRIPTIONS_BY_NAME);
-		out.write(System.lineSeparator().getBytes());
+		out.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
 		out.flush();
 	}
 

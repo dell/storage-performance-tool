@@ -13,6 +13,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystemException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -97,7 +98,7 @@ public class TimingMetricQuantileResultsImpl implements Closeable {
 	// chosen metric
 	private List<Long> readArrayFromInputStream(InputStream inputStream) {
 		List<Long> tmpArray = new ArrayList<>();
-		try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream))) {
+		try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
 			String line;
 			while ((line = br.readLine()) != null) {
 				String[] values = line.split(" ");

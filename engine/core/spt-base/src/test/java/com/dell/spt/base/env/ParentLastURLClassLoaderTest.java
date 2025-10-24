@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.*;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -146,7 +147,7 @@ public class ParentLastURLClassLoaderTest {
 		assertNotNull(resource, "Should find resource");
 
 		try (InputStream is = resource.openStream();
-						Scanner scanner = new Scanner(is)) {
+						Scanner scanner = new Scanner(is, StandardCharsets.UTF_8)) {
 			String content = scanner.nextLine();
 			assertEquals("source=child", content, "Should load resource from child first");
 		}
@@ -161,7 +162,7 @@ public class ParentLastURLClassLoaderTest {
 		while (resources.hasMoreElements()) {
 			URL url = resources.nextElement();
 			try (InputStream is = url.openStream();
-							Scanner scanner = new Scanner(is)) {
+							Scanner scanner = new Scanner(is, StandardCharsets.UTF_8)) {
 				sources.add(scanner.nextLine());
 			}
 		}
@@ -178,7 +179,7 @@ public class ParentLastURLClassLoaderTest {
 		InputStream stream = childClassLoader.getResourceAsStream("test.properties");
 		assertNotNull(stream, "Should get resource as stream");
 
-		try (Scanner scanner = new Scanner(stream)) {
+		try (Scanner scanner = new Scanner(stream, StandardCharsets.UTF_8)) {
 			String content = scanner.nextLine();
 			assertEquals("source=child", content, "Should load child resource");
 		}
@@ -224,7 +225,7 @@ public class ParentLastURLClassLoaderTest {
 						"com/test/VersionedClass.class", compileClass(
 										"com.test.VersionedClass",
 										"package com.test; public class VersionedClass { public String getVersion() { return \"parent-version\"; } }"),
-						"test.properties", "source=parent".getBytes()));
+						"test.properties", "source=parent".getBytes(StandardCharsets.UTF_8)));
 	}
 
 	private Path createChildJar() throws Exception {
@@ -232,7 +233,7 @@ public class ParentLastURLClassLoaderTest {
 						"com/test/VersionedClass.class", compileClass(
 										"com.test.VersionedClass",
 										"package com.test; public class VersionedClass { public String getVersion() { return \"child-version\"; } }"),
-						"test.properties", "source=child".getBytes()));
+						"test.properties", "source=child".getBytes(StandardCharsets.UTF_8)));
 	}
 
 	private Path createJarWithClass(String className, String sourceCode) throws Exception {
@@ -275,7 +276,7 @@ public class ParentLastURLClassLoaderTest {
 		return createJarWithContents(tempDir.resolve("service.jar"), Map.of(
 						"com/test/TestService.class", interfaceClass,
 						"com/test/TestServiceImpl.class", implClass,
-						"META-INF/services/com.test.TestService", "com.test.TestServiceImpl".getBytes()));
+						"META-INF/services/com.test.TestService", "com.test.TestServiceImpl".getBytes(StandardCharsets.UTF_8)));
 	}
 
 	private Path createJarWithContents(Path jarPath, Map<String, byte[]> contents) throws Exception {

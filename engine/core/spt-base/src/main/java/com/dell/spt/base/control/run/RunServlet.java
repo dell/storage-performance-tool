@@ -24,6 +24,7 @@ import com.github.akurilov.confuse.exceptions.InvalidValueTypeException;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.Arrays;
@@ -304,7 +305,8 @@ public class RunServlet extends HttpServlet {
 					throws IOException, NoSuchMethodException, InvalidValuePathException,
 					InvalidValueTypeException {
 		final String rawDefaultsData;
-		try (final var br = new BufferedReader(new InputStreamReader(defaultsPart.getInputStream()))) {
+		try (final var br = new BufferedReader(
+						new InputStreamReader(defaultsPart.getInputStream(), StandardCharsets.UTF_8))) {
 			rawDefaultsData = br.lines().collect(Collectors.joining("\n"));
 		}
 		final var contentType = defaultsPart.getContentType();
@@ -335,7 +337,8 @@ public class RunServlet extends HttpServlet {
 		if (scenarioPart == null) {
 			scenarioResult = ScenarioUtil.defaultScenario(appHomePath);
 		} else {
-			try (final var br = new BufferedReader(new InputStreamReader(scenarioPart.getInputStream()))) {
+			try (final var br = new BufferedReader(
+							new InputStreamReader(scenarioPart.getInputStream(), StandardCharsets.UTF_8))) {
 				scenarioResult = br.lines().collect(Collectors.joining("\n"));
 			}
 		}
