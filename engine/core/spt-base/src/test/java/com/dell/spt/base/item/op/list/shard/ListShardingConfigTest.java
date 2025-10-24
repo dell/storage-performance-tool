@@ -189,15 +189,15 @@ class ListShardingConfigTest {
 	}
 
 	@Test
-	void splitPagesInvalidValueDefaultsGracefully() throws Exception {
+	void splitPagesZeroDefaultsToBaseline() throws Exception {
 		final Map<String, Object> sharding = new java.util.HashMap<>();
 		sharding.put("mode", "auto");
-		sharding.put("split", Map.of("pages", "oops"));
+		sharding.put("split", Map.of("pages", 0));
 		final Map<String, Object> schema = Map.of(
 						"sharding",
 						Map.of(
 										"mode", String.class,
-										"split", Map.of("pages", String.class)));
+										"split", Map.of("pages", Integer.class)));
 		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
 
 		final ListShardingConfig cfg = ListShardingConfig.parse(list);
