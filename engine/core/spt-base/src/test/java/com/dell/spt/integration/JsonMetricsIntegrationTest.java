@@ -51,7 +51,6 @@ public class JsonMetricsIntegrationTest {
 
 	private static final int METRICS_PORT = 2112;
 	private static final int JSON_PORT = 2113;
-	private static final String PROMETHEUS_URL = "http://localhost:" + METRICS_PORT + "/metrics";
 	private static final String NODE_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
 	private static final String FLEET_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
 	private static final String CLUSTER_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
@@ -356,26 +355,6 @@ public class JsonMetricsIntegrationTest {
 	}
 
 	/**
-	 * Fetch Prometheus metrics via HTTP
-	 */
-	private String fetchPrometheusMetrics() throws Exception {
-		URL url = new URL(PROMETHEUS_URL);
-		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-		connection.setRequestMethod("GET");
-
-		StringBuilder response = new StringBuilder();
-		try (BufferedReader reader = new BufferedReader(
-						new InputStreamReader(connection.getInputStream()))) {
-			String line;
-			while ((line = reader.readLine()) != null) {
-				response.append(line).append("\n");
-			}
-		}
-		connection.disconnect();
-		return response.toString();
-	}
-
-	/**
 	 * Fetch JSON metrics via HTTP
 	 */
 	private String fetchJsonMetrics() throws Exception {
@@ -401,6 +380,7 @@ public class JsonMetricsIntegrationTest {
 	/**
 	 * Parse Prometheus metrics text format into key-value map
 	 */
+	@SuppressWarnings("unused")
 	private Map<String, Double> parsePrometheusMetrics(String prometheusText) {
 		Map<String, Double> metrics = new HashMap<>();
 
@@ -425,6 +405,7 @@ public class JsonMetricsIntegrationTest {
 	/**
 	 * Compare metric values with tolerance for floating point precision
 	 */
+	@SuppressWarnings("unused")
 	private void compareMetric(String metricName, double jsonValue, Double prometheusValue) {
 		assertNotNull(prometheusValue, "Prometheus value should not be null for: " + metricName);
 		assertEquals(prometheusValue, jsonValue, 0.001,

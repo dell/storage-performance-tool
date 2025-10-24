@@ -17,7 +17,6 @@ import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -28,8 +27,6 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 public class MetricsJsonResponderTest {
-
-	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	@Test
 	void clusterMetricsIncludesAggregatedFields() throws Exception {

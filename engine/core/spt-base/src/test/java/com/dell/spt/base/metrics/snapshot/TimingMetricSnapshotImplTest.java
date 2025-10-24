@@ -33,7 +33,8 @@ final class TimingMetricSnapshotImplTest {
 	@Test
 	void aggregateZeroSumForcesZeroMinMax() {
 		final TimingMetricSnapshot s1 = new TimingMetricSnapshotImpl(0, 0, 7, 9, 0.0, "lat");
-		final var agg = TimingMetricSnapshotImpl.aggregate(List.of(s1));
+		final var singleAggregate = TimingMetricSnapshotImpl.aggregate(List.of(s1));
+		assertSame(s1, singleAggregate, "Single-element aggregation should return the original snapshot");
 		// Single snapshot path returns same object; guard zero behavior in code via second snapshot
 		final var agg2 = TimingMetricSnapshotImpl.aggregate(List.of(s1, new TimingMetricSnapshotImpl(0, 0, 1, 2, 0.0, "lat")));
 		assertEquals(0, agg2.sum());

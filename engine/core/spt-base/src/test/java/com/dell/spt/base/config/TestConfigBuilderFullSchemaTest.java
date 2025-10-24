@@ -123,18 +123,12 @@ public class TestConfigBuilderFullSchemaTest {
 	@Test
 	public void testCachedSchemaLoading() {
 		// First load
-		long start = System.currentTimeMillis();
 		Config config1 = TestConfigBuilder.config();
-		long firstLoadTime = System.currentTimeMillis() - start;
 
 		// Second load (should be cached and faster)
-		start = System.currentTimeMillis();
 		Config config2 = TestConfigBuilder.config();
-		long secondLoadTime = System.currentTimeMillis() - start;
 
 		assertNotNull(config1);
 		assertNotNull(config2);
-		// Second load should typically be faster due to caching
-		// (though not guaranteed on all systems)
 	}
 }

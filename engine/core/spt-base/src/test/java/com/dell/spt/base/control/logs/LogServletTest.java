@@ -4,20 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.dell.spt.base.concurrent.ServiceTaskExecutor;
-import com.dell.spt.base.config.TestConfigBuilder;
-import com.dell.spt.base.metrics.MetricsManager;
-import com.dell.spt.base.metrics.MetricsManagerImpl;
-import com.github.akurilov.confuse.Config;
-
-import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -30,15 +18,11 @@ import org.junit.jupiter.api.Test;
 
 public class LogServletTest {
 	private static final int PORT = 9999;
-	private static final String HOST = "http://localhost:" + PORT;
 	private static final Server server = new Server(PORT);
-	private Config testConfig;
 
 	@BeforeEach
 	public void setUp() throws Exception {
-		testConfig = TestConfigBuilder.config();
 		final ServletContextHandler context = new ServletContextHandler();
-		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
 		context.setContextPath("/");
 		server.setHandler(context);
 
@@ -95,10 +79,4 @@ public class LogServletTest {
 	}
 
 	/* Utility Methods */
-	private String resultFromServer(final String urlPath) throws IOException, InterruptedException {
-		final HttpClient client = HttpClient.newHttpClient();
-		final HttpRequest request = HttpRequest.newBuilder(URI.create(urlPath)).build();
-		final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-		return response.body();
-	}
 }

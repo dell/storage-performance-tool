@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import com.dell.spt.base.Constants;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -39,19 +38,8 @@ public class ExposedMetricsTest {
 	private static final int PORT = 1111;
 	private static final String CONTEXT = "/metrics";
 	private static final int ITERATION_COUNT = 10;
-	private static final Double TIMING_ACCURACY = 0.0001;
-	private static final double ELAPSED_TIME_ACCURACY = 0.1;
 	private static final int MARK_DUR = 1_100_000; // dur must be more than lat (dur > lat)
 	private static final int MARK_LAT = 1_000_000;
-	private static final String[] CONCURRENCY_METRICS = {"mean", "last"
-	};
-	private static final String[] TIMING_METRICS = {
-			"count", "sum", "mean", "min", "max", "quantile_0_25", "quantile_0_5", "quantile_0_75"
-	};
-	private static final String[] OPS_METRICS = {"count", "rate_mean", "rate_last"
-	};
-	private static final String[] BYTES_METRICS = {"count", "rate_mean", "rate_last"
-	};
 	private static final Double[] QUANTILE_VALUES = {0.25, 0.5, 0.75
 	};
 	private static final List<String> nodeList = Arrays.asList("127.0.0.1:1099");
@@ -131,16 +119,6 @@ public class ExposedMetricsTest {
 		// Note: elapsed_time_value test removed - too timing-dependent and brittle
 		// The metric is exported correctly, but exact timing varies by test execution environment
 		// latency and duration are now only testable in functional testing as they use actual files in the os
-		//testTimingMetric(result, MARK_DUR, METRIC_NAME_DUR);
-		//testTimingMetric(result, MARK_LAT, METRIC_NAME_LAT);
-		// Note: Removed brittle timing-dependent assertions for concurrency and rates
-		// These tests were too sensitive to execution environment timing variations
-		// The core functionality (metrics export format and presence) is verified by testHelpLine()
-		// testConcurrencyMetric(result, 1, METRIC_NAME_CONC);
-		// testRateMetric(result, ITEM_DATA_SIZE.get(), METRIC_NAME_BYTE);
-		// testRateMetric(result, 1, METRIC_NAME_FAIL);
-		// testRateMetric(result, 1, METRIC_NAME_SUCC);
-		//
 		testTestStateMetric(result);
 		//
 		testLabels(result);
@@ -184,64 +162,12 @@ public class ExposedMetricsTest {
 		assertEquals(expectedValue, actualValue, "label : " + labelName);
 	}
 
-	private void testTimingMetric(final String stdOut, final double markValue, final String name) {
-		final Map<String, Double> expectedValues = new HashMap<>();
-		// concurrency count != iteration_count, because in the refreshLastSnapshot lat & dur account
-		// only after the condition, and concurrency - every time
-		final double count = ITERATION_COUNT;
-		final double accuracy = TIMING_ACCURACY;
-		final var markValueInSec = markValue / Constants.M;
-		final double[] values = {
-				count,
-				markValueInSec * count,
-				markValueInSec,
-				markValueInSec,
-				markValueInSec,
-				markValueInSec,
-				markValueInSec,
-				markValueInSec
-		};
-		for (var i = 0; i < TIMING_METRICS.length; ++i) {
-			expectedValues.put(TIMING_METRICS[i], values[i]);
-		}
-		testMetric(stdOut, name, expectedValues, accuracy);
-	}
-
-	private void testRateMetric(final String stdOut, final double markValue, final String name) {
-		final Map<String, Double> expectedValues = new HashMap<>();
-		double count = ITERATION_COUNT;
-		var rateMetrics = OPS_METRICS;
-		if (name.equals(METRIC_NAME_BYTE)) {
-			count *= markValue;
-			rateMetrics = BYTES_METRICS;
-		}
-		final Double[] values = {count, markValue, markValue
-		};
-		for (var i = 0; i < rateMetrics.length; ++i) {
-			expectedValues.put(rateMetrics[i], values[i]);
-		}
-		testMetric(stdOut, name, expectedValues, false);
-	}
-
-	private void testConcurrencyMetric(
-					final String stdOut, final double markValue, final String name) {
-		final Map<String, Double> expectedValues = new HashMap<>();
-		final double accuracy = 0;
-		final double[] values = {
-				1, 1,
-		};
-		for (var i = 0; i < CONCURRENCY_METRICS.length; ++i) {
-			expectedValues.put(CONCURRENCY_METRICS[i], values[i]);
-		}
-		testMetric(stdOut, name, expectedValues, accuracy);
-	}
-
 	private void testTestStateMetric(final String stdOut) {
 		// Phase 3: Test the new test state metric
 		// During active test execution, test state should be 1.0 (running)
 		final Map<String, Double> expectedValues = new HashMap<>();
 		expectedValues.put("value", 1.0);  // Test is running with active operations
-		testMetric(stdOut, METRIC_NAME_TEST_STATE, expectedValues, 0);
+		testMetric(stdOut, METRIC_NAME_TEST_STATE, expectedValues, true, 0);
 	}
 
 	private String resultFromServer(final String urlPath) throws Exception {
@@ -252,29 +178,6 @@ public class ExposedMetricsTest {
 						.build();
 		final var response = httpClient.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
 		return response.body();
-	}
-
-	private void testMetric(
-					final String resultOutput,
-					final String metricName,
-					final Map<String, Double> expectedValues,
-					final double accuracy) {
-		testMetric(resultOutput, metricName, expectedValues, true, accuracy);
-	}
-
-	private void testMetric(
-					final String resultOutput,
-					final String metricName,
-					final Map<String, Double> expectedValues,
-					final boolean compareEquality) {
-		testMetric(resultOutput, metricName, expectedValues, compareEquality, 0);
-	}
-
-	private void testMetric(
-					final String resultOutput,
-					final String metricName,
-					final Map<String, Double> expectedValues) {
-		testMetric(resultOutput, metricName, expectedValues, true, 0);
 	}
 
 	private void testMetric(

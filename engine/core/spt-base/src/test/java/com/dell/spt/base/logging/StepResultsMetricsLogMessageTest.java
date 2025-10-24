@@ -40,12 +40,9 @@ public class StepResultsMetricsLogMessageTest extends StepResultsMetricsLogMessa
 	}
 
 	private static final long[] LATENCIES = new long[COUNT];
-	private static long latSum = 0;
-
 	static {
 		for (int i = 0; i < COUNT; i++) {
 			LATENCIES[i] = System.nanoTime() % LAT_MAX;
-			latSum += LATENCIES[i];
 		}
 	}
 

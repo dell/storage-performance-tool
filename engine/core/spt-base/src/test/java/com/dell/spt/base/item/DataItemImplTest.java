@@ -133,20 +133,14 @@ public class DataItemImplTest {
 
 		item.dataInput(dataInput);
 
-		Exception exception = assertThrows(DataCorruptionException.class, () -> {
-			item.write(data);
-		});
+		assertThrows(DataCorruptionException.class, () -> item.write(data));
 	}
 
 	/* Utility Methods */
 	private DataInput generate_data_input(final Config config) throws IllegalStateException, IllegalArgumentException, IOException {
 		DataInput dataInput = null;
-		final var loadConfig = config.configVal("load");
-		final var batchSize = loadConfig.intVal("batch-size");
-		final var storageConfig = config.configVal("storage");
 		final var itemConfig = config.configVal("item");
 		final var itemDataConfig = itemConfig.configVal("data");
-		final var verifyFlag = itemDataConfig.boolVal("verify");
 		final var itemDataInputConfig = itemDataConfig.configVal("input");
 		final var itemDataInputLayerConfig = itemDataInputConfig.configVal("layer");
 		final var itemDataInputLayerSizeRaw = itemDataInputLayerConfig.val("size");
