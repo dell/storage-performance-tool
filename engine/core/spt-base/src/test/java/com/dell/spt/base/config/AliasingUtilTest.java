@@ -23,10 +23,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function leaves the arguments unchanged when there is no matching alias.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void noMatchLeavesArgsAlone() {
@@ -41,10 +37,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function leaves the arguments unchanged when there is no matching alias.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void renameKeepsValue() {
@@ -58,10 +50,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function leaves the arguments unchanged when there is no matching alias.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void renameOverridesValue() {
@@ -74,10 +62,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function splits the first equals sign in the target value.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void onlyFirstEqualsSplits() {
@@ -90,10 +74,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function leaves the arguments unchanged when there is no matching alias.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void emptyValueOverride() {
@@ -106,10 +86,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function throws an IllegalArgumentException when a deprecated alias has a null target.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void deprecatedWithNullTargetThrows() {
@@ -125,10 +101,6 @@ public class AliasingUtilTest {
 
 	/**
 	 * Verifies that the AliasingUtil.apply function leaves the arguments unchanged when there is no matching alias.
-	 *
-	 * @param  args		a map of strings to be transformed
-	 * @param  cfg		a list of aliasing configurations
-	 * @return         	a map of transformed strings
 	 */
 	@Test
 	void onlyMatchingArgsTransformed() {

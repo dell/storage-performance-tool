@@ -86,8 +86,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that the last snapshot is created and refreshed after starting the context.
-	 *
-	 * @return  void
 	 */
 	@Test
 	void lastSnapshotCreatedAndRefreshes() {
@@ -105,8 +103,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that markSucc and markPartSucc calls do not throw exceptions and supports array overloads.
-	 *
-	 * @return void
 	 */
 	@Test
 	void markSuccAndFailCallsDoNotThrowAndSupportArrayOverloads() {
@@ -136,8 +132,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that timing metrics are ignored when latency is invalid or not less than duration.
-	 *
-	 * @return void
 	 */
 	@Test
 	void timingsAreIgnoredWhenLatencyInvalidOrNotLessThanDuration() {
@@ -156,8 +150,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that a nested context is created when entering a threshold state with expected metadata.
-	 *
-	 * @return void
 	 */
 	@Test
 	void thresholdStateCreatesNestedContextWithExpectedMetadata() {
@@ -192,8 +184,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that equals and toString methods behave as documented.
-	 *
-	 * @return void
 	 */
 	@Test
 	void equalsAndtoStringBehaveAsExpected() {
@@ -239,8 +229,6 @@ class MetricsContextImplTest {
 	/**
 	 * Verifies that the builder allows zero or negative threshold values but
 	 * normalizes them to max int in child contexts.
-	 *
-	 * @return void
 	 */
 	@Test
 	void builderAllowsZeroOrNegativeThresholdButBaseNormalizesToMaxIntInChild() {

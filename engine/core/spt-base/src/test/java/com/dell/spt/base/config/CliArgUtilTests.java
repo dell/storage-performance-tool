@@ -15,9 +15,6 @@ class CliArgUtilTests {
 
 	/**
 	 * Tests that CliArgUtil.parseArgs can correctly parse command line arguments that include key-value pairs, boolean flags, and empty values.
-	 *
-	 * @param args	a list of command line arguments
-	 * @return         	a map of parsed key-value pairs
 	 */
 	@Test
 	void parseArgs_parsesKeyValueBooleanAndEmpty_andLastWins() {
@@ -36,9 +33,6 @@ class CliArgUtilTests {
 
 	/**
 	 * Tests that CliArgUtil.parseArgs can correctly parse command line arguments that include key-value pairs, boolean flags, and empty values.
-	 *
-	 * @param args	a list of command line arguments
-	 * @return         	a map of parsed key-value pairs
 	 */
 	@Test
 	void parseArgs_allowsHyphenatedKeys() {
@@ -55,9 +49,6 @@ class CliArgUtilTests {
 
 	/**
 	 * Tests that CliArgUtil.parseArgs throws an exception when the argument prefix is missing.
-	 *
-	 * @param args	a list of command line arguments
-	 * @return         	a map of parsed key-value pairs
 	 */
 	@Test
 	void parseArgs_throwsOnBadPrefix() {
@@ -71,9 +62,6 @@ class CliArgUtilTests {
 
 	/**
 	 * Tests that CliArgUtil.allCliArgs() correctly flattens nested schemas into command line arguments.
-	 *
-	 * @param  schema	a nested schema with hyphenated path separators
-	 * @return         	a list of command line arguments
 	 */
 	@Test
 	void allCliArgs_flattensNestedSchema_withDefaultDashSeparator() {
@@ -96,9 +84,6 @@ class CliArgUtilTests {
 
 	/**
 	 * Tests that CliArgUtil.argsFromSchemaEntry supports custom separators and recursion.
-	 *
-	 * @param  paramName	a schema entry
-	 * @return         	a list of flattened arguments
 	 */
 	@Test
 	void argsFromSchemaEntry_supportsCustomSeparatorAndRecursion() {
@@ -118,10 +103,7 @@ class CliArgUtilTests {
 	}
 
 	/**
-	 * Tests that CliArgUtil.parseArgs can correctly parse command line arguments that include key-value pairs, boolean flags, and empty values.
-	 *
-	 * @param args	a list of command line arguments
-	 * @return         	a map of parsed key-value pairs
+	 * Tests that CliArgUtil.parseArgs only splits on the first equals sign.
 	 */
 	@Test
 	void parseArgs_handlesSingleEqualsOnlyOnce() {
