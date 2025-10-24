@@ -5,11 +5,14 @@ import static com.github.akurilov.commons.math.MathUtil.xorShift;
 import static java.nio.ByteBuffer.allocate;
 import static java.nio.ByteBuffer.allocateDirect;
 
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.IdentityHashMap;
+import java.util.Map;
+
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.ints.IntIterator;
 
 /**
  * Data input that lazily generates and caches layers to avoid repeated allocations.
@@ -19,10 +22,10 @@ import java.nio.ByteBuffer;
 public class CachedDataInput
 				extends DataInputBase {
 
+	private static final ThreadLocal<Map<CachedDataInput, Int2ObjectOpenHashMap<ByteBuffer>>> THREAD_LAYER_CACHE = ThreadLocal.withInitial(IdentityHashMap::new);
+
 	private int layersCacheCountLimit;
 	private boolean isInHeapMem;
-	@SuppressWarnings("ThreadLocalNotStaticFinal")
-	private final ThreadLocal<Int2ObjectOpenHashMap<ByteBuffer>> thrLocLayersCache = new ThreadLocal<>();
 
 	public CachedDataInput() {
 		super();
@@ -53,26 +56,28 @@ public class CachedDataInput
 		if (layerIndex == 0) {
 			return inputBuff;
 		}
-		var layersCache = thrLocLayersCache.get();
+		final Map<CachedDataInput, Int2ObjectOpenHashMap<ByteBuffer>> allCaches = THREAD_LAYER_CACHE.get();
+		var layersCache = allCaches.get(this);
 		if (layersCache == null) {
-			layersCache = new Int2ObjectOpenHashMap<>(layersCacheCountLimit - 1);
-			thrLocLayersCache.set(layersCache);
+			final int initialCapacity = Math.max(1, layersCacheCountLimit - 1);
+			layersCache = new Int2ObjectOpenHashMap<>(initialCapacity);
+			allCaches.put(this, layersCache);
 		}
 		// check if layer exists
 		var layer = layersCache.get(layerIndex - 1);
 		if (layer == null) {
-			// check if it's necessary to free the space first
-			var layersCountToFree = layersCacheCountLimit - layersCache.size() + 1;
-			final var layerSize = inputBuff.capacity();
-			if (layersCountToFree > 0) {
-				for (final int i : layersCache.keySet()) {
-					layer = layersCache.remove(i);
-					if (layer != null) {
-						layersCountToFree--;
-						if (layersCountToFree == 0) {
-							break;
-						}
+			final int layerSize = inputBuff.capacity();
+			final int cacheCapacity = Math.max(0, layersCacheCountLimit - 1);
+			if (cacheCapacity == 0) {
+				layersCache.clear();
+			} else {
+				while (layersCache.size() >= cacheCapacity) {
+					final IntIterator iterator = layersCache.keySet().iterator();
+					if (!iterator.hasNext()) {
+						break;
 					}
+					iterator.nextInt();
+					iterator.remove();
 				}
 				layersCache.trim();
 			}
@@ -89,10 +94,11 @@ public class CachedDataInput
 	public void close()
 					throws IOException {
 		super.close();
-		final var layersCache = (Int2ObjectMap<ByteBuffer>) thrLocLayersCache.get();
+
+		final Map<CachedDataInput, Int2ObjectOpenHashMap<ByteBuffer>> allCaches = THREAD_LAYER_CACHE.get();
+		final Int2ObjectMap<ByteBuffer> layersCache = allCaches.remove(this);
 		if (layersCache != null) {
 			layersCache.clear();
-			thrLocLayersCache.set(null);
 		}
 	}
 
