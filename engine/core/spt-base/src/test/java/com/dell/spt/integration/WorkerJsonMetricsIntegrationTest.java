@@ -35,7 +35,7 @@ import java.io.OutputStream;
 import java.util.Locale;
 import com.sun.net.httpserver.HttpServer;
 
-/**
+/*
  * Verifies that /metrics/json returns non-empty data when only local (non-distributed) contexts
  * are registered on a node (worker behavior in RMI runs).
  */

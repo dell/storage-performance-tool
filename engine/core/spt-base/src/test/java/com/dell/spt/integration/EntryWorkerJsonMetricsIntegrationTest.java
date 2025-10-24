@@ -37,7 +37,7 @@ import java.util.Locale;
 import com.sun.net.httpserver.HttpServer;
 import java.util.List;
 
-/**
+/*
  * Simulates 1 entry + 1 worker: worker has only local metrics; entry has a distributed
  * context aggregating the worker snapshot supplier. Verifies both endpoints are non-empty.
  */

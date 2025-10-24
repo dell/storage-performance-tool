@@ -23,7 +23,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.eclipse.jetty.server.Server;
@@ -46,7 +45,11 @@ public class ExposedMetricsTest {
 	private final String STEP_ID = ExposedMetricsTest.class.getSimpleName();
 	private final int RUN_ID = 123;
 	private final OpType OP_TYPE = OpType.CREATE;
-	private final IntSupplier nodeCountSupplier = () -> 1;
+
+	private static int nodeCount() {
+		return 1;
+	}
+
 	private final int CONCURRENCY_LIMIT = 0;
 	private final int CONCURRENCY_THRESHOLD = 0;
 	private final SizeInBytes ITEM_DATA_SIZE = ItemSize.SMALL.getValue();
@@ -84,7 +87,7 @@ public class ExposedMetricsTest {
 		distributedMetricsContext = DistributedMetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.opType(OP_TYPE)
-						.nodeCountSupplier(nodeCountSupplier)
+						.nodeCountSupplier(ExposedMetricsTest::nodeCount)
 						.concurrencyLimit(CONCURRENCY_LIMIT)
 						.concurrencyThreshold(CONCURRENCY_THRESHOLD)
 						.itemDataSize(ITEM_DATA_SIZE)

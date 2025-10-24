@@ -132,8 +132,8 @@ public class AppSmokeTest {
 				}
 			} catch (final IOException e) {
 				LogUtil.exception(Level.FATAL, e, "Failed to read the scenario file \"{}\"", scenarioPath);
-				try {
-					Files.list(scenarioPath.getParent()).forEach(System.out::println);
+				try (java.util.stream.Stream<Path> entries = Files.list(scenarioPath.getParent())) {
+					entries.forEach(System.out::println);
 				} catch (final IOException ee) {
 					LogUtil.trace(
 									Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");

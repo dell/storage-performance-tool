@@ -39,7 +39,6 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -65,7 +64,11 @@ public class JsonMetricsIntegrationTest {
 	private static final int RUN_ID = 12345;
 	private static final OpType OP_TYPE = OpType.CREATE;
 	private static final List<String> NODE_LIST = Arrays.asList("127.0.0.1:1099");
-	private static final IntSupplier NODE_COUNT_SUPPLIER = () -> 1;
+
+	private static int nodeCount() {
+		return 1;
+	}
+
 	private static final int CONCURRENCY_LIMIT = 10;
 	private static final SizeInBytes ITEM_DATA_SIZE = ItemSize.SMALL.getValue();
 
@@ -128,7 +131,7 @@ public class JsonMetricsIntegrationTest {
 		distributedMetricsContext = DistributedMetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.nodeAddrs(NODE_LIST)
-						.nodeCountSupplier(NODE_COUNT_SUPPLIER)
+						.nodeCountSupplier(JsonMetricsIntegrationTest::nodeCount)
 						.concurrencyLimit(CONCURRENCY_LIMIT)
 						.concurrencyThreshold(0)
 						.itemDataSize(ITEM_DATA_SIZE)
