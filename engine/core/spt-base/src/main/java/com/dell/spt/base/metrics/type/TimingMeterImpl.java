@@ -5,7 +5,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 
 import java.util.concurrent.atomic.LongAdder;
 
-/** @author veronika K. on 10.10.18 */
+/** Meter tracking timing samples with min/max/sum aggregation. */
 public class TimingMeterImpl implements LongMeter<TimingMetricSnapshot> {
 
 	private final LongAdder count = new LongAdder();

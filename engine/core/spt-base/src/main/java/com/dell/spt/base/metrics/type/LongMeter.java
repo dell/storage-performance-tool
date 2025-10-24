@@ -2,7 +2,7 @@ package com.dell.spt.base.metrics.type;
 
 import java.io.Serializable;
 
-/** @author veronika K. on 11.10.18 */
+/** Meter abstraction that records long values and exposes a snapshot. */
 public interface LongMeter<S extends Serializable> {
 
 	void update(final long v);

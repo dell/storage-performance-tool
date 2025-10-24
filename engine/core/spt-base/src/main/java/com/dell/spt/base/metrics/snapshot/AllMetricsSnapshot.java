@@ -2,6 +2,7 @@ package com.dell.spt.base.metrics.snapshot;
 
 import java.io.Serializable;
 
+/** Aggregated view of rate, timing, concurrency, and byte metrics. */
 public interface AllMetricsSnapshot extends Serializable {
 
 	TimingMetricSnapshot durationSnapshot();
@@ -16,6 +17,6 @@ public interface AllMetricsSnapshot extends Serializable {
 
 	RateMetricSnapshot failsSnapshot();
 
-	/** @return value in milliseconds */
+	/** Returns the duration of the measurement window in milliseconds. */
 	long elapsedTimeMillis();
 }

@@ -121,10 +121,12 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 		pageFirstKey = null;
 	}
 
+	@Override
 	public ListShard shard() {
 		return shard;
 	}
 
+	@Override
 	public void shard(final ListShard shard) {
 		if (shard == null) {
 			this.shard = null;

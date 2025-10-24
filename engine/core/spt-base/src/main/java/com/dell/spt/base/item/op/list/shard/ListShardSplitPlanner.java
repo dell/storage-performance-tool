@@ -15,7 +15,6 @@ public final class ListShardSplitPlanner {
 
 	private final ListShardQueue queue;
 	private final ListShardSplitHeuristics heuristics;
-	private final ListShardingConfig config;
 	private final Clock clock;
 	private final char[] alphabet;
 	private final int branchFactor;
@@ -34,7 +33,7 @@ public final class ListShardSplitPlanner {
 					final Clock clock) {
 		this.queue = Objects.requireNonNull(queue, "queue");
 		this.heuristics = Objects.requireNonNull(heuristics, "heuristics");
-		this.config = Objects.requireNonNull(config, "config");
+		Objects.requireNonNull(config, "config");
 		this.clock = Objects.requireNonNull(clock, "clock");
 		final char[] configuredAlphabet = config.alphabet();
 		if (configuredAlphabet == null || configuredAlphabet.length == 0) {

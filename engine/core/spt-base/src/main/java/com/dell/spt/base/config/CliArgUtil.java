@@ -45,13 +45,6 @@ public interface CliArgUtil {
 		};
 	}
 
-	private static <K, V> void putUnique(Map<K, V> map, K key, V v1) {
-		final var v2 = map.putIfAbsent(key, v1);
-		if (v2 != null)
-			throw new IllegalStateException(
-							String.format("Duplicate key '%s' (attempted merging incoming value '%s' with existing '%s')", key, v1, v2));
-	}
-
 	@SuppressWarnings("CollectionWithoutInitialCapacity")
 	static List<String> allCliArgs(final Map<String, Object> schema, final String sep) {
 		final List<String> allArgs = new ArrayList<>();

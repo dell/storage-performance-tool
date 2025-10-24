@@ -1,6 +1,6 @@
 package com.dell.spt.base.metrics.snapshot;
 
-/** @author veronika K. on 12.10.18 */
+/** Snapshot containing aggregate timing statistics. */
 public interface TimingMetricSnapshot
 				extends CountMetricSnapshot, NamedMetricSnapshot, MeanMetricSnapshot {
 

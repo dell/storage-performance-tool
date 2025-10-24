@@ -1,6 +1,6 @@
 package com.dell.spt.base.metrics.util;
 
-/** @author veronika K. on 03.10.18 */
+/** Reservoir interface for capturing rolling sequences of long values. */
 public interface LongReservoir {
 
 	int size();

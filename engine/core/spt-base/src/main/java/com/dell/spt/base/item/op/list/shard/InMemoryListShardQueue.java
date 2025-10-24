@@ -160,7 +160,7 @@ final class InMemoryListShardQueue implements ListShardQueue {
 			return terminal.get();
 		}
 
-		private void rescue(final long nowMillis) {
+		private void rescue() {
 			if (!terminal.compareAndSet(false, true)) {
 				return;
 			}
@@ -197,7 +197,7 @@ final class InMemoryListShardQueue implements ListShardQueue {
 				continue;
 			}
 			if (now - state.lastHeartbeatMillis > leaseTimeoutMillis && activeLeases.remove(lease, state)) {
-				lease.rescue(now);
+				lease.rescue();
 			}
 		}
 	}

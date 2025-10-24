@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
-/** @author veronika K. on 21.11.18 */
+/** Builder for distributed metrics contexts. */
 public interface DistributedContextBuilder
 				extends ContextBuilder<DistributedContextBuilder, DistributedMetricsContextImpl> {
 

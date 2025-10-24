@@ -21,7 +21,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.CloseableThreadContext;
 
-/** Created on 11.07.16. */
+/** Core contract for storage drivers that execute load operations. */
 public interface StorageDriver<I extends Item, O extends Operation<I>>
 				extends Daemon, Output<O> {
 
@@ -60,7 +60,7 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	int put(final List<O> ops);
 
-	/** @return 0 if the concurrency is not limited */
+	/** Returns the maximum concurrent operations supported, or 0 when unlimited. */
 	int concurrencyLimit();
 
 	int activeOpCount();
@@ -80,7 +80,9 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	void close() throws IOException;
 
 	/**
-	* @param extensions the resolved runtime extensions
+	 * Creates a storage driver instance using registered extensions.
+	 *
+	 * @param extensions the resolved runtime extensions
 	* @param storageConfig storage sub-config (also specifies the particular storage driver type)
 	* @param dataInput the data input used to produce/reproduce the data
 	* @param verifyFlag verify the data on read or not

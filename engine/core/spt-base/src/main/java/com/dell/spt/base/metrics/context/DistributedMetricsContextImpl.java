@@ -251,8 +251,8 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		private int concurrencyThreshold;
 		private boolean stdOutColorFlag;
 		private int outputPeriodSec;
-		private IntSupplier actualConcurrencyGauge = () -> 1; // TODO: How to correctly define for distributed mode
 
+		@Override
 		public DistributedMetricsContextImpl build() {
 			return new DistributedMetricsContextImpl(
 							metaData,
@@ -324,7 +324,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		@Override
 		public DistributedContextBuilder actualConcurrencyGauge(
 						final IntSupplier actualConcurrencyGauge) {
-			this.actualConcurrencyGauge = actualConcurrencyGauge;
+			this.metaData.put("actual_concurrency_gauge", actualConcurrencyGauge);
 			return this;
 		}
 

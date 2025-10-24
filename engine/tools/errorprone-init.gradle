@@ -1,0 +1,28 @@
+// Init script to enable Error Prone across Java compile tasks without touching build files
+initscript {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'net.ltgt.gradle:gradle-errorprone-plugin:4.1.0'
+    }
+}
+
+import net.ltgt.gradle.errorprone.ErrorPronePlugin
+
+allprojects { prj ->
+    gradle.projectsEvaluated {
+        prj.plugins.withId('java') {
+            prj.apply plugin: ErrorPronePlugin
+            prj.dependencies {
+                errorprone 'com.google.errorprone:error_prone_core:2.36.0'
+            }
+            prj.tasks.withType(JavaCompile).configureEach { JavaCompile t ->
+                // Treat everything as warnings for triage
+                options.errorprone.allErrorsAsWarnings.set(true)
+                options.errorprone.disableWarningsInGeneratedCode.set(true)
+            }
+        }
+    }
+}

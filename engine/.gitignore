@@ -91,3 +91,6 @@ tmp/
 
 # Local helper scripts
 tools/legacy-docker-publish.sh
+
+# Error Prone scan output
+errorprone_scan.txt

@@ -10,17 +10,17 @@ import com.dell.spt.base.storage.driver.ListOptions;
  */
 public interface ListOperation<I extends PathItem> extends PathOperation<I> {
 
-	/** @return number of concrete objects returned in this page */
+	/** Returns the number of concrete objects returned on this page. */
 	int objectsListed();
 
 	void objectsListed(int n);
 
-	/** @return aggregated bytes across listed objects (0 when metadata absent) */
+	/** Returns aggregated bytes across listed objects (0 when metadata absent). */
 	long bytesListed();
 
 	void bytesListed(long bytes);
 
-	/** @return continuation token to resume listing, or null if listing is complete */
+	/** Returns the continuation token, or {@code null} when listing is complete. */
 	String continuationToken();
 
 	void continuationToken(String token);
@@ -49,7 +49,7 @@ public interface ListOperation<I extends PathItem> extends PathOperation<I> {
 
 	void shard(ListShard shard);
 
-	/** First object key on this page (used for split LCP). */
+	/** Returns the first object key on this page (used for split LCP). */
 	String pageFirstKey();
 
 	void pageFirstKey(String key);

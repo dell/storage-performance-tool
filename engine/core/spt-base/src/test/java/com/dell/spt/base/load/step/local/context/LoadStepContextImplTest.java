@@ -362,7 +362,7 @@ public class LoadStepContextImplTest {
 
 	/* Helpers for tests */
 	private MetricsContext<AllMetricsSnapshot> buildMetricsCtx(final String id) {
-		final MetricsContext<AllMetricsSnapshot> ctx = MetricsContextImpl.<AllMetricsSnapshot> builder()
+		final MetricsContext<AllMetricsSnapshot> ctx = MetricsContextImpl.builder()
 						.loadStepId(id)
 						.opType(OpType.CREATE)
 						.actualConcurrencyGauge(() -> 0)
@@ -660,7 +660,6 @@ public class LoadStepContextImplTest {
 
 	/* Utility Methods */
 	Input<Item> createCSVItemInput() throws InterruptedException {
-		Input<Item> itemInput = null;
 		File csvFile = new File(TMP_DIR_PATH.toString(), "test.csv");
 
 		try {
@@ -671,8 +670,7 @@ public class LoadStepContextImplTest {
 
 		testConfig.val("item-input-file", TMP_DIR_PATH.toString() + "/test.csv");
 		var mockDriver = DummyStorageDriverMock.create();
-		itemInput = ItemInputFactory.createItemInput(testConfig.configVal("item"), batchSize, mockDriver);
-		return itemInput;
+		return ItemInputFactory.createItemInput(testConfig.configVal("item"), batchSize, mockDriver);
 	}
 
 	Path createItemOutputFile() {

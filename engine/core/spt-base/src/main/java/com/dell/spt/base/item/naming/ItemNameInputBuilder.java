@@ -57,7 +57,7 @@ public final class ItemNameInputBuilder
 	}
 
 	@Override
-	public <T extends ItemNameInput> T build() {
+	public ItemNameInput build() {
 		final var maxId = (long) pow(radix, length);
 		Input<String> prefixInput;
 		if (prefix == null) {
@@ -69,9 +69,9 @@ public final class ItemNameInputBuilder
 		}
 		switch (type) {
 		case RANDOM:
-			return (T) new ItemNameInputImpl((x) -> abs(xorShift(x) % maxId), seed, prefixInput, radix);
+			return new ItemNameInputImpl((x) -> abs(xorShift(x) % maxId), seed, prefixInput, radix);
 		case SERIAL:
-			return (T) new ItemNameInputImpl((x) -> abs((x + step) % maxId), seed, prefixInput, radix);
+			return new ItemNameInputImpl((x) -> abs((x + step) % maxId), seed, prefixInput, radix);
 		}
 		return null;
 	}

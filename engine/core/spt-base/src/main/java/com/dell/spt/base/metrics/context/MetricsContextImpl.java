@@ -249,6 +249,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		private int outputPeriodSec;
 		private Map<String, Object> metadata = new HashMap();
 
+		@Override
 		public MetricsContextImpl build() {
 			return new MetricsContextImpl(
 							metadata,

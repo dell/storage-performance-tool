@@ -31,27 +31,24 @@ public class CompositeExpressionInputBuilderImpl
 		withLanguage(inputBuilder);
 	}
 
-	@SuppressWarnings("unchecked")
 	@Override
-	public final <T extends CompositeExpressionInputBuilder> T expression(final String expr) {
+	public final CompositeExpressionInputBuilder expression(final String expr) {
 		this.expr = expr;
-		return (T) this;
+		return this;
 	}
 
-	@SuppressWarnings("unchecked")
 	@Override
-	public final <T extends CompositeExpressionInputBuilder> T function(
+	public final CompositeExpressionInputBuilder function(
 					final String prefix, final String name, final Method method) {
 		inputBuilder.function(prefix, name, method);
-		return (T) this;
+		return this;
 	}
 
-	@SuppressWarnings("unchecked")
 	@Override
-	public final <T extends CompositeExpressionInputBuilder> T value(
+	public final CompositeExpressionInputBuilder value(
 					final String name, final Object value, final Class<?> type) {
 		inputBuilder.value(name, value, type);
-		return (T) this;
+		return this;
 	}
 
 	@SuppressWarnings("unchecked")

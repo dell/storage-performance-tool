@@ -11,10 +11,8 @@ import javax.servlet.http.HttpServletResponse;
 public final class FleetMetricsHandler extends HttpServlet {
 
 	private final MetricsJsonResponder responder;
-	private final MetricsManager metricsManager;
 
 	public FleetMetricsHandler(final MetricsManager metricsManager, final Config config) {
-		this.metricsManager = metricsManager;
 		this.responder = new MetricsJsonResponder(metricsManager, config);
 	}
 

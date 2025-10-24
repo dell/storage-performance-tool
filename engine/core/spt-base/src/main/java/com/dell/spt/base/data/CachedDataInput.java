@@ -12,10 +12,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 /**
- Created by andrey on 24.07.17. The data input able to produce the layer of different data using
- the given layer index. Also caches the layers using the layers count limit to not to exhaust the
- available memory. The allocated off-heap memory is calculated as layersCacheCountLimit *
- layerSize (worst case)
+ * Data input that lazily generates and caches layers to avoid repeated allocations.
+ *
+ * <p>The allocated off-heap memory is calculated as layersCacheCountLimit * layerSize (worst case).
  */
 public class CachedDataInput
 				extends DataInputBase {
@@ -86,6 +85,7 @@ public class CachedDataInput
 		return layer;
 	}
 
+	@Override
 	public void close()
 					throws IOException {
 		super.close();

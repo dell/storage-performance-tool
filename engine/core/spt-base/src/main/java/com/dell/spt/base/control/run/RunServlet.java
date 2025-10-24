@@ -45,7 +45,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import org.apache.logging.log4j.Level;
 import org.eclipse.jetty.http.HttpHeader;
 
-/** @author veronika K. on 08.11.18 */
+/** Servlet that orchestrates run submission, execution, and status updates. */
 public class RunServlet extends HttpServlet {
 
 	private static final String PART_KEY_DEFAULTS = "defaults";

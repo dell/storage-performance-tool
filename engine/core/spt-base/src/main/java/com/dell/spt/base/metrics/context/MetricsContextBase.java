@@ -178,10 +178,12 @@ public abstract class MetricsContextBase<S extends AllMetricsSnapshot>
 		}
 	}
 
+	@Override
 	public long elapsedTimeMillis() {
 		return (System.currentTimeMillis() - tsStart);
 	}
 
+	@Override
 	public String comment() {
 		return (String) this.metadata.get(METADATA_COMMENT);
 	}

@@ -27,10 +27,7 @@ import org.apache.commons.codec.binary.Hex;
 */
 public class DataItemImpl extends ItemImpl implements DataItem {
 	//
-	private static final String FMT_MSG_OFFSET = "Data item offset is not correct hexadecimal value: \"%s\"",
-					FMT_MSG_SIZE = "Data item size is not correct hexadecimal value: \"%s\"",
-					FMT_MSG_MASK = "Ranges mask is not correct hexadecimal value: %s",
-					STR_EMPTY_MASK = "0";
+	private static final String STR_EMPTY_MASK = "0";
 	//
 	private static final char LAYER_MASK_SEP = '/';
 	//
@@ -70,7 +67,8 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 		try {
 			offset(Long.parseLong(offsetInfo, 0x10));
 		} catch (final NumberFormatException e) {
-			throw new IllegalArgumentException(String.format(FMT_MSG_OFFSET, offsetInfo));
+			throw new IllegalArgumentException(
+							String.format("Data item offset is not correct hexadecimal value: \"%s\"", offsetInfo));
 		}
 
 		prevCommaPos = nextCommaPos;
@@ -82,7 +80,8 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 		try {
 			truncate(Long.parseLong(sizeInfo, 10));
 		} catch (final NumberFormatException e) {
-			throw new IllegalArgumentException(String.format(FMT_MSG_SIZE, sizeInfo));
+			throw new IllegalArgumentException(
+							String.format("Data item size is not correct decimal value: \"%s\"", sizeInfo));
 		}
 
 		prevCommaPos = nextCommaPos;
@@ -104,7 +103,8 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 			// method "or" to merge w/ the existing mask
 			modifiedRangesMask.or(BitSet.valueOf(Hex.decodeHex(rangesMaskChars)));
 		} catch (final DecoderException | NumberFormatException e) {
-			throw new IllegalArgumentException(String.format(FMT_MSG_MASK, rangesInfo));
+			throw new IllegalArgumentException(
+							String.format("Ranges mask is not correct hexadecimal value: %s", rangesInfo));
 		}
 	}
 
@@ -260,6 +260,7 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 	}
 
 	//
+	@Override
 	public long position() {
 		return position;
 	}
