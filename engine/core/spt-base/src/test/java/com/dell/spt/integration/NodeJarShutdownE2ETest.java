@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.DisplayName;
@@ -116,7 +117,7 @@ public class NodeJarShutdownE2ETest {
 	}
 
 	private static String readTail(Path file) {
-		try (BufferedReader br = new BufferedReader(new InputStreamReader(Files.newInputStream(file)))) {
+		try (BufferedReader br = new BufferedReader(new InputStreamReader(Files.newInputStream(file), StandardCharsets.UTF_8))) {
 			StringBuilder sb = new StringBuilder();
 			String line;
 			int count = 0;

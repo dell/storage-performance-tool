@@ -158,7 +158,16 @@ public class ExposedMetricsTest {
 		final var m = p.matcher(result);
 		final var found = m.find();
 		assertTrue(found);
-		final var actualValue = m.group().split(labelName + "=")[1].replaceAll("\"", "");
+		final String group = m.group();
+		final String needle = labelName + "=";
+		final int start = group.indexOf(needle);
+		assertTrue(start >= 0, "label : " + labelName);
+		int valueStart = start + needle.length();
+		int valueEnd = group.indexOf(',', valueStart);
+		if (valueEnd < 0) {
+			valueEnd = group.length();
+		}
+		final String actualValue = group.substring(valueStart, valueEnd).replace("\"", "");
 		assertEquals(expectedValue, actualValue, "label : " + labelName);
 	}
 
@@ -191,7 +200,10 @@ public class ExposedMetricsTest {
 			final var m = p.matcher(resultOutput);
 			final var found = m.find();
 			assertTrue(found);
-			final var actualValue = Double.valueOf(m.group().split("}")[1]);
+			final String group = m.group();
+			final int braceIdx = group.indexOf('}');
+			assertTrue(braceIdx >= 0, "metric : " + metricName + "_" + key);
+			final var actualValue = Double.valueOf(group.substring(braceIdx + 1).trim());
 			final var expectedValue = Double.valueOf(expectedValues.get(key));
 			if (compareEquality) {
 				// Use accuracy as tolerance/delta for floating point comparison
