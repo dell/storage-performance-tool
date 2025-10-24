@@ -141,7 +141,6 @@ class MetricsAsciiTableLogMessageTest {
 	/**
 	 * Verifies that ANSI colors are inserted when stdout color output is enabled.
 	 *
-	 * @throws Exception if the test fails
 	 */
 	@Test
 	void shouldInsertOpTypeAndFailureColorsWithStdOutColorsEnabled() {
