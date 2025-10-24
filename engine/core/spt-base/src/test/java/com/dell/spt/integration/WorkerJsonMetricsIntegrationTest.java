@@ -28,6 +28,12 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.net.InetSocketAddress;
+import java.io.OutputStream;
+import java.util.Locale;
+import com.sun.net.httpserver.HttpServer;
 
 /**
  * Verifies that /metrics/json returns non-empty data when only local (non-distributed) contexts
@@ -137,13 +143,53 @@ public class WorkerJsonMetricsIntegrationTest {
 		final var conn = (HttpURLConnection) u.openConnection();
 		conn.setRequestMethod("GET");
 		final var sb = new StringBuilder();
-		try (var r = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
+		try (var r = new BufferedReader(new InputStreamReader(conn.getInputStream(), resolveCharset(conn)))) {
 			String line;
 			while ((line = r.readLine()) != null)
 				sb.append(line).append('\n');
 		}
 		conn.disconnect();
 		return sb.toString();
+	}
+
+	@Test
+	public void fetchReadsUtf8AsExpected() throws Exception {
+		HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/ascii", exchange -> {
+			byte[] body = "plain".getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+			exchange.sendResponseHeaders(200, body.length);
+			try (OutputStream os = exchange.getResponseBody()) {
+				os.write(body);
+			}
+		});
+		server.start();
+		try {
+			String response = fetch("http://127.0.0.1:" + server.getAddress().getPort() + "/ascii");
+			assertEquals("plain\n", response);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	public void fetchHonorsUtf16Charset() throws Exception {
+		HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/latin", exchange -> {
+			byte[] body = "føø".getBytes(StandardCharsets.UTF_16LE);
+			exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-16LE");
+			exchange.sendResponseHeaders(200, body.length);
+			try (OutputStream os = exchange.getResponseBody()) {
+				os.write(body);
+			}
+		});
+		server.start();
+		try {
+			String response = fetch("http://127.0.0.1:" + server.getAddress().getPort() + "/latin");
+			assertEquals("føø\n", response);
+		} finally {
+			server.stop(0);
+		}
 	}
 
 	private static int fetchStatus(String url) throws Exception {
@@ -153,5 +199,30 @@ public class WorkerJsonMetricsIntegrationTest {
 		final int status = conn.getResponseCode();
 		conn.disconnect();
 		return status;
+	}
+
+	private static Charset resolveCharset(HttpURLConnection connection) {
+		final String contentType = connection.getContentType();
+		if (contentType != null) {
+			int start = 0;
+			while (start <= contentType.length()) {
+				final int separator = contentType.indexOf(';', start);
+				final int end = separator >= 0 ? separator : contentType.length();
+				final String part = contentType.substring(start, end).trim();
+				if (part.toLowerCase(Locale.ROOT).startsWith("charset=")) {
+					final String charsetName = part.substring("charset=".length()).trim();
+					try {
+						return Charset.forName(charsetName);
+					} catch (Exception ignored) {
+						// fall back to UTF-8
+					}
+				}
+				if (separator < 0) {
+					break;
+				}
+				start = separator + 1;
+			}
+		}
+		return StandardCharsets.UTF_8;
 	}
 }
