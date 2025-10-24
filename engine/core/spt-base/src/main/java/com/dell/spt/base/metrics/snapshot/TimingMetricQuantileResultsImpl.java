@@ -101,9 +101,10 @@ public class TimingMetricQuantileResultsImpl implements Closeable {
 		try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
 			String line;
 			while ((line = br.readLine()) != null) {
-				String[] values = line.split(" ");
-				// e.g. 100 200. we only take one of the columns based on the metric type
-				tmpArray.add(Long.valueOf(values[metricType.ordinal()]));
+				final Long parsedValue = parseMetricValue(line, metricType);
+				if (parsedValue != null) {
+					tmpArray.add(parsedValue);
+				}
 			}
 		} catch (IOException e) {
 			LogUtil.exception(
@@ -157,13 +158,63 @@ public class TimingMetricQuantileResultsImpl implements Closeable {
 		// Quantile 0.9:              6521
 		// Quantile 0.1:              1679
 		// so linkedHashMap is used over HashMap
-		final Map<Double, Long> arrayQuantileValues = new LinkedHashMap<>(metricsArray.size());
+		final Map<Double, Long> arrayQuantileValues = new LinkedHashMap<>(quantiles.size());
 		final int metricsArrayLength = metricsArray.size();
+		if (metricsArrayLength == 0) {
+			Loggers.ERR.warn("No timing metrics available to compute quantiles for type {}", metricType);
+			return arrayQuantileValues;
+		}
 		for (final Double quantile : quantiles) {
-			arrayQuantileValues.put(quantile, metricsArray.get((int) (quantile * metricsArrayLength)));
+			int index = (int) (quantile * metricsArrayLength);
+			if (index >= metricsArrayLength) {
+				index = metricsArrayLength - 1;
+			}
+			arrayQuantileValues.put(quantile, metricsArray.get(index));
 
 		}
 		return arrayQuantileValues;
+	}
+
+	static Long parseMetricValue(final String line, final TimingMetricType metricType) {
+		if (line == null) {
+			return null;
+		}
+		final int targetColumn = switch (metricType) {
+		case LATENCY -> 0;
+		case DURATION -> 1;
+		};
+		int index = 0;
+		final int length = line.length();
+		// Skip leading whitespace
+		while (index < length && Character.isWhitespace(line.charAt(index))) {
+			index++;
+		}
+		if (index >= length) {
+			return null;
+		}
+		int currentColumn = 0;
+		while (index < length) {
+			final int tokenStart = index;
+			while (index < length && !Character.isWhitespace(line.charAt(index))) {
+				index++;
+			}
+			if (currentColumn == targetColumn) {
+				final String token = line.substring(tokenStart, index);
+				try {
+					return Long.parseLong(token);
+				} catch (NumberFormatException ex) {
+					LogUtil.exception(Level.WARN, ex, "Failed to parse timing metric token '{}' for {}", token, metricType);
+					return null;
+				}
+			}
+			currentColumn++;
+			while (index < length && Character.isWhitespace(line.charAt(index))) {
+				index++;
+			}
+		}
+		Loggers.ERR.warn(
+						"Timing metrics line '{}' does not contain column {} for {}", line, targetColumn, metricType);
+		return null;
 	}
 
 	public Map<Double, Long> getMetricsValues() {

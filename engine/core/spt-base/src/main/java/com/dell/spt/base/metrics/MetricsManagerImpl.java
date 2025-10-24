@@ -3,7 +3,7 @@ package com.dell.spt.base.metrics;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.dell.spt.base.metrics.MetricsConstants.METRIC_LABELS;
+import static com.dell.spt.base.metrics.MetricsConstants.metricLabelsArray;
 import static com.dell.spt.base.metrics.TimingMetricType.LATENCY;
 import static com.dell.spt.base.metrics.TimingMetricType.DURATION;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
@@ -166,7 +166,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 				distributedMetrics.put(
 								distributedMetricsCtx,
 								new PrometheusMetricsExporterImpl(distributedMetricsCtx)
-												.labels(METRIC_LABELS, labelValues)
+												.labels(metricLabelsArray(), labelValues)
 												//.quantiles(distributedMetricsCtx.quantileValues())
 												.register());
 			}
