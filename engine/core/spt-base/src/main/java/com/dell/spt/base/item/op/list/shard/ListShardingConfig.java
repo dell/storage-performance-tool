@@ -350,7 +350,8 @@ public final class ListShardingConfig {
 
 	private static String dedupe(final String charsetRaw) {
 		final var seen = new LinkedHashMap<Character, Boolean>();
-		for (final char c : charsetRaw.toCharArray()) {
+		for (var idx = 0; idx < charsetRaw.length(); idx++) {
+			final char c = charsetRaw.charAt(idx);
 			seen.putIfAbsent(c, Boolean.TRUE);
 		}
 		final var builder = new StringBuilder(seen.size());
@@ -376,7 +377,7 @@ public final class ListShardingConfig {
 		if (sanitizedBase.isEmpty()) {
 			return suffix;
 		}
-		return sanitizedBase.endsWith("/") ? sanitizedBase + suffix : sanitizedBase + suffix;
+		return sanitizedBase + suffix;
 	}
 
 	private static String trimLeadingSlash(final String value) {
