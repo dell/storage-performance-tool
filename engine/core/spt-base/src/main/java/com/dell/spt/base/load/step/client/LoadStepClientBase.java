@@ -46,6 +46,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -181,8 +182,8 @@ public abstract class LoadStepClientBase
 		final var itemDataInputLayerCacheSize = itemDataInputLayerConfig.intVal("cache");
 		final var isInHeapMem = itemDataInputLayerConfig.boolVal("heap");
 		final var opConfig = loadConfig.configVal("op");
-		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
-		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase());
+		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
+		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final boolean skipScatter = ItemType.PATH.equals(itemType) && OpType.LIST.equals(opType);
 		if (skipScatter) {
 			Loggers.MSG.info("{}: skipping item input scatter for LIST workload", loadStepId());
@@ -470,7 +471,7 @@ public abstract class LoadStepClientBase
 			}
 			Loggers.MSG.debug(
 							"{}: await for {} step slices for at most {} {}...", loadStepId(), stepSliceCount,
-							timeout, timeUnit.name().toLowerCase());
+							timeout, timeUnit.name().toLowerCase(Locale.ROOT));
 			return stepSlices.parallelStream().map(stepSlice -> {
 				try {
 					final var invokeTimeMillis = System.currentTimeMillis();

@@ -44,6 +44,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -68,7 +69,7 @@ public class LoadStepContextImplTest {
 	Input<Item> itemInput = null;
 	Config testConfig = TestConfigBuilder.config();
 	private int batchSize = 4096; // default value given in the schema
-	final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase());
+	final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
 	final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
 	final DummyStorageDriverMock mockDriver = DummyStorageDriverMock.create();
 

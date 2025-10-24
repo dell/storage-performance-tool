@@ -71,6 +71,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -881,7 +882,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 
-		AMZChecksum amzChecksum = AMZChecksum.valueOf(checksumAlgorithm.toUpperCase());
+		AMZChecksum amzChecksum = AMZChecksum.valueOf(checksumAlgorithm.toUpperCase(Locale.ROOT));
 		var dataItem = (DataItem) op.item();
 
 		// Select digest
@@ -939,7 +940,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			if (amzChecksum == AMZChecksum.MD5) {
 				httpHeaders.set(HttpHeaderNames.CONTENT_MD5, checksum);
 			} else {
-				httpHeaders.set(S3Api.AMZ_CHECKSUM_PREFIX + amzChecksum.toString().toLowerCase(), checksum);
+				httpHeaders.set(
+								S3Api.AMZ_CHECKSUM_PREFIX + amzChecksum.toString().toLowerCase(Locale.ROOT), checksum);
 			}
 		} catch (IOException e) {
 			Loggers.ERR.info("Unable to compute checksum: {}", e.getMessage());
@@ -1315,14 +1317,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final Map<String, String> sortedHeaders = new TreeMap<>();
 		if (sharedHeaders != null) {
 			for (final var header : sharedHeaders) {
-				headerName = header.getKey().toLowerCase();
+				headerName = header.getKey().toLowerCase(Locale.ROOT);
 				if (headerName.startsWith(S3Api.PREFIX_KEY_X_AMZ)) {
 					sortedHeaders.put(headerName, header.getValue());
 				}
 			}
 		}
 		for (final var header : httpHeaders) {
-			headerName = header.getKey().toLowerCase();
+			headerName = header.getKey().toLowerCase(Locale.ROOT);
 			if (headerName.startsWith(S3Api.PREFIX_KEY_X_AMZ)) {
 				sortedHeaders.put(headerName, header.getValue());
 			}

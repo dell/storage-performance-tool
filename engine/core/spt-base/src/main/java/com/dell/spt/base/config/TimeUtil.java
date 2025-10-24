@@ -2,6 +2,7 @@ package com.dell.spt.base.config;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,14 +53,14 @@ public abstract class TimeUtil {
 		Matcher m = PATTERN_TIME.matcher(rawValue);
 
 		if (m.matches()) {
-			final String t = m.group(2).toLowerCase();
+			final String t = m.group(2).toLowerCase(Locale.ROOT);
 			if (TIME_UNIT_SHORTCUTS.containsKey(t)) {
 				result = TIME_UNIT_SHORTCUTS.get(t);
 			}
 		} else {
 			m = PATTERN_TIME_COMPAT.matcher(rawValue);
 			if (m.matches()) {
-				result = TimeUnit.valueOf(m.group(2).toUpperCase());
+				result = TimeUnit.valueOf(m.group(2).toUpperCase(Locale.ROOT));
 			} else {
 				throw new IllegalArgumentException(
 								String.format(

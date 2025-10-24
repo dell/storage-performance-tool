@@ -2,6 +2,7 @@ package com.dell.spt.params;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public abstract class EnvParams {
@@ -17,25 +18,25 @@ public abstract class EnvParams {
 		final List<StorageType> includedStorageTypes = new ArrayList<>();
 		final String storageTypeValues = env.get(StorageType.KEY_ENV);
 		for (final String storageTypeValue : storageTypeValues.split(",")) {
-			includedStorageTypes.add(StorageType.valueOf(storageTypeValue.toUpperCase()));
+			includedStorageTypes.add(StorageType.valueOf(storageTypeValue.toUpperCase(Locale.ROOT)));
 		}
 
 		final List<RunMode> includedRunModes = new ArrayList<>();
 		final String nodeCountValues = env.get(RunMode.KEY_ENV);
 		for (final String nodeCountValue : nodeCountValues.split(",")) {
-			includedRunModes.add(RunMode.valueOf(nodeCountValue.toUpperCase()));
+			includedRunModes.add(RunMode.valueOf(nodeCountValue.toUpperCase(Locale.ROOT)));
 		}
 
 		final List<Concurrency> includedConcurrencies = new ArrayList<>();
 		final String concurrencyValues = env.get(Concurrency.KEY_ENV);
 		for (final String concurrencyValue : concurrencyValues.split(",")) {
-			includedConcurrencies.add(Concurrency.valueOf(concurrencyValue.toUpperCase()));
+			includedConcurrencies.add(Concurrency.valueOf(concurrencyValue.toUpperCase(Locale.ROOT)));
 		}
 
 		final List<ItemSize> includedItemSizes = new ArrayList<>();
 		final String itemSizeValues = env.get(ItemSize.KEY_ENV);
 		for (final String itemSizeValue : itemSizeValues.split(",")) {
-			includedItemSizes.add(ItemSize.valueOf(itemSizeValue.toUpperCase()));
+			includedItemSizes.add(ItemSize.valueOf(itemSizeValue.toUpperCase(Locale.ROOT)));
 		}
 
 		for (final StorageType storageType : includedStorageTypes) {

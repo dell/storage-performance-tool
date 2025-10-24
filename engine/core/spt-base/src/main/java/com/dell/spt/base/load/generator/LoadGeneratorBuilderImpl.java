@@ -58,6 +58,7 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.Locale;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -133,7 +134,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		if (!(itemInput instanceof TransferConvertBuffer)) {
 			sizeEstimate = estimateTransferSize(
 							null,
-							OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase()),
+							OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase(Locale.ROOT)),
 							(Input<DataItem>) itemInput);
 		}
 		return this;
@@ -206,7 +207,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			opsBuilder = (OperationsBuilder<I, O>) new TokenOperationsBuilderImpl(originIndex);
 		}
 		// determine the operations type
-		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
+		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		opsBuilder.opType(opType);
 		ListShardingConfig shardingConfig = null;
 		if (opType == OpType.LIST && opsBuilder instanceof PathOperationsBuilderImpl) {
@@ -624,7 +625,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var prefix = namingConfig.stringVal("prefix");
 		final var radix = namingConfig.intVal("radix");
 		final var step = namingConfig.intVal("step");
-		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase());
+		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final var itemNameInput = ItemNameInput.Builder.newInstance()
 						.length(length)
 						.seed(seed)

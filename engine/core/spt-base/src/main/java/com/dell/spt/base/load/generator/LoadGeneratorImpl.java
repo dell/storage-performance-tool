@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -90,7 +91,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 		this.rnd = shuffleFlag ? new Random() : null;
 		final var ioStr = opsBuilder.opType().toString();
 		name = Character.toUpperCase(ioStr.charAt(0))
-						+ ioStr.substring(1).toLowerCase()
+						+ ioStr.substring(1).toLowerCase(Locale.ROOT)
 						+ (countLimit > 0 && countLimit < Long.MAX_VALUE ? Long.toString(countLimit) : "")
 						+ itemInput.toString();
 		threadLocalOpBuff = ThreadLocal.withInitial(() -> new CircularArrayBuffer<>(batchSize));

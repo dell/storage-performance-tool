@@ -46,6 +46,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -304,14 +305,14 @@ public class AtmosStorageDriver<I extends Item, O extends Operation<I>>
 		Map<String, String> sortedHeaders = new TreeMap<>();
 		if (sharedHeaders != null) {
 			for (final var header : sharedHeaders) {
-				headerName = header.getKey().toLowerCase();
+				headerName = header.getKey().toLowerCase(Locale.ROOT);
 				if (headerName.startsWith(PREFIX_KEY_X_Dell) && !headerName.equals(KEY_X_Dell_SIGNATURE)) {
 					sortedHeaders.put(headerName, header.getValue());
 				}
 			}
 		}
 		for (final var header : httpHeaders) {
-			headerName = header.getKey().toLowerCase();
+			headerName = header.getKey().toLowerCase(Locale.ROOT);
 			if (headerName.startsWith(PREFIX_KEY_X_Dell) && !headerName.equals(KEY_X_Dell_SIGNATURE)) {
 				sortedHeaders.put(headerName, header.getValue());
 			}

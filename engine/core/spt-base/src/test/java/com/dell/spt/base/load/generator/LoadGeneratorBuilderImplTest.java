@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -105,7 +106,7 @@ public class LoadGeneratorBuilderImplTest {
 				put("load-op-recycle-content-update", false);
 				put("load-op-retry", false);
 				put("load-op-shuffle", false);
-				put("load-op-type", OpType.CREATE.name().toLowerCase());
+				put("load-op-type", OpType.CREATE.name().toLowerCase(Locale.ROOT));
 				put("storage-auth-file", credentialsFilePath.toAbsolutePath().toString());
 			}
 		};

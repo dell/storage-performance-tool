@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 
 import static com.dell.spt.base.config.el.Language.withLanguage;
@@ -87,7 +88,7 @@ public interface ConfigSliceUtil {
 	static void sliceItemNaming(final List<Config> configSlices) {
 		try {
 			final var namingConfig = configSlices.get(0).configVal("item-naming");
-			final var namingType = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase());
+			final var namingType = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
 			if (SERIAL.equals(namingType)) {
 				final var sliceCount = configSlices.size();
 				final var srcNamingSeedRaw = namingConfig.val("seed");

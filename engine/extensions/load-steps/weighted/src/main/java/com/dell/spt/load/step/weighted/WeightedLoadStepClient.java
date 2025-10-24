@@ -16,6 +16,7 @@ import org.apache.logging.log4j.Level;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
@@ -60,7 +61,7 @@ public class WeightedLoadStepClient extends LoadStepClientBase {
 				LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
 				throwUnchecked(e);
 			}
-			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase());
+			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase(Locale.ROOT));
 			final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
 			final Config outputConfig = subConfig.configVal("output");
 			final Config metricsConfig = outputConfig.configVal("metrics");

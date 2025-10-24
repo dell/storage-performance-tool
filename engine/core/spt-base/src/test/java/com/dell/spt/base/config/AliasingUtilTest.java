@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -119,7 +120,7 @@ public class AliasingUtilTest {
 						IllegalArgumentException.class,
 						() -> AliasingUtil.apply(args, cfg));
 		assertTrue(ex.getMessage().contains("\"old\""));
-		assertTrue(ex.getMessage().toLowerCase().contains("deprecated"));
+		assertTrue(ex.getMessage().toLowerCase(Locale.ROOT).contains("deprecated"));
 	}
 
 	/**

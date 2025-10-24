@@ -197,7 +197,12 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 						exitMetricsThresholdState(metricsCtx);
 					}
 
-					if (metricsCtx instanceof DistributedMetricsContext) {
+					final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext;
+					final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
+					recordProgressSnapshot(metricsCtx, snapshot);
+					TerminalStepEntry terminalEntry = null;
+
+					if (distributedEntry) {
 						final DistributedMetricsContext<?> distributedMetricsCtx = (DistributedMetricsContext<?>) metricsCtx;
 						final String timingMetricsDirPath = System.getProperty("java.io.tmpdir") + "/spt/";
 						final String timingMetricsFilePattern = "timingMetrics_" + metricsCtx.loadStepId();
@@ -208,8 +213,19 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 										DURATION, distributedMetricsCtx.nodeCount(), timingMetricsDirPath,
 										timingMetricsFilePattern, metricsCtx.timingPersistEnabled());
 
-						if (null != snapshot) {
-							recordProgressSnapshot(metricsCtx, snapshot);
+						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
+							if (hasProgress(snapshot)) {
+								final var nodesPresent = distributedMetricsCtx.nodeAddrs();
+								final int nodeCount = distributedMetricsCtx.nodeCount();
+								final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
+								terminalEntry = buildEntryFromSnapshot(
+												metricsCtx,
+												aggregSnapshot,
+												true,
+												nodeCount,
+												nodesPresent,
+												partial);
+							}
 							// file output
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
 							// class instance. though this flag is only enabled for distributed context.
@@ -243,19 +259,8 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 						}
 
 						// Cache terminal entry for JSON endpoint
-						if (snapshot instanceof DistributedAllMetricsSnapshot && aggregSnapshot != null) {
-							final var nodesPresent = distributedMetricsCtx.nodeAddrs();
-							final int nodeCount = distributedMetricsCtx.nodeCount();
-							final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
-
-							final TerminalStepEntry entry = buildEntryFromSnapshot(
-											metricsCtx,
-											aggregSnapshot,
-											true,
-											nodeCount,
-											nodesPresent,
-											partial);
-							terminalByStepId.put(ProgressKey.of(metricsCtx.loadStepId(), true), entry);
+						if (terminalEntry != null) {
+							terminalByStepId.put(progressKey, terminalEntry);
 						}
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
@@ -265,18 +270,25 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 										&& snapshot.byteSnapshot() != null
 										&& snapshot.latencySnapshot() != null
 										&& snapshot.durationSnapshot() != null
-										&& snapshot.concurrencySnapshot() != null) {
-							final TerminalStepEntry entry = buildEntryFromSnapshot(
+										&& snapshot.concurrencySnapshot() != null
+										&& hasProgress(snapshot)) {
+							terminalEntry = buildEntryFromSnapshot(
 											metricsCtx,
 											snapshot,
 											false,
 											0,
 											List.of(),
 											false);
-							terminalByStepId.put(ProgressKey.of(metricsCtx.loadStepId(), false), entry);
+							terminalByStepId.put(progressKey, terminalEntry);
 						}
 					}
-					lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
+					if (terminalEntry == null) {
+						final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
+						if (lastProgressEntry != null) {
+							terminalByStepId.put(progressKey, lastProgressEntry);
+						}
+					}
+					lastProgressByStepId.remove(progressKey);
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {

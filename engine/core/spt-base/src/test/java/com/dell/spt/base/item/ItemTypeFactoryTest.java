@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.github.akurilov.confuse.Config;
+import java.util.Locale;
 
 public class ItemTypeFactoryTest {
 	Config testConfig = TestConfigBuilder.config();
@@ -21,7 +22,7 @@ public class ItemTypeFactoryTest {
 	@Test
 	public void dataItemFactoryTest() {
 		testConfig.val("item-type", "data");
-		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase());
+		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
 		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(DataItemFactoryImpl.class, itemFactory);
 	}
@@ -37,7 +38,7 @@ public class ItemTypeFactoryTest {
 	@Test
 	public void pathItemFactoryTest() {
 		testConfig.val("item-type", "path");
-		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase());
+		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
 		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(PathItemFactoryImpl.class, itemFactory);
 	}
@@ -53,7 +54,7 @@ public class ItemTypeFactoryTest {
 	@Test
 	public void tokenItemFactoryTest() {
 		testConfig.val("item-type", "token");
-		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase());
+		final ItemType itemType = ItemType.valueOf(testConfig.stringVal("item-type").toUpperCase(Locale.ROOT));
 		final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
 		assertInstanceOf(TokenItemFactoryImpl.class, itemFactory);
 	}
