@@ -6,10 +6,15 @@ import org.junit.jupiter.api.Test;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.*;
 
 class LogServletHeadSuccessTest {
@@ -35,10 +40,28 @@ class LogServletHeadSuccessTest {
 		assertDoesNotThrow(() -> servlet.doHead(req, resp));
 
 		// Cleanup
+		ThreadContext.clearAll();
 		try {
-			Files.deleteIfExists(msg);
-			Files.deleteIfExists(logDir);
-			Files.deleteIfExists(tmpHome);
-		} catch (Exception ignore) {}
+			Files.walkFileTree(
+							tmpHome,
+							new SimpleFileVisitor<>() {
+								@Override
+								public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) throws IOException {
+									Files.deleteIfExists(file);
+									return FileVisitResult.CONTINUE;
+								}
+
+								@Override
+								public FileVisitResult postVisitDirectory(final Path dir, final IOException exc) throws IOException {
+									if (exc != null) {
+										throw exc;
+									}
+									Files.deleteIfExists(dir);
+									return FileVisitResult.CONTINUE;
+								}
+							});
+		} catch (final IOException ex) {
+			fail("Failed to clean up temporary log servlet files", ex);
+		}
 	}
 }

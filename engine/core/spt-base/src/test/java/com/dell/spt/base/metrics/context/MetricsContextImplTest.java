@@ -252,6 +252,9 @@ class MetricsContextImplTest {
 	private static void sleepQuiet(long millis) {
 		try {
 			Thread.sleep(millis);
-		} catch (InterruptedException ignored) {}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			fail("Sleep interrupted in test helper", e);
+		}
 	}
 }

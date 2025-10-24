@@ -282,7 +282,9 @@ public final class Main {
 				// Configure terminal metrics retention to match status linger
 				try {
 					metricsMgr.setTerminalRetentionMillis(fullDefaultConfig.intVal("api-linger-sec") * 1000L);
-				} catch (Exception ignore) {}
+				} catch (final Exception e) {
+					Loggers.MSG.warn("Unable to align terminal metrics retention with api-linger-sec; continuing with default retention", e);
+				}
 				// Register /run before starting the server to avoid a readiness race
 				final var runServletHolder = new ServletHolder(
 								new RunServlet(

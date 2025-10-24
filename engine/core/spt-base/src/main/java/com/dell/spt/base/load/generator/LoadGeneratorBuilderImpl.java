@@ -363,7 +363,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				} finally {
 					try {
 						itemInput.close();
-					} catch (final Exception ignored) {}
+					} catch (final Exception e) {
+						Loggers.MSG.warn("Failed to close itemInput after loading concat source items; continuing with cleanup", e);
+					}
 				}
 				// shoot the foot
 				if (srcItemsCount == 0) {

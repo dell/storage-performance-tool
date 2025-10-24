@@ -32,7 +32,9 @@ class ItemFileSlicerAggregatorTest {
 		for (Path p : filesToCleanup) {
 			try {
 				Files.deleteIfExists(p);
-			} catch (Exception ignore) {}
+			} catch (final Exception e) {
+				fail("Failed to delete temp file " + p, e);
+			}
 		}
 		filesToCleanup.clear();
 	}

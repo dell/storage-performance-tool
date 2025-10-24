@@ -28,14 +28,19 @@ public class ItemTimingMetricsFileOutputTest {
 	@AfterEach
 	void tearDown() throws Exception {
 		if (tempDir != null) {
-			// Best-effort cleanup
-			Files.walk(tempDir)
-							.sorted((a, b) -> b.getNameCount() - a.getNameCount())
-							.forEach(p -> {
-								try {
-									Files.deleteIfExists(p);
-								} catch (Exception ignored) {}
-							});
+			try (var paths = Files.walk(tempDir)) {
+				paths
+								.sorted((a, b) -> b.getNameCount() - a.getNameCount())
+								.forEach(p -> {
+									try {
+										Files.deleteIfExists(p);
+									} catch (final Exception e) {
+										throw new RuntimeException("Failed to delete path " + p, e);
+									}
+								});
+			} catch (final Exception e) {
+				fail("Failed to clean up temporary directory " + tempDir, e);
+			}
 		}
 	}
 

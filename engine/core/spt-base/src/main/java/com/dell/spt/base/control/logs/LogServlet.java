@@ -289,11 +289,15 @@ public final class LogServlet extends HttpServlet {
 				item.put("modified", java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
 								.withZone(java.time.ZoneOffset.UTC)
 								.format(java.time.Instant.ofEpochMilli(mtime)));
-			} catch (final IOException ignore) {}
+			} catch (final IOException ioe) {
+				Loggers.MSG.debug("Unable to read size/mtime for log file {}", p, ioe);
+			}
 			String ctype = null;
 			try {
 				ctype = Files.probeContentType(p);
-			} catch (final IOException ignore) {}
+			} catch (final IOException ioe) {
+				Loggers.MSG.debug("Unable to probe content type for log file {}", p, ioe);
+			}
 			if (ctype == null) {
 				final String name = p.getFileName().toString().toLowerCase();
 				if (name.endsWith(".csv"))

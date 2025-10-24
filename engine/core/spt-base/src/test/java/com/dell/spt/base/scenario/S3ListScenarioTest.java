@@ -64,7 +64,9 @@ class S3ListScenarioTest {
 				if (somClass.isInstance(cfg)) {
 					return (Map<String, Object>) somClass.getMethod("to", Class.class).invoke(cfg, Map.class);
 				}
-			} catch (final Exception ignore) {}
+			} catch (final Exception e) {
+				throw new IllegalArgumentException("Unsupported config object: " + cfg, e);
+			}
 			throw new IllegalArgumentException("Unsupported config object: " + cfg);
 		}
 	}
