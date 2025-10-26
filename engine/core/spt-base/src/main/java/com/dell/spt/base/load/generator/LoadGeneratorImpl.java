@@ -130,9 +130,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 								n = (int) Math.min(remainingOpCount, n);
 								if (tempBufferLock.tryLock()) {
 									try {
-
 										items = getItems(itemInput, n);
-									} catch (final ConcurrentModificationException ignored) {} finally {
+									} catch (final ConcurrentModificationException cme) {
+										Loggers.MSG.debug(
+														"{}: item input changed while fetching operations; retrying",
+														name);
+										items.clear();
+										return;
+									} finally {
 										tempBufferLock.unlock();
 									}
 								}
@@ -148,11 +153,18 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 										try {
 											n = items.size();
 											if (n > 0) {
-												pendingOpCount += buildOps(items, opBuff, n);
+												final long newlyBuilt = buildOps(items, opBuff, n);
+												pendingOpCount = (int) (pendingOpCount + newlyBuilt);
 											} else {
 												itemInputFinishFlag = true;
 											}
-										} catch (final ConcurrentModificationException ignored) {} finally {
+										} catch (final ConcurrentModificationException cme) {
+											Loggers.MSG.debug(
+															"{}: items buffer changed while building operations; retrying",
+															name);
+											items.clear();
+											return;
+										} finally {
 											tempBufferLock.unlock();
 										}
 									} else if (items.isEmpty()) {
@@ -231,14 +243,18 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 				outputFinishFlag = true;
 			}
 
-		} catch (final EOFException ok) {} catch (final Throwable t) {
+		} catch (final EOFException eof) {
+			Loggers.MSG.debug("{}: terminating load generator due to EOF", name);
+		} catch (final Throwable t) {
 			throwUncheckedIfInterrupted(t);
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
 			if (isFinished()) {
 				try {
 					stop();
-				} catch (final IllegalStateException ignored) {}
+				} catch (final IllegalStateException e) {
+					Loggers.MSG.debug("{}: stop already in progress; ignoring redundant stop", name);
+				}
 			}
 		}
 	}
@@ -299,7 +315,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 
 	private boolean isFinished() {
 		return outputFinishFlag
-						|| itemInputFinishFlag && opInputFinishFlag && generatedOpCount() == outputOpCounter.sum();
+						|| (itemInputFinishFlag && opInputFinishFlag && generatedOpCount() == outputOpCounter.sum());
 	}
 
 	@Override
