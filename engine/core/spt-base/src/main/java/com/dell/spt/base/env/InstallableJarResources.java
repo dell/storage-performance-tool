@@ -47,7 +47,10 @@ public abstract class InstallableJarResources implements Installable {
 						checksumCalc.update(buff, 0, n);
 					}
 				}
-			} catch (final EOFException ok) {} catch (final IOException e) {
+			} catch (final EOFException e) {
+				LogUtil.trace(
+								Loggers.ERR, Level.WARN, e, "Unexpected EOF while reading src file \"{}\"", srcFilePath);
+			} catch (final IOException e) {
 				LogUtil.exception(Level.WARN, e, "Failed to read the src file \"{}\"", srcFilePath);
 			}
 			final var srcFileChecksum = checksumCalc.getValue();
@@ -58,7 +61,10 @@ public abstract class InstallableJarResources implements Installable {
 				while (-1 < (n = in.read(buff))) {
 					checksumCalc.update(buff, 0, n);
 				}
-			} catch (final EOFException ok) {} catch (final IOException e) {
+			} catch (final EOFException e) {
+				LogUtil.trace(
+								Loggers.ERR, Level.WARN, e, "Unexpected EOF while reading dst file \"{}\"", dstPath);
+			} catch (final IOException e) {
 				LogUtil.exception(Level.WARN, e, "Failed to read the dst file \"{}\"", dstPath);
 			}
 			final var dstFileChecksum = checksumCalc.getValue();
