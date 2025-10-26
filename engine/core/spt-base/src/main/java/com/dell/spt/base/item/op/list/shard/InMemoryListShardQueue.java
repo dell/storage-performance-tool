@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -22,6 +23,7 @@ final class InMemoryListShardQueue implements ListShardQueue {
 	private final long leaseTimeoutMillis;
 	private final long watchdogIntervalMillis;
 	private final ScheduledExecutorService watchdog;
+	private final ScheduledFuture<?> rescueTask;
 
 	InMemoryListShardQueue(final ListShardMetricsRecorder metricsRecorder) {
 		this(metricsRecorder, computeDefaultTimeout(metricsRecorder));
@@ -41,8 +43,11 @@ final class InMemoryListShardQueue implements ListShardQueue {
 							t.setDaemon(true);
 							return t;
 						});
-		this.watchdog.scheduleAtFixedRate(
-						this::rescueStaleLeases, this.watchdogIntervalMillis, this.watchdogIntervalMillis, TimeUnit.MILLISECONDS);
+		this.rescueTask = this.watchdog.scheduleAtFixedRate(
+						this::rescueStaleLeases,
+						this.watchdogIntervalMillis,
+						this.watchdogIntervalMillis,
+						TimeUnit.MILLISECONDS);
 	}
 
 	@Override
@@ -182,6 +187,9 @@ final class InMemoryListShardQueue implements ListShardQueue {
 	}
 
 	private void rescueStaleLeases() {
+		if (rescueTask.isCancelled()) {
+			return;
+		}
 		if (activeLeases.isEmpty()) {
 			return;
 		}

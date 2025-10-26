@@ -368,7 +368,7 @@ public final class ListShardMetricsRecorderImpl implements ListShardMetricsRecor
 		return String.format("%.3f", value);
 	}
 
-	private final class ShardStats {
+	private static final class ShardStats {
 
 		private final String prefix;
 		private final AtomicLong pages = new AtomicLong();
