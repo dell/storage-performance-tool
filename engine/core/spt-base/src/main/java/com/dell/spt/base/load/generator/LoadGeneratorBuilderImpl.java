@@ -67,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
@@ -158,6 +159,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		return this;
 	}
 
+	@Override
 	@SuppressWarnings("unchecked")
 	public T build() throws IllegalConfigurationException {
 		// prepare
@@ -529,15 +531,14 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			} else {
 				throw e;
 			}
-		} finally {
-			try {
-				itemInput.reset();
-			} catch (final Exception e) {
-				if (e instanceof IOException) {
-					LogUtil.exception(Level.WARN, e, "Failed reset the items input");
-				} else {
-					throw e;
-				}
+		}
+		try {
+			itemInput.reset();
+		} catch (final Exception e) {
+			if (e instanceof IOException) {
+				LogUtil.exception(Level.WARN, e, "Failed to reset the items input");
+			} else {
+				throwUnchecked(e);
 			}
 		}
 		var sumSize = 0L;
@@ -557,7 +558,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 					}
 				}
 			} catch (final IOException e) {
-				throw new AssertionError(e);
+				throwUnchecked(e);
 			}
 			itemSize = minSize == maxSize ? sumSize / n : (minSize + maxSize) / 2;
 		}
@@ -680,7 +681,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 						2, new LogContextThreadFactory("loadSrcItemsWorker", true));
 		final var finishLatch = new CountDownLatch(1);
 		try {
-			executor.submit(
+			executor.execute(
 							() -> {
 								var n = 0;
 								int m;
@@ -701,18 +702,19 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 									} else if (e instanceof IOException) {
 										LogUtil.exception(Level.WARN, e, "Loaded {} items, I/O failure occurred", n);
 									} else {
-										throw e;
+										throwUnchecked(e);
 									}
 								} finally {
 									finishLatch.countDown();
 								}
 							});
-			executor.scheduleAtFixedRate(
+			final ScheduledFuture<?> logTask = executor.scheduleAtFixedRate(
 							() -> Loggers.MSG.info("Loaded {} items from the input...", loadedCount.sum()),
 							0,
 							10,
 							TimeUnit.SECONDS);
 			finishLatch.await();
+			logTask.cancel(true);
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
 		} finally {

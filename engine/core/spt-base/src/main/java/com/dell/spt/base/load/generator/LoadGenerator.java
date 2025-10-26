@@ -8,20 +8,20 @@ import java.io.IOException;
 /** Created on 11.07.16. */
 public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Fiber, AutoCloseable {
 
-	/** @return true if item input has been read until its end, false otherwise */
+	/** Returns true when the item input has been fully consumed. */
 	boolean isItemInputFinished();
 
-	/** @return sum of the new tasks and recycled ones */
+	/** Returns the number of operations generated including recycled ones. */
 	long generatedOpCount();
 
 	/**
-	* Enqueues the task for further recycling
-	*
-	* @param op the task to recycle
-	*/
+	 * Enqueues the task for further recycling.
+	 *
+	 * @param op the task to recycle
+	 */
 	void recycle(final O op);
 
-	/** @return true if the internal recycle queue is empty, false otherwise */
+	/** Returns true when the recycle queue is currently empty. */
 	boolean isNothingToRecycle();
 
 	@Override

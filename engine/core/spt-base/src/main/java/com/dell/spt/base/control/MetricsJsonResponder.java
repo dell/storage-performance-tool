@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.akurilov.confuse.Config;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -93,6 +94,7 @@ final class MetricsJsonResponder {
 	}
 
 	@Deprecated
+	@SuppressWarnings("InlineMeSuggester")
 	ArrayNode buildFleetMetrics(final boolean verbose) {
 		return buildClusterMetrics(verbose);
 	}
@@ -244,20 +246,8 @@ final class MetricsJsonResponder {
 	}
 
 	private void addLimitFields(final ObjectNode jsonObj, final java.util.Map meta) {
-		long countLimit = 0L;
-		long timeLimitSec = 0L;
-		try {
-			final Object v = meta.get(MetricsConstants.METADATA_LIMIT_OP_COUNT);
-			if (v instanceof Number) {
-				countLimit = ((Number) v).longValue();
-			}
-		} catch (Exception ignore) {}
-		try {
-			final Object v = meta.get(MetricsConstants.METADATA_LIMIT_TIME_SEC);
-			if (v instanceof Number) {
-				timeLimitSec = ((Number) v).longValue();
-			}
-		} catch (Exception ignore) {}
+		long countLimit = metadataLong(meta, MetricsConstants.METADATA_LIMIT_OP_COUNT);
+		long timeLimitSec = metadataLong(meta, MetricsConstants.METADATA_LIMIT_TIME_SEC);
 
 		final boolean hasCountLimit = countLimit > 0L;
 		final boolean hasTimeLimit = timeLimitSec > 0L;
@@ -580,20 +570,8 @@ final class MetricsJsonResponder {
 
 	private int calculateCompletionPercent(
 					final java.util.Map meta, final long successCount, final long failsCount, final long elapsedTimeMillis) {
-		long countLimit = 0L;
-		long timeLimitSec = 0L;
-		try {
-			final Object v = meta.get(MetricsConstants.METADATA_LIMIT_OP_COUNT);
-			if (v instanceof Number) {
-				countLimit = ((Number) v).longValue();
-			}
-		} catch (Exception ignore) {}
-		try {
-			final Object v = meta.get(MetricsConstants.METADATA_LIMIT_TIME_SEC);
-			if (v instanceof Number) {
-				timeLimitSec = ((Number) v).longValue();
-			}
-		} catch (Exception ignore) {}
+		final long countLimit = metadataLong(meta, MetricsConstants.METADATA_LIMIT_OP_COUNT);
+		final long timeLimitSec = metadataLong(meta, MetricsConstants.METADATA_LIMIT_TIME_SEC);
 
 		double completion = 0.0;
 		if (countLimit > 0) {
@@ -729,19 +707,8 @@ final class MetricsJsonResponder {
 	}
 
 	private boolean hasLimit(final java.util.Map meta) {
-		try {
-			final Object cl = meta.get(MetricsConstants.METADATA_LIMIT_OP_COUNT);
-			if (cl instanceof Number && ((Number) cl).longValue() > 0L) {
-				return true;
-			}
-		} catch (Exception ignore) {}
-		try {
-			final Object tl = meta.get(MetricsConstants.METADATA_LIMIT_TIME_SEC);
-			if (tl instanceof Number && ((Number) tl).longValue() > 0L) {
-				return true;
-			}
-		} catch (Exception ignore) {}
-		return false;
+		return metadataLong(meta, MetricsConstants.METADATA_LIMIT_OP_COUNT) > 0L
+						|| metadataLong(meta, MetricsConstants.METADATA_LIMIT_TIME_SEC) > 0L;
 	}
 
 	private void applyCommonMetadata(final ObjectNode jsonObj, final String scope, final long runId) {
@@ -764,52 +731,100 @@ final class MetricsJsonResponder {
 	}
 
 	private static boolean resolveEntryRoleHint(final Config config) {
-		try {
-			return config.boolVal("run-node");
-		} catch (Exception ignore) {
-			return false;
-		}
+		final Boolean value = safeBoolean(config, "run-node");
+		return Boolean.TRUE.equals(value);
 	}
 
 	private static String resolveNodeId(final Config config) {
 		for (String path : List.of("run-node-id", "output-metrics-node-id", "run-comment")) {
-			try {
-				final String value = config.stringVal(path);
-				if (value != null && !value.isBlank()) {
-					return value;
-				}
-			} catch (Exception ignore) {}
+			final String value = safeString(config, path);
+			if (value != null && !value.isBlank()) {
+				return value;
+			}
 		}
-		try {
-			final String host = InetAddress.getLocalHost().getHostName();
-			int port = 0;
-			try {
-				port = config.intVal("run-port");
-			} catch (Exception ignore) {}
-			return port > 0 ? host + ':' + port : host;
-		} catch (Exception ignore) {
+		final String host = safeHostname();
+		final Integer port = safeInteger(config, "run-port");
+		if (host == null) {
 			return "spt-node";
 		}
+		return port != null && port > 0 ? host + ':' + port : host;
 	}
 
 	private static String resolveClusterId(final Config config) {
 		for (String path : List.of("run-cluster-id", "run-cluster")) {
-			try {
-				final String value = config.stringVal(path);
-				if (value != null && !value.isBlank()) {
-					return value;
-				}
-			} catch (Exception ignore) {}
+			final String value = safeString(config, path);
+			if (value != null && !value.isBlank()) {
+				return value;
+			}
 		}
 		return null;
 
 	}
 
 	private static long resolveConfiguredRunId(final Config config) {
-		try {
-			return config.longVal("run-id");
-		} catch (Exception ignore) {
+		final Long runId = safeLong(config, "run-id");
+		return runId == null ? 0L : runId;
+	}
+
+	private static long metadataLong(final java.util.Map meta, final String key) {
+		if (meta == null) {
 			return 0L;
+		}
+		final Object value = meta.get(key);
+		if (value instanceof Number) {
+			return ((Number) value).longValue();
+		}
+		if (value != null) {
+			Loggers.MSG.debug(
+							"MetricsJsonResponder: metadata value for key {} is not numeric (type={})",
+							key,
+							value.getClass().getSimpleName());
+		}
+		return 0L;
+	}
+
+	private static String safeString(final Config config, final String path) {
+		try {
+			return config.stringVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("MetricsJsonResponder: unable to read string config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	private static Integer safeInteger(final Config config, final String path) {
+		try {
+			return config.intVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("MetricsJsonResponder: unable to read int config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	private static Long safeLong(final Config config, final String path) {
+		try {
+			return config.longVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("MetricsJsonResponder: unable to read long config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	private static Boolean safeBoolean(final Config config, final String path) {
+		try {
+			return config.boolVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("MetricsJsonResponder: unable to read boolean config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	private static String safeHostname() {
+		try {
+			return InetAddress.getLocalHost().getHostName();
+		} catch (final UnknownHostException e) {
+			Loggers.ERR.debug("MetricsJsonResponder: unable to resolve local host name", e);
+			return null;
 		}
 	}
 }

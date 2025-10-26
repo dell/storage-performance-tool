@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
@@ -299,7 +300,7 @@ public final class LogServlet extends HttpServlet {
 				Loggers.MSG.debug("Unable to probe content type for log file {}", p, ioe);
 			}
 			if (ctype == null) {
-				final String name = p.getFileName().toString().toLowerCase();
+				final String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
 				if (name.endsWith(".csv"))
 					ctype = "text/csv";
 				else if (name.endsWith(".log") || name.endsWith(".txt"))
