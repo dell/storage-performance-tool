@@ -71,10 +71,9 @@ public interface ConfigUtil {
 		final var configCopy = (Config) new BasicConfig(config);
 		final var configTree = configCopy.mapVal(null);
 		for (final var e : configTree.entrySet()) {
-			final var key = e.getKey();
 			final var val = e.getValue();
 			if (val instanceof Config) {
-				configTree.replace(key, configTree((Config) val));
+				e.setValue(configTree((Config) val));
 			}
 		}
 		return configTree;

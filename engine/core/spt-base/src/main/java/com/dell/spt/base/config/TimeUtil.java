@@ -1,8 +1,7 @@
 package com.dell.spt.base.config;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -10,14 +9,11 @@ import java.util.regex.Pattern;
 /** Created by andrey on 07.04.15. */
 public abstract class TimeUtil {
 
-	private static final Map<String, TimeUnit> TIME_UNIT_SHORTCUTS = new HashMap<String, TimeUnit>() {
-		{
-			put("s", TimeUnit.SECONDS);
-			put("m", TimeUnit.MINUTES);
-			put("h", TimeUnit.HOURS);
-			put("d", TimeUnit.DAYS);
-		}
-	};
+	private static final Map<String, TimeUnit> TIME_UNIT_SHORTCUTS = Map.of(
+					"s", TimeUnit.SECONDS,
+					"m", TimeUnit.MINUTES,
+					"h", TimeUnit.HOURS,
+					"d", TimeUnit.DAYS);
 	private static final Pattern PATTERN_TIME = Pattern.compile("([0-9]*)([smhdSMHD]?)");
 	private static final Pattern PATTERN_TIME_COMPAT = Pattern.compile("([0-9]*)\\.([a-zA-Z]{4,7})");
 
@@ -54,9 +50,7 @@ public abstract class TimeUtil {
 
 		if (m.matches()) {
 			final String t = m.group(2).toLowerCase(Locale.ROOT);
-			if (TIME_UNIT_SHORTCUTS.containsKey(t)) {
-				result = TIME_UNIT_SHORTCUTS.get(t);
-			}
+			result = TIME_UNIT_SHORTCUTS.getOrDefault(t, TimeUnit.SECONDS);
 		} else {
 			m = PATTERN_TIME_COMPAT.matcher(rawValue);
 			if (m.matches()) {
