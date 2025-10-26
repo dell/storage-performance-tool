@@ -28,7 +28,8 @@ public interface LoadStepSliceUtil {
 
 		final LoadStepManagerService stepMgrSvc;
 		try {
-			stepMgrSvc = ServiceUtil.resolve(nodeAddrWithPort, LoadStepManagerService.SVC_NAME);
+			stepMgrSvc = ServiceUtil.resolve(
+							nodeAddrWithPort, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
 		} catch (final Exception e) {
 			LogUtil.exception(
 							Level.ERROR,
@@ -51,7 +52,7 @@ public interface LoadStepSliceUtil {
 
 		final LoadStepService stepSvc;
 		try {
-			stepSvc = ServiceUtil.resolve(nodeAddrWithPort, stepSvcName);
+			stepSvc = ServiceUtil.resolve(nodeAddrWithPort, stepSvcName, LoadStepService.class);
 		} catch (final Exception e) {
 			LogUtil.exception(
 							Level.ERROR,

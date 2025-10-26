@@ -2,7 +2,6 @@ package com.dell.spt.base.svc;
 
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.net.FixedPortRmiSocketFactory;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.net.Inet4Address;
@@ -17,7 +16,6 @@ import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
-import java.rmi.server.RMISocketFactory;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.Collections;
 import java.util.HashMap;
@@ -43,18 +41,6 @@ public abstract class ServiceUtil {
 					REGISTRY_MAP.put(port, new WeakReference<>(LocateRegistry.getRegistry(port)));
 				}
 			}
-		}
-	}
-
-	private static void ensureRmiUseFixedPort(final int port)
-					throws IOException, IllegalStateException {
-		final RMISocketFactory prevSocketFactory = RMISocketFactory.getSocketFactory();
-		if (prevSocketFactory == null) {
-			RMISocketFactory.setSocketFactory(new FixedPortRmiSocketFactory(port));
-		} else if (prevSocketFactory instanceof FixedPortRmiSocketFactory) {
-			((FixedPortRmiSocketFactory) prevSocketFactory).setFixedPort(port);
-		} else {
-			throw new IllegalStateException("Invalid RMI socket factory was set");
 		}
 	}
 
@@ -144,7 +130,6 @@ public abstract class ServiceUtil {
 					throws URISyntaxException, MalformedURLException, SocketException, RemoteException {
 		String svcUri = null;
 		synchronized (SVC_MAP) {
-			// ensureRmiUseFixedPort(port);
 			ensureRmiRegistryIsAvailableAt(port);
 			UnicastRemoteObject.exportObject(svc, port);
 			final String svcName = svc.name();
@@ -159,18 +144,23 @@ public abstract class ServiceUtil {
 		return svcUri;
 	}
 
-	@SuppressWarnings("unchecked")
-	public static <S extends Service> S resolve(final String addr, final String name)
+	public static <S extends Service> S resolve(final String addr, final String name, final Class<S> type)
 					throws NotBoundException, RemoteException, URISyntaxException, MalformedURLException {
 		final String svcUri = getRemoteSvcUri(addr, name).toString();
-		return (S) Naming.lookup(svcUri);
+		return type.cast(Naming.lookup(svcUri));
 	}
 
-	@SuppressWarnings("unchecked")
-	public static <S extends Service> S resolve(final String addr, final int port, final String name)
+	public static <S extends Service> S resolve(
+					final String addr, final int port, final String name, final Class<S> type)
 					throws NotBoundException, IOException, URISyntaxException {
 		final String svcUri = getRemoteSvcUri(addr, port, name).toString();
-		return (S) Naming.lookup(svcUri);
+		try {
+			return type.cast(Naming.lookup(svcUri));
+		} catch (final MalformedURLException e) {
+			// Naming.lookup declares RemoteException and NotBoundException, but URL parse failure
+			// is still possible. Preserve original behaviour by surfacing the URISyntaxException path.
+			throw new URISyntaxException(svcUri, "Malformed service URI produced from inputs: " + e.getMessage());
+		}
 	}
 
 	public static String close(final Service svc) throws RemoteException, MalformedURLException {

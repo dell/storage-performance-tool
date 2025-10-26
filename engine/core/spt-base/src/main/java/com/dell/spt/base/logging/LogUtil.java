@@ -85,18 +85,14 @@ public interface LogUtil {
 		if (fail == 0) {
 			return "\u001B[38;2;0;200;0m";
 		}
+		final double total = succ + fail;
 		if (fail >= succ) {
-			return "\u001B[38;2;" + ((int) (200 + ((double) 55 * fail) / (succ + fail))) + ";0;0m";
+			final int red = (int) (200 + 55d * fail / total);
+			return "\u001B[38;2;" + red + ";0;0m";
 		}
-		return "\u001B[38;2;"
-						+
-						/* R */ ((int) (400 * Math.sqrt(((double) fail) / (succ + fail))))
-						+ ";"
-						+
-						/* G */ ((int) (((double) 200 * succ / (succ + fail))))
-						+ ";"
-						+
-						/* B */ "0m";
+		final int red = (int) (400 * Math.sqrt(fail / total));
+		final int green = (int) (200d * succ / total);
+		return "\u001B[38;2;" + red + ";" + green + ";0m";
 	}
 
 	ThreadLocal<StringBuilder> THR_LOC_MSG_BUILDER = ThreadLocal.withInitial(StringBuilder::new);

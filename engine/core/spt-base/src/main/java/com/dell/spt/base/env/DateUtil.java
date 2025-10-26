@@ -89,6 +89,7 @@ public interface DateUtil {
 		return parsed.toInstant();
 	}
 
+	@SuppressWarnings("JavaUtilDate") // Expression language historically exposes java.util.Date instances.
 	static Date date(final long epochMillis) {
 		return new Date(epochMillis);
 	}
