@@ -46,7 +46,7 @@ public class FileManagerImpl implements FileManager {
 
 	@Override
 	public final byte[] readFromFile(final String fileName, final long offset) throws IOException {
-		try (final SeekableByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), READ_OPTIONS)) {
+		try (final SeekableByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), FileManager.readOpenOptions())) {
 			fileChannel.position(offset);
 			final long remainingSize = fileChannel.size() - offset;
 			if (remainingSize <= 0) {
@@ -95,7 +95,7 @@ public class FileManagerImpl implements FileManager {
 
 	@Override
 	public final void writeToFile(final String fileName, final byte[] buff) throws IOException {
-		try (final ByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), APPEND_OPEN_OPTIONS)) {
+		try (final ByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), FileManager.appendOpenOptions())) {
 			final ByteBuffer bb = ByteBuffer.wrap(buff);
 			int n = 0;
 			while (n < buff.length) {
@@ -111,7 +111,7 @@ public class FileManagerImpl implements FileManager {
 
 	@Override
 	public final void truncateFile(final String fileName, final long size) throws IOException {
-		try (final SeekableByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), WRITE_OPEN_OPTIONS)) {
+		try (final SeekableByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), FileManager.writeOpenOptions())) {
 			fileChannel.truncate(size);
 		}
 	}

@@ -23,7 +23,8 @@ public class LinearLoadStepClient
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
+	@SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"
+	})
 	protected <T extends LoadStepClient> T copyInstance(final Config config, final List<Config> ctxConfigs) {
 		return (T) new LinearLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}

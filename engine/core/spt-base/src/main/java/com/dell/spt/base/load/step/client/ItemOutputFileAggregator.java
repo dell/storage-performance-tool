@@ -23,7 +23,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
@@ -90,9 +93,9 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 		final var finishLatch = new CountDownLatch(1);
 		final var itemOutputPath = Paths.get(itemOutputFile);
 		FsUtil.createParentDirsIfNotExist(itemOutputPath);
-		executor.submit(
+		final Future<?> transferTask = executor.submit(
 						() -> {
-							try (final var localItemOutput = Files.newOutputStream(itemOutputPath, FileManager.APPEND_OPEN_OPTIONS)) {
+							try (final var localItemOutput = Files.newOutputStream(itemOutputPath, FileManager.appendOpenOptions())) {
 								final Lock localItemOutputLock = new ReentrantLock();
 								itemOutputFileSlices
 												.entrySet()
@@ -133,7 +136,7 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 								finishLatch.countDown();
 							}
 						});
-		executor.scheduleAtFixedRate(
+		final ScheduledFuture<?> progressTask = executor.scheduleAtFixedRate(
 						() -> Loggers.MSG.info(
 										"\"{}\" <- transferred {} of the output items data...",
 										itemOutputFile,
@@ -144,9 +147,14 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 
 		try {
 			finishLatch.await();
+			transferTask.get();
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+		} catch (final ExecutionException e) {
+			final var cause = e.getCause() != null ? e.getCause() : e;
+			LogUtil.exception(Level.ERROR, cause, "{}: data aggregation failed", loadStepId);
 		} finally {
+			progressTask.cancel(true);
 			executor.shutdownNow();
 			Loggers.MSG.info(
 							"\"{}\" <- transferred {} of the output items data",

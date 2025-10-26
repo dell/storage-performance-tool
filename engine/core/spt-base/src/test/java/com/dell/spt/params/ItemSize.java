@@ -4,17 +4,24 @@ import com.github.akurilov.commons.system.SizeInBytes;
 
 /** Created by andrey on 11.08.17. */
 public enum ItemSize {
-	EMPTY(new SizeInBytes(0)), SMALL(new SizeInBytes("10KB")), MEDIUM(new SizeInBytes("1MB")), LARGE(new SizeInBytes("100MB")), HUGE(new SizeInBytes("10GB"));
+	EMPTY(0L), SMALL("10KB"), MEDIUM("1MB"), LARGE("100MB"), HUGE("10GB");
 
 	public static final String KEY_ENV = "ITEM_SIZE";
 
-	private final SizeInBytes value;
+	private final String sizeSpec;
+	private final Long sizeBytes;
 
-	ItemSize(final SizeInBytes value) {
-		this.value = value;
+	ItemSize(final String sizeSpec) {
+		this.sizeSpec = sizeSpec;
+		this.sizeBytes = null;
+	}
+
+	ItemSize(final long sizeBytes) {
+		this.sizeSpec = null;
+		this.sizeBytes = sizeBytes;
 	}
 
 	public final SizeInBytes getValue() {
-		return value;
+		return sizeSpec != null ? new SizeInBytes(sizeSpec) : new SizeInBytes(sizeBytes);
 	}
 }

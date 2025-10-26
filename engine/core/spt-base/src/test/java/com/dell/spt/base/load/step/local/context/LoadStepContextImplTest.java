@@ -689,17 +689,17 @@ public class LoadStepContextImplTest {
 	static void cleanup() {
 		if (TMP_DIR_PATH != null) {
 			try {
-				java.nio.file.Files.walk(TMP_DIR_PATH)
-								.sorted((o1, o2) -> o2.compareTo(o1))
-								.forEach(path -> {
-									try {
-										if (java.nio.file.Files.deleteIfExists(path)) {
-											System.out.println("Deleted file: " + path);
-										}
-									} catch (IOException e) {
-										LogUtil.exception(Level.WARN, e, "Failed to Delete temp files");
-									}
-								});
+				try (var stream = java.nio.file.Files.walk(TMP_DIR_PATH)) {
+					stream.sorted((o1, o2) -> o2.compareTo(o1)).forEach(path -> {
+						try {
+							if (java.nio.file.Files.deleteIfExists(path)) {
+								System.out.println("Deleted file: " + path);
+							}
+						} catch (IOException e) {
+							LogUtil.exception(Level.WARN, e, "Failed to Delete temp files");
+						}
+					});
+				}
 			} catch (IOException e) {
 				LogUtil.exception(Level.WARN, e, "Failed to delete ", TMP_DIR_PATH.toString());
 			}

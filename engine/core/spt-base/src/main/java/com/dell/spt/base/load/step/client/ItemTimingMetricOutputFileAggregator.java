@@ -18,10 +18,13 @@ import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
@@ -84,7 +87,7 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 		// we need as many locks as there are slices except for entry node. Because we have a separate tmp file for each slice
 		final var finishLatch = new CountDownLatch(itemTimingMetricOutputFileSlices.size() - 1);
 		FsUtil.createParentDirsIfNotExist(itemTimingMetricsOutputFilePath);
-		executor.submit(
+		final Future<?> transferTask = executor.submit(
 						() -> {
 							itemTimingMetricOutputFileSlices
 											.entrySet()
@@ -95,10 +98,12 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 															entry -> {
 																final var fileMgr = entry.getKey();
 																final var remoteItemOutputFileName = entry.getValue();
-																final Path localItemOutputPath = Paths.get(itemTimingMetricsOutputFilePath.toString() +
-																				"_" + (new Random()).nextLong());
+																final Path localItemOutputPath = Paths.get(
+																				itemTimingMetricsOutputFilePath.toString()
+																								+ "_"
+																								+ ThreadLocalRandom.current().nextLong());
 																try (final var localItemOutput = Files.newOutputStream(localItemOutputPath,
-																				FileManager.APPEND_OPEN_OPTIONS)) {
+																				FileManager.appendOpenOptions())) {
 																	transferToLocal(
 																					fileMgr,
 																					remoteItemOutputFileName,
@@ -128,7 +133,7 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 																}
 															});
 						});
-		executor.scheduleAtFixedRate(
+		final ScheduledFuture<?> progressTask = executor.scheduleAtFixedRate(
 						() -> Loggers.MSG.info(
 										"\"{}\" <- transferred {} of the output items data...",
 										itemTimingMetricsOutputFilePath.toString(),
@@ -139,10 +144,16 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 
 		try {
 			finishLatch.await();
+			transferTask.get();
 		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
 			LogUtil.exception(Level.ERROR, e, "data aggregation was interrupted. Metrics may be inaccurate");
 			//throwUnchecked(e); //TODO: what to do? ctrl c while aggregating -> ? BASE-1447
+		} catch (final ExecutionException e) {
+			final var cause = e.getCause() != null ? e.getCause() : e;
+			LogUtil.exception(Level.ERROR, cause, "data aggregation failed");
 		} finally {
+			progressTask.cancel(true);
 			executor.shutdownNow();
 			Loggers.MSG.info(
 							"\"{}\" <- transferred {} of the output items data",
