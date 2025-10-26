@@ -134,9 +134,8 @@ public class ItemInputFactoryTest {
 	@AfterAll
 	static void cleanup() {
 		if (TMP_DIR_PATH != null) {
-			try {
-				java.nio.file.Files.walk(TMP_DIR_PATH)
-								.sorted((o1, o2) -> o2.compareTo(o1))
+			try (var paths = java.nio.file.Files.walk(TMP_DIR_PATH)) {
+				paths.sorted((o1, o2) -> o2.compareTo(o1))
 								.forEach(path -> {
 									try {
 										if (java.nio.file.Files.deleteIfExists(path)) {

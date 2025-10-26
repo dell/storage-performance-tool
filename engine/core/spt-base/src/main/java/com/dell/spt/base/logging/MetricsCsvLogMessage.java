@@ -3,15 +3,15 @@ package com.dell.spt.base.logging;
 import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.M;
 import static com.dell.spt.base.Constants.MIB;
-import static com.dell.spt.base.env.DateUtil.FMT_DATE_ISO8601;
 
+import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
-import java.util.Date;
+import java.time.Instant;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
 /** Created by kurila on 18.05.17. */
@@ -39,7 +39,7 @@ public final class MetricsCsvLogMessage extends LogMessageBase {
 		final TimingMetricSnapshot latencySnapshot = snapshot.latencySnapshot();
 
 		strb.append('"')
-						.append(FMT_DATE_ISO8601.format(new Date()))
+						.append(DateUtil.formatIso8601(Instant.now()))
 						.append('"')
 						.append(',')
 						.append(opType.name())

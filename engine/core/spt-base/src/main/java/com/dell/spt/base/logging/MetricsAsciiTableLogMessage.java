@@ -1,15 +1,16 @@
 package com.dell.spt.base.logging;
 
 import static com.dell.spt.base.Constants.MIB;
-import static com.dell.spt.base.env.DateUtil.FMT_DATE_METRICS_TABLE;
 import static com.dell.spt.base.logging.LogUtil.RESET;
 import static com.dell.spt.base.logging.LogUtil.getFailureRatioAnsiColorCode;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import java.util.Date;
+import com.dell.spt.base.env.DateUtil;
+import java.time.Instant;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.commons.text.TextStringBuilder;
 
 /**
@@ -32,7 +33,7 @@ public class MetricsAsciiTableLogMessage extends LogMessageBase {
 					+ LINE_SEPARATOR;
 	public static final String TABLE_BORDER_VERTICAL = "|";
 	public static final int TABLE_HEADER_PERIOD = 20;
-	private static volatile long ROW_OUTPUT_COUNTER = 0;
+	private static final AtomicLong ROW_OUTPUT_COUNTER = new AtomicLong();
 	private final Set<MetricsContext> metrics;
 	private volatile String formattedMsg = null;
 
@@ -56,13 +57,14 @@ public class MetricsAsciiTableLogMessage extends LogMessageBase {
 					failCount = snapshot.failsSnapshot().count();
 					opType = metricsCtx.opType();
 					stdOutColorFlag = metricsCtx.stdOutColorEnabled();
-					if (0 == ROW_OUTPUT_COUNTER % TABLE_HEADER_PERIOD) {
+					final long rowIndex = ROW_OUTPUT_COUNTER.getAndIncrement();
+					if (rowIndex % TABLE_HEADER_PERIOD == 0) {
 						strb.append(TABLE_HEADER);
 					}
-					ROW_OUTPUT_COUNTER++;
 					strb.appendFixedWidthPadLeft(metricsCtx.loadStepId(), 10, ' ')
 									.append(TABLE_BORDER_VERTICAL)
-									.appendFixedWidthPadLeft(FMT_DATE_METRICS_TABLE.format(new Date()), 12, ' ')
+									.appendFixedWidthPadLeft(
+													DateUtil.formatMetricsTable(Instant.now()), 12, ' ')
 									.append(TABLE_BORDER_VERTICAL);
 					if (stdOutColorFlag) {
 						switch (opType) {

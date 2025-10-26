@@ -16,9 +16,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-public final class PipelineLoadStepExtension<T extends PipelineLoadStepLocal, U extends PipelineLoadStepClient>
+public final class PipelineLoadStepExtension<T extends PipelineLoadStepLocal>
 				extends ExtensionBase
-				implements LoadStepFactory<T, U> {
+				implements LoadStepFactory<T, PipelineLoadStepClient> {
 
 	public static final String TYPE = "PipelineLoad";
 
@@ -69,9 +69,8 @@ public final class PipelineLoadStepExtension<T extends PipelineLoadStepLocal, U 
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	public final U createClient(
+	public final PipelineLoadStepClient createClient(
 					final Config baseConfig, final List<Extension> extensions, final MetricsManager metricsManager) {
-		return (U) new PipelineLoadStepClient(baseConfig, extensions, null, metricsManager);
+		return new PipelineLoadStepClient(baseConfig, extensions, null, metricsManager);
 	}
 }

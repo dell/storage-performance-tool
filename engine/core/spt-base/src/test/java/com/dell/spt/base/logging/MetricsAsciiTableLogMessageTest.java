@@ -13,6 +13,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import java.lang.reflect.Field;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +25,7 @@ class MetricsAsciiTableLogMessageTest {
 		// Make header printing deterministic (header shown when counter % 20 == 0).
 		Field f = MetricsAsciiTableLogMessage.class.getDeclaredField("ROW_OUTPUT_COUNTER");
 		f.setAccessible(true);
-		f.setLong(null, 0L);
+		((AtomicLong) f.get(null)).set(0L);
 	}
 
 	/**
@@ -115,7 +116,7 @@ class MetricsAsciiTableLogMessageTest {
 
 		Field f = MetricsAsciiTableLogMessage.class.getDeclaredField("ROW_OUTPUT_COUNTER");
 		f.setAccessible(true);
-		f.setLong(null, 19L);
+		((AtomicLong) f.get(null)).set(19L);
 
 		MetricsContext ctx1 = mockBasicContext("s1", OpType.NOOP, false);
 		MetricsContext ctx2 = mockBasicContext("s2", OpType.NOOP, false);

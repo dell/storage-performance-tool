@@ -2,7 +2,6 @@ package com.dell.spt.base.load.step.linear;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.step.client.LoadStepClient;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -14,7 +13,7 @@ import java.util.List;
 import java.util.Locale;
 
 public class LinearLoadStepClient
-				extends LoadStepClientBase {
+				extends LoadStepClientBase<LinearLoadStepClient> {
 
 	public LinearLoadStepClient(
 					final Config baseConfig, final List<Extension> extensions, final List<Config> contextConfigs,
@@ -23,10 +22,8 @@ public class LinearLoadStepClient
 	}
 
 	@Override
-	@SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"
-	})
-	protected <T extends LoadStepClient> T copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return (T) new LinearLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+	protected LinearLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
+		return new LinearLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override

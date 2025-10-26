@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -22,6 +23,8 @@ import com.dell.spt.base.data.DataInput;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.google.common.base.Splitter;
+import java.util.List;
 
 public class DataItemImplTest {
 
@@ -41,14 +44,14 @@ public class DataItemImplTest {
 		System.out.println(item.toString());
 
 		String itemStr = item.toString();
-		String[] components = itemStr.split(",");
+		List<String> components = Splitter.on(',').splitToList(itemStr);
 
 		// Name
-		assertEquals(name, components[0]);
+		assertEquals(name, components.get(0));
 		// Offset
-		assertEquals("64", components[1]);
+		assertEquals("64", components.get(1));
 		// Size
-		assertEquals(String.valueOf(size), components[2]);
+		assertEquals(String.valueOf(size), components.get(2));
 	}
 
 	// I will dig more into this - but I believe write() takes a ByteBuffer and writes it to a "RingBuff" from the dataInput
@@ -159,7 +162,7 @@ public class DataItemImplTest {
 			dataInput = DataInput.instance(
 							itemDataInputFile, itemDataInputSeed, itemDataLayerSize, itemDataInputLayerCacheSize, isInHeapMem);
 		} catch (Exception e) {
-			e.printStackTrace();
+			fail("Failed to create DataInput instance", e);
 		}
 		return dataInput;
 	}

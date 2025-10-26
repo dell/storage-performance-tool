@@ -12,26 +12,15 @@ public class ConfigUtilTest {
 	@Test
 	public void testFlatten() throws Exception {
 
-		final Map<String, Object> srcMap = new HashMap<String, Object>() {
-			{
-				put(
-								"a",
-								new HashMap<String, Object>() {
-									{
-										put("aa", null);
-										put("bb", 123);
-									}
-								});
-				put(
-								"b",
-								new HashMap<String, Object>() {
-									{
-										put("aa", "yohoho");
-										put("bb", true);
-									}
-								});
-			}
-		};
+		final Map<String, Object> srcMap = new HashMap<>();
+		final Map<String, Object> aMap = new HashMap<>();
+		aMap.put("aa", null);
+		aMap.put("bb", 123);
+		srcMap.put("a", aMap);
+		final Map<String, Object> bMap = new HashMap<>();
+		bMap.put("aa", "yohoho");
+		bMap.put("bb", true);
+		srcMap.put("b", bMap);
 
 		final String sep = "-";
 		final Map<String, String> dstMap = new HashMap<>();

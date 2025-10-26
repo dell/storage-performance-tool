@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runnable {
@@ -36,7 +37,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected final MetricsManager metricsMgr;
 	protected final List<MetricsContext<? extends AllMetricsSnapshot>> metricsContexts = new ArrayList<>();
 
-	private volatile long timeLimitSec = Long.MAX_VALUE;
+	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
 	private volatile long startTimeSec = -1;
 
 	protected LoadStepBase(
@@ -85,7 +86,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		try {
 			start();
 			try {
-				await(timeLimitSec, TimeUnit.SECONDS);
+				await(timeLimitSec.get(), TimeUnit.SECONDS);
 			} catch (final IllegalStateException e) {
 				LogUtil.exception(Level.WARN, e, "Failed to await \"{}\"", toString());
 			}
@@ -126,7 +127,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				t = TypeUtil.typeConvert(loadStepLimitTimeRaw, long.class);
 			}
 			if (t > 0) {
-				timeLimitSec = t;
+				timeLimitSec.set(t);
 			}
 			startTimeSec = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
 
@@ -163,14 +164,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		final long t = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis()) - startTimeSec;
 		if (t < 0) {
 			Loggers.ERR.warn("Stopped earlier than started, won't account the elapsed time");
-		} else if (t > timeLimitSec) {
+		} else if (t > timeLimitSec.get()) {
 			Loggers.MSG.warn(
 							"The elapsed time ({}[s]) is more than the limit ({}[s]), further resuming is not available",
 							t,
-							timeLimitSec);
-			timeLimitSec = 0;
+							timeLimitSec.get());
+			timeLimitSec.set(0);
 		} else {
-			timeLimitSec -= t;
+			timeLimitSec.addAndGet(-t);
 		}
 	}
 

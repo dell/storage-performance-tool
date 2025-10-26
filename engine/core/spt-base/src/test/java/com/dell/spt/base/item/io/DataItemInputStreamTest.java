@@ -46,7 +46,7 @@ public class DataItemInputStreamTest {
 		final DataItemImpl item = new DataItemImpl("ITEM", offset, size);
 		item.dataInput(dataInput);
 
-		final byte[] expected = bytesFromLayer(dataInput, (int) ((offset) % LAYER_SIZE), (int) size);
+		final byte[] expected = bytesFromLayer(dataInput, (int) (offset % LAYER_SIZE), (int) size);
 
 		try (final DataItemInputStream in = new DataItemInputStream(item)) {
 			final byte[] actual = new byte[(int) size];

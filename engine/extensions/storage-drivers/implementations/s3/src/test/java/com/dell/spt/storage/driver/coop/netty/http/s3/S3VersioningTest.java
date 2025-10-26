@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayDeque;
 import java.util.Collections;
-import java.util.Date;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -160,9 +160,8 @@ public class S3VersioningTest
 		final HttpHeaders reqHeaders0 = req0.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders0.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders0.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate0 = DateUtil.FMT_DATE_RFC1123.parse(
-						reqHeaders0.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate0.getTime(), 10_000);
+		final Instant reqDate0 = DateUtil.parseRfc1123(reqHeaders0.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate0);
 		final String authHeaderValue0 = reqHeaders0.get(HttpHeaderNames.AUTHORIZATION);
 		assertTrue(authHeaderValue0.startsWith("AWS " + CREDENTIAL.getUid() + ":"));
 
@@ -172,11 +171,8 @@ public class S3VersioningTest
 		final HttpHeaders reqHeaders1 = req1.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders1.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders1.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate1 = DateUtil.FMT_DATE_RFC1123.parse(
-						reqHeaders1.get(HttpHeaderNames.DATE));
-		assertEquals(
-						new Date().getTime(), reqDate1.getTime(), 10_000,
-						"Date differs from now " + new Date() + " more than 10 sec: " + reqDate1);
+		final Instant reqDate1 = DateUtil.parseRfc1123(reqHeaders1.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate1);
 		final String authHeaderValue1 = reqHeaders1.get(HttpHeaderNames.AUTHORIZATION);
 		assertTrue(authHeaderValue1.startsWith("AWS " + CREDENTIAL.getUid() + ":"));
 
@@ -185,9 +181,8 @@ public class S3VersioningTest
 		assertEquals(bucketName + "?versioning", req2.uri());
 		final HttpHeaders reqHeaders2 = req2.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders2.get(HttpHeaderNames.HOST));
-		final Date reqDate2 = DateUtil.FMT_DATE_RFC1123.parse(
-						reqHeaders2.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate2.getTime(), 10_000);
+		final Instant reqDate2 = DateUtil.parseRfc1123(reqHeaders2.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate2);
 		final String authHeaderValue2 = reqHeaders2.get(HttpHeaderNames.AUTHORIZATION);
 		assertTrue(authHeaderValue2.startsWith("AWS " + CREDENTIAL.getUid() + ":"));
 		final byte[] reqContent2 = req2.content().array();
@@ -196,4 +191,10 @@ public class S3VersioningTest
 						reqContent2.length, reqHeaders2.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
 	}
 
+	private static final long DATE_TOLERANCE_MILLIS = 10_000L;
+
+	private static void assertCloseToNow(final Instant instant) {
+		final long now = Instant.now().toEpochMilli();
+		assertEquals(now, instant.toEpochMilli(), DATE_TOLERANCE_MILLIS);
+	}
 }

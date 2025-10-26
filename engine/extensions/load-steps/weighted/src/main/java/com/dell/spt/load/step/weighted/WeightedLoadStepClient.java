@@ -2,7 +2,6 @@ package com.dell.spt.load.step.weighted;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.step.client.LoadStepClient;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -23,7 +22,7 @@ import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
 
-public class WeightedLoadStepClient extends LoadStepClientBase {
+public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepClient> {
 	public WeightedLoadStepClient(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsManager) {
@@ -36,9 +35,8 @@ public class WeightedLoadStepClient extends LoadStepClientBase {
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	protected <T extends LoadStepClient> T copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return (T) new WeightedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+	protected WeightedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
+		return new WeightedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override

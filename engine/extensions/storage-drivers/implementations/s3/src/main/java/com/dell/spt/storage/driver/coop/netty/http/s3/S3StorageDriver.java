@@ -68,7 +68,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
-import java.util.Date;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -1250,9 +1250,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				}
 
 				// Set signing timestamp using SigV4 header
-				Date now = new Date();
+				final Instant now = Instant.now();
 				httpHeaders.remove(HttpHeaderNames.DATE);
-				httpHeaders.set(S3Api.AMZ_DATE_HEADER, DateUtil.FMT_DATE_AMAZON.format(now));
+				httpHeaders.set(S3Api.AMZ_DATE_HEADER, DateUtil.formatAmazon(now));
 
 				// Set payload header
 				final String contentLengthHeader = httpHeaders.get(HttpHeaderNames.CONTENT_LENGTH);

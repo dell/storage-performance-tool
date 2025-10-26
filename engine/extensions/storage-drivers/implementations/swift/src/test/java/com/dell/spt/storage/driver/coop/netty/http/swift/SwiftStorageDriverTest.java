@@ -33,9 +33,9 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -152,8 +152,8 @@ public class SwiftStorageDriverTest
 		final HttpHeaders reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		final Instant reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(CREDENTIAL.getUid(), reqHeaders.get(SwiftApi.KEY_X_AUTH_USER));
 		assertEquals(CREDENTIAL.getSecret(), reqHeaders.get(SwiftApi.KEY_X_AUTH_KEY));
 	}
@@ -166,15 +166,15 @@ public class SwiftStorageDriverTest
 		assertEquals(2, httpRequestsLog.size());
 		FullHttpRequest req;
 		HttpHeaders reqHeaders;
-		Date reqDate;
+		Instant reqDate;
 		req = httpRequestsLog.poll();
 		assertEquals(HttpMethod.HEAD, req.method());
 		assertEquals(SwiftApi.URI_BASE + '/' + NS + container, req.uri());
 		reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
 		req = httpRequestsLog.poll();
 		assertEquals(HttpMethod.PUT, req.method());
@@ -182,8 +182,8 @@ public class SwiftStorageDriverTest
 		reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(SwiftApi.DEFAULT_VERSIONS_LOCATION, reqHeaders.get(SwiftApi.KEY_X_VERSIONS_LOCATION));
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
 	}
@@ -209,8 +209,8 @@ public class SwiftStorageDriverTest
 		final HttpHeaders reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		final Instant reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
 	}
 
@@ -230,8 +230,8 @@ public class SwiftStorageDriverTest
 		final HttpHeaders reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		final Instant reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(containerSrcName + '/' + itemId, reqHeaders.get(SwiftApi.KEY_X_COPY_FROM));
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
 	}
@@ -253,8 +253,8 @@ public class SwiftStorageDriverTest
 		final HttpHeaders reqHeaders = req.headers();
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(partSize, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
-		final Date reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		final Instant reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
 	}
 
@@ -284,8 +284,15 @@ public class SwiftStorageDriverTest
 		assertEquals(storageNodeAddrs[0], reqHeaders.get(HttpHeaderNames.HOST));
 		assertEquals(0, reqHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH).intValue());
 		assertEquals(container + '/' + itemId + '/', reqHeaders.get(SwiftApi.KEY_X_OBJECT_MANIFEST));
-		final Date reqDate = DateUtil.FMT_DATE_RFC1123.parse(reqHeaders.get(HttpHeaderNames.DATE));
-		assertEquals(new Date().getTime(), reqDate.getTime(), 10_000);
+		final Instant reqDate = DateUtil.parseRfc1123(reqHeaders.get(HttpHeaderNames.DATE));
+		assertCloseToNow(reqDate);
 		assertEquals(AUTH_TOKEN, reqHeaders.get(SwiftApi.KEY_X_AUTH_TOKEN));
+	}
+
+	private static final long DATE_TOLERANCE_MILLIS = 10_000L;
+
+	private static void assertCloseToNow(final Instant actual) {
+		final long now = Instant.now().toEpochMilli();
+		assertEquals(now, actual.toEpochMilli(), DATE_TOLERANCE_MILLIS);
 	}
 }

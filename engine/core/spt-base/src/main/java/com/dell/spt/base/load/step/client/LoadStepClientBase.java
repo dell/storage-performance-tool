@@ -52,9 +52,9 @@ import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.Level;
 
-public abstract class LoadStepClientBase
+public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				extends LoadStepBase
-				implements LoadStepClient {
+				implements LoadStepClient<T> {
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
 	private final List<FileManager> fileMgrs = new ArrayList<>();
@@ -634,7 +634,7 @@ public abstract class LoadStepClientBase
 	}
 
 	@Override
-	public final <T extends LoadStepClient> T config(final Map<String, Object> configMap) {
+	public final T config(final Map<String, Object> configMap) {
 		if (ctxConfigs != null) {
 			throw new IllegalStateException("config(...) should be invoked before any append(...) call");
 		}
@@ -658,7 +658,7 @@ public abstract class LoadStepClientBase
 	}
 
 	@Override
-	public final <T extends LoadStepClient> T append(final Map<String, Object> context) {
+	public final T append(final Map<String, Object> context) {
 		final List<Config> ctxConfigsCopy;
 		if (ctxConfigs == null) {
 			ctxConfigsCopy = new ArrayList<>(1);
@@ -680,6 +680,5 @@ public abstract class LoadStepClientBase
 		return copyInstance(config, ctxConfigsCopy);
 	}
 
-	protected abstract <T extends LoadStepClient> T copyInstance(
-					final Config config, final List<Config> ctxConfigs);
+	protected abstract T copyInstance(final Config config, final List<Config> ctxConfigs);
 }

@@ -197,7 +197,9 @@ public interface ScenarioUtil {
 		final StringBuilder strb = new StringBuilder();
 		try {
 			if (Files.exists(scenarioPath)) {
-				Files.lines(scenarioPath).forEach(line -> strb.append(line).append(System.lineSeparator()));
+				try (final var lines = Files.lines(scenarioPath)) {
+					lines.forEach(line -> strb.append(line).append(System.lineSeparator()));
+				}
 				return strb.toString();
 			}
 		} catch (final IOException ignored) {

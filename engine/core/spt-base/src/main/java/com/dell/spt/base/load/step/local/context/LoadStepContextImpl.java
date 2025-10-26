@@ -39,7 +39,6 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
-import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -69,7 +68,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final MetricsContext metricsCtx;
 	private final LongAdder counterResults = new LongAdder();
 	private final boolean tracePersistFlag;
-	private final int batchSize;
 	private volatile Output<O> opsResultsOutput;
 	private volatile Output<O> opsMetricsOutput;
 	private final boolean waitOpFinishBeforeStop;
@@ -115,7 +113,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.metricsCtx = metricsCtx;
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
-		this.batchSize = loadConfig.intVal("batch-size");
 		final Config opConfig = loadConfig.configVal("op");
 		final Config itemConfig = loadConfig.configVal("item");
 		final Config recycleConfig = opConfig.configVal("recycle");
@@ -306,18 +303,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		return false;
-	}
-
-	private boolean isIdle() throws ConcurrentModificationException {
-		try {
-			if (!generator.isStopped() && !generator.isClosed()) {
-				return false;
-			}
-			if (!driver.isStopped() && !driver.isClosed() && !driver.isIdle()) {
-				return false;
-			}
-		} catch (final RemoteException ignored) {}
-		return true;
 	}
 
 	@Override

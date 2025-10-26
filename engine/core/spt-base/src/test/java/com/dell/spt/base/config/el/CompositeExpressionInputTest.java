@@ -1,7 +1,6 @@
 package com.dell.spt.base.config.el;
 
 import static com.dell.spt.base.config.el.CompositeExpressionInputBuilderImpl.INITIAL_VALUE_PATTERN;
-import static com.dell.spt.base.env.DateUtil.FMT_DATE_METRICS_TABLE;
 import static java.lang.System.currentTimeMillis;
 
 import org.junit.jupiter.api.Test;
@@ -12,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.env.DateUtil;
 import com.github.akurilov.commons.io.collection.CompositeStringInput;
 
-import java.util.Date;
+import java.time.Instant;
 import java.util.concurrent.TimeUnit;
 
 public class CompositeExpressionInputTest {
@@ -101,9 +100,9 @@ public class CompositeExpressionInputTest {
 						.expression("${date:format(\"" + DateUtil.PATTERN_METRICS_TABLE + "\").format(date:from(rnd.nextLong(time:millisSinceEpoch())))}")
 						.build();
 		final var rndDateStr = dateInput.get();
-		final var rndDate = FMT_DATE_METRICS_TABLE.parse(rndDateStr);
-		assertTrue(rndDate.after(new Date(0)));
-		assertTrue(rndDate.before(new Date(currentTimeMillis())));
+		final var rndDate = DateUtil.parseMetricsTable(rndDateStr);
+		assertTrue(rndDate.isAfter(Instant.EPOCH));
+		assertTrue(rndDate.isBefore(Instant.ofEpochMilli(currentTimeMillis())));
 	}
 
 	@Test

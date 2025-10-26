@@ -3,7 +3,7 @@ package com.dell.spt.base.load.step.client;
 import com.dell.spt.base.load.step.LoadStep;
 import java.util.Map;
 
-public interface LoadStepClient extends LoadStep {
+public interface LoadStepClient<T extends LoadStepClient<T>> extends LoadStep {
 
 	int OUTPUT_PROGRESS_PERIOD_MILLIS = 10_000;
 
@@ -14,8 +14,7 @@ public interface LoadStepClient extends LoadStep {
 	 * @return <b>new/copied</b> step instance with the applied config values
 	 * @throws IllegalStateException if was called after any append(...) call
 	 */
-	<T extends LoadStepClient> T config(final Map<String, Object> config)
-					throws IllegalStateException;
+	T config(final Map<String, Object> config) throws IllegalStateException;
 
 	/**
 	 * Append the load step context. The actual behavior depends on the particular step type
@@ -24,5 +23,5 @@ public interface LoadStepClient extends LoadStep {
 	 *     implementation
 	 * @return <b>new/copied</b> step instance with the appended context
 	 */
-	<T extends LoadStepClient> T append(final Map<String, Object> context);
+	T append(final Map<String, Object> context);
 }

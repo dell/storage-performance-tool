@@ -17,9 +17,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-public class TestLoadStepExtension<T extends LoadStep, U extends TestLoadStepClient>
+public class TestLoadStepExtension<T extends LoadStep>
 				extends ExtensionBase
-				implements LoadStepFactory<T, U> {
+				implements LoadStepFactory<T, TestLoadStepClient> {
 
 	public static final String TYPE = "test-load-step";
 
@@ -71,9 +71,9 @@ public class TestLoadStepExtension<T extends LoadStep, U extends TestLoadStepCli
 
 	@Override
 	@SuppressWarnings("unchecked")
-	public final U createClient(
+	public final TestLoadStepClient createClient(
 					final Config baseConfig, final List<Extension> extensions, final MetricsManager metricsManager) {
-		return (U) new TestLoadStepClient(baseConfig, extensions, null, metricsManager);
+		return new TestLoadStepClient(baseConfig, extensions, null, metricsManager);
 	}
 
 	@Override

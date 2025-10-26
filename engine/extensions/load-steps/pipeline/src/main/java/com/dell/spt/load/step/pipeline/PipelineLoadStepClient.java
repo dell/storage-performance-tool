@@ -2,7 +2,6 @@ package com.dell.spt.load.step.pipeline;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.step.client.LoadStepClient;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -24,7 +23,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
 
 public class PipelineLoadStepClient
-				extends LoadStepClientBase {
+				extends LoadStepClientBase<PipelineLoadStepClient> {
 
 	public PipelineLoadStepClient(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
@@ -33,9 +32,8 @@ public class PipelineLoadStepClient
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	protected <T extends LoadStepClient> T copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return (T) new PipelineLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+	protected PipelineLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
+		return new PipelineLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override

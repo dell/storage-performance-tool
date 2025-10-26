@@ -29,7 +29,7 @@ class MetricsContextImplTest {
 	@BeforeEach
 	void setUp() {
 		concGauge = new AtomicInteger(0);
-		ctx = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		ctx = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -187,7 +187,7 @@ class MetricsContextImplTest {
 	 */
 	@Test
 	void equalsAndtoStringBehaveAsExpected() {
-		MetricsContext<AllMetricsSnapshotImpl> a = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> a = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -200,7 +200,7 @@ class MetricsContextImplTest {
 						.actualConcurrencyGauge(concGauge::get)
 						.build();
 
-		MetricsContext<AllMetricsSnapshotImpl> b = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> b = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -232,7 +232,7 @@ class MetricsContextImplTest {
 	 */
 	@Test
 	void builderAllowsZeroOrNegativeThresholdButBaseNormalizesToMaxIntInChild() {
-		MetricsContext<AllMetricsSnapshotImpl> zeroThresholdCtx = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> zeroThresholdCtx = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.READ)

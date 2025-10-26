@@ -3,7 +3,6 @@ package com.dell.spt.base.logging;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.HashMap;
 import java.util.Map;
 
 /** Created by kurila on 05.05.17. */
@@ -25,17 +24,16 @@ public interface Loggers {
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
 
-	Map<String, String> DESCRIPTIONS_BY_NAME = new HashMap<>() {
-		{
-			put(CLI.getName().substring(BASE.length()), "CLI args");
-			put(CONFIG.getName().substring(BASE.length()), "Base config");
-			put(ERR.getName().substring(BASE.length()), "Errors");
-			put(OP_TRACES.getName().substring(BASE.length()), "Operation Traces");
-			put(METRICS_FILE.getName().substring(BASE.length()), "Metrics");
-			put(METRICS_FILE_TOTAL.getName().substring(BASE.length()), "Metrics Total");
-			put(METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()), "Threshold Metrics Total");
-			put(MSG.getName().substring(BASE.length()), "Messages");
-			put(SCENARIO.getName().substring(BASE.length()), "Scenario");
-		}
-	};
+	Map<String, String> DESCRIPTIONS_BY_NAME = Map.ofEntries(
+					Map.entry(CLI.getName().substring(BASE.length()), "CLI args"),
+					Map.entry(CONFIG.getName().substring(BASE.length()), "Base config"),
+					Map.entry(ERR.getName().substring(BASE.length()), "Errors"),
+					Map.entry(OP_TRACES.getName().substring(BASE.length()), "Operation Traces"),
+					Map.entry(METRICS_FILE.getName().substring(BASE.length()), "Metrics"),
+					Map.entry(METRICS_FILE_TOTAL.getName().substring(BASE.length()), "Metrics Total"),
+					Map.entry(
+									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
+									"Threshold Metrics Total"),
+					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
+					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"));
 }
