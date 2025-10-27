@@ -143,7 +143,13 @@ public class OpTraceLogFileAggregator implements Closeable {
 				transferredByteCount += data.length;
 				byteCounter.add(data.length);
 			}
-		} catch (final EOFException ok) {} catch (final RemoteException e) {
+		} catch (final EOFException eof) {
+			Loggers.MSG.debug(
+							"Reached end of remote operation trace file '{}' @ '{}' after {}",
+							remoteIoTraceLogFileName,
+							fileMgr,
+							SizeInBytes.formatFixedSize(transferredByteCount));
+		} catch (final RemoteException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to read the data from the remote file");
 		} catch (final IOException e) {
 			LogUtil.exception(Level.ERROR, e, "Unexpected I/O exception");

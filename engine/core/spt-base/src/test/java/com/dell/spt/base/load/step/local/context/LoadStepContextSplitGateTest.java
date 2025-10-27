@@ -112,7 +112,7 @@ public class LoadStepContextSplitGateTest {
 		// Unused interface methods for this test
 		@Override
 		public Map metadata() {
-			return Map.of();
+			return new java.util.HashMap<>();
 		}
 
 		@Override
@@ -349,7 +349,9 @@ public class LoadStepContextSplitGateTest {
 		windowsField.setAccessible(true);
 		final ConcurrentMap<String, Object> splitWindows = (ConcurrentMap<String, Object>) windowsField.get(ctx);
 		final Class<?> windowClass = Class.forName(LoadStepContextImpl.class.getName() + "$Window");
-		final Object window = windowClass.getDeclaredConstructor().newInstance();
+		final var ctor = windowClass.getDeclaredConstructor();
+		ctor.setAccessible(true);
+		final Object window = ctor.newInstance();
 		final Field firstKey = windowClass.getDeclaredField("firstKey");
 		firstKey.setAccessible(true);
 		firstKey.set(window, "prefix/a");

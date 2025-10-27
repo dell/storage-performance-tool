@@ -227,7 +227,7 @@ public class LoadStepContextImplTest {
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
 		doNothing().when(driverMock).operationResultOutput(any());
-		doThrow(new RemoteException("driver-start")).when(driverMock).start();
+		when(driverMock.start()).thenThrow(new RemoteException("driver-start"));
 		final MetricsContext metrics = buildMetricsCtx("driverStartRemote");
 		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
 						"ctx-driver-start",
@@ -245,8 +245,8 @@ public class LoadStepContextImplTest {
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
 		doNothing().when(driverMock).operationResultOutput(any());
-		doNothing().when(driverMock).start();
-		doThrow(new RemoteException("generator-start")).when(generatorMock).start();
+		when(driverMock.start()).thenReturn(driverMock);
+		when(generatorMock.start()).thenThrow(new RemoteException("generator-start"));
 		final MetricsContext metrics = buildMetricsCtx("generatorStartRemote");
 		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
 						"ctx-generator-start",
