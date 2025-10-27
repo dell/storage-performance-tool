@@ -44,6 +44,7 @@ import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.SplittableRandom;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -75,6 +76,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean outputDuplicates;
 	private final boolean updateContents;
 	private final ListShardMetricsRecorder listShardMetricsRecorder;
+	private final AtomicBoolean generatorStopWarned = new AtomicBoolean();
 	// delimiter-first runtime split state (per-shard prefix)
 	private final java.util.concurrent.ConcurrentMap<String, Window> splitWindows = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -240,7 +242,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (generator.isStopped()) {
 				return counterResults.longValue() >= generator.generatedOpCount();
 			}
-		} catch (final RemoteException ignored) {}
+		} catch (final RemoteException e) {
+			logGeneratorStopCheckFailure(e);
+		}
 		return false;
 	}
 
@@ -557,12 +561,20 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	protected void doStart() throws IllegalStateException {
 		try {
 			driver.start();
-		} catch (final RemoteException ignored) {} catch (final IllegalStateException e) {
+		} catch (final RemoteException e) {
+			throw new IllegalStateException(
+							String.format("%s: failed to start the storage driver \"%s\"", id, driver),
+							e);
+		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
 		try {
 			generator.start();
-		} catch (final RemoteException ignored) {} catch (final IllegalStateException e) {
+		} catch (final RemoteException e) {
+			throw new IllegalStateException(
+							String.format("%s: failed to start the load generator \"%s\"", id, generator),
+							e);
+		} catch (final IllegalStateException e) {
 			LogUtil.exception(
 							Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
 		}
@@ -616,12 +628,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			generator.stop();
 			Loggers.MSG.debug("{}: load generator \"{}\" stopped", id, generator.toString());
-		} catch (final RemoteException ignored) {}
+		} catch (final RemoteException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to stop the load generator cleanly", id);
+		}
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
 			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
-		} catch (final RemoteException ignored) {}
+		} catch (final RemoteException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+		}
 	}
 
 	@Override
@@ -797,7 +813,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (listShardMetricsRecorder instanceof com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl rec) {
 				threshold = rec.splitPages();
 			}
-		} catch (final Exception ignore) {}
+		} catch (final Exception e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: failed to resolve split page threshold", id);
+		}
 		if (w.pages < threshold) {
 			return false;
 		}
@@ -828,8 +846,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				splitWindows.remove(prefix);
 				return false;
 			}
-		} catch (final Exception ignore) {
-			// If metrics are unavailable, fall through and attempt the probe below.
+		} catch (final Exception e) {
+			// If metrics are unavailable, fall through and attempt the probe below, but surface detail.
+			LogUtil.exception(Level.DEBUG, e, "{}: metrics unavailable during delimiter split probe", id);
 		}
 		// Probe delimiters
 		String delims = "/-_.";
@@ -837,7 +856,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (listShardMetricsRecorder instanceof com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl rec) {
 				delims = rec.delimiters();
 			}
-		} catch (final Exception ignore) {}
+		} catch (final Exception e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: failed to resolve delimiter candidates", id);
+		}
 		if (!(driver instanceof ListDiscoveryProbe probe)) {
 			splitWindows.remove(prefix);
 			return false;
@@ -902,7 +923,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		// notify recorder and clear window
 		try {
 			listShardMetricsRecorder.onSplit(shard, null, childShards);
-		} catch (final Exception ignore) {}
+		} catch (final Exception e) {
+			LogUtil.exception(Level.WARN, e, "{}: shard metrics recorder failed during split commit", id);
+		}
 		if (Loggers.MSG.isDebugEnabled()) {
 			Loggers.MSG.debug(
 							"split.commit prefix={} lcp={} children={} flat_children={} startAfter={}",
@@ -948,6 +971,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								Level.ERROR, e, "Failed to close the storage driver \"{}\"", driver.toString());
 			}
 			Loggers.MSG.debug("{}: closed the load step context", id);
+		}
+	}
+
+	private void logGeneratorStopCheckFailure(final RemoteException e) {
+		if (generatorStopWarned.compareAndSet(false, true)) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to query generator state", id);
+		} else if (Loggers.MSG.isDebugEnabled()) {
+			LogUtil.exception(Level.DEBUG, e, "{}: repeated generator state query failure", id);
 		}
 	}
 }

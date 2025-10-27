@@ -37,6 +37,7 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.lang.reflect.Method;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -49,6 +50,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.rmi.RemoteException;
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
@@ -58,6 +60,7 @@ import org.junit.jupiter.api.Test;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -195,6 +198,83 @@ public class LoadStepContextImplTest {
 		assertEquals(op, resultsOut.received.get(0));
 		assertTrue(resultsOut.poisoned.get());
 		assertTrue(metricsOut.poisoned.get());
+	}
+
+	@Test
+	public void allOperationsCompletedHandlesRemoteException() throws Exception {
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		when(generatorMock.isStopped()).thenThrow(new RemoteException("boom"));
+		when(generatorMock.generatedOpCount()).thenReturn(10L);
+		final MetricsContext metrics = buildMetricsCtx("allOpsRemote");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-remote",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final Method method = LoadStepContextImpl.class.getDeclaredMethod("allOperationsCompleted");
+		method.setAccessible(true);
+		assertFalse((boolean) method.invoke(ctx));
+		// invoke again to exercise the repeated logging path
+		assertFalse((boolean) method.invoke(ctx));
+	}
+
+	@Test
+	public void doStartFailsFastOnDriverRemoteException() throws Exception {
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		doThrow(new RemoteException("driver-start")).when(driverMock).start();
+		final MetricsContext metrics = buildMetricsCtx("driverStartRemote");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-driver-start",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final IllegalStateException thrown = Assertions.assertThrows(IllegalStateException.class, ctx::doStart);
+		Assertions.assertTrue(thrown.getCause() instanceof RemoteException);
+	}
+
+	@Test
+	public void doStartFailsFastOnGeneratorRemoteException() throws Exception {
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		doNothing().when(driverMock).start();
+		doThrow(new RemoteException("generator-start")).when(generatorMock).start();
+		final MetricsContext metrics = buildMetricsCtx("generatorStartRemote");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-generator-start",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final IllegalStateException thrown = Assertions.assertThrows(IllegalStateException.class, ctx::doStart);
+		Assertions.assertTrue(thrown.getCause() instanceof RemoteException);
+	}
+
+	@Test
+	public void doShutdownLogsAndContinuesOnRemoteExceptions() throws Exception {
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		doThrow(new RemoteException("stop")).when(generatorMock).stop();
+		doThrow(new RemoteException("shutdown")).when(driverMock).shutdown();
+		final MetricsContext metrics = buildMetricsCtx("shutdownRemote");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-shutdown",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		assertDoesNotThrow(ctx::doShutdown);
 	}
 
 	@Test
