@@ -86,6 +86,10 @@ public interface ConfigSliceUtil {
 	}
 
 	static void sliceItemNaming(final List<Config> configSlices) {
+		if (configSlices == null || configSlices.isEmpty()) {
+			Loggers.MSG.debug("Item naming slicing skipped: no config slices provided");
+			return;
+		}
 		try {
 			final var namingConfig = configSlices.get(0).configVal("item-naming");
 			final var namingType = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
@@ -120,7 +124,9 @@ public interface ConfigSliceUtil {
 					configSlice.val("item-naming-step", namingStepPerSlice);
 				}
 			}
-		} catch (final NoSuchElementException ignored) {} catch (final Exception e) {
+		} catch (final NoSuchElementException e) {
+			Loggers.MSG.debug("Item naming slicing skipped: item-naming configuration missing", e);
+		} catch (final Exception e) {
 			LogUtil.exception(Level.ERROR, e, "Item naming slicing failure");
 		}
 	}
