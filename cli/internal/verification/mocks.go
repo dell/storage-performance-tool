@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -22,6 +23,8 @@ type MockCommandExecutor struct {
 
 	// ExecutedCommands tracks what commands were executed
 	ExecutedCommands []MockCommandExecution
+
+	mu sync.Mutex
 }
 
 // MockCommandResponse describes an expected stdout/stderr/error triple for a command.
@@ -40,6 +43,9 @@ type MockCommandExecution struct {
 
 // ExecuteCommand implements CommandExecutor for tests; it records and replays configured responses.
 func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Record the execution
 	m.ExecutedCommands = append(m.ExecutedCommands, MockCommandExecution{
 		Host:    host,
@@ -68,6 +74,8 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 
 // SetupDockerSuccess configures mock to return successful Docker responses
 func (m *MockCommandExecutor) SetupDockerSuccess() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Commands == nil {
 		m.Commands = make(map[string]MockCommandResponse)
 	}
@@ -122,6 +130,8 @@ func (m *MockCommandExecutor) SetupDockerSuccess() {
 
 // SetupContainerSuccess configures mock to return successful container responses
 func (m *MockCommandExecutor) SetupContainerSuccess() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Commands == nil {
 		m.Commands = make(map[string]MockCommandResponse)
 	}
@@ -165,6 +175,8 @@ type MockNetworkChecker struct {
 
 	// HTTPRequests tracks what HTTP requests were made
 	HTTPRequests []string
+
+	mu sync.Mutex
 }
 
 // MockHTTPResponse holds an HTTP response or error for a mocked request.
@@ -182,6 +194,8 @@ type MockPortCheck struct {
 
 // IsPortOpen records the probe and returns the configured open/closed state.
 func (m *MockNetworkChecker) IsPortOpen(host string, port int, timeout time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// Record the check
 	m.PortChecks = append(m.PortChecks, MockPortCheck{
 		Host:    host,
@@ -201,6 +215,8 @@ func (m *MockNetworkChecker) IsPortOpen(host string, port int, timeout time.Dura
 
 // HTTPGet records the request and returns the configured response/error.
 func (m *MockNetworkChecker) HTTPGet(_ context.Context, url string) (*http.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// Record the request
 	m.HTTPRequests = append(m.HTTPRequests, url)
 
@@ -215,6 +231,8 @@ func (m *MockNetworkChecker) HTTPGet(_ context.Context, url string) (*http.Respo
 
 // SetupPortsOpen configures mock to return all specified ports as open
 func (m *MockNetworkChecker) SetupPortsOpen(host string, ports []int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.OpenPorts == nil {
 		m.OpenPorts = make(map[string]bool)
 	}
@@ -227,6 +245,8 @@ func (m *MockNetworkChecker) SetupPortsOpen(host string, ports []int) {
 
 // SetupPortsClosed configures mock to return all specified ports as closed
 func (m *MockNetworkChecker) SetupPortsClosed(host string, ports []int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.OpenPorts == nil {
 		m.OpenPorts = make(map[string]bool)
 	}
@@ -247,10 +267,14 @@ type MockTimeProvider struct {
 
 	// CallCount tracks how many times Now() has been called
 	CallCount int
+
+	mu sync.Mutex
 }
 
 // Now returns the configured current time and advances if TimeAdvance is set.
 func (m *MockTimeProvider) Now() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallCount++
 	currentTime := m.CurrentTime
 	m.CurrentTime = m.CurrentTime.Add(m.TimeAdvance)
@@ -259,6 +283,8 @@ func (m *MockTimeProvider) Now() time.Time {
 
 // Since returns the delta between the current mock time and t.
 func (m *MockTimeProvider) Since(t time.Time) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.CurrentTime.Sub(t)
 }
 

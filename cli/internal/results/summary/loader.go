@@ -185,7 +185,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 }
 
 func (l *Loader) loadManifest(path string) (*results.Manifest, error) {
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) // #nosec G304 -- path restricted to sanitized results directory
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func (l *Loader) loadManifest(path string) (*results.Manifest, error) {
 }
 
 func (l *Loader) loadRunParams(path string) (*RunParams, error) {
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) // #nosec G304 -- path restricted to sanitized results directory
 	if err != nil {
 		return nil, err
 	}

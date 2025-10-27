@@ -5,8 +5,8 @@ const (
 	EnvSptImage      = "SPT_IMAGE"
 	EnvHosts         = "HOSTS"
 	EnvS3Endpoint    = "S3_ENDPOINT"
-	EnvS3AccessKey   = "S3_ACCESS_KEY"
-	EnvS3SecretKey   = "S3_SECRET_KEY"
+	EnvS3AccessKey   = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
+	EnvS3SecretKey   = "S3_SECRET_KEY" // #nosec G101 -- env var names only
 	EnvS3Bucket      = "S3_BUCKET"
 	EnvS3AuthVersion = "S3_AUTH_VERSION"
 	EnvSkipImagePull = "SPT_SKIP_IMAGE_PULL"

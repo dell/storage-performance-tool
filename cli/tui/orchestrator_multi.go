@@ -813,7 +813,7 @@ func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTe
 		pollInterval:  constants.MetricsPollInterval, // Default poll interval
 		pollStates:    make(map[string]*nodePollState),
 		backoffCfg:    multiNodeBackoff,
-		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- jitter only
 		logJSONBodies: os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
 }

@@ -139,7 +139,7 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			metadata.BaseURL = baseURL
 		}
 		// ensure results directory exists early so we can stage metadata
-		if err := os.MkdirAll(root, 0o755); err != nil {
+		if err := os.MkdirAll(root, 0o750); err != nil {
 			logging.LogError("auto-results", "create results dir", err, "path", root)
 		} else {
 			if storedPath, copyErr := copyScenarioForResults(scenarioPath, root); copyErr != nil {
