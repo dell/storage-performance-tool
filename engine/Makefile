@@ -20,7 +20,10 @@
 GRADLE := ./gradlew
 DIST_DIR := bundle/build/dist
 SPT_JAR := $(DIST_DIR)/spt.jar
-ZIP_FILE := bundle/build/distributions/spt-bundle-5.0.0-SNAPSHOT.zip
+VERSION_FILE := ../VERSION
+SPT_VERSION := $(shell if [ -f $(VERSION_FILE) ]; then tr -d '\n' < $(VERSION_FILE); else echo "0.0.0-dev"; fi)
+SPT_RELEASE_VERSION := $(firstword $(subst -, ,$(SPT_VERSION)))
+ZIP_FILE := bundle/build/distributions/spt-bundle-$(SPT_VERSION).zip
 # Build options - tests disabled by default for faster builds
 # The gradle.properties file enables parallel execution, build caching, etc.
 BUILD_OPTS := --no-daemon
@@ -229,7 +232,7 @@ vscode:
 # Show project information
 info:
 	@echo "Spt v5 Bundle Information:"
-	@echo "  Version: 5.0.0-SNAPSHOT"
+	@echo "  Version: $(SPT_VERSION)"
 	@echo "  Distribution: $(DIST_DIR)"
 	@echo "  Main JAR: spt.jar"
 	@echo "  Extensions: ext/ directory"
@@ -262,7 +265,7 @@ cache-report:
 DOCKER_REGISTRY := dcr.octo.dell.com
 DOCKER_NAMESPACE := spt
 DOCKER_IMAGE := $(DOCKER_REGISTRY)/$(DOCKER_NAMESPACE)/spt
-DOCKER_TAG := 5.0.0-SNAPSHOT
+DOCKER_TAG := $(SPT_VERSION)
 
 # Build Docker image
 docker: $(SPT_JAR)

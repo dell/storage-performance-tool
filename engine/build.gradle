@@ -3,9 +3,17 @@ plugins {
     id 'jacoco'
 }
 
+def sptVersion = file('../VERSION').text.trim()
+def sptReleaseVersion = sptVersion.tokenize('-').first()
+
+ext {
+    SPT_VERSION = sptVersion
+    SPT_RELEASE_VERSION = sptReleaseVersion
+}
+
 allprojects {
     group = 'com.github.dell-spt'
-    version = '5.0.0-SNAPSHOT'
+    version = sptVersion
     
     repositories {
         mavenCentral()

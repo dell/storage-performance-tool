@@ -49,7 +49,7 @@ gradlew.bat clean build -x test   # Windows
 #   └── run.bat           # Windows launcher
 
 # For distribution, a ZIP file is also created:
-# bundle/build/distributions/spt-bundle-5.0.0-SNAPSHOT.zip
+# bundle/build/distributions/spt-bundle-<version>.zip
 ```
 
 #### Alternative: Using Make (Optional)
@@ -90,7 +90,7 @@ run.bat --version     # Windows
   --load-op-limit-count=1000
 ```
 
-Note: The run scripts automatically handle setting up the extensions in the correct location (`~/.spt/5.0.0/ext/`).
+Note: The run scripts automatically handle setting up the extensions in the correct location (`~/.spt/<version>/ext/`).
 
 ### Common Command-Line Options
 
@@ -116,7 +116,7 @@ After building, the distribution contains:
 
 The launcher scripts handle:
 - Setting up the correct extension directory structure
-- Linking/copying extensions to `~/.spt/5.0.0/ext/`
+- Linking/copying extensions to `~/.spt/<version>/ext/`
 - Launching Spt with the proper classpath configuration
 
 ### IDE Integration
