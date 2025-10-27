@@ -23,7 +23,7 @@ public interface LoadStepFactory<T extends LoadStep, U extends LoadStepClient<U>
 					final MetricsManager metricsManager);
 
 	@SuppressWarnings("unchecked")
-	static <T extends LoadStep> T createLocalLoadStep(
+	static LoadStep createLocalLoadStep(
 					final Config baseConfig,
 					final List<Extension> extensions,
 					final List<Config> contextConfigs,
@@ -46,6 +46,6 @@ public interface LoadStepFactory<T extends LoadStep, U extends LoadStepClient<U>
 																		+ Arrays.toString(
 																						loadStepFactories.stream().map(LoadStepFactory::id).toArray())));
 
-		return (T) selectedFactory.createLocal(baseConfig, extensions, contextConfigs, metricsManager);
+		return (LoadStep) selectedFactory.createLocal(baseConfig, extensions, contextConfigs, metricsManager);
 	}
 }

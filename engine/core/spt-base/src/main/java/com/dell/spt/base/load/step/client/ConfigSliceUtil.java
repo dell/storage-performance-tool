@@ -111,11 +111,13 @@ public interface ConfigSliceUtil {
 				final var srcNamingStep = namingConfig.intVal("step");
 				for (var i = 0; i < sliceCount; i++) {
 					final var configSlice = configSlices.get(i);
+					final long namingOffset = (long) i * srcNamingStep;
+					final long namingStepPerSlice = (long) srcNamingStep * sliceCount;
 					Loggers.MSG.debug(
-									"Item naming slicing: slice #{}, seed: {}, step: {}", i, srcNamingSeed + i * srcNamingStep,
-									srcNamingStep * sliceCount);
-					configSlice.val("item-naming-seed", srcNamingSeed + i * srcNamingStep);
-					configSlice.val("item-naming-step", srcNamingStep * sliceCount);
+									"Item naming slicing: slice #{}, seed: {}, step: {}", i, srcNamingSeed + namingOffset,
+									namingStepPerSlice);
+					configSlice.val("item-naming-seed", srcNamingSeed + namingOffset);
+					configSlice.val("item-naming-step", namingStepPerSlice);
 				}
 			}
 		} catch (final NoSuchElementException ignored) {} catch (final Exception e) {

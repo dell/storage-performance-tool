@@ -34,6 +34,7 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 		count = snapshotSuppliers.length;
 	}
 
+	@Override
 	public final List<AllMetricsSnapshot> metricsSnapshotsByIndex(final int originIndex) {
 		MetricsSnapshotsSupplierTask supplyTask;
 		List<? extends AllMetricsSnapshot> snapshots;

@@ -18,6 +18,7 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -138,7 +139,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 			byte[] data;
 			while (true) {
 				data = fileMgr.readFromFile(remoteIoTraceLogFileName, transferredByteCount);
-				Loggers.OP_TRACES.info(new String(data));
+				Loggers.OP_TRACES.info(new String(data, StandardCharsets.UTF_8));
 				transferredByteCount += data.length;
 				byteCounter.add(data.length);
 			}

@@ -145,6 +145,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		super.doStop();
 	}
 
+	@Override
 	protected final void doClose() throws IOException {
 		super.doClose();
 		stepContexts
