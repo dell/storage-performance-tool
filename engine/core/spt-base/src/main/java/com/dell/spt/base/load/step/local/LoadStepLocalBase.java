@@ -134,13 +134,18 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doShutdown() {
-		stepContexts.forEach(
-						stepCtx -> {
-							try (final Instance ctx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-								stepCtx.shutdown();
-								Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
-							} catch (final RemoteException ignored) {}
-						});
+		final var iterator = stepContexts.iterator();
+		while (iterator.hasNext()) {
+			final var stepCtx = iterator.next();
+			try (final Instance ctx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				stepCtx.shutdown();
+				Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
+			} catch (final RemoteException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to shutdown the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			}
+		}
 	}
 
 	@Override
@@ -172,7 +177,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						}
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
-					} catch (final RemoteException ignored) {}
+					} catch (final RemoteException e) {
+						LogUtil.exception(
+										Level.WARN, e, "{}: step context \"{}\" became unreachable during await", loadStepId(), stepCtx);
+						stepContextsCopy[i] = null;
+						stepContexts.remove(stepCtx);
+						countDown--;
+						break;
+					}
 				}
 			}
 		}

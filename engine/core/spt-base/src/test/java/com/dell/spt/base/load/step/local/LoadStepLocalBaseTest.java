@@ -5,9 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
@@ -20,6 +25,7 @@ import com.github.akurilov.confuse.Config;
 import java.util.List;
 import java.util.Map;
 import java.rmi.RemoteException;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -117,6 +123,40 @@ class LoadStepLocalBaseTest {
 		verify(failing).start();
 	}
 
+	@Test
+	void doShutdownRemovesFailingContext() throws RemoteException {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-shutdown");
+
+		final LoadStepContext failing = mock(LoadStepContext.class);
+		final LoadStepContext healthy = mock(LoadStepContext.class);
+		doThrow(new RemoteException("boom")).when(failing).shutdown();
+
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing, healthy);
+
+		loadStep.shutdownContextsForTest();
+		assertEquals(1, loadStep.contextCount());
+		assertSame(healthy, loadStep.contextAt(0));
+		verify(failing).shutdown();
+		verify(healthy).shutdown();
+	}
+
+	@Test
+	void awaitRemovesContextOnRemoteFailure() throws Exception {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-await");
+
+		final LoadStepContext failing = mock(LoadStepContext.class);
+		when(failing.isDone()).thenReturn(false);
+		when(failing.await(anyLong(), any(TimeUnit.class))).thenThrow(new RemoteException("boom"));
+
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing);
+
+		assertTrue(loadStep.awaitContextsForTest(5, TimeUnit.SECONDS));
+		assertEquals(0, loadStep.contextCount());
+		verify(failing).await(anyLong(), eq(TimeUnit.NANOSECONDS));
+	}
+
 	private static final class TestLoadStepLocalBase extends LoadStepLocalBase {
 
 		TestLoadStepLocalBase(
@@ -158,6 +198,14 @@ class LoadStepLocalBaseTest {
 
 		void startContextsForTest() {
 			doStartWrapped();
+		}
+
+		void shutdownContextsForTest() {
+			doShutdown();
+		}
+
+		boolean awaitContextsForTest(final long timeout, final TimeUnit unit) {
+			return await(timeout, unit);
 		}
 
 		int contextCount() {
