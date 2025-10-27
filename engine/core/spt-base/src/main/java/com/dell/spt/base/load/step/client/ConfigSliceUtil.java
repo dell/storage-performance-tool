@@ -113,10 +113,10 @@ public interface ConfigSliceUtil {
 					}
 				}
 				final var srcNamingStep = namingConfig.intVal("step");
+				final var namingStepPerSlice = Math.toIntExact((long) srcNamingStep * sliceCount);
 				for (var i = 0; i < sliceCount; i++) {
 					final var configSlice = configSlices.get(i);
 					final long namingOffset = (long) i * srcNamingStep;
-					final long namingStepPerSlice = (long) srcNamingStep * sliceCount;
 					Loggers.MSG.debug(
 									"Item naming slicing: slice #{}, seed: {}, step: {}", i, srcNamingSeed + namingOffset,
 									namingStepPerSlice);

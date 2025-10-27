@@ -57,7 +57,7 @@ public final class TempInputTextFileSlicerTest {
 			}
 		}
 		TempInputTextFileSlicer.scatterLines(
-						SRC_FILE_NAME, SLICE_COUNT, FILE_MGRS, FILE_SLICES, BATCH_SIZE);
+						SRC_FILE_NAME, SLICE_COUNT, FILE_MGRS, FILE_SLICES, BATCH_SIZE, "test-step");
 	}
 
 	@Test
@@ -93,7 +93,8 @@ public final class TempInputTextFileSlicerTest {
 							1,
 							List.of(fileMgr),
 							Map.of(fileMgr, dstName),
-							8);
+							8,
+							"test-step-utf8");
 
 			final var dstLines = Files.readAllLines(Paths.get(dstName), StandardCharsets.UTF_8);
 			assertEquals(sampleLines, dstLines);
@@ -102,4 +103,5 @@ public final class TempInputTextFileSlicerTest {
 			fileMgr.deleteFile(dstName);
 		}
 	}
+
 }

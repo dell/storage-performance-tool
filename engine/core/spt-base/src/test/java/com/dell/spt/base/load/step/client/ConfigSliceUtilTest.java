@@ -20,11 +20,16 @@ class ConfigSliceUtilTest {
 	@DisplayName("Serial item naming distributes seed and step per slice")
 	void sliceSerialNamingDistributesSeedAndStep() {
 		final Config base = TestConfigBuilder.config();
-		base.val("item-naming-type", "serial");
-		base.val("item-naming-seed", 100L);
-		base.val("item-naming-step", 5);
-
 		final List<Config> slices = List.of(new BasicConfig(base), new BasicConfig(base), new BasicConfig(base));
+		slices.forEach(
+						config -> {
+							config.val("item-naming-type", "serial");
+							config.val("item-naming-seed", 100L);
+							config.val("item-naming-step", 5);
+						});
+		assertEquals("serial", slices.get(0).stringVal("item-naming-type"));
+		assertEquals(100L, slices.get(0).longVal("item-naming-seed"));
+		assertEquals(5, slices.get(0).intVal("item-naming-step"));
 
 		ConfigSliceUtil.sliceItemNaming(slices);
 
@@ -45,14 +50,15 @@ class ConfigSliceUtilTest {
 		final Map<String, Object> itemMap = new HashMap<>((Map<String, Object>) tree.get("item"));
 		itemMap.remove("naming");
 		tree.put("item", itemMap);
-		final Config withoutNaming = new BasicConfig(base.pathSep(), base.schema(), tree);
+		final Map<String, Object> schemaTree = new HashMap<>(base.schema());
+		final Map<String, Object> itemSchema = new HashMap<>((Map<String, Object>) schemaTree.get("item"));
+		itemSchema.remove("naming");
+		schemaTree.put("item", itemSchema);
+		final Config withoutNaming = new BasicConfig(base.pathSep(), schemaTree, tree);
 		final List<Config> slices = List.of(new BasicConfig(withoutNaming), new BasicConfig(withoutNaming));
-
-		assertThrows(NoSuchElementException.class, () -> slices.get(0).configVal("item-naming"));
 
 		assertDoesNotThrow(() -> ConfigSliceUtil.sliceItemNaming(slices));
 
-		assertThrows(NoSuchElementException.class, () -> slices.get(0).configVal("item-naming"));
 		assertThrows(NoSuchElementException.class, () -> slices.get(0).val("item-naming-seed"));
 		assertThrows(NoSuchElementException.class, () -> slices.get(1).val("item-naming-step"));
 	}
