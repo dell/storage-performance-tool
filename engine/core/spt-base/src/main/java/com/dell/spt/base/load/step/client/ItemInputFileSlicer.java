@@ -14,11 +14,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
@@ -102,29 +102,33 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 														Function.identity(),
 														fileMgr -> new ByteArrayOutputStream(batchSize * APPROX_LINE_LENGTH)));
 
-		final Map<FileManager, ObjectOutputStream> itemsOutputs = itemsOutByteBuffs.entrySet().stream()
-						.collect(
-										Collectors.toMap(
-														Map.Entry::getKey,
-														entry -> {
-															try {
-																return new ObjectOutputStream(entry.getValue());
-															} catch (final IOException ignored) {}
-															return null;
-														}));
+		final Map<FileManager, ObjectOutputStream> itemsOutputs = new HashMap<>(itemsOutByteBuffs.size());
+		IOException streamFailure = null;
+		for (final var entry : itemsOutByteBuffs.entrySet()) {
+			try {
+				itemsOutputs.put(entry.getKey(), OBJECT_OUTPUT_STREAM_FACTORY.create(entry.getValue()));
+			} catch (final IOException e) {
+				streamFailure = e;
+				LogUtil.exception(
+								Level.WARN,
+								e,
+								"{}: failed to prepare the item input stream for file manager \"{}\"",
+								loadStepId,
+								entry.getKey());
+				break;
+			}
+		}
 
-		transferData(itemInput, itemsOutByteBuffs, itemsOutputs, batchSize);
+		if (streamFailure != null) {
+			itemsOutputs.values().forEach(out -> closeQuietly(out));
+			throw streamFailure;
+		}
 
-		itemsOutputs
-						.values()
-						.parallelStream()
-						.filter(Objects::nonNull)
-						.forEach(
-										outStream -> {
-											try {
-												outStream.close();
-											} catch (final IOException ignored) {}
-										});
+		try {
+			transferData(itemInput, itemsOutByteBuffs, itemsOutputs, batchSize);
+		} finally {
+			itemsOutputs.values().forEach(this::closeQuietly);
+		}
 	}
 
 	private <I extends Item> void transferData(
@@ -207,5 +211,31 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 						itemInput,
 						count,
 						sliceCount);
+	}
+
+	private void closeQuietly(final ObjectOutputStream outStream) {
+		if (outStream == null) {
+			return;
+		}
+		try {
+			outStream.close();
+		} catch (final IOException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to close item input slice stream", loadStepId);
+		}
+	}
+
+	@FunctionalInterface
+	interface ObjectOutputStreamFactory {
+		ObjectOutputStream create(OutputStream out) throws IOException;
+	}
+
+	private static volatile ObjectOutputStreamFactory OBJECT_OUTPUT_STREAM_FACTORY = ObjectOutputStream::new;
+
+	static void setObjectOutputStreamFactoryForTesting(final ObjectOutputStreamFactory factory) {
+		OBJECT_OUTPUT_STREAM_FACTORY = factory == null ? ObjectOutputStream::new : factory;
+	}
+
+	static void resetObjectOutputStreamFactoryForTesting() {
+		OBJECT_OUTPUT_STREAM_FACTORY = ObjectOutputStream::new;
 	}
 }
