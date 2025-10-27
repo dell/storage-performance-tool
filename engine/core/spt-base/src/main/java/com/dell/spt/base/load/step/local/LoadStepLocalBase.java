@@ -41,15 +41,26 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected void doStartWrapped() {
-		stepContexts.forEach(
-						stepCtx -> {
-							try {
-								stepCtx.start();
-							} catch (final RemoteException ignored) {} catch (final IllegalStateException e) {
-								LogUtil.exception(
-												Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
-							}
-						});
+		boolean anyStarted = false;
+		final var iterator = stepContexts.iterator();
+		while (iterator.hasNext()) {
+			final var stepCtx = iterator.next();
+			try {
+				stepCtx.start();
+				anyStarted = true;
+			} catch (final RemoteException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			}
+		}
+		if (!anyStarted) {
+			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
+		}
 	}
 
 	@Override

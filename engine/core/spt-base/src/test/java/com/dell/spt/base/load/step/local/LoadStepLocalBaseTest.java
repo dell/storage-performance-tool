@@ -1,9 +1,13 @@
 package com.dell.spt.base.load.step.local;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
@@ -15,6 +19,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.List;
 import java.util.Map;
+import java.rmi.RemoteException;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -79,14 +84,47 @@ class LoadStepLocalBaseTest {
 		return ctx;
 	}
 
+	@Test
+	void doStartWrappedRemovesFailingContext() throws RemoteException {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-start");
+
+		final LoadStepContext failing = mock(LoadStepContext.class);
+		final LoadStepContext healthy = mock(LoadStepContext.class);
+		when(failing.start()).thenThrow(new RemoteException("boom"));
+
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing, healthy);
+
+		assertDoesNotThrow(loadStep::startContextsForTest);
+		assertEquals(1, loadStep.contextCount());
+		assertSame(healthy, loadStep.contextAt(0));
+		verify(failing).start();
+		verify(healthy).start();
+	}
+
+	@Test
+	void doStartWrappedThrowsWhenAllContextsFail() throws RemoteException {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-none");
+
+		final LoadStepContext failing = mock(LoadStepContext.class);
+		when(failing.start()).thenThrow(new RemoteException("boom"));
+
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing);
+
+		assertThrows(IllegalStateException.class, loadStep::startContextsForTest);
+		assertEquals(0, loadStep.contextCount());
+		verify(failing).start();
+	}
+
 	private static final class TestLoadStepLocalBase extends LoadStepLocalBase {
 
 		TestLoadStepLocalBase(
 						final Config baseConfig,
 						final MetricsManager metricsManager,
-						final LoadStepContext stepContext) {
+						final LoadStepContext... stepContexts) {
 			super(baseConfig, List.<Extension> of(), List.<Config> of(), metricsManager);
-			this.stepContexts.add(stepContext);
+			this.stepContexts.addAll(List.of(stepContexts));
 		}
 
 		@Override
@@ -116,6 +154,18 @@ class LoadStepLocalBaseTest {
 
 		Map<String, Object> latestMetadata() {
 			return metricsContexts.get(metricsContexts.size() - 1).metadata();
+		}
+
+		void startContextsForTest() {
+			doStartWrapped();
+		}
+
+		int contextCount() {
+			return stepContexts.size();
+		}
+
+		LoadStepContext contextAt(final int index) {
+			return stepContexts.get(index);
 		}
 	}
 
