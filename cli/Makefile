@@ -10,13 +10,25 @@ GOMOD=$(GOCMD) mod
 GOFMT=gofmt
 GOVET=$(GOCMD) vet -mod=mod
 
+# Build metadata (override via env in CI).
+VERSION_FILE ?= ../VERSION
+VERSION ?= $(shell if [ -f $(VERSION_FILE) ]; then tr -d '\n' < $(VERSION_FILE); else echo "0.0.0-dev"; fi)
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILDINFO_PKG=github.com/dell/storage-performance-tool/cli/internal/buildinfo
+
+# Ensure values have no whitespace for ldflags injection.
+LD_VERSION=$(strip $(VERSION))
+LD_COMMIT=$(strip $(GIT_COMMIT))
+LD_DATE=$(strip $(BUILD_DATE))
+
 # Binary name
 BINARY_NAME=spt
 BINARY_PATH=./$(BINARY_NAME)
 
 # Build variables
 BUILD_DIR=build
-LDFLAGS=-ldflags "-s -w"
+LDFLAGS=-ldflags "-s -w -X $(BUILDINFO_PKG).Version=$(LD_VERSION) -X $(BUILDINFO_PKG).Commit=$(LD_COMMIT) -X $(BUILDINFO_PKG).BuildDate=$(LD_DATE)"
 
 # Default target - show help
 help:

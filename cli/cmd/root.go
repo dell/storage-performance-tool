@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -129,7 +130,9 @@ func initializeLogger() error {
 
 	// Log initial message
 	Logger.Info("spt starting",
-		"version", "1.0.0",
+		"version", buildinfo.Version,
+		"git_commit", buildinfo.Commit,
+		"build_date", buildinfo.BuildDate,
 		"log_level", logLevel,
 		"log_file", logFile,
 		"log_append", logAppend)
@@ -151,4 +154,7 @@ func init() {
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
+	rootCmd.Version = buildinfo.Version
+	rootCmd.SetVersionTemplate(fmt.Sprintf("spt version: %s\ncommit: %s\nbuilt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate))
 }
