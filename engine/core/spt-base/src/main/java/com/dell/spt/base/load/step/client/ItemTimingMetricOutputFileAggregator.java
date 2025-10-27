@@ -177,7 +177,13 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 				transferredByteCount += buff.length;
 				byteCounter.add(buff.length);
 			}
-		} catch (final EOFException ok) {} catch (final IOException e) {
+		} catch (final EOFException eof) {
+			Loggers.MSG.debug(
+							"Reached end of remote timing metrics file '{}' @ '{}' after {}",
+							remoteItemOutputFileName,
+							fileMgr,
+							SizeInBytes.formatFixedSize(transferredByteCount));
+		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "Remote items output timing metrics file transfer failure");
 		} finally {
 			Loggers.MSG.debug(
