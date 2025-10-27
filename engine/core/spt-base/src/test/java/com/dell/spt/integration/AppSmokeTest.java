@@ -29,8 +29,10 @@ import com.github.akurilov.confuse.Config;
 
 import io.prometheus.client.exporter.MetricsServlet;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -123,12 +125,15 @@ public class AppSmokeTest {
 		} else {
 			scriptEngine = ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
 			final var strb = new StringBuilder();
-			try {
-				Files.lines(scenarioPath).forEach(line -> strb.append(line).append(System.lineSeparator()));
+			try (BufferedReader reader = Files.newBufferedReader(scenarioPath, StandardCharsets.UTF_8)) {
+				String line;
+				while ((line = reader.readLine()) != null) {
+					strb.append(line).append(System.lineSeparator());
+				}
 			} catch (final IOException e) {
 				LogUtil.exception(Level.FATAL, e, "Failed to read the scenario file \"{}\"", scenarioPath);
-				try {
-					Files.list(scenarioPath.getParent()).forEach(System.out::println);
+				try (java.util.stream.Stream<Path> entries = Files.list(scenarioPath.getParent())) {
+					entries.forEach(System.out::println);
 				} catch (final IOException ee) {
 					LogUtil.trace(
 									Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");

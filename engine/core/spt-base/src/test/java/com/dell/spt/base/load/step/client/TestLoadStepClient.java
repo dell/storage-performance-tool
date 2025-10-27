@@ -13,7 +13,7 @@ import java.util.List;
  * This provides minimal implementations of abstract methods to enable testing
  * of the base class functionality without complex setup.
  */
-public class TestLoadStepClient extends LoadStepClientBase {
+public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 
 	private boolean initCalled = false;
 	private boolean copyInstanceCalled = false;
@@ -28,16 +28,14 @@ public class TestLoadStepClient extends LoadStepClientBase {
 	}
 
 	@Override
-	@SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"
-	})
-	protected <T extends LoadStepClient> T copyInstance(
+	protected TestLoadStepClient copyInstance(
 					Config config,
 					List<Config> ctxConfigs) {
 		copyInstanceCalled = true;
 		copyInstanceCallCount++;
 
 		// Return a new instance with the updated config
-		return (T) new TestLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+		return new TestLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override

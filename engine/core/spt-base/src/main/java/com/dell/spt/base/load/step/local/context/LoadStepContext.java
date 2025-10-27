@@ -19,6 +19,7 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 
 	boolean isDone();
 
+	@Override
 	default Input<O> getInput() {
 		throw new AssertionError("Shouldn't be invoked");
 	}

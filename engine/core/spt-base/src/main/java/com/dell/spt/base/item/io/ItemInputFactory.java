@@ -13,6 +13,7 @@ import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import org.apache.logging.log4j.Level;
 
 public interface ItemInputFactory {
@@ -21,8 +22,9 @@ public interface ItemInputFactory {
 					final Config itemConfig, final int batchSize, final StorageDriver<I, O> storageDriver) {
 		Input<I> itemInput = null;
 
-		final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase());
-		final ItemFactory<I> itemFactory = ItemType.getItemFactory(itemType);
+		final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
+		@SuppressWarnings("unchecked")
+		final ItemFactory<I> itemFactory = (ItemFactory<I>) ItemType.getItemFactory(itemType);
 		final Config itemInputConfig = itemConfig.configVal("input");
 		final String itemInputFile = itemInputConfig.stringVal("file");
 

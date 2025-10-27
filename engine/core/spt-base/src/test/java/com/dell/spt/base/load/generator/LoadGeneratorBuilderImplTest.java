@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -83,32 +84,29 @@ public class LoadGeneratorBuilderImplTest {
 			}
 		}
 		final var seed = 314159265;
-		final Map<String, Object> options = new HashMap<>() {
-			{
-				put("item-data-ranges-concat", null);
-				put("item-data-ranges-fixed", null);
-				put("item-data-ranges-random", 0);
-				put("item-data-ranges-threshold", 0);
-				put("item-data-size", "1MB");
-				put("item-input-path", null);
-				put("item-naming-length", 12);
-				put("item-naming-seed", 0L);
-				put("item-naming-prefix", null);
-				put("item-naming-radix", 36);
-				put("item-naming-step", 1);
-				put("item-naming-type", "random");
-				put("item-output-path", prefixBucket + "${rnd.nextLong(100)}%{" + seed + "}");
-				put("load-batch-size", opCount);
-				put("load-op-limit-count", opCount);
-				put("load-op-limit-recycle", 1_000_000);
-				put("load-op-recycle-mode", false);
-				put("load-op-recycle-content-update", false);
-				put("load-op-retry", false);
-				put("load-op-shuffle", false);
-				put("load-op-type", OpType.CREATE.name().toLowerCase());
-				put("storage-auth-file", credentialsFilePath.toAbsolutePath().toString());
-			}
-		};
+		final Map<String, Object> options = new HashMap<>();
+		options.put("item-data-ranges-concat", null);
+		options.put("item-data-ranges-fixed", null);
+		options.put("item-data-ranges-random", 0);
+		options.put("item-data-ranges-threshold", 0);
+		options.put("item-data-size", "1MB");
+		options.put("item-input-path", null);
+		options.put("item-naming-length", 12);
+		options.put("item-naming-seed", 0L);
+		options.put("item-naming-prefix", null);
+		options.put("item-naming-radix", 36);
+		options.put("item-naming-step", 1);
+		options.put("item-naming-type", "random");
+		options.put("item-output-path", prefixBucket + "${rnd.nextLong(100)}%{" + seed + "}");
+		options.put("load-batch-size", opCount);
+		options.put("load-op-limit-count", opCount);
+		options.put("load-op-limit-recycle", 1_000_000);
+		options.put("load-op-recycle-mode", false);
+		options.put("load-op-recycle-content-update", false);
+		options.put("load-op-retry", false);
+		options.put("load-op-shuffle", false);
+		options.put("load-op-type", OpType.CREATE.name().toLowerCase(Locale.ROOT));
+		options.put("storage-auth-file", credentialsFilePath.toAbsolutePath().toString());
 		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
 		options.forEach(config::val);
 		final var itemFactory = (ItemFactory) new DataItemFactoryImpl();
@@ -156,7 +154,7 @@ public class LoadGeneratorBuilderImplTest {
 		ops.clear();
 		final var expectedFreq = opCount / bucketCount;
 		for (var i = 0; i < bucketCount; i++) {
-			assertEquals(expectedFreq, freq.getCount(i), expectedFreq / 2.0);
+			assertEquals(expectedFreq, (double) freq.getCount(i), expectedFreq / 2.0);
 		}
 	}
 }

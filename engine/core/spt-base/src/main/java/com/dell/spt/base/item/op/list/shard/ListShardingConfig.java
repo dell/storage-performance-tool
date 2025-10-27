@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.NoSuchElementException;
 
 public final class ListShardingConfig {
 
@@ -129,7 +130,7 @@ public final class ListShardingConfig {
 		}
 		final var mode = resolveMode(sharding);
 		final var alphabet = resolveAlphabet(sharding);
-		int radix = resolveRadix(sharding, alphabet.length);
+		final int radix = resolveRadix(sharding, alphabet.length);
 		if (radix > alphabet.length) {
 			throw new IllegalConfigurationException(
 							"Sharding radix "
@@ -141,89 +142,38 @@ public final class ListShardingConfig {
 		final Duration stallTimeout = parseDuration(sharding.val("stall_timeout"), Duration.ofSeconds(30));
 		final Duration progressLogInterval = parseDuration(sharding.val("progress_log_interval"), Duration.ofSeconds(10));
 		final AdaptiveHeuristicsConfig adaptive = AdaptiveHeuristicsConfig.parse(sharding);
-		int splitLogRate = 1;
 		final Config splitConfig = sharding.configVal("split");
-		if (splitConfig != null) {
-			final Config logConfig = splitConfig.configVal("log");
-			if (logConfig != null) {
-				try {
-					splitLogRate = logConfig.intVal("rate");
-				} catch (final Exception ignore) {
-					try {
-						splitLogRate = logConfig.intVal("sample");
-					} catch (final Exception ignored) {}
-				}
-			}
-			// New: parse pages threshold (expressed in pages of 1000)
-			try {
-				// Allow either kebab/snake or dot style; prefer dot as documented
-				Object pagesRaw = splitConfig.val("pages");
-				if (pagesRaw == null) {
-					pagesRaw = splitConfig.val("split_pages");
-				}
-				if (pagesRaw instanceof Number) {
-					// no-op; handled below
-				}
-				if (pagesRaw != null) {
-					// handled after defaults setup below
-				}
-			} catch (final Exception ignore) {}
+		final Config splitLogConfig = splitConfig != null ? splitConfig.configVal("log") : null;
+
+		final Integer splitLogRateCandidate = firstNonNull(
+						optionalInt(splitLogConfig, "rate"),
+						optionalInt(splitLogConfig, "sample"),
+						optionalInt(sharding, "split_log_rate"),
+						optionalInt(sharding, "split_log_sample"));
+		int splitLogRate = splitLogRateCandidate == null ? 1 : Math.max(1, splitLogRateCandidate);
+
+		final Boolean summaryCandidate = firstNonNull(
+						optionalBoolean(sharding, "summary"),
+						optionalBoolean(sharding, "summary_enabled"),
+						optionalBoolean(sharding, "summary-enabled"));
+		final boolean summary = summaryCandidate != null ? summaryCandidate : false;
+
+		final String delimiters = sanitizeDelimiters(optionalString(sharding, "delimiters"));
+
+		final Integer splitPagesCandidate = firstNonNull(
+						optionalInt(splitConfig, "pages"),
+						optionalInt(splitConfig, "split_pages"),
+						optionalInt(sharding, "split_pages"));
+		int splitPages = splitPagesCandidate == null ? 50 : splitPagesCandidate;
+		if (splitPages <= 0) {
+			splitPages = 50;
 		}
-		if (splitLogRate < 1) {
-			try {
-				splitLogRate = sharding.intVal("split_log_rate");
-			} catch (final Exception ignore) {
-				try {
-					splitLogRate = sharding.intVal("split_log_sample");
-				} catch (final Exception ignored) {}
-			}
+
+		final Integer queueMaxCandidate = optionalInt(sharding, "queue_max");
+		int queueMax = queueMaxCandidate == null ? 10_000_000 : queueMaxCandidate;
+		if (queueMax <= 0) {
+			queueMax = 10_000_000;
 		}
-		if (splitLogRate < 1) {
-			splitLogRate = 1;
-		}
-		boolean summary = false;
-		try {
-			summary = sharding.boolVal("summary");
-		} catch (final Exception ignore) {
-			try {
-				summary = sharding.boolVal("summary_enabled");
-			} catch (final Exception ignored) {
-				try {
-					summary = sharding.boolVal("summary-enabled");
-				} catch (final Exception ignoredToo) {}
-			}
-		}
-		// New delimiter-first settings
-		String delimiters = "/-_.";
-		try {
-			final String rawDelims = stringOrNull(sharding, "delimiters");
-			if (rawDelims != null && !rawDelims.isEmpty()) {
-				delimiters = rawDelims;
-			}
-		} catch (final Exception ignore) {}
-		int splitPages = 50;
-		try {
-			final Config split = sharding.configVal("split");
-			if (split != null) {
-				try {
-					splitPages = split.intVal("pages");
-				} catch (final Exception ignore) {
-					try {
-						splitPages = split.intVal("split_pages");
-					} catch (final Exception ignored) {}
-				}
-			}
-			// Fallback: allow flat key at sharding level for CLI convenience
-			if (splitPages == 50) { // unchanged above
-				try {
-					splitPages = sharding.intVal("split_pages");
-				} catch (final Exception ignored) {}
-			}
-		} catch (final Exception ignore) {}
-		int queueMax = 10_000_000;
-		try {
-			queueMax = sharding.intVal("queue_max");
-		} catch (final Exception ignore) {}
 
 		return new ListShardingConfig(
 						mode,
@@ -288,6 +238,105 @@ public final class ListShardingConfig {
 		}
 	}
 
+	private static Integer optionalInt(final Config config, final String key) throws IllegalConfigurationException {
+		if (config == null || key == null) {
+			return null;
+		}
+		final Object raw = readValue(config, key);
+		if (raw == null) {
+			return null;
+		}
+		if (raw instanceof Number number) {
+			return Integer.valueOf(number.intValue());
+		}
+		if (raw instanceof String str) {
+			if (str.isBlank()) {
+				return null;
+			}
+			try {
+				return Integer.parseInt(str.trim());
+			} catch (final NumberFormatException e) {
+				throw new IllegalConfigurationException(
+								"Unable to parse integer value \"" + str + "\" for key \"" + key + "\"", e);
+			}
+		}
+		throw new IllegalConfigurationException(
+						"Unsupported integer value for key \"" + key + "\": " + raw);
+	}
+
+	private static Boolean optionalBoolean(final Config config, final String key)
+					throws IllegalConfigurationException {
+		if (config == null || key == null) {
+			return null;
+		}
+		final Object raw = readValue(config, key);
+		if (raw == null) {
+			return null;
+		}
+		if (raw instanceof Boolean b) {
+			return b;
+		}
+		if (raw instanceof String str) {
+			if (str.isBlank()) {
+				return null;
+			}
+			final String normalized = str.trim();
+			if ("true".equalsIgnoreCase(normalized)) {
+				return Boolean.TRUE;
+			}
+			if ("false".equalsIgnoreCase(normalized)) {
+				return Boolean.FALSE;
+			}
+			throw new IllegalConfigurationException(
+							"Unable to parse boolean value \"" + str + "\" for key \"" + key + "\"");
+		}
+		throw new IllegalConfigurationException(
+						"Unsupported boolean value for key \"" + key + "\": " + raw);
+	}
+
+	private static String optionalString(final Config config, final String key)
+					throws IllegalConfigurationException {
+		if (config == null || key == null) {
+			return null;
+		}
+		final Object raw = readValue(config, key);
+		if (raw == null) {
+			return null;
+		}
+		if (raw instanceof String str) {
+			return str;
+		}
+		throw new IllegalConfigurationException(
+						"Unsupported string value for key \"" + key + "\": " + raw);
+	}
+
+	private static Object readValue(final Config config, final String key) throws IllegalConfigurationException {
+		try {
+			return config.val(key);
+		} catch (final NoSuchElementException e) {
+			return null;
+		} catch (final Exception e) {
+			throw new IllegalConfigurationException("Unable to read value for key \"" + key + "\"", e);
+		}
+	}
+
+	@SafeVarargs
+	private static <T> T firstNonNull(final T... candidates) {
+		for (final T candidate : candidates) {
+			if (candidate != null) {
+				return candidate;
+			}
+		}
+		return null;
+	}
+
+	private static String sanitizeDelimiters(final String raw) {
+		if (raw == null || raw.isBlank()) {
+			return "/-_.";
+		}
+		return raw;
+	}
+
 	public List<ListShard> createStaticShards(final String seedPrefix) {
 		final var normalizedBase = normalizeSeedPrefix(seedPrefix);
 		final var shards = new ArrayList<ListShard>(radix);
@@ -301,7 +350,8 @@ public final class ListShardingConfig {
 
 	private static String dedupe(final String charsetRaw) {
 		final var seen = new LinkedHashMap<Character, Boolean>();
-		for (final char c : charsetRaw.toCharArray()) {
+		for (var idx = 0; idx < charsetRaw.length(); idx++) {
+			final char c = charsetRaw.charAt(idx);
 			seen.putIfAbsent(c, Boolean.TRUE);
 		}
 		final var builder = new StringBuilder(seen.size());
@@ -327,7 +377,7 @@ public final class ListShardingConfig {
 		if (sanitizedBase.isEmpty()) {
 			return suffix;
 		}
-		return sanitizedBase.endsWith("/") ? sanitizedBase + suffix : sanitizedBase + suffix;
+		return sanitizedBase + suffix;
 	}
 
 	private static String trimLeadingSlash(final String value) {

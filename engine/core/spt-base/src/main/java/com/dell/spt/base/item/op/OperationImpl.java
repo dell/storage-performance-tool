@@ -244,6 +244,9 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 
 	@Override
 	public final int hashCode() {
-		return originIndex ^ opType.ordinal() ^ item.hashCode();
+		int result = Integer.hashCode(originIndex);
+		result = 31 * result + (opType != null ? opType.hashCode() : 0);
+		result = 31 * result + (item != null ? item.hashCode() : 0);
+		return result;
 	}
 }

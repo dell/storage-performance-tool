@@ -16,9 +16,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-public final class WeightedLoadStepExtension<T extends WeightedLoadStepLocal, U extends WeightedLoadStepClient>
+public final class WeightedLoadStepExtension<T extends WeightedLoadStepLocal>
 				extends ExtensionBase
-				implements LoadStepFactory<T, U> {
+				implements LoadStepFactory<T, WeightedLoadStepClient> {
 
 	public static final String TYPE = "WeightedLoad";
 
@@ -54,10 +54,9 @@ public final class WeightedLoadStepExtension<T extends WeightedLoadStepLocal, U 
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	public final U createClient(
+	public final WeightedLoadStepClient createClient(
 					final Config baseConfig, final List<Extension> extensions, final MetricsManager metricsManager) {
-		return (U) new WeightedLoadStepClient(baseConfig, extensions, null, metricsManager);
+		return new WeightedLoadStepClient(baseConfig, extensions, null, metricsManager);
 	}
 
 	@Override

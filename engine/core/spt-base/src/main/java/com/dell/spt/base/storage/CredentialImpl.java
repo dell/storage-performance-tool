@@ -6,7 +6,7 @@ public final class CredentialImpl implements Credential {
 	private final String uid;
 	private final String secret;
 
-	protected CredentialImpl(final String uid, final String secret) {
+	CredentialImpl(final String uid, final String secret) {
 		this.uid = uid;
 		this.secret = secret;
 	}

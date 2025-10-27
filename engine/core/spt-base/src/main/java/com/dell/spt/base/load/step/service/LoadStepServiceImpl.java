@@ -44,18 +44,24 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 
 	@Override
 	protected final void doStart() {
-		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, localLoadStep.loadStepId())) {
+		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			localLoadStep.start();
-			Loggers.MSG.info("Step service for \"{}\" is started", localLoadStep.loadStepId());
-		} catch (final RemoteException ignored) {}
+			Loggers.MSG.info("Step service for \"{}\" is started", safeLoadStepId());
+		} catch (final RemoteException e) {
+			Loggers.ERR.warn("Step service start failure for {}", safeLoadStepId(), e);
+			throw new IllegalStateException("Failed to start load step service " + safeLoadStepId(), e);
+		}
 	}
 
 	@Override
 	protected void doStop() {
-		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, localLoadStep.loadStepId())) {
+		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			localLoadStep.stop();
-			Loggers.MSG.info("Step service for \"{}\" is stopped", localLoadStep.loadStepId());
-		} catch (final RemoteException ignored) {}
+			Loggers.MSG.info("Step service for \"{}\" is stopped", safeLoadStepId());
+		} catch (final RemoteException e) {
+			Loggers.ERR.warn("Step service stop failure for {}", safeLoadStepId(), e);
+			throw new IllegalStateException("Failed to stop load step service " + safeLoadStepId(), e);
+		}
 	}
 
 	@Override
@@ -96,9 +102,19 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	@Override
 	public final boolean await(final long timeout, final TimeUnit timeUnit)
 					throws IllegalStateException, InterruptedException {
-		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, localLoadStep.loadStepId())) {
+		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			return localLoadStep.await(timeout, timeUnit);
-		} catch (final RemoteException ignored) {}
-		return false;
+		} catch (final RemoteException e) {
+			Loggers.ERR.warn("Await interrupted by remote failure for {}", safeLoadStepId(), e);
+			return false;
+		}
+	}
+
+	private String safeLoadStepId() {
+		try {
+			return localLoadStep.loadStepId();
+		} catch (final RemoteException e) {
+			return "unknown-step";
+		}
 	}
 }

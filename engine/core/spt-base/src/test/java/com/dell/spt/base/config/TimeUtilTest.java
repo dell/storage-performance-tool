@@ -18,7 +18,6 @@ class TimeUtilTest {
 		 * Parses raw time value into numeric value.
 		 *
 		 * @param raw        raw time value string
-		 * @return          numeric value
 		 */
 		@ParameterizedTest
 		@CsvSource({
@@ -45,8 +44,6 @@ class TimeUtilTest {
 
 		/**
 		 * Verifies that an empty string input returns zero.
-		 *
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@Test
 		void emptyStringReturnsZero() {
@@ -57,7 +54,6 @@ class TimeUtilTest {
 		 * Verifies that invalid time value patterns throw an IllegalArgumentException.
 		 *
 		 * @param raw	a raw time value string
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@ParameterizedTest
 		@ValueSource(strings = {
@@ -73,8 +69,6 @@ class TimeUtilTest {
 
 		/**
 		 * Verifies that a null input throws a NullPointerException.
-		 *
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@Test
 		void nullInputNpe() {
@@ -89,7 +83,6 @@ class TimeUtilTest {
 		 *
 		 * @param raw        the raw time value string
 		 * @param expected    the expected TimeUnit
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@ParameterizedTest
 		@CsvSource({
@@ -117,7 +110,6 @@ class TimeUtilTest {
 		 * Verifies that invalid time value patterns throw an IllegalArgumentException.
 		 *
 		 * @param raw        a raw time value string
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@ParameterizedTest
 		@ValueSource(strings = {
@@ -133,8 +125,6 @@ class TimeUtilTest {
 
 		/**
 		 * Verifies that a null input throws a NullPointerException.
-		 *
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@Test
 		void nullInputNpe() {
@@ -149,7 +139,6 @@ class TimeUtilTest {
 		 * Verifies that a raw time value string can be converted into seconds.
 		 *
 		 * @param raw        a raw time value string
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@ParameterizedTest
 		@CsvSource({
@@ -177,8 +166,6 @@ class TimeUtilTest {
 
 		/**
 		 * Verifies that an empty string input returns zero seconds.
-		 *
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@Test
 		void emptyStringIsZero() {
@@ -189,7 +176,6 @@ class TimeUtilTest {
 		 * Verifies that invalid time value patterns throw an IllegalArgumentException.
 		 *
 		 * @param  raw	a raw time value string
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@ParameterizedTest
 		@ValueSource(strings = {
@@ -205,8 +191,6 @@ class TimeUtilTest {
 
 		/**
 		 * Verifies that a null input throws a NullPointerException.
-		 *
-		 * @return         	a boolean indicating whether the test passed
 		 */
 		@Test
 		void nullInputNpe() {

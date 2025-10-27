@@ -156,17 +156,20 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 		op.startRequest();
 		op.finishRequest();
 		op.startResponse();
-		if (op instanceof DataOperation) {
-			final DataOperation dataOp = (DataOperation) op;
+		if (op instanceof DataOperation<?> dataOperation) {
+			final DataOperation<? extends DataItem> dataOp = dataOperation;
 			final DataItem dataItem = dataOp.item();
 			switch (dataOp.type()) {
 			case CREATE:
 				try {
 					dataOp.countBytesDone(dataItem.size());
-				} catch (final IOException ignored) {}
+				} catch (final IOException e) {
+					Loggers.MSG.debug("DummyStorageDriverMock: failed to count bytes for CREATE", e);
+				}
 				break;
 			case READ:
 				dataOp.startDataResponse();
+				// fall through to UPDATE to reuse range-handling logic
 			case UPDATE:
 				final List<Range> fixedRanges = dataOp.fixedRanges();
 				if (fixedRanges == null || fixedRanges.isEmpty()) {
@@ -175,7 +178,9 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 					} else {
 						try {
 							dataOp.countBytesDone(dataItem.size());
-						} catch (final IOException ignored) {}
+						} catch (final IOException e) {
+							Loggers.MSG.debug("DummyStorageDriverMock: failed to count bytes for {}", dataOp.type(), e);
+						}
 					}
 				} else {
 					dataOp.countBytesDone(dataOp.markedRangesSize());

@@ -57,7 +57,7 @@ public final class ShardedListPathItemInput<I extends PathItem> implements Input
 			return 0;
 		}
 		final long skipped = Math.min(count, shards.size() - emitted);
-		emitted += skipped;
+		emitted = (int) (emitted + skipped);
 		return skipped;
 	}
 

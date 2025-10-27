@@ -20,6 +20,7 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.fiber4j.Fiber;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.util.NoSuchElementException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -40,15 +41,26 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected void doStartWrapped() {
-		stepContexts.forEach(
-						stepCtx -> {
-							try {
-								stepCtx.start();
-							} catch (final RemoteException ignored) {} catch (final IllegalStateException e) {
-								LogUtil.exception(
-												Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
-							}
-						});
+		boolean anyStarted = false;
+		final var iterator = stepContexts.iterator();
+		while (iterator.hasNext()) {
+			final var stepCtx = iterator.next();
+			try {
+				stepCtx.start();
+				anyStarted = true;
+			} catch (final RemoteException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			}
+		}
+		if (!anyStarted) {
+			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
+		}
 	}
 
 	@Override
@@ -74,12 +86,27 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						.build();
 
 		// enrich metadata with limits so /metrics/json can compute completion on workers
+		boolean countLimitConfigured = false;
+		boolean countLimitApplied = false;
 		try {
-			long countLimit = this.config.longVal("load-op-limit-count");
+			final long countLimit = this.config.longVal("load-op-limit-count");
+			countLimitConfigured = true;
 			metricsCtx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, countLimit);
-		} catch (Exception ignore) {}
+			countLimitApplied = true;
+		} catch (final NoSuchElementException ignore) {
+			// count limit not defined is a valid configuration for unbounded steps
+		} catch (final RuntimeException e) {
+			countLimitConfigured = true;
+			Loggers.MSG.warn(
+							"{}: ignoring invalid load-op-limit-count value; treating as unlimited",
+							loadStepId(),
+							e);
+		}
+		boolean timeLimitConfigured = false;
+		boolean timeLimitApplied = false;
 		try {
 			final Object raw = this.config.val("load-step-limit-time");
+			timeLimitConfigured = true;
 			long timeLimitSec = 0L;
 			if (raw instanceof String) {
 				timeLimitSec = com.dell.spt.base.config.TimeUtil.getTimeInSeconds((String) raw);
@@ -87,19 +114,38 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				timeLimitSec = com.github.akurilov.commons.reflection.TypeUtil.typeConvert(raw, long.class);
 			}
 			metricsCtx.metadata().put(MetricsConstants.METADATA_LIMIT_TIME_SEC, timeLimitSec);
-		} catch (Exception ignore) {}
+			timeLimitApplied = true;
+		} catch (final NoSuchElementException ignore) {
+			// time limit not defined is a valid configuration for unbounded steps
+		} catch (final RuntimeException e) {
+			timeLimitConfigured = true;
+			Loggers.MSG.warn(
+							"{}: ignoring invalid load-step-limit-time value; treating as unlimited",
+							loadStepId(),
+							e);
+		}
+		if ((countLimitConfigured || timeLimitConfigured) && !(countLimitApplied || timeLimitApplied)) {
+			Loggers.MSG.warn(
+							"{}: load-step limits configured but none usable; treating as unlimited",
+							loadStepId());
+		}
 		metricsContexts.add(metricsCtx);
 	}
 
 	@Override
 	protected final void doShutdown() {
-		stepContexts.forEach(
-						stepCtx -> {
-							try (final Instance ctx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-								stepCtx.shutdown();
-								Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
-							} catch (final RemoteException ignored) {}
-						});
+		final var iterator = stepContexts.iterator();
+		while (iterator.hasNext()) {
+			final var stepCtx = iterator.next();
+			try (final Instance ctx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				stepCtx.shutdown();
+				Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
+			} catch (final RemoteException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to shutdown the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			}
+		}
 	}
 
 	@Override
@@ -131,7 +177,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						}
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
-					} catch (final RemoteException ignored) {}
+					} catch (final RemoteException e) {
+						LogUtil.exception(
+										Level.WARN, e, "{}: step context \"{}\" became unreachable during await", loadStepId(), stepCtx);
+						stepContextsCopy[i] = null;
+						stepContexts.remove(stepCtx);
+						countDown--;
+						break;
+					}
 				}
 			}
 		}
@@ -145,6 +198,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		super.doStop();
 	}
 
+	@Override
 	protected final void doClose() throws IOException {
 		super.doClose();
 		stepContexts

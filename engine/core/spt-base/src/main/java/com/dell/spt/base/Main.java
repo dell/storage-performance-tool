@@ -42,16 +42,19 @@ import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import com.github.akurilov.confuse.exceptions.InvalidValueTypeException;
 import io.prometheus.client.exporter.MetricsServlet;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.script.ScriptEngine;
 import javax.servlet.MultipartConfigElement;
 import org.apache.commons.lang3.StringUtils;
@@ -282,7 +285,9 @@ public final class Main {
 				// Configure terminal metrics retention to match status linger
 				try {
 					metricsMgr.setTerminalRetentionMillis(fullDefaultConfig.intVal("api-linger-sec") * 1000L);
-				} catch (Exception ignore) {}
+				} catch (final Exception e) {
+					Loggers.MSG.warn("Unable to align terminal metrics retention with api-linger-sec; continuing with default retention", e);
+				}
 				// Register /run before starting the server to avoid a readiness race
 				final var runServletHolder = new ServletHolder(
 								new RunServlet(
@@ -369,15 +374,21 @@ public final class Main {
 		} else {
 			scriptEngine = ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
 			final var strb = new StringBuilder();
-			try {
-				Files.lines(scenarioPath).forEach(line -> strb.append(line).append(System.lineSeparator()));
+			try (BufferedReader reader = Files.newBufferedReader(scenarioPath, StandardCharsets.UTF_8)) {
+				String line;
+				while ((line = reader.readLine()) != null) {
+					strb.append(line).append(System.lineSeparator());
+				}
 			} catch (final IOException e) {
 				LogUtil.exception(Level.FATAL, e, "Failed to read the scenario file \"{}\"", scenarioPath);
-				try {
-					Files.list(scenarioPath.getParent()).forEach(System.out::println);
-				} catch (final IOException ee) {
-					LogUtil.trace(
-									Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");
+				final Path parent = scenarioPath.getParent();
+				if (parent != null) {
+					try (Stream<Path> entries = Files.list(parent)) {
+						entries.forEach(System.out::println);
+					} catch (final IOException ee) {
+						LogUtil.trace(
+										Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");
+					}
 				}
 			}
 			scenarioText = strb.toString();

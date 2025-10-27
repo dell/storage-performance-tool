@@ -35,4 +35,20 @@ class ListShardingDelimiterConfigTest {
 		assertEquals(42, cfg.splitPages());
 		assertEquals(123456, cfg.queueMax());
 	}
+
+	@Test
+	void blankDelimitersFallbackToDefault() throws IllegalConfigurationException {
+		final Map<String, Object> sharding = new HashMap<>();
+		sharding.put("mode", "auto");
+		sharding.put("delimiters", "");
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"delimiters", String.class));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		final ListShardingConfig cfg = ListShardingConfig.parse(list);
+		assertEquals("/-_.", cfg.delimiters());
+	}
 }

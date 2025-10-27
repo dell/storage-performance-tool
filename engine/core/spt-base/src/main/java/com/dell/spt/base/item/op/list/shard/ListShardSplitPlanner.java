@@ -3,7 +3,6 @@ package com.dell.spt.base.item.op.list.shard;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.Snapshot;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -86,7 +85,7 @@ public final class ListShardSplitPlanner {
 
 	private List<ListShard> createChildren(final ListShard parent) {
 		if (branchFactor <= 1) {
-			return Collections.emptyList();
+			return List.of();
 		}
 		final var children = new ArrayList<ListShard>(branchFactor);
 		final String basePrefix = sanitize(parent.prefix());
@@ -105,7 +104,7 @@ public final class ListShardSplitPlanner {
 			final ListShard child = new ListShard(childPrefix, upperBound, null, childStartAfter, null, nextDepth);
 			children.add(child);
 		}
-		return children;
+		return List.copyOf(children);
 	}
 
 	private int determineStartIndex(final ListShard shard, final String basePrefix) {

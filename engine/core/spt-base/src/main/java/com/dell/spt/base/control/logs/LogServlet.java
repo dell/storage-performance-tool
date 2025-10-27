@@ -9,9 +9,11 @@ import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
@@ -260,7 +262,7 @@ public final class LogServlet extends HttpServlet {
 						.configure(Feature.FLUSH_PASSED_TO_STREAM, false)
 						.writerWithDefaultPrettyPrinter()
 						.writeValue(out, Loggers.DESCRIPTIONS_BY_NAME);
-		out.write(System.lineSeparator().getBytes());
+		out.write(System.lineSeparator().getBytes(StandardCharsets.UTF_8));
 		out.flush();
 	}
 
@@ -288,13 +290,17 @@ public final class LogServlet extends HttpServlet {
 				item.put("modified", java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
 								.withZone(java.time.ZoneOffset.UTC)
 								.format(java.time.Instant.ofEpochMilli(mtime)));
-			} catch (final IOException ignore) {}
+			} catch (final IOException ioe) {
+				Loggers.MSG.debug("Unable to read size/mtime for log file {}", p, ioe);
+			}
 			String ctype = null;
 			try {
 				ctype = Files.probeContentType(p);
-			} catch (final IOException ignore) {}
+			} catch (final IOException ioe) {
+				Loggers.MSG.debug("Unable to probe content type for log file {}", p, ioe);
+			}
 			if (ctype == null) {
-				final String name = p.getFileName().toString().toLowerCase();
+				final String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
 				if (name.endsWith(".csv"))
 					ctype = "text/csv";
 				else if (name.endsWith(".log") || name.endsWith(".txt"))

@@ -10,11 +10,25 @@ import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.*;
+import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
+import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import com.github.akurilov.confuse.Config;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentMap;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Verifies that the idle/backlog gate suppresses delimiter split probes when concurrency is at the
@@ -98,7 +112,7 @@ public class LoadStepContextSplitGateTest {
 		// Unused interface methods for this test
 		@Override
 		public Map metadata() {
-			return Map.of();
+			return new java.util.HashMap<>();
 		}
 
 		@Override
@@ -297,6 +311,63 @@ public class LoadStepContextSplitGateTest {
 		m.setAccessible(true);
 		final Object ret = assertDoesNotThrow(() -> m.invoke(ctx, shard, listOp));
 		assertEquals(Boolean.FALSE, ret, "Gate should skip split when concurrency is at limit");
+	}
+
+	@Test
+	public void delimiterSplitLogsRecorderFailuresAndContinues() throws Exception {
+		final var metrics = new FakeMetrics(10, 1); // concCurr < concLimit
+		final StorageDriver<Item, Operation<Item>> driverMock = mock(
+						StorageDriver.class,
+						Mockito.withSettings().extraInterfaces(ListDiscoveryProbe.class));
+		doNothing().when(driverMock).operationResultOutput(any());
+		when(((ListDiscoveryProbe) driverMock)
+						.probeCommonPrefixes(anyString(), anyString(), anyString(), anyInt()))
+						.thenReturn(new ListDiscoveryProbe.DiscoverResult(List.of("p-1", "p-2"), true, false));
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<Item, Operation<Item>> generatorMock = mock(LoadGenerator.class);
+		doNothing().when(generatorMock).recycle(any());
+		when(generatorMock.generatedOpCount()).thenReturn(0L);
+		when(generatorMock.isNothingToRecycle()).thenReturn(false);
+		final var recorder = new ListShardMetricsRecorder() {
+			@Override
+			public void onSplit(
+							final ListShard parent,
+							final com.dell.spt.base.item.op.list.shard.ListShardSplitHeuristics.Decision decision,
+							final java.util.List<ListShard> children) {
+				throw new RuntimeException("boom");
+			}
+		};
+		final LoadStepContextImpl<Item, Operation<Item>> ctx = new LoadStepContextImpl<>(
+						"split-test",
+						generatorMock,
+						driverMock,
+						metrics,
+						minimalLoadConfig(),
+						false,
+						recorder);
+		final Field windowsField = LoadStepContextImpl.class.getDeclaredField("splitWindows");
+		windowsField.setAccessible(true);
+		final ConcurrentMap<String, Object> splitWindows = (ConcurrentMap<String, Object>) windowsField.get(ctx);
+		final Class<?> windowClass = Class.forName(LoadStepContextImpl.class.getName() + "$Window");
+		final var ctor = windowClass.getDeclaredConstructor();
+		ctor.setAccessible(true);
+		final Object window = ctor.newInstance();
+		final Field firstKey = windowClass.getDeclaredField("firstKey");
+		firstKey.setAccessible(true);
+		firstKey.set(window, "prefix/a");
+		final Field lastKey = windowClass.getDeclaredField("lastKey");
+		lastKey.setAccessible(true);
+		lastKey.set(window, "prefix/z");
+		final Field pages = windowClass.getDeclaredField("pages");
+		pages.setAccessible(true);
+		pages.setInt(window, 49); // increment in method will reach threshold 50
+		splitWindows.put("prefix", window);
+		final ListShard shard = new ListShard("prefix", null, null, "prefix/x");
+		final ListOperation<?> listOp = newListOp("/bucket", "prefix/a", "prefix/z", shard);
+		final Method method = LoadStepContextImpl.class.getDeclaredMethod("tryDelimiterSplit", ListShard.class, ListOperation.class);
+		method.setAccessible(true);
+		final Object result = assertDoesNotThrow(() -> method.invoke(ctx, shard, listOp));
+		assertEquals(Boolean.TRUE, result);
 	}
 
 	private static Config minimalLoadConfig() {

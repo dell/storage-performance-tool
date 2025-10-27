@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 import static com.dell.spt.base.metrics.MetricsConstants.METRIC_NAME_TEST_STATE;
 
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
+import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
@@ -48,6 +49,7 @@ class PrometheusMetricsExporterImplTest {
 	void setUp() {
 		MockitoAnnotations.openMocks(this);
 		exporter = new PrometheusMetricsExporterImpl(mockMetricsContext);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of());
 	}
 
 	@Test
@@ -119,12 +121,58 @@ class PrometheusMetricsExporterImplTest {
 		// Verify all expected metrics are collected when snapshot exists
 		setupMockSnapshot(50, 2, 1.5);
 		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of());
 
 		List<MetricFamilySamples> result = exporter.collect();
 
 		// Should have metrics for: success, fails, bytes, duration, latency, concurrency, elapsed time, test state
 		assertTrue(result.size() >= 8, "Should collect all metric types");
 		assertNotNull(findMetricByName(result, METRIC_NAME_TEST_STATE), "Test state metric should be present");
+	}
+
+	@Test
+	void completionUsesOperationLimitWhenProvided() {
+		setupMockSnapshot(40, 10, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_OP_COUNT, 100L));
+
+		List<MetricFamilySamples> result = exporter.collect();
+
+		MetricFamilySamples completionMetric = findMetricByName(result, MetricsConstants.METRIC_NAME_COMPLETION);
+		assertNotNull(completionMetric, "Completion metric should be present");
+		assertEquals(50.0, completionMetric.samples.get(0).value, 0.0001);
+	}
+
+	@Test
+	void completionFallsBackToTimeWhenCountMissing() {
+		setupMockSnapshot(0, 0, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_TIME_SEC, 10L));
+		when(mockSnapshot.elapsedTimeMillis()).thenReturn(5000L);
+
+		List<MetricFamilySamples> result = exporter.collect();
+
+		MetricFamilySamples completionMetric = findMetricByName(result, MetricsConstants.METRIC_NAME_COMPLETION);
+		assertNotNull(completionMetric, "Completion metric should be present");
+		assertEquals(50.0, completionMetric.samples.get(0).value, 0.0001);
+	}
+
+	@Test
+	void completionIgnoresMalformedMetadataValues() {
+		setupMockSnapshot(0, 0, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_OP_COUNT, "not-a-number",
+						MetricsConstants.METADATA_LIMIT_TIME_SEC, "also-bad"));
+
+		List<MetricFamilySamples> result = exporter.collect();
+
+		MetricFamilySamples completionMetric = findMetricByName(result, MetricsConstants.METRIC_NAME_COMPLETION);
+		assertNotNull(completionMetric, "Completion metric should be present");
+		assertEquals(0.0, completionMetric.samples.get(0).value, 0.0001,
+						"Malformed metadata should be ignored and completion should remain at default");
 	}
 
 	private void setupMockSnapshot(long successCount, long failsCount, double concurrency) {

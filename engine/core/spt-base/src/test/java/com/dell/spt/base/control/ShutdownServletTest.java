@@ -1,6 +1,8 @@
 package com.dell.spt.base.control;
 
+import com.dell.spt.base.svc.Service;
 import com.dell.spt.base.svc.ServiceBase;
+import com.dell.spt.base.svc.ServiceUtil;
 import org.junit.jupiter.api.Test;
 
 import javax.servlet.http.HttpServletRequest;
@@ -13,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+import org.mockito.MockedStatic;
 
 class ShutdownServletTest {
 
@@ -34,6 +37,11 @@ class ShutdownServletTest {
 			closed.countDown();
 		}
 
+		@Override
+		public void close() {
+			closed.countDown();
+		}
+
 		boolean awaitClosed(long t, TimeUnit u) throws InterruptedException {
 			return closed.await(t, u);
 		}
@@ -45,17 +53,25 @@ class ShutdownServletTest {
 		LatchingService svc2 = new LatchingService();
 		ShutdownServlet servlet = new ShutdownServlet(List.of(svc1, svc2));
 
-		HttpServletRequest req = mock(HttpServletRequest.class);
-		HttpServletResponse resp = mock(HttpServletResponse.class);
-		StringWriter sw = new StringWriter();
+		httpServletInteractions(servlet, svc1, svc2);
+	}
+
+	private void httpServletInteractions(final ShutdownServlet servlet, final LatchingService svc1, final LatchingService svc2)
+					throws Exception {
+		final HttpServletRequest req = mock(HttpServletRequest.class);
+		final HttpServletResponse resp = mock(HttpServletResponse.class);
+		final StringWriter sw = new StringWriter();
 		when(resp.getWriter()).thenReturn(new PrintWriter(sw));
 
-		servlet.doPost(req, resp);
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("mock://closed");
 
-		verify(resp).setStatus(HttpServletResponse.SC_ACCEPTED);
-		assertTrue(sw.toString().contains("accepted"));
-		// Both services are closed asynchronously
-		assertTrue(svc1.awaitClosed(2, TimeUnit.SECONDS));
-		assertTrue(svc2.awaitClosed(2, TimeUnit.SECONDS));
+			servlet.doPost(req, resp);
+
+			verify(resp).setStatus(HttpServletResponse.SC_ACCEPTED);
+			assertTrue(sw.toString().contains("accepted"));
+			assertTrue(svc1.awaitClosed(2, TimeUnit.SECONDS));
+			assertTrue(svc2.awaitClosed(2, TimeUnit.SECONDS));
+		}
 	}
 }

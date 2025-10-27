@@ -11,6 +11,7 @@ import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 @DisplayName("ItemInputFileSlicer & ItemOutputFileAggregator")
 class ItemFileSlicerAggregatorTest {
@@ -32,7 +34,9 @@ class ItemFileSlicerAggregatorTest {
 		for (Path p : filesToCleanup) {
 			try {
 				Files.deleteIfExists(p);
-			} catch (Exception ignore) {}
+			} catch (final Exception e) {
+				fail("Failed to delete temp file " + p, e);
+			}
 		}
 		filesToCleanup.clear();
 	}
@@ -107,5 +111,38 @@ class ItemFileSlicerAggregatorTest {
 		byte[] collected = Files.readAllBytes(localOutput);
 		assertArrayEquals(payload, collected);
 		assertFalse(Files.exists(Path.of(remoteFile)), "Remote slice should be deleted after collect");
+	}
+
+	@Test
+	@DisplayName("ItemInputFileSlicer logs and skips when stream initialization fails")
+	void itemInputFileSlicerHandlesStreamFactoryFailure() throws Exception {
+		final FileManager mockMgr = mock(FileManager.class);
+		final Path tmp = Files.createTempFile("spt-slicer", ".input");
+		filesToCleanup.add(tmp);
+		when(mockMgr.newTmpFileName()).thenReturn(tmp.toString());
+		doAnswer(invocation -> {
+			Files.deleteIfExists(tmp);
+			return null;
+		}).when(mockMgr).deleteFile(anyString());
+
+		final Config baseCfg = TestConfigBuilder.config();
+		final List<Config> slices = List.of(new BasicConfig(baseCfg));
+
+		final String data = "alpha\n";
+		final CsvItemInput<Item> itemInput = new CsvItemInput<>(
+						new ByteArrayInputStream(data.getBytes(StandardCharsets.UTF_8)), new ItemFactoryImpl<>());
+
+		ItemInputFileSlicer.setObjectOutputStreamFactoryForTesting(out -> {
+			throw new IOException("stream header failure");
+		});
+		try {
+			final ItemInputFileSlicer slicer = new ItemInputFileSlicer(
+							"test-step-stream-failure", List.of(mockMgr), slices, itemInput, 1);
+			assertEquals(tmp.toString(), slices.get(0).stringVal("item-input-file"));
+			verify(mockMgr, never()).writeToFile(anyString(), any(byte[].class));
+			slicer.close();
+		} finally {
+			ItemInputFileSlicer.resetObjectOutputStreamFactoryForTesting();
+		}
 	}
 }

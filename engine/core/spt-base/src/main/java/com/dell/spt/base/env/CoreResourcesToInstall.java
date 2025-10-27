@@ -12,9 +12,11 @@ import com.github.akurilov.confuse.SchemaProvider;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
@@ -47,8 +49,10 @@ public final class CoreResourcesToInstall extends InstallableJarResources {
 	@Override
 	protected final List<String> resourceFilesToInstall() {
 		try (
-						final var in = getClass().getResourceAsStream(RESOURCES_FILE_NAME);
-						final var reader = new BufferedReader(new InputStreamReader(in))) {
+						final var in = Objects.requireNonNull(
+										getClass().getResourceAsStream(RESOURCES_FILE_NAME),
+										"Missing install resources manifest: " + RESOURCES_FILE_NAME);
+						final var reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
 			return reader.lines().collect(Collectors.toList());
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to load the resources list");

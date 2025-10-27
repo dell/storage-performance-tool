@@ -7,15 +7,15 @@ import com.dell.spt.base.item.op.data.DataOperation;
 /** Created by andrey on 24.07.17. */
 public final class OperationTraceRecord<I extends Item, O extends Operation<I>> {
 
-	protected final String storageNode;
-	protected final String itemPath;
-	protected final int opTypeCode;
-	protected final int statusCode;
-	protected final long reqTimeStart;
-	protected final long duration;
-	protected final long respLatency;
-	protected final long dataLatency;
-	protected final long transferSize;
+	private final String storageNode;
+	private final String itemPath;
+	private final String opTypeCode;
+	private final String statusCode;
+	private final long reqTimeStart;
+	private final long duration;
+	private final long respLatency;
+	private final long dataLatency;
+	private final long transferSize;
 
 	public OperationTraceRecord(final O opResult) {
 		storageNode = opResult.nodeAddr();
@@ -30,14 +30,13 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		} else {
 			itemPath = null;
 		}
-		opTypeCode = opResult.type().ordinal();
-		statusCode = opResult.status().ordinal();
+		opTypeCode = opResult.type() != null ? opResult.type().name() : "";
+		statusCode = opResult.status() != null ? opResult.status().name() : "";
 		reqTimeStart = opResult.reqTimeStart();
 		duration = opResult.duration();
 		var t = opResult.latency();
 		respLatency = t <= duration ? t : -1;
-		if (opResult instanceof DataOperation) {
-			final DataOperation dataIoResult = (DataOperation) opResult;
+		if (opResult instanceof DataOperation dataIoResult) {
 			t = dataIoResult.dataLatency();
 			dataLatency = t < duration && t > 0 ? t : -1;
 			transferSize = dataIoResult.countBytesDone();
@@ -56,13 +55,9 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 			strb.append(itemPath);
 		}
 		strb.append(',');
-		if (opTypeCode != -1) {
-			strb.append(opTypeCode);
-		}
+		strb.append(opTypeCode);
 		strb.append(',');
-		if (statusCode != -1) {
-			strb.append(statusCode);
-		}
+		strb.append(statusCode);
 		strb.append(',');
 		if (reqTimeStart > 0) {
 			strb.append(reqTimeStart);

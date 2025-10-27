@@ -19,6 +19,7 @@ import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.rmi.RemoteException;
@@ -63,7 +64,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			Loggers.MSG.info(
 							"{}: scatter the lines from the input text file \"{}\"...", loadStepId, srcFileName);
-			scatterLines(srcFileName, sliceCount, fileMgrs, fileSlices, batchSize);
+			scatterLines(srcFileName, sliceCount, fileMgrs, fileSlices, batchSize, loadStepId);
 			Loggers.MSG.info(
 							"{}: scatter the lines from the input text file \"{}\" finished",
 							loadStepId,
@@ -109,7 +110,8 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 					final int sliceCount,
 					final List<FileManager> fileMgrs,
 					final Map<FileManager, String> fileSlices,
-					final int batchSize)
+					final int batchSize,
+					final String loadStepId)
 					throws IOException {
 
 		final var inputFinishFlag = new AtomicBoolean(false);
@@ -131,26 +133,45 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 											inputFinishFlag, writeFinishCountDown, lineQueue, fileMgr, dstFileName, batchSize));
 		}
 
-		tasks.forEach(
-						task -> {
-							try {
-								task.start();
-							} catch (final RemoteException ignored) {}
-						});
-
 		try {
+			startTasks(loadStepId, tasks, srcFileName);
 			writeFinishCountDown.await();
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
 		} finally {
-			tasks.forEach(
-							task -> {
-								try {
-									task.close();
-								} catch (final IOException ignored) {}
-							});
-			tasks.clear();
+			closeTasks(loadStepId, tasks, srcFileName);
 		}
+	}
+
+	static void startTasks(final String loadStepId, final List<AsyncRunnable> tasks, final String srcFileName)
+					throws IOException {
+		IOException failure = null;
+		for (final AsyncRunnable task : tasks) {
+			try {
+				task.start();
+			} catch (final RemoteException e) {
+				if (failure == null) {
+					failure = new IOException("Failed to start async task for input file " + srcFileName, e);
+				} else {
+					failure.addSuppressed(e);
+				}
+				LogUtil.exception(Level.WARN, e, "{}: failed to start async task", loadStepId);
+			}
+		}
+		if (failure != null) {
+			throw failure;
+		}
+	}
+
+	static void closeTasks(final String loadStepId, final List<AsyncRunnable> tasks, final String srcFileName) {
+		for (final AsyncRunnable task : tasks) {
+			try {
+				task.close();
+			} catch (final IOException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to close async task", loadStepId);
+			}
+		}
+		tasks.clear();
 	}
 
 	private static final class ReadTask extends ExclusiveFiberBase {
@@ -275,7 +296,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 
 			lines = new ArrayList<>(batchSize);
 			linesByteBuff = new ByteArrayOutputStream();
-			linesWriter = new BufferedWriter(new OutputStreamWriter(linesByteBuff));
+			linesWriter = new BufferedWriter(new OutputStreamWriter(linesByteBuff, StandardCharsets.UTF_8));
 		}
 
 		@Override

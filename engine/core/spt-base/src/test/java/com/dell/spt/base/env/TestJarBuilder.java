@@ -3,6 +3,7 @@ package com.dell.spt.base.env;
 import javax.tools.*;
 import java.io.*;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.jar.*;
@@ -27,7 +28,7 @@ class TestJarBuilder {
 	}
 
 	TestJarBuilder addResource(String path, String content) {
-		resources.put(path, content.getBytes());
+		resources.put(path, content.getBytes(StandardCharsets.UTF_8));
 		return this;
 	}
 
@@ -69,7 +70,7 @@ class TestJarBuilder {
 
 	private Map<String, byte[]> compileClasses() throws IOException {
 		if (classes.isEmpty()) {
-			return Collections.emptyMap();
+			return Map.of();
 		}
 
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
@@ -105,14 +106,15 @@ class TestJarBuilder {
 			}
 		}
 
-		return compiledClasses;
+		return Map.copyOf(compiledClasses);
 	}
 
 	private void cleanupTempDir() throws IOException {
-		Files.walk(tempDir)
-						.sorted(Comparator.reverseOrder())
-						.map(Path::toFile)
-						.forEach(File::delete);
+		try (var stream = Files.walk(tempDir)) {
+			stream.sorted(Comparator.reverseOrder())
+							.map(Path::toFile)
+							.forEach(File::delete);
+		}
 	}
 
 	/**

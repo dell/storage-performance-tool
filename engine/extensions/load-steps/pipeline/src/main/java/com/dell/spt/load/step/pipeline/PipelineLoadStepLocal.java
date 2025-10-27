@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -81,7 +82,7 @@ public class PipelineLoadStepLocal
 			}
 			final Config loadConfig = subConfig.configVal("load");
 			final Config opConfig = loadConfig.configVal("op");
-			final OpType opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
+			final OpType opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 			final Config storageConfig = subConfig.configVal("storage");
 			final int concurrencyLimit = storageConfig.intVal("driver-limit-concurrency");
 			final Config outputConfig = subConfig.configVal("output");
@@ -125,7 +126,7 @@ public class PipelineLoadStepLocal
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, dataConfig.boolVal("verify"), batchSize, testStepId);
 
-					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase());
+					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 					final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 					final double rateLimit = opConfig.doubleVal("limit-rate");
 

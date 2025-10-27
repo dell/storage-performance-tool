@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.DisplayName;
@@ -66,6 +67,7 @@ public class NodeJarShutdownE2ETest {
 
 		// Wait readiness up to 30s
 		boolean ready = false;
+		IOException lastConnectFailure = null;
 		for (int i = 0; i < 30; i++) {
 			try {
 				int code = client.send(HttpRequest.newBuilder(URI.create(base + "/metrics")).GET().build(),
@@ -74,10 +76,19 @@ public class NodeJarShutdownE2ETest {
 					ready = true;
 					break;
 				}
-			} catch (IOException ignored) {}
+			} catch (final IOException e) {
+				lastConnectFailure = e;
+			}
 			Thread.sleep(1000);
 		}
-		assertTrue(ready, "Node did not become ready in time; stdout=" + readTail(outFile) + ", stderr=" + readTail(errFile));
+		assertTrue(
+						ready,
+						"Node did not become ready in time; last error="
+										+ (lastConnectFailure == null ? "<none>" : lastConnectFailure)
+										+ "; stdout="
+										+ readTail(outFile)
+										+ ", stderr="
+										+ readTail(errFile));
 
 		// Basic /status should be 200
 		var statusResp = client.send(HttpRequest.newBuilder(URI.create(base + "/status")).GET().build(), HttpResponse.BodyHandlers.ofString());
@@ -90,7 +101,10 @@ public class NodeJarShutdownE2ETest {
 		// During linger, status may still be 200
 		try {
 			Thread.sleep(500);
-		} catch (InterruptedException ignored) {}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			fail("Interrupted while waiting during linger", e);
+		}
 		statusResp = client.send(HttpRequest.newBuilder(URI.create(base + "/status")).GET().build(), HttpResponse.BodyHandlers.ofString());
 		assertEquals(200, statusResp.statusCode());
 
@@ -103,7 +117,7 @@ public class NodeJarShutdownE2ETest {
 	}
 
 	private static String readTail(Path file) {
-		try (BufferedReader br = new BufferedReader(new InputStreamReader(Files.newInputStream(file)))) {
+		try (BufferedReader br = new BufferedReader(new InputStreamReader(Files.newInputStream(file), StandardCharsets.UTF_8))) {
 			StringBuilder sb = new StringBuilder();
 			String line;
 			int count = 0;

@@ -144,7 +144,7 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 		this.dataInputSize = baseDataItem.dataInputSize;
 		this.offset = baseDataItem.offset + internalOffset;
 		this.size = size;
-		this.layerNum = nextLayer ? baseDataItem.layerNum : baseDataItem.layerNum;
+		this.layerNum = baseDataItem.layerNum + (nextLayer ? 1 : 0);
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////

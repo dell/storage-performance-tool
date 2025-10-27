@@ -46,14 +46,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.Level;
 
-public abstract class LoadStepClientBase
+public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				extends LoadStepBase
-				implements LoadStepClient {
+				implements LoadStepClient<T> {
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
 	private final List<FileManager> fileMgrs = new ArrayList<>();
@@ -181,8 +182,8 @@ public abstract class LoadStepClientBase
 		final var itemDataInputLayerCacheSize = itemDataInputLayerConfig.intVal("cache");
 		final var isInHeapMem = itemDataInputLayerConfig.boolVal("heap");
 		final var opConfig = loadConfig.configVal("op");
-		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
-		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase());
+		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
+		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final boolean skipScatter = ItemType.PATH.equals(itemType) && OpType.LIST.equals(opType);
 		if (skipScatter) {
 			Loggers.MSG.info("{}: skipping item input scatter for LIST workload", loadStepId());
@@ -347,7 +348,11 @@ public abstract class LoadStepClientBase
 					final var storageNodeAddrs = storageNetNodeConfig.<String> listVal("addrs");
 					ConfigSliceUtil.sliceStorageNodeAddrs(configSlices, storageNodeAddrs);
 				}
-			} catch (final NoSuchElementException ignore) {} catch (final InvalidValueTypeException e) {
+			} catch (final NoSuchElementException e) {
+				Loggers.MSG.debug(
+								"{}: storage-net-node configuration missing; skipping endpoint slicing",
+								loadStepId());
+			} catch (final InvalidValueTypeException e) {
 				if (null != e.actualType()) {
 					LogUtil.exception(Level.ERROR, e, "Failed to assign the storage endpoints to the nodes");
 				}
@@ -362,6 +367,7 @@ public abstract class LoadStepClientBase
 		return stepSlices.size();
 	}
 
+	@Override
 	protected final void initMetrics(
 					final int originIndex, final OpType opType, final int concurrencyLimit, final Config metricsConfig,
 					final SizeInBytes itemDataSize, final boolean outputColorFlag) {
@@ -377,8 +383,13 @@ public abstract class LoadStepClientBase
 				effectiveConfig = new com.github.akurilov.confuse.impl.BasicConfig(
 								this.config.pathSep(), this.config.schema(), merged);
 			}
-		} catch (final Exception ignore) {
+		} catch (final Exception e) {
 			// Fall back to base config if merging fails for any reason
+			Loggers.MSG.debug(
+							"{}: failed to merge context config for origin index {}; using base config",
+							loadStepId(),
+							originIndex,
+							e);
 			effectiveConfig = this.config;
 		}
 
@@ -387,7 +398,12 @@ public abstract class LoadStepClientBase
 		long timeLimitSec = 0L;
 		try {
 			opCountLimit = effectiveConfig.longVal("load-op-limit-count");
-		} catch (final Exception ignore) {}
+		} catch (final Exception e) {
+			Loggers.MSG.debug(
+							"{}: load-op-limit-count unavailable or invalid; proceeding without override",
+							loadStepId(),
+							e);
+		}
 		try {
 			final Object raw = effectiveConfig.val("load-step-limit-time");
 			if (raw instanceof String) {
@@ -395,7 +411,12 @@ public abstract class LoadStepClientBase
 			} else if (raw != null) {
 				timeLimitSec = com.github.akurilov.commons.reflection.TypeUtil.typeConvert(raw, long.class);
 			}
-		} catch (final Exception ignore) {}
+		} catch (final Exception e) {
+			Loggers.MSG.debug(
+							"{}: load-step-limit-time unavailable or invalid; proceeding without override",
+							loadStepId(),
+							e);
+		}
 		final var concurrencyThreshold = (int) (concurrencyLimit * metricsConfig.doubleVal("threshold"));
 		final var metricsAvgPersistFlag = metricsConfig.boolVal("average-persist");
 		final var metricsSumPersistFlag = metricsConfig.boolVal("summary-persist");
@@ -470,7 +491,7 @@ public abstract class LoadStepClientBase
 			}
 			Loggers.MSG.debug(
 							"{}: await for {} step slices for at most {} {}...", loadStepId(), stepSliceCount,
-							timeout, timeUnit.name().toLowerCase());
+							timeout, timeUnit.name().toLowerCase(Locale.ROOT));
 			return stepSlices.parallelStream().map(stepSlice -> {
 				try {
 					final var invokeTimeMillis = System.currentTimeMillis();
@@ -515,7 +536,14 @@ public abstract class LoadStepClientBase
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();
-			} catch (final RemoteException ignored) {}
+			} catch (final RemoteException e) {
+				LogUtil.trace(
+								Loggers.ERR,
+								Level.DEBUG,
+								e,
+								"{}: metrics aggregator stop failed; continuing shutdown",
+								loadStepId());
+			}
 		}
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
@@ -606,7 +634,7 @@ public abstract class LoadStepClientBase
 	}
 
 	@Override
-	public final <T extends LoadStepClient> T config(final Map<String, Object> configMap) {
+	public final T config(final Map<String, Object> configMap) {
 		if (ctxConfigs != null) {
 			throw new IllegalStateException("config(...) should be invoked before any append(...) call");
 		}
@@ -630,7 +658,7 @@ public abstract class LoadStepClientBase
 	}
 
 	@Override
-	public final <T extends LoadStepClient> T append(final Map<String, Object> context) {
+	public final T append(final Map<String, Object> context) {
 		final List<Config> ctxConfigsCopy;
 		if (ctxConfigs == null) {
 			ctxConfigsCopy = new ArrayList<>(1);
@@ -652,6 +680,5 @@ public abstract class LoadStepClientBase
 		return copyInstance(config, ctxConfigsCopy);
 	}
 
-	protected abstract <T extends LoadStepClient> T copyInstance(
-					final Config config, final List<Config> ctxConfigs);
+	protected abstract T copyInstance(final Config config, final List<Config> ctxConfigs);
 }

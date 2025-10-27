@@ -13,6 +13,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.io.yaml.TypeNames;
 import org.eclipse.jetty.http.HttpHeader;
+import java.util.regex.Pattern;
 import java.io.IOException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -23,6 +24,7 @@ public class ConfigServlet extends HttpServlet {
 
 	private static final String SCHEMA_PATH = "schema";
 	private static final String CONTEXT_SEP = "/";
+	private static final Pattern CONTEXT_SPLITTER = Pattern.compile(Pattern.quote(CONTEXT_SEP));
 
 	private final Config config;
 
@@ -33,7 +35,7 @@ public class ConfigServlet extends HttpServlet {
 	@Override
 	protected final void doGet(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		final var contexts = req.getRequestURI().split(CONTEXT_SEP);
+		final var contexts = CONTEXT_SPLITTER.split(req.getRequestURI(), 0);
 		final var acceptHeader = req.getHeader(HttpHeader.ACCEPT.toString());
 		final ConfigFormat configFormat;
 		if (null == acceptHeader) {

@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Locale;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
@@ -59,7 +60,7 @@ public class LinearLoadStepLocal
 		final Config loadConfig = config.configVal("load");
 		final Config opConfig = loadConfig.configVal("op");
 		final Config stepConfig = loadConfig.configVal("step");
-		final OpType opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
+		final OpType opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final Config storageConfig = config.configVal("storage");
 		final int concurrencyLimit = storageConfig.intVal("driver-limit-concurrency");
 		final Config outputConfig = config.configVal("output");
@@ -103,8 +104,8 @@ public class LinearLoadStepLocal
 				final StorageDriver driver = StorageDriver.instance(
 								extensions, storageConfig, dataInput, dataConfig.boolVal("verify"), batchSize, testStepId);
 
-				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase());
-				final ItemFactory<Item> itemFactory = ItemType.getItemFactory(itemType);
+				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
+				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
 				final double rateLimit = opConfig.doubleVal("limit-rate");
 
 				try {

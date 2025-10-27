@@ -13,6 +13,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import java.lang.reflect.Field;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -24,15 +25,11 @@ class MetricsAsciiTableLogMessageTest {
 		// Make header printing deterministic (header shown when counter % 20 == 0).
 		Field f = MetricsAsciiTableLogMessage.class.getDeclaredField("ROW_OUTPUT_COUNTER");
 		f.setAccessible(true);
-		f.setLong(null, 0L);
+		((AtomicLong) f.get(null)).set(0L);
 	}
 
 	/**
 	 * Verifies that a single row in the table is correctly formatted, including the header, core fields, and memoized values.
-	 *
-	 * @param  ctx  a MetricsContext object
-	 * @param  snap  an AllMetricsSnapshot object
-	 * @return  void
 	 */
 	@Test
 	void verifySingleRowLogMessageFormatting() {
@@ -110,17 +107,16 @@ class MetricsAsciiTableLogMessageTest {
 	}
 
 	/**
-	 * Verifies that a single row in the table is correctly formatted, including the header, core fields, and memoized values.
+	 * Verifies that the header is printed every 20 rows.
 	 *
 	 * @throws Exception if the test fails
-	 * @return void
 	 */
 	@Test
 	void printsHeaderEvery20Rows() throws Exception {
 
 		Field f = MetricsAsciiTableLogMessage.class.getDeclaredField("ROW_OUTPUT_COUNTER");
 		f.setAccessible(true);
-		f.setLong(null, 19L);
+		((AtomicLong) f.get(null)).set(19L);
 
 		MetricsContext ctx1 = mockBasicContext("s1", OpType.NOOP, false);
 		MetricsContext ctx2 = mockBasicContext("s2", OpType.NOOP, false);
@@ -144,10 +140,8 @@ class MetricsAsciiTableLogMessageTest {
 	}
 
 	/**
-	 * Verifies that a single row in the table is correctly formatted, including the header, core fields, and memoized values.
+	 * Verifies that ANSI colors are inserted when stdout color output is enabled.
 	 *
-	 * @throws Exception if the test fails
-	 * @return void
 	 */
 	@Test
 	void shouldInsertOpTypeAndFailureColorsWithStdOutColorsEnabled() {

@@ -1,5 +1,6 @@
 package com.dell.spt.base.logging;
 
+import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
@@ -8,13 +9,12 @@ import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
-import java.util.Date;
 import java.util.Map;
+import java.time.Instant;
 
 import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.M;
 import static com.dell.spt.base.Constants.MIB;
-import static com.dell.spt.base.env.DateUtil.FMT_DATE_ISO8601;
 
 // metricsTotalCsv unlike metricsCsv also output the quantile values for the timing metrics
 // it is only used at the end of each test step and only in DistributedMetricsContext
@@ -70,7 +70,7 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		final TimingMetricSnapshot latencySnapshot = snapshot.latencySnapshot();
 
 		strb.append('"')
-						.append(FMT_DATE_ISO8601.format(new Date()))
+						.append(DateUtil.formatIso8601(Instant.now()))
 						.append('"')
 						.append(',')
 						.append(opType.name())

@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 
 import static com.dell.spt.base.config.el.Language.withLanguage;
@@ -85,9 +86,13 @@ public interface ConfigSliceUtil {
 	}
 
 	static void sliceItemNaming(final List<Config> configSlices) {
+		if (configSlices == null || configSlices.isEmpty()) {
+			Loggers.MSG.debug("Item naming slicing skipped: no config slices provided");
+			return;
+		}
 		try {
 			final var namingConfig = configSlices.get(0).configVal("item-naming");
-			final var namingType = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase());
+			final var namingType = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
 			if (SERIAL.equals(namingType)) {
 				final var sliceCount = configSlices.size();
 				final var srcNamingSeedRaw = namingConfig.val("seed");
@@ -108,16 +113,20 @@ public interface ConfigSliceUtil {
 					}
 				}
 				final var srcNamingStep = namingConfig.intVal("step");
+				final var namingStepPerSlice = Math.toIntExact((long) srcNamingStep * sliceCount);
 				for (var i = 0; i < sliceCount; i++) {
 					final var configSlice = configSlices.get(i);
+					final long namingOffset = (long) i * srcNamingStep;
 					Loggers.MSG.debug(
-									"Item naming slicing: slice #{}, seed: {}, step: {}", i, srcNamingSeed + i * srcNamingStep,
-									srcNamingStep * sliceCount);
-					configSlice.val("item-naming-seed", srcNamingSeed + i * srcNamingStep);
-					configSlice.val("item-naming-step", srcNamingStep * sliceCount);
+									"Item naming slicing: slice #{}, seed: {}, step: {}", i, srcNamingSeed + namingOffset,
+									namingStepPerSlice);
+					configSlice.val("item-naming-seed", srcNamingSeed + namingOffset);
+					configSlice.val("item-naming-step", namingStepPerSlice);
 				}
 			}
-		} catch (final NoSuchElementException ignored) {} catch (final Exception e) {
+		} catch (final NoSuchElementException e) {
+			Loggers.MSG.debug("Item naming slicing skipped: item-naming configuration missing", e);
+		} catch (final Exception e) {
 			LogUtil.exception(Level.ERROR, e, "Item naming slicing failure");
 		}
 	}

@@ -113,14 +113,15 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 	}
 
 	private void collectElapsedTime(
-					final double timeMillis, final List<MetricFamilySamples> mfsList) {
+					final long timeMillis, final List<MetricFamilySamples> mfsList) {
+		final double timeSeconds = (double) timeMillis / Constants.K;
 		mfsList.add(
 						new MetricFamilySamples(
 										String.format(METRIC_FORMAT, METRIC_NAME_TIME + System.currentTimeMillis()),
 										Type.GAUGE,
 										help,
 										Collections.singletonList(
-														newSample(METRIC_NAME_TIME, "value", timeMillis / Constants.K))));
+														newSample(METRIC_NAME_TIME, "value", timeSeconds))));
 	}
 
 	private void collectCompletionPercent(
@@ -129,18 +130,18 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		final var metadata = metricsContext.metadata();
 		long countLimit = 0L;
 		long timeLimitSec = 0L;
-		try {
-			Object v = metadata.get(MetricsConstants.METADATA_LIMIT_OP_COUNT);
-			if (v instanceof Number) {
-				countLimit = ((Number) v).longValue();
+		if (metadata != null) {
+			final Long countLimitCandidate = toLong(metadata.get(MetricsConstants.METADATA_LIMIT_OP_COUNT),
+							MetricsConstants.METADATA_LIMIT_OP_COUNT);
+			final Long timeLimitCandidate = toLong(metadata.get(MetricsConstants.METADATA_LIMIT_TIME_SEC),
+							MetricsConstants.METADATA_LIMIT_TIME_SEC);
+			if (countLimitCandidate != null && countLimitCandidate > 0L) {
+				countLimit = countLimitCandidate;
 			}
-		} catch (Exception ignore) {}
-		try {
-			Object v = metadata.get(MetricsConstants.METADATA_LIMIT_TIME_SEC);
-			if (v instanceof Number) {
-				timeLimitSec = ((Number) v).longValue();
+			if (timeLimitCandidate != null && timeLimitCandidate > 0L) {
+				timeLimitSec = timeLimitCandidate;
 			}
-		} catch (Exception ignore) {}
+		}
 
 		// Compute completion fraction using count if available, otherwise time
 		double completion = 0.0;
@@ -219,7 +220,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 	private List<Sample> collect(final RateMetricSnapshot metric) {
 		final String metricName = metric.name();
 		final List<Sample> samples = new ArrayList<>();
-		samples.add(newSample(metricName, "count", metric.count()));
+		samples.add(newSample(metricName, "count", (double) metric.count()));
 		samples.add(newSample(metricName, "rate_mean", metric.mean()));
 		samples.add(newSample(metricName, "rate_last", metric.last()));
 
@@ -230,7 +231,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		final List<Sample> samples = new ArrayList<>();
 		//final HistogramSnapshot snapshot = metric.histogramSnapshot(); // for quantiles
 		final String metricName = metric.name();
-		samples.add(newSample(metricName, "count", metric.count()));
+		samples.add(newSample(metricName, "count", (double) metric.count()));
 		samples.add(newSample(metricName, "sum", metric.sum() / Constants.M));
 		samples.add(newSample(metricName, "mean", metric.mean() / Constants.M));
 		samples.add(newSample(metricName, "min", metric.min() / Constants.M));
@@ -256,7 +257,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		final String metricName = metric.name();
 		final List<Sample> samples = new ArrayList<>();
 		samples.add(newSample(metricName, "mean", metric.mean()));
-		samples.add(newSample(metricName, "last", metric.last()));
+		samples.add(newSample(metricName, "last", (double) metric.last()));
 		return samples;
 	}
 
@@ -264,5 +265,27 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 					final String metricName, final String aggregationType, final double value) {
 		return new Sample(
 						String.format(METRIC_FORMAT, metricName) + "_" + aggregationType, labelNames, labelValues, value);
+	}
+
+	private static Long toLong(final Object raw, final String key) {
+		if (raw == null) {
+			return null;
+		}
+		if (raw instanceof Number number) {
+			return number.longValue();
+		}
+		if (raw instanceof String str) {
+			if (str.isBlank()) {
+				return null;
+			}
+			try {
+				return Long.parseLong(str.trim());
+			} catch (final NumberFormatException e) {
+				Loggers.ERR.warn("Ignoring non-numeric value \"{}\" for metadata key {}", str, key);
+				return null;
+			}
+		}
+		Loggers.ERR.debug("Ignoring unsupported metadata value type {} for key {}", raw.getClass(), key);
+		return null;
 	}
 }

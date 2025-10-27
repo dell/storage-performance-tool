@@ -7,6 +7,8 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.github.akurilov.commons.system.SizeInBytes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -114,6 +116,78 @@ public class MetricsManagerImplTest {
 		assertTrue(ctx.exitThresholdCalled, "exitThresholdState should be called on unregister when entered");
 	}
 
+	@Test
+	void recordProgressSnapshotStoresMetadataLimits() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-meta");
+		ctx.metadata.put(MetricsConstants.METADATA_LIMIT_OP_COUNT, 250L);
+		ctx.metadata.put(MetricsConstants.METADATA_LIMIT_TIME_SEC, 30L);
+		ctx.snapshot = new CountingSnapshot(
+						10,
+						2,
+						1024,
+						100.0,
+						200.0,
+						new FakeConcurrencySnapshot(4),
+						5000L);
+
+		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+
+		Collection<TerminalStepEntry> entries = lastProgressEntries();
+		assertEquals(1, entries.size(), "Expected single progress entry");
+		TerminalStepEntry entry = entries.iterator().next();
+		assertEquals(250L, entry.countLimit);
+		assertEquals(30L, entry.timeLimitSec);
+		assertEquals(10L, entry.successCount);
+		assertEquals(2L, entry.failedCount);
+		assertEquals(1024L, entry.bytesTotal);
+		assertEquals(100.0, entry.latencyMeanUs);
+		assertEquals(200.0, entry.durationMeanUs);
+		assertEquals(4L, entry.concurrencyLast);
+		assertEquals(5000L, entry.elapsedTimeMillis);
+	}
+
+	@Test
+	void recordProgressSnapshotIgnoresMalformedMetadata() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-meta-bad");
+		ctx.metadata.put(MetricsConstants.METADATA_LIMIT_OP_COUNT, "not-a-number");
+		ctx.metadata.put(MetricsConstants.METADATA_LIMIT_TIME_SEC, new Object());
+		ctx.snapshot = new CountingSnapshot(
+						5,
+						0,
+						512,
+						50.0,
+						75.0,
+						new FakeConcurrencySnapshot(1),
+						2000L);
+
+		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+
+		Collection<TerminalStepEntry> entries = lastProgressEntries();
+		assertEquals(1, entries.size());
+		TerminalStepEntry entry = entries.iterator().next();
+		assertEquals(0L, entry.countLimit);
+		assertEquals(0L, entry.timeLimitSec);
+	}
+
+	@Test
+	void hasProgressHandlesSnapshotExceptions() throws Exception {
+		Method hasProgress = MetricsManagerImpl.class.getDeclaredMethod("hasProgress", AllMetricsSnapshot.class);
+		hasProgress.setAccessible(true);
+		boolean result = (boolean) hasProgress.invoke(null, new ThrowingSnapshot());
+		assertFalse(result, "Snapshot throwing should be treated as no progress");
+	}
+
+	@Test
+	void invokeTimedExclusivelyIgnoresConcurrentModification() throws Exception {
+		ThrowingRefreshMetricsContext ctx = new ThrowingRefreshMetricsContext("step-cme");
+		mgr.register(ctx);
+
+		Method tick = MetricsManagerImpl.class.getDeclaredMethod("invokeTimedExclusively", long.class);
+		tick.setAccessible(true);
+
+		assertDoesNotThrow(() -> tick.invoke(mgr, System.nanoTime()));
+	}
+
 	// --- Test fakes ---
 
 	private static class FakeMetricsContext<S extends AllMetricsSnapshot> implements MetricsContext<S> {
@@ -135,6 +209,7 @@ public class MetricsManagerImplTest {
 		boolean timingPersist = false;
 		S snapshot = null;
 		MetricsContext thresholdDelegate = this;
+		final Map<String, Object> metadata = new HashMap<>();
 
 		FakeMetricsContext(String id) {
 			this.id = id;
@@ -142,7 +217,7 @@ public class MetricsManagerImplTest {
 
 		@Override
 		public Map metadata() {
-			return Collections.emptyMap();
+			return metadata;
 		}
 
 		@Override
@@ -386,19 +461,29 @@ public class MetricsManagerImplTest {
 
 	private static class StubRate implements com.dell.spt.base.metrics.snapshot.RateMetricSnapshot {
 		private final String name;
+		private final long count;
+		private final double mean;
+		private final double last;
 
 		StubRate(String name) {
+			this(name, 0L, 0.0, 0.0);
+		}
+
+		StubRate(String name, long count, double mean, double last) {
 			this.name = name;
+			this.count = count;
+			this.mean = mean;
+			this.last = last;
 		}
 
 		@Override
 		public long count() {
-			return 0L;
+			return count;
 		}
 
 		@Override
 		public double last() {
-			return 0.0;
+			return last;
 		}
 
 		@Override
@@ -408,7 +493,7 @@ public class MetricsManagerImplTest {
 
 		@Override
 		public double mean() {
-			return 0.0;
+			return mean;
 		}
 
 		@Override
@@ -419,14 +504,28 @@ public class MetricsManagerImplTest {
 
 	private static class StubTiming implements com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot {
 		private final String name;
+		private final long count;
+		private final double mean;
+		private final long sum;
+		private final long min;
+		private final long max;
 
 		StubTiming(String name) {
+			this(name, 0L, 0.0, 0L, 0L, 0L);
+		}
+
+		StubTiming(String name, long count, double mean, long sum, long min, long max) {
 			this.name = name;
+			this.count = count;
+			this.mean = mean;
+			this.sum = sum;
+			this.min = min;
+			this.max = max;
 		}
 
 		@Override
 		public long count() {
-			return 0L;
+			return count;
 		}
 
 		@Override
@@ -436,22 +535,22 @@ public class MetricsManagerImplTest {
 
 		@Override
 		public double mean() {
-			return 0.0;
+			return mean;
 		}
 
 		@Override
 		public long sum() {
-			return 0L;
+			return sum;
 		}
 
 		@Override
 		public long min() {
-			return 0L;
+			return min;
 		}
 
 		@Override
 		public long max() {
-			return 0L;
+			return max;
 		}
 	}
 
@@ -476,5 +575,129 @@ public class MetricsManagerImplTest {
 		public String name() {
 			return "concurrency";
 		}
+	}
+
+	private static class CountingSnapshot implements AllMetricsSnapshot {
+		private final RateMetricSnapshot success;
+		private final RateMetricSnapshot fails;
+		private final RateMetricSnapshot bytes;
+		private final TimingMetricSnapshot latency;
+		private final TimingMetricSnapshot duration;
+		private final ConcurrencyMetricSnapshot concurrency;
+		private final long elapsedMillis;
+
+		CountingSnapshot(
+						long successCount,
+						long failCount,
+						long bytesTotal,
+						double latencyMean,
+						double durationMean,
+						ConcurrencyMetricSnapshot concurrency,
+						long elapsedMillis) {
+			this.success = new StubRate("success", successCount, 0.0, 0.0);
+			this.fails = new StubRate("fails", failCount, 0.0, 0.0);
+			this.bytes = new StubRate("byte", bytesTotal, 0.0, 0.0);
+			this.latency = new StubTiming("latency", successCount + failCount, latencyMean, 0L, 0L, 0L);
+			this.duration = new StubTiming("duration", successCount + failCount, durationMean, 0L, 0L, 0L);
+			this.concurrency = concurrency;
+			this.elapsedMillis = elapsedMillis;
+		}
+
+		@Override
+		public ConcurrencyMetricSnapshot concurrencySnapshot() {
+			return concurrency;
+		}
+
+		@Override
+		public long elapsedTimeMillis() {
+			return elapsedMillis;
+		}
+
+		@Override
+		public TimingMetricSnapshot durationSnapshot() {
+			return duration;
+		}
+
+		@Override
+		public TimingMetricSnapshot latencySnapshot() {
+			return latency;
+		}
+
+		@Override
+		public RateMetricSnapshot byteSnapshot() {
+			return bytes;
+		}
+
+		@Override
+		public RateMetricSnapshot successSnapshot() {
+			return success;
+		}
+
+		@Override
+		public RateMetricSnapshot failsSnapshot() {
+			return fails;
+		}
+	}
+
+	private static class ThrowingSnapshot implements AllMetricsSnapshot {
+		@Override
+		public ConcurrencyMetricSnapshot concurrencySnapshot() {
+			throw new UnsupportedOperationException("concurrencySnapshot");
+		}
+
+		@Override
+		public long elapsedTimeMillis() {
+			return 0;
+		}
+
+		@Override
+		public TimingMetricSnapshot durationSnapshot() {
+			throw new UnsupportedOperationException("durationSnapshot");
+		}
+
+		@Override
+		public TimingMetricSnapshot latencySnapshot() {
+			throw new UnsupportedOperationException("latencySnapshot");
+		}
+
+		@Override
+		public RateMetricSnapshot byteSnapshot() {
+			throw new UnsupportedOperationException("byteSnapshot");
+		}
+
+		@Override
+		public RateMetricSnapshot successSnapshot() {
+			throw new RuntimeException("snapshot failure");
+		}
+
+		@Override
+		public RateMetricSnapshot failsSnapshot() {
+			throw new UnsupportedOperationException("failsSnapshot");
+		}
+	}
+
+	private static class ThrowingRefreshMetricsContext extends FakeMetricsContext<AllMetricsSnapshot> {
+		ThrowingRefreshMetricsContext(String id) {
+			super(id);
+		}
+
+		@Override
+		public void refreshLastSnapshot() {
+			throw new ConcurrentModificationException("simulated CME");
+		}
+	}
+
+	private void invokeRecordProgressSnapshot(MetricsContext<?> ctx, AllMetricsSnapshot snapshot) throws Exception {
+		Method record = MetricsManagerImpl.class.getDeclaredMethod("recordProgressSnapshot", MetricsContext.class, AllMetricsSnapshot.class);
+		record.setAccessible(true);
+		record.invoke(mgr, ctx, snapshot);
+	}
+
+	@SuppressWarnings("unchecked")
+	private Collection<TerminalStepEntry> lastProgressEntries() throws Exception {
+		java.lang.reflect.Field lastProgressField = MetricsManagerImpl.class.getDeclaredField("lastProgressByStepId");
+		lastProgressField.setAccessible(true);
+		Map<?, TerminalStepEntry> map = (Map<?, TerminalStepEntry>) lastProgressField.get(mgr);
+		return new ArrayList<>(map.values());
 	}
 }

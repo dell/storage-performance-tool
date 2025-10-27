@@ -1,5 +1,6 @@
 package com.dell.spt.base.control;
 
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -50,34 +51,46 @@ public final class HealthServlet extends HttpServlet {
 
 	private String resolveNodeId() {
 		for (String path : List.of("run-node-id", "output-metrics-node-id", "run-comment")) {
-			try {
-				final String value = config.stringVal(path);
-				if (value != null && !value.isBlank()) {
-					return value;
-				}
-			} catch (Exception ignore) {}
+			final String value = safeStringValue(path);
+			if (value != null && !value.isBlank()) {
+				return value;
+			}
 		}
 		try {
 			final String host = InetAddress.getLocalHost().getHostName();
-			int port = 0;
-			try {
-				port = config.intVal("run-port");
-			} catch (Exception ignore) {}
+			final Integer port = safeIntValue("run-port");
 			return port > 0 ? host + ':' + port : host;
-		} catch (Exception ignore) {
+		} catch (final IOException e) {
+			Loggers.ERR.debug("HealthServlet: unable to resolve host name", e);
 			return "spt-node";
 		}
 	}
 
 	private String resolveClusterId() {
 		for (String path : List.of("run-cluster-id", "run-cluster")) {
-			try {
-				final String value = config.stringVal(path);
-				if (value != null && !value.isBlank()) {
-					return value;
-				}
-			} catch (Exception ignore) {}
+			final String value = safeStringValue(path);
+			if (value != null && !value.isBlank()) {
+				return value;
+			}
 		}
 		return null;
+	}
+
+	private String safeStringValue(final String path) {
+		try {
+			return config.stringVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("HealthServlet: unable to read string config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
+	}
+
+	private Integer safeIntValue(final String path) {
+		try {
+			return config.intVal(path);
+		} catch (final RuntimeException e) {
+			Loggers.MSG.debug("HealthServlet: unable to read int config \"{}\": {}", path, e.getMessage());
+			return null;
+		}
 	}
 }

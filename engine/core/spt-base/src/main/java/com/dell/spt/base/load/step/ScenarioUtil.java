@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineFactory;
@@ -143,27 +144,27 @@ public interface ScenarioUtil {
 
 		for (final OpType opType : OpType.values()) {
 			specificConfig = new BasicConfig(config);
-			final String ioTypeName = opType.name().toLowerCase();
+			final String ioTypeName = opType.name().toLowerCase(Locale.ROOT);
 			specificConfig.val("load-op-type", ioTypeName);
-			final String stepName = ioTypeName.substring(0, 1).toUpperCase() + ioTypeName.substring(1) + "Load";
+			final String stepName = ioTypeName.substring(0, 1).toUpperCase(Locale.ROOT) + ioTypeName.substring(1) + "Load";
 			se.put(stepName, baseLoadStepFactory.createClient(specificConfig, extensions, metricsMgr));
 		}
 
 		specificConfig = new BasicConfig(config);
-		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase());
+		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase(Locale.ROOT));
 		specificConfig.val("item-data-verify", true);
 		se.put(
 						"ReadVerifyLoad", baseLoadStepFactory.createClient(specificConfig, extensions, metricsMgr));
 
 		specificConfig = new BasicConfig(config);
-		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase());
+		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase(Locale.ROOT));
 		specificConfig.val("item-data-ranges-random", 1);
 		se.put(
 						"ReadRandomRangeLoad",
 						baseLoadStepFactory.createClient(specificConfig, extensions, metricsMgr));
 
 		specificConfig = new BasicConfig(config);
-		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase());
+		specificConfig.val("load-op-type", OpType.READ.name().toLowerCase(Locale.ROOT));
 		specificConfig.val("item-data-verify", true);
 		specificConfig.val("item-data-ranges-random", 1);
 		se.put(
@@ -171,7 +172,7 @@ public interface ScenarioUtil {
 						baseLoadStepFactory.createClient(specificConfig, extensions, metricsMgr));
 
 		specificConfig = new BasicConfig(config);
-		specificConfig.val("load-op-type", OpType.UPDATE.name().toLowerCase());
+		specificConfig.val("load-op-type", OpType.UPDATE.name().toLowerCase(Locale.ROOT));
 		specificConfig.val("item-data-ranges-random", 1);
 		se.put(
 						"UpdateRandomRangeLoad",
@@ -196,7 +197,9 @@ public interface ScenarioUtil {
 		final StringBuilder strb = new StringBuilder();
 		try {
 			if (Files.exists(scenarioPath)) {
-				Files.lines(scenarioPath).forEach(line -> strb.append(line).append(System.lineSeparator()));
+				try (final var lines = Files.lines(scenarioPath)) {
+					lines.forEach(line -> strb.append(line).append(System.lineSeparator()));
+				}
 				return strb.toString();
 			}
 		} catch (final IOException ignored) {

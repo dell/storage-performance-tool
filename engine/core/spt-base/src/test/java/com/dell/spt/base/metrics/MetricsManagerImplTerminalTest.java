@@ -89,7 +89,10 @@ class MetricsManagerImplTerminalTest {
 		mgr.setTerminalRetentionMillis(0);
 		try {
 			Thread.sleep(2);
-		} catch (InterruptedException ignore) {}
+		} catch (final InterruptedException ie) {
+			Thread.currentThread().interrupt();
+			fail("Interrupted while waiting for terminal retention eviction", ie);
+		}
 		assertTrue(mgr.getTerminalSteps().isEmpty());
 	}
 

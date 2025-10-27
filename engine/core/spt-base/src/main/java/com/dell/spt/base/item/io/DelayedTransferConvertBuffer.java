@@ -9,8 +9,9 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import java.io.EOFException;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
@@ -21,9 +22,9 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class DelayedTransferConvertBuffer<I extends Item, O extends Operation<I>>
 				implements TransferConvertBuffer<I, O> {
 
-	private final List<O> ioResultsBuff;
+	private final Deque<O> ioResultsBuff;
 	private final int ioResultsBuffLimit;
-	private final List<O> markBuffer;
+	private final Deque<O> markBuffer;
 	private final long delayMicroseconds;
 	private final Lock lock = new ReentrantLock();
 
@@ -32,9 +33,9 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 	private volatile boolean poisonedFlag = false;
 
 	public DelayedTransferConvertBuffer(final int limit, final long delay, final TimeUnit timeUnit) {
-		this.ioResultsBuff = new LinkedList<>();
+		this.ioResultsBuff = new ArrayDeque<>(Math.max(limit, 1));
 		this.ioResultsBuffLimit = limit;
-		this.markBuffer = new LinkedList<>();
+		this.markBuffer = new ArrayDeque<>();
 		this.delayMicroseconds = timeUnit.toMicros(delay);
 	}
 
@@ -59,7 +60,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 				try {
 					ioResultsBuffSize = this.ioResultsBuffSize;
 					if (ioResultsBuffSize < ioResultsBuffLimit) {
-						ioResultsBuff.add(ioResult);
+						ioResultsBuff.addLast(ioResult);
 						this.ioResultsBuffSize = ioResultsBuffSize + 1;
 						return true;
 					}
@@ -98,7 +99,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 								poisonedFlag = true;
 								return to - i - j;
 							}
-							ioResultsBuff.add(ioResult);
+							ioResultsBuff.addLast(ioResult);
 						}
 						i += n;
 						// avoid blocking, there's a chance to exit the outer loop
@@ -144,7 +145,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 
 				O nextIoResult;
 				long nextFinishTime, currTime;
-				final var ioResultsIter = ioResultsBuff.listIterator();
+				final Iterator<O> ioResultsIter = ioResultsBuff.iterator();
 				while (ioResultsIter.hasNext()) {
 					nextIoResult = ioResultsIter.next();
 					final var markLimit = this.markLimit;
@@ -154,7 +155,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 						if (currTime - nextFinishTime > delayMicroseconds) {
 							item = nextIoResult.item();
 							if (markLimit > 0 && markLimit > markBuffer.size()) {
-								markBuffer.add(nextIoResult);
+								markBuffer.addLast(nextIoResult);
 							}
 							ioResultsIter.remove();
 							this.ioResultsBuffSize = ioResultsBuffSize + 1;
@@ -163,7 +164,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 					} else {
 						item = nextIoResult.item();
 						if (markBuffer.size() < markLimit) {
-							markBuffer.add(nextIoResult);
+							markBuffer.addLast(nextIoResult);
 						}
 						ioResultsIter.remove();
 						this.ioResultsBuffSize = ioResultsBuffSize + 1;
@@ -192,7 +193,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 
 				O nextIoResult;
 				long nextFinishTime, currTime;
-				final var ioResultsIter = ioResultsBuff.listIterator();
+				final Iterator<O> ioResultsIter = ioResultsBuff.iterator();
 				final var markLimit = this.markLimit;
 				if (delayMicroseconds > 0) {
 					while (ioResultsIter.hasNext() && n < limit) {
@@ -202,7 +203,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 						if (currTime - nextFinishTime > delayMicroseconds) {
 							buffer.add(nextIoResult.item());
 							if (markLimit > 0 && markLimit > markBuffer.size()) {
-								markBuffer.add(nextIoResult);
+								markBuffer.addLast(nextIoResult);
 							}
 							ioResultsIter.remove();
 							this.ioResultsBuffSize = ioResultsBuffSize + 1;
@@ -214,7 +215,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 						nextIoResult = ioResultsIter.next();
 						buffer.add(nextIoResult.item());
 						if (markLimit > 0 && markLimit > markBuffer.size()) {
-							markBuffer.add(nextIoResult);
+							markBuffer.addLast(nextIoResult);
 						}
 						ioResultsIter.remove();
 						this.ioResultsBuffSize = ioResultsBuffSize + 1;

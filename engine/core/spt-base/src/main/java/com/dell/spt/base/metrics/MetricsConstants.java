@@ -1,6 +1,7 @@
 package com.dell.spt.base.metrics;
 
 import com.dell.spt.base.Constants;
+import java.util.List;
 
 public interface MetricsConstants {
 
@@ -28,15 +29,19 @@ public interface MetricsConstants {
 	String METADATA_LIMIT_TIME_SEC = "load_step_limit_time_sec"; // long, seconds; 0 or missing means unlimited
 	String METADATA_LIST_SHARD_METRICS = "list_shard_metrics";
 	//
-	String[] METRIC_LABELS = {
-			METADATA_STEP_ID,
-			METADATA_OP_TYPE,
-			METADATA_LIMIT_CONC,
-			METADATA_ITEM_DATA_SIZE,
-			METADATA_START_TIME,
-			METADATA_NODE_LIST,
-			METADATA_COMMENT,
-			METADATA_RUN_ID
-	};
+	List<String> METRIC_LABELS = List.of(
+					METADATA_STEP_ID,
+					METADATA_OP_TYPE,
+					METADATA_LIMIT_CONC,
+					METADATA_ITEM_DATA_SIZE,
+					METADATA_START_TIME,
+					METADATA_NODE_LIST,
+					METADATA_COMMENT,
+					METADATA_RUN_ID);
+
+	static String[] metricLabelsArray() {
+		return METRIC_LABELS.toArray(new String[0]);
+	}
+
 	String METRIC_FORMAT = Constants.APP_NAME + "_%s"; // appName_metricName<_aggregationType>
 }

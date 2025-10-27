@@ -18,11 +18,15 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
@@ -69,7 +73,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 						2, new LogContextThreadFactory("collectOpTraceLogFileWorker", true));
 		final CountDownLatch finishLatch = new CountDownLatch(1);
 
-		executor.submit(
+		final Future<?> transferTask = executor.submit(
 						() -> {
 							try {
 								opTraceLogFileSlices
@@ -99,7 +103,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 								finishLatch.countDown();
 							}
 						});
-		executor.scheduleAtFixedRate(
+		final ScheduledFuture<?> progressTask = executor.scheduleAtFixedRate(
 						() -> Loggers.MSG.info(
 										"\"{}\": transferred {} I/O trace data...",
 										loadStepId,
@@ -110,9 +114,14 @@ public class OpTraceLogFileAggregator implements Closeable {
 
 		try {
 			finishLatch.await();
+			transferTask.get();
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+		} catch (final ExecutionException e) {
+			final var cause = e.getCause() != null ? e.getCause() : e;
+			LogUtil.exception(Level.ERROR, cause, "{}: failed during operation trace aggregation", loadStepId);
 		} finally {
+			progressTask.cancel(true);
 			executor.shutdownNow();
 			Loggers.MSG.info(
 							"\"{}\": transferred {} of the operation traces data",
@@ -130,11 +139,17 @@ public class OpTraceLogFileAggregator implements Closeable {
 			byte[] data;
 			while (true) {
 				data = fileMgr.readFromFile(remoteIoTraceLogFileName, transferredByteCount);
-				Loggers.OP_TRACES.info(new String(data));
+				Loggers.OP_TRACES.info(new String(data, StandardCharsets.UTF_8));
 				transferredByteCount += data.length;
 				byteCounter.add(data.length);
 			}
-		} catch (final EOFException ok) {} catch (final RemoteException e) {
+		} catch (final EOFException eof) {
+			Loggers.MSG.debug(
+							"Reached end of remote operation trace file '{}' @ '{}' after {}",
+							remoteIoTraceLogFileName,
+							fileMgr,
+							SizeInBytes.formatFixedSize(transferredByteCount));
+		} catch (final RemoteException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to read the data from the remote file");
 		} catch (final IOException e) {
 			LogUtil.exception(Level.ERROR, e, "Unexpected I/O exception");

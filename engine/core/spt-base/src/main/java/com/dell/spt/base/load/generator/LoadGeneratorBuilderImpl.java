@@ -58,6 +58,7 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.Locale;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -66,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
@@ -133,7 +135,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		if (!(itemInput instanceof TransferConvertBuffer)) {
 			sizeEstimate = estimateTransferSize(
 							null,
-							OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase()),
+							OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase(Locale.ROOT)),
 							(Input<DataItem>) itemInput);
 		}
 		return this;
@@ -157,6 +159,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		return this;
 	}
 
+	@Override
 	@SuppressWarnings("unchecked")
 	public T build() throws IllegalConfigurationException {
 		// prepare
@@ -206,7 +209,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			opsBuilder = (OperationsBuilder<I, O>) new TokenOperationsBuilderImpl(originIndex);
 		}
 		// determine the operations type
-		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase());
+		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		opsBuilder.opType(opType);
 		ListShardingConfig shardingConfig = null;
 		if (opType == OpType.LIST && opsBuilder instanceof PathOperationsBuilderImpl) {
@@ -362,7 +365,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				} finally {
 					try {
 						itemInput.close();
-					} catch (final Exception ignored) {}
+					} catch (final Exception e) {
+						Loggers.MSG.warn("Failed to close itemInput after loading concat source items; continuing with cleanup", e);
+					}
 				}
 				// shoot the foot
 				if (srcItemsCount == 0) {
@@ -526,15 +531,14 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			} else {
 				throw e;
 			}
-		} finally {
-			try {
-				itemInput.reset();
-			} catch (final Exception e) {
-				if (e instanceof IOException) {
-					LogUtil.exception(Level.WARN, e, "Failed reset the items input");
-				} else {
-					throw e;
-				}
+		}
+		try {
+			itemInput.reset();
+		} catch (final Exception e) {
+			if (e instanceof IOException) {
+				LogUtil.exception(Level.WARN, e, "Failed to reset the items input");
+			} else {
+				throwUnchecked(e);
 			}
 		}
 		var sumSize = 0L;
@@ -554,7 +558,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 					}
 				}
 			} catch (final IOException e) {
-				throw new AssertionError(e);
+				throwUnchecked(e);
 			}
 			itemSize = minSize == maxSize ? sumSize / n : (minSize + maxSize) / 2;
 		}
@@ -624,7 +628,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var prefix = namingConfig.stringVal("prefix");
 		final var radix = namingConfig.intVal("radix");
 		final var step = namingConfig.intVal("step");
-		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase());
+		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final var itemNameInput = ItemNameInput.Builder.newInstance()
 						.length(length)
 						.seed(seed)
@@ -677,7 +681,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 						2, new LogContextThreadFactory("loadSrcItemsWorker", true));
 		final var finishLatch = new CountDownLatch(1);
 		try {
-			executor.submit(
+			executor.execute(
 							() -> {
 								var n = 0;
 								int m;
@@ -698,18 +702,19 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 									} else if (e instanceof IOException) {
 										LogUtil.exception(Level.WARN, e, "Loaded {} items, I/O failure occurred", n);
 									} else {
-										throw e;
+										throwUnchecked(e);
 									}
 								} finally {
 									finishLatch.countDown();
 								}
 							});
-			executor.scheduleAtFixedRate(
+			final ScheduledFuture<?> logTask = executor.scheduleAtFixedRate(
 							() -> Loggers.MSG.info("Loaded {} items from the input...", loadedCount.sum()),
 							0,
 							10,
 							TimeUnit.SECONDS);
 			finishLatch.await();
+			logTask.cancel(true);
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
 		} finally {

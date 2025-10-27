@@ -29,7 +29,7 @@ class MetricsContextImplTest {
 	@BeforeEach
 	void setUp() {
 		concGauge = new AtomicInteger(0);
-		ctx = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		ctx = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -86,8 +86,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that the last snapshot is created and refreshed after starting the context.
-	 *
-	 * @return  void
 	 */
 	@Test
 	void lastSnapshotCreatedAndRefreshes() {
@@ -105,8 +103,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that markSucc and markPartSucc calls do not throw exceptions and supports array overloads.
-	 *
-	 * @return void
 	 */
 	@Test
 	void markSuccAndFailCallsDoNotThrowAndSupportArrayOverloads() {
@@ -136,8 +132,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that timing metrics are ignored when latency is invalid or not less than duration.
-	 *
-	 * @return void
 	 */
 	@Test
 	void timingsAreIgnoredWhenLatencyInvalidOrNotLessThanDuration() {
@@ -156,8 +150,6 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that a nested context is created when entering a threshold state with expected metadata.
-	 *
-	 * @return void
 	 */
 	@Test
 	void thresholdStateCreatesNestedContextWithExpectedMetadata() {
@@ -192,12 +184,10 @@ class MetricsContextImplTest {
 
 	/**
 	 * Verifies that equals and toString methods behave as documented.
-	 *
-	 * @return void
 	 */
 	@Test
 	void equalsAndtoStringBehaveAsExpected() {
-		MetricsContext<AllMetricsSnapshotImpl> a = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> a = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -210,7 +200,7 @@ class MetricsContextImplTest {
 						.actualConcurrencyGauge(concGauge::get)
 						.build();
 
-		MetricsContext<AllMetricsSnapshotImpl> b = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> b = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.CREATE)
@@ -239,12 +229,10 @@ class MetricsContextImplTest {
 	/**
 	 * Verifies that the builder allows zero or negative threshold values but
 	 * normalizes them to max int in child contexts.
-	 *
-	 * @return void
 	 */
 	@Test
 	void builderAllowsZeroOrNegativeThresholdButBaseNormalizesToMaxIntInChild() {
-		MetricsContext<AllMetricsSnapshotImpl> zeroThresholdCtx = MetricsContextImpl.<AllMetricsSnapshotImpl> builder()
+		MetricsContext<AllMetricsSnapshotImpl> zeroThresholdCtx = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.runId(RUN_ID)
 						.opType(OpType.READ)
@@ -264,6 +252,9 @@ class MetricsContextImplTest {
 	private static void sleepQuiet(long millis) {
 		try {
 			Thread.sleep(millis);
-		} catch (InterruptedException ignored) {}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			fail("Sleep interrupted in test helper", e);
+		}
 	}
 }

@@ -2,7 +2,6 @@ package com.dell.spt.load.step.pipeline;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.step.client.LoadStepClient;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -16,6 +15,7 @@ import org.apache.logging.log4j.Level;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
@@ -23,7 +23,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
 
 public class PipelineLoadStepClient
-				extends LoadStepClientBase {
+				extends LoadStepClientBase<PipelineLoadStepClient> {
 
 	public PipelineLoadStepClient(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
@@ -32,9 +32,8 @@ public class PipelineLoadStepClient
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	protected <T extends LoadStepClient> T copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return (T) new PipelineLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+	protected PipelineLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
+		return new PipelineLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
 	@Override
@@ -56,7 +55,7 @@ public class PipelineLoadStepClient
 				LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
 				throwUnchecked(e);
 			}
-			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase());
+			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase(Locale.ROOT));
 			final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
 			final Config outputConfig = subConfig.configVal("output");
 			final Config metricsConfig = outputConfig.configVal("metrics");

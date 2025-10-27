@@ -171,4 +171,113 @@ class ListShardingConfigTest {
 		final var parsed = ListShardingConfig.parse(listConfig);
 		assertEquals(7, parsed.splitLogRate());
 	}
+
+	@Test
+	void splitPagesFallsBackToTopLevelKey() throws Exception {
+		final Map<String, Object> sharding = new java.util.HashMap<>();
+		sharding.put("mode", "auto");
+		sharding.put("split_pages", 99);
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"split_pages", Integer.class));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		final ListShardingConfig cfg = ListShardingConfig.parse(list);
+		assertEquals(99, cfg.splitPages());
+	}
+
+	@Test
+	void splitPagesZeroDefaultsToBaseline() throws Exception {
+		final Map<String, Object> sharding = new java.util.HashMap<>();
+		sharding.put("mode", "auto");
+		sharding.put("split", Map.of("pages", 0));
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"split", Map.of("pages", Integer.class)));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		final ListShardingConfig cfg = ListShardingConfig.parse(list);
+		assertEquals(50, cfg.splitPages());
+	}
+
+	@Test
+	void summaryEnabledSupportsAllSynonyms() throws Exception {
+		final Map<String, Object> baseSchema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"summary", Boolean.class,
+										"summary_enabled", Boolean.class,
+										"summary-enabled", Boolean.class));
+
+		final Map<String, Object> summaryOnly = new java.util.HashMap<>();
+		summaryOnly.put("mode", "auto");
+		summaryOnly.put("summary", true);
+		final ListShardingConfig summaryCfg = ListShardingConfig.parse(new BasicConfig("/", baseSchema, Map.of("sharding", summaryOnly)));
+		assertTrue(summaryCfg.summaryEnabled());
+
+		final Map<String, Object> underscore = new java.util.HashMap<>();
+		underscore.put("mode", "auto");
+		underscore.put("summary_enabled", true);
+		final ListShardingConfig underscoreCfg = ListShardingConfig.parse(new BasicConfig("/", baseSchema, Map.of("sharding", underscore)));
+		assertTrue(underscoreCfg.summaryEnabled());
+
+		final Map<String, Object> hyphen = new java.util.HashMap<>();
+		hyphen.put("mode", "auto");
+		hyphen.put("summary-enabled", true);
+		final ListShardingConfig hyphenCfg = ListShardingConfig.parse(new BasicConfig("/", baseSchema, Map.of("sharding", hyphen)));
+		assertTrue(hyphenCfg.summaryEnabled());
+
+		final Map<String, Object> absent = new java.util.HashMap<>();
+		absent.put("mode", "auto");
+		final ListShardingConfig absentCfg = ListShardingConfig.parse(new BasicConfig("/", baseSchema, Map.of("sharding", absent)));
+		assertFalse(absentCfg.summaryEnabled());
+	}
+
+	@Test
+	void queueMaxDefaultsWhenMissing() throws Exception {
+		final Map<String, Object> sharding = new java.util.HashMap<>();
+		sharding.put("mode", "auto");
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of("mode", String.class));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		final ListShardingConfig cfg = ListShardingConfig.parse(list);
+		assertEquals(10_000_000, cfg.queueMax());
+	}
+
+	@Test
+	void splitPagesMalformedShouldFail() {
+		final Map<String, Object> sharding = new java.util.HashMap<>();
+		sharding.put("mode", "auto");
+		sharding.put("split", Map.of("pages", "not-a-number"));
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"split", Map.of("pages", String.class)));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		assertThrows(IllegalConfigurationException.class, () -> ListShardingConfig.parse(list));
+	}
+
+	@Test
+	void queueMaxMalformedShouldFail() {
+		final Map<String, Object> sharding = new java.util.HashMap<>();
+		sharding.put("mode", "auto");
+		sharding.put("queue_max", "NaN");
+		final Map<String, Object> schema = Map.of(
+						"sharding",
+						Map.of(
+										"mode", String.class,
+										"queue_max", String.class));
+		final Config list = new BasicConfig("/", schema, Map.of("sharding", sharding));
+
+		assertThrows(IllegalConfigurationException.class, () -> ListShardingConfig.parse(list));
+	}
 }

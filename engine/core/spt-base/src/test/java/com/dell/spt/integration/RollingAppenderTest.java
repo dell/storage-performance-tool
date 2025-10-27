@@ -10,8 +10,6 @@ import org.junit.jupiter.api.Test;
 
 public class RollingAppenderTest {
 
-	private static final int LIMIT = 5;
-	private static String fileName = "/tmp/log4jFileTest.txt";
 	//	public static Logger logger = Logger.getLogger(RollingAppenderTest.class);
 	//	public static Appender appender;
 

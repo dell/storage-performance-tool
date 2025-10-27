@@ -65,6 +65,10 @@ class MainTest {
 		if (msgConfig != null) {
 			msgConfig.setLevel(level);
 		}
+		final org.apache.logging.log4j.core.Logger msgLogger = ctx.getLogger(Loggers.MSG.getName());
+		if (msgLogger != null) {
+			msgLogger.setLevel(level);
+		}
 		ctx.updateLoggers();
 	}
 

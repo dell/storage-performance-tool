@@ -8,6 +8,8 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.svc.Service;
+import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import java.rmi.RemoteException;
 import java.util.Collections;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
 /**
  * Tests for {@link LoadStepServiceImpl} focusing on delegation behavior and await handling.
@@ -60,30 +63,35 @@ public class LoadStepServiceImplTest {
 		when(local.metricsSnapshots()).thenReturn((List) Collections.emptyList());
 		when(local.await(eq(1L), eq(TimeUnit.SECONDS))).thenReturn(true);
 
-		final LoadStepServiceImpl svc = newServiceWith(local);
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.create(any(Service.class), anyInt())).thenReturn("rmi://localhost/test");
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
 
-		// name(): prefix + hashCode
-		assertTrue(
-						svc.name().startsWith(LoadStepService.SVC_NAME_PREFIX),
-						"Service name should start with prefix");
-		assertEquals(
-						LoadStepService.SVC_NAME_PREFIX + svc.hashCode(),
-						svc.name(),
-						"Service name should be prefix + hashCode");
+			final LoadStepServiceImpl svc = newServiceWith(local);
 
-		// Delegated calls
-		assertEquals("svc-test-1", svc.loadStepId());
-		assertEquals(42L, svc.runId());
-		assertEquals("local", svc.getTypeName());
-		assertNotNull(svc.metricsSnapshots());
-		assertTrue(svc.await(1, TimeUnit.SECONDS));
+			// name(): prefix + hashCode
+			assertTrue(
+							svc.name().startsWith(LoadStepService.SVC_NAME_PREFIX),
+							"Service name should start with prefix");
+			assertEquals(
+							LoadStepService.SVC_NAME_PREFIX + svc.hashCode(),
+							svc.name(),
+							"Service name should be prefix + hashCode");
 
-		// Verify delegation occurred
-		verify(local, atLeastOnce()).loadStepId();
-		verify(local).runId();
-		verify(local).getTypeName();
-		verify(local).metricsSnapshots();
-		verify(local).await(1L, TimeUnit.SECONDS);
+			// Delegated calls
+			assertEquals("svc-test-1", svc.loadStepId());
+			assertEquals(42L, svc.runId());
+			assertEquals("local", svc.getTypeName());
+			assertNotNull(svc.metricsSnapshots());
+			assertTrue(svc.await(1, TimeUnit.SECONDS));
+
+			// Verify delegation occurred
+			verify(local, atLeastOnce()).loadStepId();
+			verify(local).runId();
+			verify(local).getTypeName();
+			verify(local).metricsSnapshots();
+			verify(local).await(1L, TimeUnit.SECONDS);
+		}
 	}
 
 	@Test
@@ -93,11 +101,50 @@ public class LoadStepServiceImplTest {
 		when(local.loadStepId()).thenReturn("svc-test-2");
 		when(local.await(anyLong(), any())).thenThrow(new RemoteException("boom"));
 
-		final LoadStepServiceImpl svc = newServiceWith(local);
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.create(any(Service.class), anyInt())).thenReturn("rmi://localhost/test");
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
 
-		// Should swallow RemoteException and return false
-		assertFalse(svc.await(5, TimeUnit.MILLISECONDS));
+			final LoadStepServiceImpl svc = newServiceWith(local);
 
-		verify(local).await(5L, TimeUnit.MILLISECONDS);
+			// Should swallow RemoteException and return false
+			assertFalse(svc.await(5, TimeUnit.MILLISECONDS));
+
+			verify(local).await(5L, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	@Test
+	@DisplayName("doStart propagates RemoteException from local load step")
+	void testDoStartPropagatesRemoteException() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-test-3");
+		when(local.start()).thenThrow(new RemoteException("boom"));
+
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.create(any(Service.class), anyInt())).thenReturn("rmi://localhost/test");
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
+
+			final LoadStepServiceImpl svc = newServiceWith(local);
+			assertThrows(IllegalStateException.class, svc::doStart);
+		}
+	}
+
+	@Test
+	@DisplayName("doStop propagates RemoteException from local load step")
+	void testDoStopPropagatesRemoteException() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-test-4");
+		doThrow(new RemoteException("stop"))
+						.when(local)
+						.stop();
+
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.create(any(Service.class), anyInt())).thenReturn("rmi://localhost/test");
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
+
+			final LoadStepServiceImpl svc = newServiceWith(local);
+			assertThrows(IllegalStateException.class, svc::doStop);
+		}
 	}
 }

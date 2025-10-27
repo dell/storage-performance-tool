@@ -51,6 +51,7 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -157,7 +158,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				transportKey = Transport.NIO;
 			}
 		} else {
-			transportKey = Transport.valueOf(transportConfig.toUpperCase());
+			transportKey = Transport.valueOf(transportConfig.toUpperCase(Locale.ROOT));
 		}
 		Loggers.MSG.info("{}: netty transport: {}", toString(), transportKey);
 

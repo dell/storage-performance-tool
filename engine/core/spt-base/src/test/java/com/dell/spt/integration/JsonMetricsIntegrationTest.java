@@ -33,14 +33,19 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Locale;
+import java.net.InetSocketAddress;
+import java.io.OutputStream;
+import com.sun.net.httpserver.HttpServer;
 
 /**
  * Integration test comparing JSON vs Prometheus output to ensure consistency.
@@ -51,7 +56,6 @@ public class JsonMetricsIntegrationTest {
 
 	private static final int METRICS_PORT = 2112;
 	private static final int JSON_PORT = 2113;
-	private static final String PROMETHEUS_URL = "http://localhost:" + METRICS_PORT + "/metrics";
 	private static final String NODE_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
 	private static final String FLEET_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
 	private static final String CLUSTER_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
@@ -60,7 +64,11 @@ public class JsonMetricsIntegrationTest {
 	private static final int RUN_ID = 12345;
 	private static final OpType OP_TYPE = OpType.CREATE;
 	private static final List<String> NODE_LIST = Arrays.asList("127.0.0.1:1099");
-	private static final IntSupplier NODE_COUNT_SUPPLIER = () -> 1;
+
+	private static int nodeCount() {
+		return 1;
+	}
+
 	private static final int CONCURRENCY_LIMIT = 10;
 	private static final SizeInBytes ITEM_DATA_SIZE = ItemSize.SMALL.getValue();
 
@@ -123,7 +131,7 @@ public class JsonMetricsIntegrationTest {
 		distributedMetricsContext = DistributedMetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
 						.nodeAddrs(NODE_LIST)
-						.nodeCountSupplier(NODE_COUNT_SUPPLIER)
+						.nodeCountSupplier(JsonMetricsIntegrationTest::nodeCount)
 						.concurrencyLimit(CONCURRENCY_LIMIT)
 						.concurrencyThreshold(0)
 						.itemDataSize(ITEM_DATA_SIZE)
@@ -258,18 +266,7 @@ public class JsonMetricsIntegrationTest {
 
 	@Test
 	public void testNodeEndpointIdleSampleWhenOnlyDistributedContextsPresent() throws Exception {
-		URL url = new URL(NODE_JSON_URL);
-		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-		connection.setRequestMethod("GET");
-		StringBuilder response = new StringBuilder();
-		try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
-			String line;
-			while ((line = reader.readLine()) != null) {
-				response.append(line).append("\n");
-			}
-		}
-		connection.disconnect();
-		JsonNode arr = objectMapper.readTree(response.toString());
+		JsonNode arr = objectMapper.readTree(fetchFromUrl(NODE_JSON_URL));
 		assertEquals(1, arr.size(), "/metrics/json should emit a single idle sample when no local contexts are active");
 		JsonNode obj = arr.get(0);
 		assertEquals(2, obj.get("metrics_schema").asInt());
@@ -333,6 +330,46 @@ public class JsonMetricsIntegrationTest {
 		connection.disconnect();
 	}
 
+	@Test
+	public void fetchFromUrlReadsUtf8AsExpected() throws Exception {
+		HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/ascii", exchange -> {
+			byte[] body = "plain-ascii".getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+			exchange.sendResponseHeaders(200, body.length);
+			try (OutputStream os = exchange.getResponseBody()) {
+				os.write(body);
+			}
+		});
+		server.start();
+		try {
+			String response = fetchFromUrl("http://127.0.0.1:" + server.getAddress().getPort() + "/ascii");
+			assertEquals("plain-ascii\n", response);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	public void fetchFromUrlHonorsUtf16Charset() throws Exception {
+		HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/latin", exchange -> {
+			byte[] body = "føø".getBytes(StandardCharsets.UTF_16LE);
+			exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-16LE");
+			exchange.sendResponseHeaders(200, body.length);
+			try (OutputStream os = exchange.getResponseBody()) {
+				os.write(body);
+			}
+		});
+		server.start();
+		try {
+			String response = fetchFromUrl("http://127.0.0.1:" + server.getAddress().getPort() + "/latin");
+			assertEquals("føø\n", response);
+		} finally {
+			server.stop(0);
+		}
+	}
+
 	/**
 	 * Generate test metrics data by simulating operations
 	 */
@@ -356,26 +393,6 @@ public class JsonMetricsIntegrationTest {
 	}
 
 	/**
-	 * Fetch Prometheus metrics via HTTP
-	 */
-	private String fetchPrometheusMetrics() throws Exception {
-		URL url = new URL(PROMETHEUS_URL);
-		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-		connection.setRequestMethod("GET");
-
-		StringBuilder response = new StringBuilder();
-		try (BufferedReader reader = new BufferedReader(
-						new InputStreamReader(connection.getInputStream()))) {
-			String line;
-			while ((line = reader.readLine()) != null) {
-				response.append(line).append("\n");
-			}
-		}
-		connection.disconnect();
-		return response.toString();
-	}
-
-	/**
 	 * Fetch JSON metrics via HTTP
 	 */
 	private String fetchJsonMetrics() throws Exception {
@@ -387,7 +404,8 @@ public class JsonMetricsIntegrationTest {
 		final HttpURLConnection connection = (HttpURLConnection) url.openConnection();
 		connection.setRequestMethod("GET");
 		final StringBuilder response = new StringBuilder();
-		try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+		try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(),
+						resolveCharset(connection)))) {
 			String line;
 			while ((line = reader.readLine()) != null) {
 				response.append(line).append('\n');
@@ -401,30 +419,61 @@ public class JsonMetricsIntegrationTest {
 	/**
 	 * Parse Prometheus metrics text format into key-value map
 	 */
+	@SuppressWarnings("unused")
 	private Map<String, Double> parsePrometheusMetrics(String prometheusText) {
 		Map<String, Double> metrics = new HashMap<>();
 
 		// Pattern to match Prometheus metric lines (ignoring HELP and TYPE lines)
 		Pattern metricPattern = Pattern.compile("^spt_(\\w+)\\{.*\\}\\s+([\\d\\.\\-eE]+)");
 
-		String[] lines = prometheusText.split("\n");
-		for (String line : lines) {
-			if (line.startsWith("spt_") && !line.startsWith("# ")) {
-				Matcher matcher = metricPattern.matcher(line);
-				if (matcher.matches()) {
-					String metricName = matcher.group(1);
-					double value = Double.parseDouble(matcher.group(2));
-					metrics.put(metricName, value);
+		try (BufferedReader reader = new BufferedReader(new java.io.StringReader(prometheusText))) {
+			String line;
+			while ((line = reader.readLine()) != null) {
+				if (line.startsWith("spt_") && !line.startsWith("# ")) {
+					Matcher matcher = metricPattern.matcher(line);
+					if (matcher.matches()) {
+						String metricName = matcher.group(1);
+						double value = Double.parseDouble(matcher.group(2));
+						metrics.put(metricName, value);
+					}
 				}
 			}
+		} catch (java.io.IOException e) {
+			// StringReader#read does not throw, but keep catch for completeness
 		}
 
 		return metrics;
 	}
 
+	private static Charset resolveCharset(HttpURLConnection connection) {
+		final String contentType = connection.getContentType();
+		if (contentType != null) {
+			int start = 0;
+			while (start <= contentType.length()) {
+				final int separator = contentType.indexOf(';', start);
+				final int end = separator >= 0 ? separator : contentType.length();
+				final String part = contentType.substring(start, end).trim();
+				if (part.toLowerCase(Locale.ROOT).startsWith("charset=")) {
+					final String charsetName = part.substring("charset=".length()).trim();
+					try {
+						return Charset.forName(charsetName);
+					} catch (Exception ignored) {
+						// fall back to UTF-8
+					}
+				}
+				if (separator < 0) {
+					break;
+				}
+				start = separator + 1;
+			}
+		}
+		return StandardCharsets.UTF_8;
+	}
+
 	/**
 	 * Compare metric values with tolerance for floating point precision
 	 */
+	@SuppressWarnings("unused")
 	private void compareMetric(String metricName, double jsonValue, Double prometheusValue) {
 		assertNotNull(prometheusValue, "Prometheus value should not be null for: " + metricName);
 		assertEquals(prometheusValue, jsonValue, 0.001,

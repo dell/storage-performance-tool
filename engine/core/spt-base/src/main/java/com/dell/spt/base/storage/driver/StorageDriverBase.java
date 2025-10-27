@@ -119,7 +119,8 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			if (Loggers.MSG.isTraceEnabled()) {
 				Loggers.MSG.trace("{}: Load operation completed", op);
 			}
-			final O opResult = op.result();
+			@SuppressWarnings("unchecked")
+			final O opResult = (O) op.result();
 			if (opResultOut.put(opResult)) {
 				return true;
 			} else {

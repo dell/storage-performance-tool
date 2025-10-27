@@ -11,9 +11,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-public final class LinearLoadStepExtension<T extends LinearLoadStepLocal, U extends LinearLoadStepClient>
+public final class LinearLoadStepExtension<T extends LinearLoadStepLocal>
 				extends ExtensionBase
-				implements LoadStepFactory<T, U> {
+				implements LoadStepFactory<T, LinearLoadStepClient> {
 
 	public static final String TYPE = "Load";
 
@@ -34,10 +34,9 @@ public final class LinearLoadStepExtension<T extends LinearLoadStepLocal, U exte
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
-	public final U createClient(
+	public final LinearLoadStepClient createClient(
 					final Config baseConfig, final List<Extension> extensions, final MetricsManager metricsManager) {
-		return (U) new LinearLoadStepClient(baseConfig, extensions, null, metricsManager);
+		return new LinearLoadStepClient(baseConfig, extensions, null, metricsManager);
 	}
 
 	@Override
