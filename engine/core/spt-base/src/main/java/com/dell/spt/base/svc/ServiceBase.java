@@ -25,17 +25,12 @@ public abstract class ServiceBase extends AsyncRunnableBase implements Service {
 	@Override
 	protected void doStart() {
 		try {
-			try {
-				ServiceUtil.create(this, port);
-			} catch (final RemoteException
-							| URISyntaxException
-							| MalformedURLException
-							| SocketException e) {
-				LogUtil.exception(
-								Level.ERROR, e, "Failed to start the service \"{}\" @ port #{}", name(), port);
-			}
-			Loggers.MSG.info("Service \"{}\" started @ port #{}", name(), port);
-		} catch (final RemoteException ignored) {}
+			ServiceUtil.create(this, port);
+			Loggers.MSG.info("Service \"{}\" started @ port #{}", safeName(), port);
+		} catch (final RemoteException | URISyntaxException | MalformedURLException | SocketException e) {
+			LogUtil.exception(Level.ERROR, e, "Failed to start the service \"{}\" @ port #{}", safeName(), port);
+			throw new IllegalStateException("Failed to start service " + safeName(), e);
+		}
 	}
 
 	@Override
@@ -45,11 +40,17 @@ public abstract class ServiceBase extends AsyncRunnableBase implements Service {
 	protected void doStop() {
 		try {
 			ServiceUtil.close(this);
-			Loggers.MSG.info("Service \"{}\" stopped listening the port #{}", name(), port);
+			Loggers.MSG.info("Service \"{}\" stopped listening the port #{}", safeName(), port);
 		} catch (final RemoteException | MalformedURLException e) {
-			try {
-				throw new RemoteException("Failed to stop the service " + name(), e);
-			} catch (final RemoteException ignored) {}
+			LogUtil.exception(Level.WARN, e, "Failed to stop the service \"{}\"", safeName());
+		}
+	}
+
+	private String safeName() {
+		try {
+			return name();
+		} catch (final RemoteException e) {
+			return getClass().getSimpleName();
 		}
 	}
 }
