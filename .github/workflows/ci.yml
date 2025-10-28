@@ -1,6 +1,7 @@
+---
 name: CI
 
-on:
+'on':
   push:
     branches: ["main", "release-**", "feat_*", "feature/**"]
   pull_request:
@@ -43,7 +44,14 @@ jobs:
 
       - name: Error Prone static analysis
         working-directory: engine
-        run: ./gradlew -I tools/errorprone-init.gradle :core:spt-base:compileJava :core:spt-base:compileTestJava --rerun-tasks -x test --no-daemon
+        run: |
+          ./gradlew \
+            -I tools/errorprone-init.gradle \
+            :core:spt-base:compileJava \
+            :core:spt-base:compileTestJava \
+            --rerun-tasks \
+            -x test \
+            --no-daemon
 
       - name: Gradle unit tests
         working-directory: engine

@@ -6,6 +6,7 @@
 #
 #  http://www.apache.org/licenses/LICENSE-2.0
 
+---
 name: Release CSM
 # Invocable as a reusable workflow
 # Can be manually triggered
@@ -14,7 +15,12 @@ on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
     inputs:
       option:
-        description: 'Choose the type of semantic versioning increment to apply to the release: "major", "minor", or "patch". Example: Choosing "minor" will increment the minor version number and release new images. *** Choosing "patch" for an n-1/n-2 release will not release any images, that should be done manually. ***'
+        description: >
+          Choose which semantic versioning increment to apply to the release.
+          Options: "major", "minor", or "patch".
+          Example: Choosing "minor" will increment the minor version number and
+          release new images. Choosing "patch" for an n-1/n-2 release will not
+          release any images; that should be done manually.
         required: true
         type: choice
         default: 'minor'
@@ -24,7 +30,9 @@ on:  # yamllint disable-line rule:truthy
           - patch
           - n-1/n-2 patch (Provide input in the below box)
       version:
-        description: "Patch version to release. example: 2.1.x (Use this only if n-1/n-2 patch is selected)"
+        description: >
+          Patch version to release. example: 2.1.x
+          (Use this only if n-1/n-2 patch is selected)
         required: false
         type: string
   repository_dispatch:
@@ -42,25 +50,32 @@ jobs:
         shell: bash
         run: |
           echo "Triggered by: ${{ github.event_name }}"
+          option_value="n-1/n-2 patch (Provide input in the below box)"
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             echo "versionEnv=minor" >> $GITHUB_OUTPUT
             exit 0
           fi
-          if [[ "${{ github.event.inputs.version }}" != "" && "${{ github.event.inputs.option }}" == "n-1/n-2 patch (Provide input in the below box)" ]]; then
-            # if both version and option are provided, then version takes precedence i.e. patch release for n-1/n-2
-            echo "versionEnv=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event.inputs.version }}" != "" && \
+            "${{ github.event.inputs.option }}" == "$option_value" ]]; then
+            # If both version and option are provided, version takes precedence
+            # i.e. patch release for n-1/n-2.
+            version_input="${{ github.event.inputs.version }}"
+            echo "versionEnv=${version_input}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ "${{ github.event.inputs.option }}" != "n-1/n-2 patch (Provide input in the below box)" ]]; then
-            # if only option is provided, then option takes precedence i.e. minor, major or patch release
-            echo "versionEnv=${{ github.event.inputs.option }}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event.inputs.option }}" != "$option_value" ]]; then
+            # If only option is provided, it takes precedence
+            # i.e. minor, major or patch release.
+            option_input="${{ github.event.inputs.option }}"
+            echo "versionEnv=${option_input}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # if neither option nor version is provided, then minor release is taken by default (Auto-release)
+          # If neither option nor version is provided,
+          # then minor release is taken by default (Auto-release).
           echo "versionEnv=minor" >> $GITHUB_OUTPUT
   csm-release:
     needs: [process-inputs]
-    uses: dell/common-github-actions/.github/workflows/csm-release-driver-module.yaml@main
+    uses: dell/common-github-actions/.github/workflows/csm-release-driver-module.yaml@main  # yamllint disable-line rule:line-length
     name: Release CSM Drivers and Modules
     with:
       version: ${{ needs.process-inputs.outputs.processedVersion }}

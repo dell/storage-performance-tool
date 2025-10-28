@@ -6,6 +6,8 @@
 #
 #  http://www.apache.org/licenses/LICENSE-2.0
 
+# yamllint disable rule:line-length
+---
 name: Copy Templates to Dell Repositories
 
 on:  # yamllint disable-line rule:truthy
@@ -107,3 +109,5 @@ jobs:
             cd ..
             rm -rf $REPO
           done
+
+# yamllint enable rule:line-length

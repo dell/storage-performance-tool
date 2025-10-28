@@ -58,6 +58,8 @@ cli/*.zst
 cli/tools/work/
 cli/_tmp/
 cli/results/
+cli/tools/codehealth/deadfinder/report.json
+cli/tools/codehealth/deadfinder/deadfinder
 
 # Local documentation exports
 cli/*.pdf

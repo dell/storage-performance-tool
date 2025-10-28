@@ -6,7 +6,9 @@
 #
 #  http://www.apache.org/licenses/LICENSE-2.0
 
-# Reusable workflow to perform updates of Dell client libraries to latest commits
+# Reusable workflow to update Dell client libraries
+# to the latest commits
+---
 name: Dell Libraries Commit Update
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
@@ -15,6 +17,6 @@ on:  # yamllint disable-line rule:truthy
 
 jobs:
   package-update:
-    uses: dell/common-github-actions/.github/workflows/update-libraries-to-commits.yml@main
+    uses: dell/common-github-actions/.github/workflows/update-libraries-to-commits.yml@main  # yamllint disable-line rule:line-length
     name: Dell Libraries Update
     secrets: inherit

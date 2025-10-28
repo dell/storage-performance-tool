@@ -5,7 +5,7 @@
 # You may obtain a copy of the License at
 #
 #  http://www.apache.org/licenses/LICENSE-2.0
-
+---
 name: Common Workflows
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
@@ -17,8 +17,8 @@ on:  # yamllint disable-line rule:truthy
 jobs:
   go-static-analysis:
     name: Golang Validation
-    uses: dell/common-github-actions/.github/workflows/go-static-analysis.yaml@main
+    uses: dell/common-github-actions/.github/workflows/go-static-analysis.yaml@main  # yamllint disable-line rule:line-length
 
   common:
     name: Quality Checks
-    uses: dell/common-github-actions/.github/workflows/go-common.yml@main
+    uses: dell/common-github-actions/.github/workflows/go-common.yml@main  # yamllint disable-line rule:line-length

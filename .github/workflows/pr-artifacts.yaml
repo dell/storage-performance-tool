@@ -1,6 +1,7 @@
+---
 name: PR Build Artifacts
 
-on:
+'on':
   pull_request:
     branches: ["**"]
     paths:
@@ -57,7 +58,11 @@ jobs:
         if: ${{ env.ACT }}
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openjdk-21-jdk ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install \
+            -y \
+            --no-install-recommends \
+            openjdk-21-jdk \
+            ca-certificates
           java -version
 
       - name: Set up Java 21 (Temurin)

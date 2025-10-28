@@ -1,10 +1,10 @@
 # Docker Compose example for Spt
-# 
+#
 # This example shows various ways to run Spt with Docker Compose,
 # including volume mounts for scenarios and logs.
 #
 # Note: You need to provide your own S3-compatible storage endpoint.
-# 
+#
 # Quick start:
 #   cp .env.example .env
 #   # Edit .env with your S3 credentials
@@ -16,7 +16,7 @@ services:
   # Basic Spt service with built-in scenario
   spt-basic:
     image: dcr.octo.dell.com/spt/spt:latest
-    command: 
+    command:
       - --run-scenario=/opt/spt/scenarios/js/default.js
       - --storage-driver-type=s3
       - --storage-net-node-addrs=${SPT_S3_ENDPOINT:-your-s3-endpoint:9000}

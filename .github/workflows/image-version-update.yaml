@@ -7,6 +7,7 @@
 #  http://www.apache.org/licenses/LICENSE-2.0
 
 # Reusable workflow to perform image version update on Golang based projects
+---
 name: Image Version Update
 
 on:  # yamllint disable-line rule:truthy
@@ -21,7 +22,7 @@ on:  # yamllint disable-line rule:truthy
 jobs:
   # image version update
   image-version-update:
-    uses: dell/common-github-actions/.github/workflows/image-version-workflow.yaml@main
+    uses: dell/common-github-actions/.github/workflows/image-version-workflow.yaml@main  # yamllint disable-line rule:line-length
     with:
       version: "${{ github.event.inputs.version || 'minor' }}"
     secrets: inherit

@@ -35,7 +35,7 @@ func TestIsSptContainer(t *testing.T) {
 		{
 			name: "dell internal spt image",
 			container: &ContainerInfo{
-		Image: "dcr.octo.dell.com/spt/spt:5.0.1",
+				Image: "dcr.octo.dell.com/spt/spt:5.0.1",
 				Name:  "spt-test",
 			},
 			expected: true,

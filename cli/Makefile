@@ -208,11 +208,15 @@ ci-local:
 	@bash tools/local_ci.sh
 
 # Run dead code analyzer and write report
+DEADFINDER_DIR=tools/codehealth/deadfinder
+DEADFINDER_BIN=$(DEADFINDER_DIR)/deadfinder
+
 test-deadcode:
+	@echo "Building dead code analyzer..."
+	@cd $(DEADFINDER_DIR) && go build -tags tools -o deadfinder .
 	@echo "Running dead code analyzer..."
-	@cd tools/codehealth/deadfinder && go build ./...
-	@tools/codehealth/deadfinder/deadfinder -root . -cover coverage.out > tools/codehealth/deadfinder/report.json
-	@echo "Report generated: tools/codehealth/deadfinder/report.json"
+	@./$(DEADFINDER_BIN) -root . -cover coverage.out > $(DEADFINDER_DIR)/report.json
+	@echo "Report generated: $(DEADFINDER_DIR)/report.json"
 
 .PHONY: help all build install test test-verbose test-quick test-summary testclean test-coverage fmt vet lint clean distclean deps tidy run build-all build-linux build-darwin build-windows dev ci ci-local test-deadcode
 

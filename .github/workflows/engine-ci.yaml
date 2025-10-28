@@ -1,6 +1,7 @@
+---
 name: Engine CI
 
-on:
+'on':
   pull_request:
     branches: ["**"]
     paths:
@@ -26,7 +27,11 @@ jobs:
         if: ${{ env.ACT }}
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openjdk-21-jdk ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install \
+            -y \
+            --no-install-recommends \
+            openjdk-21-jdk \
+            ca-certificates
           java -version
 
       - name: Set up Java 21 (Temurin)
@@ -48,7 +53,9 @@ jobs:
         working-directory: engine
         run: |
           ./gradlew --version
-          ./gradlew clean test jacocoRootReport build :bundle:build --no-daemon --stacktrace
+          ./gradlew clean test jacocoRootReport build :bundle:build \
+            --no-daemon \
+            --stacktrace
 
       - name: Upload reports (always)
         if: ${{ !env.ACT && always() }}
