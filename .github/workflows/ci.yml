@@ -115,7 +115,7 @@ jobs:
       - name: Run code sanitizer
         uses: dell/common-github-actions/code-sanitizer@main
         with:
-          args: ${{ github.workspace }}/cli
+          args: ${{ (env.ACT == 'true' && github.workspace || '/github/workspace') }}/cli
 
       - name: Malware scan
         uses: dell/common-github-actions/malware-scanner@main
