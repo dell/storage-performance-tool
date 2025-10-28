@@ -2,13 +2,25 @@
 
 # Go parameters
 GOCMD=go
-GOBUILD=$(GOCMD) build -mod=mod
-GOCLEAN=$(GOCMD) clean -mod=mod
-GOTEST=$(GOCMD) test -mod=mod
+GOBUILD=$(GOCMD) build
+GOCLEAN=$(GOCMD) clean
+GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=gofmt
-GOVET=$(GOCMD) vet -mod=mod
+GOVET=$(GOCMD) vet
+
+# Build metadata (override via env in CI).
+VERSION_FILE ?= ../VERSION
+VERSION ?= $(shell if [ -f $(VERSION_FILE) ]; then tr -d '\n' < $(VERSION_FILE); else echo "0.0.0-dev"; fi)
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILDINFO_PKG=github.com/dell/storage-performance-tool/cli/internal/buildinfo
+
+# Ensure values have no whitespace for ldflags injection.
+LD_VERSION=$(strip $(VERSION))
+LD_COMMIT=$(strip $(GIT_COMMIT))
+LD_DATE=$(strip $(BUILD_DATE))
 
 # Binary name
 BINARY_NAME=spt
@@ -16,7 +28,7 @@ BINARY_PATH=./$(BINARY_NAME)
 
 # Build variables
 BUILD_DIR=build
-LDFLAGS=-ldflags "-s -w"
+LDFLAGS=-ldflags "-s -w -X $(BUILDINFO_PKG).Version=$(LD_VERSION) -X $(BUILDINFO_PKG).Commit=$(LD_COMMIT) -X $(BUILDINFO_PKG).BuildDate=$(LD_DATE)"
 
 # Default target - show help
 help:
@@ -104,11 +116,11 @@ vet:
 # Run linter (two-pass policy: prod full, tests unused-only)
 lint:
 	@echo "Running linter (two-pass policy)..."
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not installed. Install with:"; \
-		echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin"; \
-		exit 1; \
-	fi
+		@if ! command -v golangci-lint >/dev/null 2>&1; then \
+			echo "golangci-lint not installed. Install with:"; \
+			echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $$(go env GOPATH)/bin"; \
+			exit 1; \
+		fi
 	@MIN_VER=2.2.0; \
 	ACTUAL_VER=$$(golangci-lint version 2>&1 | sed -n 's/.*version \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1); \
 	if [ -z "$$ACTUAL_VER" ]; then echo "Unable to parse golangci-lint version"; exit 1; fi; \
@@ -174,16 +186,16 @@ build-all: build-linux build-darwin build-windows
 
 build-linux:
 	@echo "Building for Linux..."
-	GOOS=linux GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64
+	GOOS=linux GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64
 
 build-darwin:
 	@echo "Building for macOS..."
-	GOOS=darwin GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64
-	GOOS=darwin GOARCH=arm64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
+	GOOS=darwin GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64
+	GOOS=darwin GOARCH=arm64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
 
 build-windows:
 	@echo "Building for Windows..."
-	GOOS=windows GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe
+	GOOS=windows GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe
 
 # Development workflow
 dev: fmt vet test build
@@ -196,11 +208,15 @@ ci-local:
 	@bash tools/local_ci.sh
 
 # Run dead code analyzer and write report
+DEADFINDER_DIR=tools/codehealth/deadfinder
+DEADFINDER_BIN=$(DEADFINDER_DIR)/deadfinder
+
 test-deadcode:
+	@echo "Building dead code analyzer..."
+	@cd $(DEADFINDER_DIR) && go build -tags tools -o deadfinder .
 	@echo "Running dead code analyzer..."
-	@cd tools/codehealth/deadfinder && go build ./...
-	@tools/codehealth/deadfinder/deadfinder -root . -cover coverage.out > tools/codehealth/deadfinder/report.json
-	@echo "Report generated: tools/codehealth/deadfinder/report.json"
+	@./$(DEADFINDER_BIN) -root . -cover coverage.out > $(DEADFINDER_DIR)/report.json
+	@echo "Report generated: $(DEADFINDER_DIR)/report.json"
 
 .PHONY: help all build install test test-verbose test-quick test-summary testclean test-coverage fmt vet lint clean distclean deps tidy run build-all build-linux build-darwin build-windows dev ci ci-local test-deadcode
 

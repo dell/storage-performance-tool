@@ -92,7 +92,7 @@ func NewFetcher(baseURL, outputDir string) *Fetcher {
 // FetchArtifactsForSteps fetches artifacts for the provided step IDs and writes a manifest.
 // It returns an error only if all steps fail to retrieve the required metrics.total.csv.
 func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*Manifest, error) {
-	if err := os.MkdirAll(f.OutputDir, 0o755); err != nil {
+	if err := os.MkdirAll(f.OutputDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create results dir: %w", err)
 	}
 
@@ -237,7 +237,7 @@ func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath strin
 				case http.StatusOK:
 					// Write to temp then rename
 					tmpDir := filepath.Dir(outPath)
-					if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+					if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 						lastErr = fmt.Errorf("mkdir: %w", err)
 						return
 					}

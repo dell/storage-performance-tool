@@ -4,13 +4,17 @@ plugins {
 	id "com.bmuschko.docker-remote-api" version "9.4.0"
 }
 
+def sptVersion = rootProject.ext.SPT_VERSION
+def sptReleaseVersion = rootProject.ext.SPT_RELEASE_VERSION
+
 description = "Spt Bundle - Distribution assembly for all components"
 group = "com.github.dell-spt"
-version = "5.0.0-SNAPSHOT"
+version = sptVersion
 
 ext {
 	distDir = layout.buildDirectory.dir("dist").get().asFile.absolutePath
 	sptJar = "spt.jar"
+	sptReleaseVersion = sptReleaseVersion
 }
 
 repositories {
@@ -112,7 +116,7 @@ task createRunScript {
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Spt version
-VERSION="5.0.0"
+VERSION="''' + sptReleaseVersion + '''"
 
 # Set up extension directory in user home
 EXT_DIR="$HOME/.spt/$VERSION/ext"
@@ -146,8 +150,8 @@ rem Spt run script for Windows
 rem Get the directory where this script is located
 set SCRIPT_DIR=%~dp0
 
-rem Detect Spt version from JAR (default to 5.0.0)
-set VERSION=5.0.0
+rem Detect Spt version from JAR (default to ${sptReleaseVersion})
+set VERSION=${sptReleaseVersion}
 for /f "tokens=3" %%i in ('java -jar "%SCRIPT_DIR%spt.jar" --version 2^>^&1 ^| findstr "spt v"') do set VERSION=%%i
 
 rem Set up extension directory in user home
@@ -296,9 +300,14 @@ task dockerBuildImage(type: DockerBuildImage) {
     def envBase = System.getenv('BASE_IMAGE')
     def propBase = project.findProperty('baseImage') as String
     def baseImageOverride = propBase ?: envBase
+    def args = [
+        SPT_VERSION: sptVersion,
+        SPT_RELEASE_VERSION: sptReleaseVersion
+    ]
     if (baseImageOverride) {
-        buildArgs.set([BASE_IMAGE: baseImageOverride])
+        args.BASE_IMAGE = baseImageOverride
     }
+    buildArgs.set(args)
 
     doFirst {
         // Ensure the distribution is built

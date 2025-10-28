@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+---
 name: Update CSM Operator version
 # reusable workflow
 on:  # yamllint disable-line rule:truthy
@@ -25,11 +26,12 @@ on:  # yamllint disable-line rule:truthy
         description: 'Latest operator version, ex: v1.7.0, v1.8.0, ...'
         required: true
       existing-version:
-        description: 'Existing operator version, ex: v1.6.0, 1.7.0, ...'
+        description: >
+          Existing operator version, ex: v1.6.0, 1.7.0, ...
         required: true
 jobs:
   version-update:
-    uses: dell/common-github-actions/.github/workflows/operator-version-update.yaml@main
+    uses: dell/common-github-actions/.github/workflows/operator-version-update.yaml@main  # yamllint disable-line rule:line-length
     name: Operator version update
     with:
       latest-version: ${{ inputs.latest-version }}

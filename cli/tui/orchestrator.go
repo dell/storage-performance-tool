@@ -70,7 +70,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 		lastSuccessfulMetrics: time.Now(),
 		metricsState:          newNodePollState(),
 		metricsBackoffCfg:     singleNodeBackoff,
-		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())),
+		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- non-crypto jitter source
 		logJSONBodies:         os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
 }

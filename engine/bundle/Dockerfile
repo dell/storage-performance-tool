@@ -7,12 +7,14 @@
 
 # Allow overriding the base image (default pins Eclipse Temurin JRE 21 LTS)
 ARG BASE_IMAGE=eclipse-temurin:21.0.7_6-jre-jammy
+ARG SPT_VERSION=0.0.0-dev
+ARG SPT_RELEASE_VERSION=${SPT_VERSION}
 FROM ${BASE_IMAGE}
 
 # Metadata
 LABEL maintainer="spt-dev@dell.com"
 LABEL description="Spt Storage Performance Testing Tool - Bundle"
-LABEL version="5.0.0-SNAPSHOT"
+LABEL version="${SPT_VERSION}"
 
 # Install runtime dependencies
 # Note: Temurin images already include the JRE, so install only basic tools
@@ -41,8 +43,8 @@ COPY --chown=spt:spt build/dist/scenarios /opt/spt/scenarios
 
 # Set up the extensions directory structure
 # Spt expects extensions in ~/.spt/<version>/ext/
-RUN mkdir -p /home/spt/.spt/5.0.0/ext && \
-    cd /home/spt/.spt/5.0.0/ext && \
+RUN mkdir -p /home/spt/.spt/${SPT_RELEASE_VERSION}/ext && \
+    cd /home/spt/.spt/${SPT_RELEASE_VERSION}/ext && \
     for ext in /opt/spt/ext/*.jar; do \
         ln -s "$ext" "$(basename "$ext")"; \
     done && \
@@ -65,7 +67,7 @@ WORKDIR /opt/spt
 # Environment variables
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
-ENV SPT_VERSION=5.0.0
+ENV SPT_VERSION=${SPT_RELEASE_VERSION}
 ENV SPT_SCENARIOS=/opt/spt/scenarios
 
 # Expose typical Spt ports

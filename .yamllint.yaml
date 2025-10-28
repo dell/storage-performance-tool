@@ -1,0 +1,16 @@
+---
+extends: default
+
+ignore: |
+  cli/results/**
+  cli/spt-scenario-*.js
+  engine/**
+  engine/extensions/**/bin/**
+  engine/extensions/**/build/**
+  engine/extensions/**/${ctx:home_dir}/**
+  engine/extensions/**/${ctx:step_id}/**
+  engine/extensions/**/log/**
+  engine/extensions/**/src/main/resources/**
+
+rules:
+  line-length: disable

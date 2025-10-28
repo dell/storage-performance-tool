@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+---
 name: Update sidecar version
 # reusable workflow
 on:  # yamllint disable-line rule:truthy
@@ -34,7 +35,8 @@ on:  # yamllint disable-line rule:truthy
         description: 'csi-node-driver-registrar version, ex: v2.13.0'
         required: true
       health-monitor:
-        description: 'csi-external-health-monitor-controller version, ex: v0.14.0'
+        description: >
+          csi-external-health-monitor-controller version, ex: v0.14.0
         required: true
       metadata-retriever:
         description: 'csi-metadata-retriever version, ex: v1.8.0'
@@ -44,7 +46,7 @@ on:  # yamllint disable-line rule:truthy
         required: true
 jobs:
   version-update:
-    uses: dell/common-github-actions/.github/workflows/sidecar-version-update.yaml@main
+    uses: dell/common-github-actions/.github/workflows/sidecar-version-update.yaml@main  # yamllint disable-line rule:line-length
     name: Sidecar version update
     with:
       attacher: ${{ inputs.attacher }}

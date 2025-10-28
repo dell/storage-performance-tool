@@ -1,8 +1,11 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
 	"bufio"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -135,8 +138,9 @@ func main() {
 				// Fallback to AST printing if types info is missing
 				if recv == "" && fn.Recv != nil && len(fn.Recv.List) > 0 {
 					var b strings.Builder
-					printer.Fprint(&b, fset, fn.Recv.List[0].Type)
-					recv = b.String()
+					if err := printer.Fprint(&b, fset, fn.Recv.List[0].Type); err == nil {
+						recv = b.String()
+					}
 				}
 				recv = normalizeRecvForPkg(recv, importPath)
 				key := FuncKey{PkgPath: importPath, Name: fn.Name.Name, Recv: recv}
@@ -157,10 +161,11 @@ func main() {
 					stmtCount = len(fn.Body.List)
 					trivial = isTrivialWrapper(fn)
 					var b strings.Builder
-					printer.Fprint(&b, fset, fn.Body)
-					norm := normalizeCode(b.String())
-					sum := sha1.Sum([]byte(norm))
-					h = hex.EncodeToString(sum[:])
+					if err := printer.Fprint(&b, fset, fn.Body); err == nil {
+						norm := normalizeCode(b.String())
+						sum := sha256.Sum256([]byte(norm))
+						h = hex.EncodeToString(sum[:])
+					}
 				}
 				fi := &FuncInfo{Key: key, File: relTo(rootAbs, filePath), PosLine: pos.Line, Exported: exported, HasBody: hasBody, Hash: h, Covered: coveredBy(cov, filePath, pos.Line), StmtCount: stmtCount, Trivial: trivial}
 				if existing := declByKey[keyString(key)]; existing != nil {
@@ -287,8 +292,9 @@ func main() {
 				}
 				if recv == "" { // AST fallback
 					var b strings.Builder
-					printer.Fprint(&b, pc.Fset, fn.Recv.List[0].Type)
-					recv = b.String()
+					if err := printer.Fprint(&b, pc.Fset, fn.Recv.List[0].Type); err == nil {
+						recv = b.String()
+					}
 				}
 				recv = normalizeRecvForPkg(recv, pc.ImportPath)
 				ast.Inspect(fn.Body, func(n2 ast.Node) bool {
@@ -421,7 +427,7 @@ func loadCoverage(path string) []CoverBlock {
 	if path == "" {
 		return nil
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- developer tool path from CLI flag
 	if err != nil {
 		return nil
 	}
@@ -569,7 +575,7 @@ func importAliases(f *ast.File) map[string]string {
 }
 
 func readModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	data, err := os.ReadFile(filepath.Join(root, "go.mod")) // #nosec G304 -- developer tool, root provided by trusted caller
 	if err != nil {
 		return ""
 	}

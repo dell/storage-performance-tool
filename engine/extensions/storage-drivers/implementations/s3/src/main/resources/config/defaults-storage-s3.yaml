@@ -8,8 +8,8 @@ storage:
     enabled: false
     algorithm: md5
   object:
-      fsAccess: false
-      tagging:
-        enabled: false
-        tags: {}
-      versioning: false
+    fsAccess: false
+    tagging:
+      enabled: false
+      tags: {}
+    versioning: false

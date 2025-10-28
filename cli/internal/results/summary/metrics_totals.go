@@ -74,7 +74,7 @@ var requiredColumns = []string{
 }
 
 func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- CSV path validated when manifest is loaded
 	if err != nil {
 		return nil, err
 	}
