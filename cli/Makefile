@@ -186,16 +186,16 @@ build-all: build-linux build-darwin build-windows
 
 build-linux:
 	@echo "Building for Linux..."
-	GOOS=linux GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64
+	GOOS=linux GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64
 
 build-darwin:
 	@echo "Building for macOS..."
-	GOOS=darwin GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64
-	GOOS=darwin GOARCH=arm64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
+	GOOS=darwin GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64
+	GOOS=darwin GOARCH=arm64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
 
 build-windows:
 	@echo "Building for Windows..."
-	GOOS=windows GOARCH=amd64 $(GOCMD) build -mod=mod $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe
+	GOOS=windows GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe
 
 # Development workflow
 dev: fmt vet test build
