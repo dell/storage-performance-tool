@@ -3,7 +3,7 @@ load:
   step:
     node:
       addrs:
-      - abc
+        - abc
   op:
     wait:
       finish: false

@@ -5,9 +5,9 @@ output:
     summary:
       persist: true
     quantiles:
-    - 0.25
-    - 0.5
-    - 0.75
+      - 0.25
+      - 0.5
+      - 0.75
     average:
       period: "10s"
       aggregation:
@@ -107,114 +107,114 @@ load:
   service:
     threads: 0
 aliasing:
-- name: "noop"
-  target: "load-op-type=noop"
-- name: "create"
-  target: "load-op-type=create"
-- name: "read"
-  target: "load-op-type=read"
-- name: "update"
-  target: "load-op-type=update"
-- name: "delete"
-  target: "load-op-type=delete"
-- name: "atmos-subtenant"
-  target: "storage-auth-token"
-- name: "s3-input-bucket"
-  target: "item-input-path"
-- name: "s3-output-bucket"
-  target: "item-output-path"
-- name: "swift-input-container"
-  target: "item-input-path"
-- name: "swift-output-container"
-  target: "item-output-path"
-- name: "test-step-metrics-period"
-  deprecated: true
-  target: "output-metrics-average-period"
-- name: "test-step-metrics-threshold"
-  deprecated: true
-  target: "output-metrics-threshold"
-- name: "test-step-name"
-  deprecated: true
-  target: "load-step-id"
-- name: "test-step-limit-rate"
-  deprecated: true
-  target: "load-op-limit-rate"
-- name: "item-data-content-file"
-  deprecated: true
-  target: "item-data-input-file"
-- name: "item-data-content-seed"
-  deprecated: true
-  target: "item-data-input-seed"
-- name: "item-data-content-ring-cache"
-  deprecated: true
-  target: "item-data-input-layer-cache"
-- name: "item-data-content-ring-size"
-  deprecated: true
-  target: "item-data-input-layer-size"
-- name: "load-circular"
-  deprecated: true
-  target: "load-op-recycle"
-- name: "load-queue-size"
-  deprecated: true
-  target: "load-op-limit-recycle"
-- name: "storage-driver-io-workers"
-  deprecated: true
-  target: "storage-driver-threads"
-- name: "storage-driver-concurrency"
-  deprecated: true
-  target: "storage-driver-limit-concurrency"
-- name: "load-rate-limit"
-  deprecated: true
-  target: "load-op-limit-rate"
-- name: "load-generator-recycle-enabled"
-  deprecated: true
-  target: "load-op-recycle"
-- name: "load-generator-shuffle"
-  deprecated: true
-  target: "load-op-shuffle"
-- name: "load-limit-concurrency"
-  deprecated: true
-  target: "storage-driver-limit-concurrency"
-- name: "load-limit-rate"
-  deprecated: true
-  target: "load-op-limit-rate"
-- name: "load-type"
-  deprecated: true
-  target: "load-op-type"
-- name: "storage-driver-remote"
-  deprecated: true
-- name: "storage-driver-addrs"
-  deprecated: true
-  target: "load-step-node-addrs"
-- name: "storage-driver-port"
-  deprecated: true
-  target: "load-step-node-port"
-- name: "storage-driver-queue-input"
-  deprecated: true
-  target: "storage-driver-limit-queue-input"
-- name: "test-scenario-file"
-  deprecated: true
-  target: "run-scenario"
-- name: "test-step-distributed"
-  deprecated: true
-- name: "test-step-id"
-  deprecated: true
-  target: "load-step-id"
-- name: "test-step-limit-count"
-  deprecated: true
-  target: "load-op-limit-count"
-- name: "test-step-limit-fail-count"
-  deprecated: true
-  target: "load-op-limit-fail-count"
-- name: "test-step-limit-fail-rate"
-  deprecated: true
-  target: "load-op-limit-fail-rate"
-- name: "test-step-limit-size"
-  deprecated: true
-  target: "load-step-limit-size"
-- name: "test-step-limit-time"
-  deprecated: true
-  target: "load-step-limit-time"
-- name: "item-naming-offset"
-  deprecated: true
-  target: "item-naming-seed"
+  - name: "noop"
+    target: "load-op-type=noop"
+  - name: "create"
+    target: "load-op-type=create"
+  - name: "read"
+    target: "load-op-type=read"
+  - name: "update"
+    target: "load-op-type=update"
+  - name: "delete"
+    target: "load-op-type=delete"
+  - name: "atmos-subtenant"
+    target: "storage-auth-token"
+  - name: "s3-input-bucket"
+    target: "item-input-path"
+  - name: "s3-output-bucket"
+    target: "item-output-path"
+  - name: "swift-input-container"
+    target: "item-input-path"
+  - name: "swift-output-container"
+    target: "item-output-path"
+  - name: "test-step-metrics-period"
+    deprecated: true
+    target: "output-metrics-average-period"
+  - name: "test-step-metrics-threshold"
+    deprecated: true
+    target: "output-metrics-threshold"
+  - name: "test-step-name"
+    deprecated: true
+    target: "load-step-id"
+  - name: "test-step-limit-rate"
+    deprecated: true
+    target: "load-op-limit-rate"
+  - name: "item-data-content-file"
+    deprecated: true
+    target: "item-data-input-file"
+  - name: "item-data-content-seed"
+    deprecated: true
+    target: "item-data-input-seed"
+  - name: "item-data-content-ring-cache"
+    deprecated: true
+    target: "item-data-input-layer-cache"
+  - name: "item-data-content-ring-size"
+    deprecated: true
+    target: "item-data-input-layer-size"
+  - name: "load-circular"
+    deprecated: true
+    target: "load-op-recycle"
+  - name: "load-queue-size"
+    deprecated: true
+    target: "load-op-limit-recycle"
+  - name: "storage-driver-io-workers"
+    deprecated: true
+    target: "storage-driver-threads"
+  - name: "storage-driver-concurrency"
+    deprecated: true
+    target: "storage-driver-limit-concurrency"
+  - name: "load-rate-limit"
+    deprecated: true
+    target: "load-op-limit-rate"
+  - name: "load-generator-recycle-enabled"
+    deprecated: true
+    target: "load-op-recycle"
+  - name: "load-generator-shuffle"
+    deprecated: true
+    target: "load-op-shuffle"
+  - name: "load-limit-concurrency"
+    deprecated: true
+    target: "storage-driver-limit-concurrency"
+  - name: "load-limit-rate"
+    deprecated: true
+    target: "load-op-limit-rate"
+  - name: "load-type"
+    deprecated: true
+    target: "load-op-type"
+  - name: "storage-driver-remote"
+    deprecated: true
+  - name: "storage-driver-addrs"
+    deprecated: true
+    target: "load-step-node-addrs"
+  - name: "storage-driver-port"
+    deprecated: true
+    target: "load-step-node-port"
+  - name: "storage-driver-queue-input"
+    deprecated: true
+    target: "storage-driver-limit-queue-input"
+  - name: "test-scenario-file"
+    deprecated: true
+    target: "run-scenario"
+  - name: "test-step-distributed"
+    deprecated: true
+  - name: "test-step-id"
+    deprecated: true
+    target: "load-step-id"
+  - name: "test-step-limit-count"
+    deprecated: true
+    target: "load-op-limit-count"
+  - name: "test-step-limit-fail-count"
+    deprecated: true
+    target: "load-op-limit-fail-count"
+  - name: "test-step-limit-fail-rate"
+    deprecated: true
+    target: "load-op-limit-fail-rate"
+  - name: "test-step-limit-size"
+    deprecated: true
+    target: "load-step-limit-size"
+  - name: "test-step-limit-time"
+    deprecated: true
+    target: "load-step-limit-time"
+  - name: "item-naming-offset"
+    deprecated: true
+    target: "item-naming-seed"

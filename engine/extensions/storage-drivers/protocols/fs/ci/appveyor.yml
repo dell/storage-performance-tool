@@ -1,3 +1,4 @@
+---
 image:
   - Visual Studio 2017
 
@@ -30,20 +31,20 @@ before_build:
   - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-storage-driver-coop:%COOP_VERSION%
   - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-base:%BASE_VERSION%
 
-build: off
+build: false
 build_script:
   - cmd: cd %DRIVER_DIR%
-# build driver fs
+  # build driver fs
   - cmd: gradlew.bat clean jar
 
 before_test:
   - cmd: set EXT_DIR=C:\Users\appveyor\.spt\%BASE_VERSION%\ext\
   - cmd: mkdir %EXT_DIR%
-  #  copy coop, nio drivers to .spt/ext
+  # copy coop, nio drivers to .spt/ext
   - cmd: for /R %MAVEN_HOME% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
-  #  copy fs driver to .spt/ext
+  # copy fs driver to .spt/ext
   - cmd: for /R %DRIVER_DIR% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
-  #  copy spt-base.jar to home dir
+  # copy spt-base.jar to home dir
   - cmd: for /R %MAVEN_HOME% %%f in (spt-base-*.jar) do COPY %%f %HOME_DIR%
 
   - cmd: set PYTHONPATH=%DRIVER_DIR%\src\test\robot\lib;C:\Python37-x64\lib\site-packages

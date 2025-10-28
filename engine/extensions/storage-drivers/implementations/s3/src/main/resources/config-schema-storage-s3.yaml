@@ -7,8 +7,8 @@ storage:
     enabled: boolean
     algorithm: string
   object:
-      fsAccess: boolean
-      tagging:
-        enabled: boolean
-        tags: map
-      versioning: boolean
+    fsAccess: boolean
+    tagging:
+      enabled: boolean
+      tags: map
+    versioning: boolean
