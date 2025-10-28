@@ -2,13 +2,13 @@
 
 # Go parameters
 GOCMD=go
-GOBUILD=$(GOCMD) build -mod=mod
-GOCLEAN=$(GOCMD) clean -mod=mod
-GOTEST=$(GOCMD) test -mod=mod
+GOBUILD=$(GOCMD) build
+GOCLEAN=$(GOCMD) clean
+GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=gofmt
-GOVET=$(GOCMD) vet -mod=mod
+GOVET=$(GOCMD) vet
 
 # Build metadata (override via env in CI).
 VERSION_FILE ?= ../VERSION
@@ -116,11 +116,11 @@ vet:
 # Run linter (two-pass policy: prod full, tests unused-only)
 lint:
 	@echo "Running linter (two-pass policy)..."
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not installed. Install with:"; \
-		echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin"; \
-		exit 1; \
-	fi
+		@if ! command -v golangci-lint >/dev/null 2>&1; then \
+			echo "golangci-lint not installed. Install with:"; \
+			echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $$(go env GOPATH)/bin"; \
+			exit 1; \
+		fi
 	@MIN_VER=2.2.0; \
 	ACTUAL_VER=$$(golangci-lint version 2>&1 | sed -n 's/.*version \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1); \
 	if [ -z "$$ACTUAL_VER" ]; then echo "Unable to parse golangci-lint version"; exit 1; fi; \

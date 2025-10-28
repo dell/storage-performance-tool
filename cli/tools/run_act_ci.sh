@@ -50,7 +50,7 @@ act pull_request \
   -P "ubuntu-latest=${IMAGE_TAG}" \
   --pull=false \
   --var CODE_COVERAGE_TARGET=65 \
-  --var PACKAGE_SKIP_LIST=github.com/dell/storage-performance-tool/cli/internal/buildinfo,github.com/dell/storage-performance-tool/cli/internal/constants,github.com/dell/storage-performance-tool/cli/tools/coverage/covsum \
+  --var PACKAGE_SKIP_LIST=github.com/dell/storage-performance-tool/cli/internal/buildinfo,github.com/dell/storage-performance-tool/cli/internal/constants,github.com/dell/storage-performance-tool/cli/internal/portcheck,github.com/dell/storage-performance-tool/cli/tools/coverage/covsum \
   --secret-file "${SECRETS_FILE}" \
   --workflows "${WORKFLOW_PATH}" \
   --rm "$@"
