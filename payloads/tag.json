@@ -1,0 +1,11 @@
+{
+  "ref": "refs/tags/v5.0.1",
+  "ref_type": "tag",
+  "repository": {
+    "full_name": "dell/storage-performance-tool",
+    "owner": {
+      "login": "dell"
+    },
+    "name": "storage-performance-tool"
+  }
+}

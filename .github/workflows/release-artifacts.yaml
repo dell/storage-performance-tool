@@ -1,0 +1,270 @@
+---
+name: Release Artifacts
+
+'on':
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override VERSION when testing manually (defaults to VERSION file or tag).'
+        required: false
+      allow_snapshot:
+        description: 'Allow VERSION values ending in -SNAPSHOT (for dry runs only).'
+        required: false
+        type: boolean
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-version:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      artifact-prefix: ${{ steps.version.outputs.prefix }}
+      allow-snapshot: ${{ steps.snapshot.outputs.allow }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version/tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_type="${GITHUB_REF_TYPE:-}"
+          ref_name="${GITHUB_REF_NAME:-}"
+          version_input="${{ inputs.version }}"
+          version_file="$(< VERSION)"
+          version_file="${version_file//$'\n'/}"
+
+          version="${version_file}"
+          if [[ -n "${version_input}" ]]; then
+            version="${version_input}"
+          elif [[ "${ref_type}" == "tag" && -n "${ref_name}" ]]; then
+            # Accept both vX.Y.Z and bare X.Y.Z tags
+            if [[ "${ref_name}" == v* ]]; then
+              version="${ref_name#v}"
+            else
+              version="${ref_name}"
+            fi
+          fi
+
+          tag_name="${ref_name}"
+          if [[ -z "${tag_name}" && -n "${version}" ]]; then
+            tag_name="v${version}"
+          fi
+
+          echo "Detected version: ${version}"
+          echo "Detected tag: ${tag_name}"
+
+          if [[ -z "${version}" ]]; then
+            echo "error: unable to resolve version" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=${version}"
+            echo "tag=${tag_name}"
+            echo "prefix=spt-${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Snapshot allowance
+        id: snapshot
+        shell: bash
+        run: |
+          allow="${{ inputs.allow_snapshot && 'true' || 'false' }}"
+          echo "allow=${allow}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify version sync
+        shell: bash
+        run: |
+          args=(--expected "${{ steps.version.outputs.version }}")
+          if [[ "${{ steps.snapshot.outputs.allow }}" == 'true' ]]; then
+            args+=(--allow-snapshot)
+          fi
+          scripts/release/check_version_sync.sh "${args[@]}"
+
+  cli-binaries:
+    name: Build CLI Binaries
+    needs: prepare-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Build multi-platform binaries
+        run: make -C cli build-all
+
+      - name: Package binaries
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare-version.outputs.version }}"
+          release_root="release"
+          if [[ -n "${ACT:-}" && -d /release ]]; then
+            release_root="/release"
+          fi
+
+          cli_dir="${release_root}/cli"
+          mkdir -p "${cli_dir}"
+
+          rm -f \
+            "${cli_dir}/spt-${version}-linux-amd64" \
+            "${cli_dir}/spt-${version}-linux-amd64.gz" \
+            "${cli_dir}/spt-${version}-darwin-amd64" \
+            "${cli_dir}/spt-${version}-darwin-amd64.gz" \
+            "${cli_dir}/spt-${version}-darwin-arm64" \
+            "${cli_dir}/spt-${version}-darwin-arm64.gz" \
+            "${cli_dir}/spt-${version}-windows-amd64.exe" \
+            "${cli_dir}/spt-${version}-windows-amd64.zip"
+
+          cp cli/build/spt-linux-amd64 "${cli_dir}/spt-${version}-linux-amd64"
+          gzip -n "${cli_dir}/spt-${version}-linux-amd64"
+
+          cp cli/build/spt-darwin-amd64 "${cli_dir}/spt-${version}-darwin-amd64"
+          gzip -n "${cli_dir}/spt-${version}-darwin-amd64"
+
+          cp cli/build/spt-darwin-arm64 "${cli_dir}/spt-${version}-darwin-arm64"
+          gzip -n "${cli_dir}/spt-${version}-darwin-arm64"
+
+          cp cli/build/spt-windows-amd64.exe "${cli_dir}/spt-${version}-windows-amd64.exe"
+          (cd "${cli_dir}" && zip -q "spt-${version}-windows-amd64.zip" "spt-${version}-windows-amd64.exe")
+          rm "${cli_dir}/spt-${version}-windows-amd64.exe"
+
+          cat <<'EOF' > "${cli_dir}/README.txt"
+          Dell Storage Performance Tool (SPT) CLI binaries
+          https://github.com/dell/storage-performance-tool
+
+          File naming: spt-<version>-<os>-<arch>.<ext>
+          - Linux   (amd64): gzip binary
+          - macOS   (amd64, arm64): gzip binaries
+          - Windows (amd64): zip archive with .exe
+          EOF
+
+      - name: Upload CLI artifacts
+        if: ${{ !env.ACT }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ needs.prepare-version.outputs.version }}
+          path: release/cli/**
+          if-no-files-found: error
+
+  engine-bundle:
+    name: Build Engine Bundle
+    needs: prepare-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install JDK 21 for act
+        if: ${{ env.ACT }}
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install \
+            -y \
+            --no-install-recommends \
+            openjdk-21-jdk \
+            ca-certificates
+          java -version
+
+      - name: Setup Java 21 (Temurin)
+        if: ${{ !env.ACT }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build bundle distribution
+        working-directory: engine
+        run: ./gradlew :bundle:distZip --no-daemon --stacktrace
+
+      - name: Stage bundle artifact
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare-version.outputs.version }}"
+          release_root="release"
+          if [[ -n "${ACT:-}" && -d /release ]]; then
+            release_root="/release"
+          fi
+
+          engine_dir="${release_root}/engine"
+          mkdir -p "${engine_dir}"
+          dist_zip="engine/bundle/build/distributions/spt-bundle-${version}.zip"
+          if [[ ! -f "${dist_zip}" ]]; then
+            echo "Expected bundle ${dist_zip} not found" >&2
+            ls engine/bundle/build/distributions >&2 || true
+            exit 1
+          fi
+          cp "${dist_zip}" "${engine_dir}/spt-bundle-${version}.zip"
+
+      - name: Upload bundle artifact
+        if: ${{ !env.ACT }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-bundle-${{ needs.prepare-version.outputs.version }}
+          path: release/engine/**
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - prepare-version
+      - cli-binaries
+      - engine-bundle
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Skip publish when running under act
+        if: ${{ env.ACT }}
+        run: echo "Skipping GitHub Release publish when running under act."
+
+      - name: Download CLI artifacts
+        if: ${{ !env.ACT }}
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-${{ needs.prepare-version.outputs.version }}
+          path: release/cli
+
+      - name: Download Engine bundle
+        if: ${{ !env.ACT }}
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-bundle-${{ needs.prepare-version.outputs.version }}
+          path: release/engine
+
+      - name: Publish release
+        if: ${{ !env.ACT }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare-version.outputs.tag }}
+          prerelease: ${{ contains(needs.prepare-version.outputs.version, '-') }}
+          files: |
+            release/cli/**
+            release/engine/**
