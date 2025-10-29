@@ -36,6 +36,9 @@ cli/*.so
 cli/*.dylib
 cli/mcli
 cli/spt
+cli/build/spt-darwin-amd64
+cli/build/spt-darwin-arm64
+cli/build/spt-linux-amd64
 
 # Go workspace & modules cache
 cli/vendor/
@@ -128,5 +131,11 @@ engine/target/
 # CLI runtime captures
 cli/entry-metrics.json
 
+<<<<<<< Updated upstream
 # Release test dir
 release/
+=======
+# CLI codehealth artifacts
+cli/tools/codehealth/deadfinder/deadfinder
+cli/tools/codehealth/deadfinder/report.json
+>>>>>>> Stashed changes
