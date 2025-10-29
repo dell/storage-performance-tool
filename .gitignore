@@ -127,3 +127,6 @@ engine/target/
 
 # CLI runtime captures
 cli/entry-metrics.json
+
+# Release test dir
+release/

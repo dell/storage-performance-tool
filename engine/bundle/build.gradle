@@ -72,6 +72,17 @@ task assembleDist {
 		file(distDir).mkdirs()
 		file("${distDir}/ext").mkdirs()
 		
+		// Copy README template with version placeholder expansion
+		def readmeTemplate = file("${projectDir}/src/distribution/README.txt")
+		if (readmeTemplate.exists()) {
+			copy {
+				from readmeTemplate
+				into distDir
+				expand(version: sptReleaseVersion)
+				filteringCharset = "UTF-8"
+			}
+		}
+		
 		// Copy core shadow JAR as spt.jar
 		def coreJar = fileTree("${coreProject.buildDir}/libs").include("*-all.jar").singleFile
 		copy {
