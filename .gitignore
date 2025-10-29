@@ -133,7 +133,7 @@ cli/entry-metrics.json
 
 <<<<<<< Updated upstream
 # Release test dir
-release/
+/release/
 =======
 # CLI codehealth artifacts
 cli/tools/codehealth/deadfinder/deadfinder
