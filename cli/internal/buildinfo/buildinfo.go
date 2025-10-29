@@ -1,3 +1,4 @@
+// Package buildinfo exposes build-time metadata injected via ldflags.
 package buildinfo
 
 // Version, Commit, and BuildDate are injected at build time via ldflags.

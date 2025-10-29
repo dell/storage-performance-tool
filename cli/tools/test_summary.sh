@@ -218,7 +218,13 @@ run_tests() {
     echo "Running tests with JSON output..."
     
     # Run tests with JSON output, save both to file and display progress
-    go test -mod=mod -json ./... | tee "$RESULTS_FILE" | \
+    gowork_setting=$(go env GOWORK 2>/dev/null || echo "")
+    go_cmd=(go test -json ./...)
+    # Only pass -mod=mod when not using a workspace.
+    if [[ -z "${gowork_setting}" || "${gowork_setting}" == "off" ]]; then
+        go_cmd=(go test -mod=mod -json ./...)
+    fi
+    "${go_cmd[@]}" | tee "$RESULTS_FILE" | \
     grep -E '"Action":"(run|pass|fail|skip)"' | \
     jq -r 'select(.Action == "run") | "Running: \(.Test // .Package)"' | \
     while IFS= read -r line; do

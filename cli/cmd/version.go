@@ -12,8 +12,9 @@ import (
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print build metadata",
-	Run: func(cmd *cobra.Command, _ []string) {
-		fmt.Fprintf(cmd.OutOrStdout(), "spt version: %s\ncommit: %s\nbuilt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "spt version: %s\ncommit: %s\nbuilt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		return err
 	},
 }
 
