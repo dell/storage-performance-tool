@@ -25,11 +25,11 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ !env.ACT }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Go
         if: ${{ !env.ACT }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.23.x'
           cache: true
@@ -40,7 +40,7 @@ jobs:
 
       - name: Upload CLI binaries
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cli-binaries-${{ github.sha }}
           path: cli/build/*
@@ -52,7 +52,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install JDK 21 for act
         if: ${{ env.ACT }}
@@ -67,13 +67,13 @@ jobs:
 
       - name: Set up Java 21 (Temurin)
         if: ${{ !env.ACT }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Spotless check
         working-directory: engine
@@ -85,7 +85,7 @@ jobs:
 
       - name: Upload engine bundle artifacts
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: engine-bundle-${{ github.sha }}
           path: |
