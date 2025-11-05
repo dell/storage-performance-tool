@@ -286,7 +286,7 @@ func (r *HeadlessRunner) runDryModeWithParams(image string, scenarioPath string,
 	r.output("DRY-RUN", "Would execute benchmark with API mode:")
 	r.output("DRY-RUN", "  Image: %s", image)
 	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
-	r.output("DRY-RUN", fmt.Sprintf("  API Port: %s", r.apiPort))
+	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
 
 	// Generate and display scenario content
 	scenarioContent, err := scenario.GenerateScenario(params)
@@ -313,7 +313,7 @@ func (r *HeadlessRunner) runDryModeWithParams(image string, scenarioPath string,
 	}
 
 	r.output("DRY-RUN", "Would start container with --run-node")
-	r.output("DRY-RUN", fmt.Sprintf("Would wait for API to be ready on http://localhost:%s", r.apiPort))
+	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
 	r.output("DRY-RUN", "Would POST scenario and defaults to /run endpoint")
 	r.output("DRY-RUN", "Would poll /status every 2 seconds")
 	r.output("DRY-RUN", "Would poll /metrics every 500ms")

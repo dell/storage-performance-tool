@@ -21,7 +21,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install JDK 21 for act
         if: ${{ env.ACT }}
@@ -36,13 +36,13 @@ jobs:
 
       - name: Set up Java 21 (Temurin)
         if: ${{ !env.ACT }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Spotless check
         working-directory: engine
@@ -59,7 +59,7 @@ jobs:
 
       - name: Upload reports (always)
         if: ${{ !env.ACT && always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: engine-reports-${{ github.run_id }}
           if-no-files-found: ignore
