@@ -79,7 +79,7 @@ Authentication defaults to Signature Version 4. Add `--auth-version 2` only when
 
 ### Prerequisites
 
-- Go 1.23 or higher
+- Go 1.25 or higher
 - Docker (Docker daemon must be running)
 - Local CI checks: golangci-lint v2.2+ (required for `make ci-local`).
 

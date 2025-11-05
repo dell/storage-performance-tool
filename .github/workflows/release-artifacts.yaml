@@ -107,7 +107,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.25.x'
           cache: true
 
       - name: Build multi-platform binaries
