@@ -90,7 +90,7 @@ docker run \
     -v /path/on/host/custom-entrypoint.sh:/path/in/container/custom-entrypoint.sh \
     --entrypoint /path/in/container/custom-entrypoint.sh \
     --network host \
-    dellspt/spt[-<TYPE>] [\
+    dcr.octo.dell.com/spt/spt[-<TYPE>] [\
     <ARGS>]
 ```
 

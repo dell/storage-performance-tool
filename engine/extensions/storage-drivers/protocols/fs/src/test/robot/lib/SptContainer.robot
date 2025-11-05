@@ -7,7 +7,7 @@ Library  RequestsLibrary
 ${LOG_DIR} =  base/build/log
 ${SPT_CONTAINER_DATA_DIR} =  /data
 ${SPT_CONTAINER_NAME} =  spt
-${SPT_IMAGE_NAME} =  dellspt/spt
+${SPT_IMAGE_NAME} =  dcr.octo.dell.com/spt/spt
 ${SPT_NODE_PORT} =  9999
 
 *** Keywords ***

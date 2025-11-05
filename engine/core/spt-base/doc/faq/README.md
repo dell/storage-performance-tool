@@ -18,7 +18,7 @@ D = spt get the last byte of response from storage; operation finish
 
 ## What is *concurrency*?
 
-**Concurrency level** = count of concurrently executed load operations/ the number of open connections at any moment of time ( in terms of the [netty driver](https://github.com/dell-spt/spt-storage-driver-netty) and its ["child" drivers](https://github.com/dell-spt/spt#dependency)).
+**Concurrency level** = count of concurrently executed load operations/ the number of open connections at any moment of time ( in terms of the [netty driver](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/primitives/netty) and its ["child" drivers](https://github.com/dell/storage-performance-tool#dependency)).
 
 ## How to deploy with docker or jar?
 

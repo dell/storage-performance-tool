@@ -24,7 +24,7 @@
     **4.3. [Docker](deployment#docker)<br/>**
     &nbsp;&nbsp;&nbsp;&nbsp;4.3.1 [Mount files](deployment#mount-files)<br/>
     **4.4. [Kubernetes](deployment#kubernetes)<br/>**
-    &nbsp;&nbsp;&nbsp;&nbsp;4.4.1 [Helm](https://github.com/dell-spt/spt-helm-charts)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;4.4.1 [Helm](https://github.com/emc-mongoose/mongoose-helm-charts)<br/>
     &nbsp;&nbsp;&nbsp;&nbsp;4.4.2 [Manual](deployment#manual-deployment)<br/>
 
 5. [Usage](usage)<br/>
@@ -51,20 +51,20 @@
 
 6. [Troubleshooting](troubleshooting)<br/>
 
-7. [Extentions](https://github.com/dell-spt/spt)<br/>
+7. [Extentions](https://github.com/dell/storage-performance-tool)<br/>
     **7.1. Storage Drivers<br/>**
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.1  [S3](https://github.com/dell-spt/spt-storage-driver-s3)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.2. [Atmos](https://github.com/dell-spt/spt-storage-driver-atmos)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.3. [Swift](https://github.com/dell-spt/spt-storage-driver-swift)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.4. [FS](https://github.com/dell-spt/spt-storage-driver-fs)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.5. [HDFS](https://github.com/dell-spt/spt-storage-driver-hdfs)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.6. [Pravega](https://github.com/dell-spt/spt-storage-driver-pravega)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.7. [Kafka](https://github.com/dell-spt/spt-storage-driver-kafka)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.1.8. [Pulsar](https://github.com/dell-spt/spt-storage-driver-pulsar)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.1  [S3](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/s3)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.2. [Atmos](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/atmos)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.3. [Swift](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/swift)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.4. [FS](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/protocols/fs)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.5. [HDFS](https://github.com/emc-mongoose/mongoose-storage-driver-hdfs)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.6. [Pravega](https://github.com/emc-mongoose/mongoose-storage-driver-pravega)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.7. [Kafka](https://github.com/emc-mongoose/mongoose-storage-driver-kafka)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.1.8. [Pulsar](https://github.com/emc-mongoose/mongoose-storage-driver-pulsar)<br/>
     **7.2. Load Steps<br/>**
-    &nbsp;&nbsp;&nbsp;&nbsp;7.2.1  [Pipeline](https://github.com/dell-spt/spt-load-step-pipeline)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;7.2.2. [Weighted](https://github.com/dell-spt/spt-load-step-weighted)<br/>
-    7.3. [Auxiliary Tools](https://github.com/dell-spt/spt#auxiliary-tools)
+    &nbsp;&nbsp;&nbsp;&nbsp;7.2.1  [Pipeline](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;7.2.2. [Weighted](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)<br/>
+    7.3. [Auxiliary Tools](https://github.com/dell/storage-performance-tool#auxiliary-tools)
 
 8. [Dependencies](dependencies)<br/>
 

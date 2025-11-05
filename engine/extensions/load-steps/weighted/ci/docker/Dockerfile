@@ -8,7 +8,7 @@ ADD gradlew ./gradlew
 ADD settings.gradle ./settings.gradle
 RUN ./gradlew clean jar
 
-FROM dellspt/spt-base:${BASE_VERSION}
+FROM dcr.octo.dell.com/spt/spt-base:${BASE_VERSION}
 ARG BASE_VERSION
 ARG VERSION
 COPY --from=0 /build/libs/spt-load-step-weighted-${VERSION}.jar /tmp/

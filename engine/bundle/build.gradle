@@ -8,7 +8,7 @@ def sptVersion = rootProject.ext.SPT_VERSION
 def sptReleaseVersion = rootProject.ext.SPT_RELEASE_VERSION
 
 description = "Spt Bundle - Distribution assembly for all components"
-group = "com.github.dell-spt"
+group = "io.github.dell.spt"
 version = sptVersion
 
 ext {

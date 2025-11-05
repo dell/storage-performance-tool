@@ -298,11 +298,11 @@ and high quartile (0.75).
 
 #### 1. Spt source code migrated to Git Lab
 
-New source code repository location: https://gitlab.com/dellspt/spt
+New source code repository location: https://github.com/dell/storage-performance-tool
 
 #### 2. Git Lab CI is used instead of Travis CI
 
-New CI location: https://gitlab.com/dellspt/spt/pipelines
+New CI location: https://github.com/dell/storage-performance-tool/pipelines
 
 ## Fixed Bugs
 
@@ -374,7 +374,7 @@ HTTP headers.
 ### Non-functional
 
 1. Spt v4.0.0 doesn't work with deprecated JSON scenarios anymore. So the tool converting the Spt v3.x
-scenarios to v4.0.0 scenarios is provided: https://github.com/dell-spt/scenario-converter-3to4
+scenarios to v4.0.0 scenarios is provided: https://github.com/emc-mongoose/scenario-converter-3to4
 
 2. New public [issue tracker (Jira)](https://spt-issues.atlassian.net/browse/BASE) is introduced instead of GitHub
 issue tracker.
@@ -422,15 +422,15 @@ issue tracker.
 ### Non-functional
 
 1. All storage driver implementations moved to the separate projects
-    under the same [GitHub organization](https://github.com/dell-spt).
+    under the Dell GitHub organization at https://github.com/dell/storage-performance-tool.
     The list of the storage drivers supported currently:
-    1. [Dell Atmos](https://github.com/dell-spt/spt-storage-driver-atmos)
-    2. [Dell S3](https://github.com/dell-spt/spt-storage-driver-dell-s3) (extensions)
-    3. [Filesystem](https://github.com/dell-spt/spt-storage-driver-fs)
-    4. [HDFS](https://github.com/dell-spt/spt-storage-driver-hdfs) (**new**)
-    5. [NFS](https://github.com/dell-spt/spt-storage-driver-nfs) (not working currently, under development)
-    6. [Amazon S3](https://github.com/dell-spt/spt-storage-driver-s3) (generic)
-    7. [OpenStack Swift](https://github.com/dell-spt/spt-storage-driver-swift)
+    1. [Dell Atmos](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/atmos)
+    2. [Dell S3](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/s3) (extensions)
+    3. [Filesystem](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/protocols/fs)
+    4. [HDFS](https://github.com/emc-mongoose/mongoose-storage-driver-hdfs) (**new**)
+    5. [NFS](https://github.com/emc-mongoose/mongoose-storage-driver-nfs) (not working currently, under development)
+    6. [Amazon S3](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/s3) (generic)
+    7. [OpenStack Swift](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/swift)
 
     The **[[deployment|v3.6 Deployment]]** procedure significantly changed,
     so please keep attention on this. Note also that base/core spt
@@ -647,7 +647,7 @@ TODO
         It's time to enhance the range of the storage types supported by Spt. The way to do this is
         described in the documentation.
 
-    2. The storage mock aka **"Nagaina" moved to the separate [project](https://github.com/dell-spt/nagaina)**
+    2. The storage mock aka **"Nagaina" moved to the separate [project](https://github.com/emc-mongoose/nagaina)**
 
         That was done to make Spt even more modular and even lighter in size.
         Nagaina has its own docker image and released tarballs.

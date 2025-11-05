@@ -22,5 +22,5 @@ The command-line options are directly mapped to the **configuration** items. For
 
 It's not possible to use the command line to specify **map/dict** type options, a user should use the scenario file for this.
 
-* [Example for http header](https://github.com/dell-spt/spt-storage-driver-http#2-custom-http-headers)
-* [Example for object tagging](https://github.com/dell-spt/spt-storage-driver-s3#421-put-object-tags)
+* [Example for http header](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/protocols/http#2-custom-http-headers)
+* [Example for object tagging](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/implementations/s3#421-put-object-tags)

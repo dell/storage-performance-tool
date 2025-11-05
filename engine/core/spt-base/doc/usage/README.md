@@ -84,8 +84,8 @@
 &nbsp;&nbsp;&nbsp;&nbsp;3.3.1. [Step Identification](load/steps#1-identification)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;3.3.2. [Step Types](load/steps#3-type) <br/>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.2.1. [Linear Load](load/steps#31-linear)<br/>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.2.2. [Pipeline Load](https://github.com/dell-spt/spt-load-step-pipeline)<br/>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.2.3. [Weighted Load](https://github.com/dell-spt/spt-load-step-weighted)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.2.2. [Pipeline Load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.2.3. [Weighted Load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;3.3.3. [Step Limits](load/steps#2-limits)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.3.1. [Operations Count](load/steps#21-operations-count)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3.3.3.2. [Time](load/steps#22-time)<br/>

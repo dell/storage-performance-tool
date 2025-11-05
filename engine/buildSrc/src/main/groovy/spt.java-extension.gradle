@@ -5,7 +5,7 @@ plugins {
 }
 
 description = 'Spt is a high-load storage performance testing tool'
-group = 'com.github.dell-spt'
+group = 'io.github.dell.spt'
 
 // Shared Java configuration
 java {
@@ -121,7 +121,7 @@ project.afterEvaluate {
 			// Exclude spt-base classes - they should come from parent classloader
 			dependencies {
 				exclude(dependency {
-					it.moduleGroup == 'com.github.dell-spt' && it.moduleName == 'spt-base'
+					it.moduleGroup == 'io.github.dell.spt' && it.moduleName == 'spt-base'
 				})
 			}
 			// API packages are now compileOnly so no need to exclude

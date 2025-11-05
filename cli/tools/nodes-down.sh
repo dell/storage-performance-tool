@@ -41,7 +41,7 @@ Usage: nodes-down.sh [options]
   --retry, -r N        Retry failed hosts up to N times (default: 3).
   --help, -h           Show this help message.
 Environment overrides:
-  PRIMARY_HOST, WORKER_HOSTS, HOSTS, SSH_OPTS, SPT_IMAGE, MONGOOSE_IMAGE,
+  PRIMARY_HOST, WORKER_HOSTS, HOSTS, SSH_OPTS, SPT_IMAGE,
   RETRIES, RETRY_SLEEP, PURGE_IMAGES.
 USAGE
       exit 0 ;;
@@ -88,9 +88,6 @@ ENTRY_CONTAINER_NAME=${ENTRY_CONTAINER_NAME:-spt-primary}
 declare -a _image_candidates=()
 if [ -n "${SPT_IMAGE:-}" ]; then
   _image_candidates+=("${SPT_IMAGE}")
-fi
-if [ -n "${MONGOOSE_IMAGE:-}" ]; then
-  _image_candidates+=("${MONGOOSE_IMAGE}")
 fi
 SPT_IMAGE_CANDIDATES="${_image_candidates[*]}"
 
@@ -166,10 +163,10 @@ purged=false
 if [ "${PURGE_IMAGES:-false}" = "true" ]; then
   declared_imgs=("${imgs[@]}")
   if [ ${#declared_imgs[@]} -eq 0 ]; then
-    # Fallback: gather unique repositories that contain "spt" or "mongoose"
+    # Fallback: gather unique repositories that contain "spt"
     while IFS= read -r repo; do
       [ -n "$repo" ] && declared_imgs+=("$repo")
-    done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'spt|mongoose' || true)
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'spt' || true)
   fi
   if [ ${#declared_imgs[@]} -gt 0 ]; then
     # Deduplicate while preserving order

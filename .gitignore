@@ -56,7 +56,6 @@ cli/coverage.html
 cli/entry-metrics.json
 
 # Generated scenarios and scratch space
-cli/mongoose-scenario-*.js
 cli/*.zst
 cli/tools/work/
 cli/_tmp/
@@ -124,7 +123,6 @@ engine/tmp/
 
 # Miscellaneous engine logs
 engine/logs/
-engine/mongoose-*.log
 engine/test-output/
 engine/target/
 

@@ -17,13 +17,13 @@ See also the [output reference](../../output#111-load-step-id)
 
 ### 2.2. Weighted
 
-*Weighted* load step type is additional and requires the [WeightedLoad](https://github.com/dell-spt/spt-load-step-weighted) extention. 
+*Weighted* load step type is additional and requires the [WeightedLoad](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted) extention. 
 Weighted load extension, allowing to generate 20% write and 80% read operations, for example.
 
 
 ### 2.3. Pipeline
 
-*Pipeline* load step type is additional and requires the [PipelineLoad](https://github.com/dell-spt/spt-load-step-pipeline) extention. 
+*Pipeline* load step type is additional and requires the [PipelineLoad](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline) extention. 
 Load operations pipeline (create, delay, read-then-update, for example), extension.
 
 

@@ -1,5 +1,5 @@
 ARG SPT_VERSION
 
-FROM dellspt/spt:${SPT_VERSION}
+FROM dcr.octo.dell.com/spt/spt:${SPT_VERSION}
 
 ADD ["http://central.maven.org/maven2/org/python/jython-standalone/2.7.1/jython-standalone-2.7.1.jar", "/root/.spt/${SPT_VERSION}/ext/jython-standalone.jar"]

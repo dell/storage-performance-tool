@@ -1,11 +1,3 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-storage-driver-http/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-storage-driver-http/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-storage-driver-http.svg)](https://github.com/dell-spt/spt-storage-driver-http/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/http/central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-http/maven-metadata.xml.svg)](http://central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-http)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-storage-driver-http.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-storage-driver-http)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-storage-driver-http.svg)](https://hub.docker.com/r/dellspt/spt-storage-driver-http/)
-
 # HTTP Storage Driver
 
 ## 1. Configuration Reference

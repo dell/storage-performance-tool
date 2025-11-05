@@ -1,11 +1,3 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-load-step-pipeline/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-load-step-pipeline/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-load-step-pipeline.svg)](https://github.com/dell-spt/spt-load-step-pipeline/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/http/central.maven.org/maven2/com/github/dell-spt/spt-load-step-pipeline/maven-metadata.xml.svg)](http://central.maven.org/maven2/com/github/dell-spt/spt-load-step-pipeline)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-load-step-pipeline.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-load-step-pipeline)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-load-step-pipeline.svg)](https://hub.docker.com/r/dellspt/spt-load-step-pipeline/)
-
 # Introduction
 
 The basic load step executes the same type of operation for each item

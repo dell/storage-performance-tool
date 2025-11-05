@@ -206,7 +206,7 @@ func IsSptContainer(container *ContainerInfo) bool {
 	// Known Spt image patterns
 	sptImages := []string{
 		"spt",
-		"dellspt/spt",
+		"dcr.octo.dell.com/spt/spt",
 		"dcr.octo.dell.com/spt/spt",
 	}
 

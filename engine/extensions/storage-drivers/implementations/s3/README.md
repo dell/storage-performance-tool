@@ -1,14 +1,6 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-storage-driver-s3/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-storage-driver-s3/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-storage-driver-s3.svg)](https://github.com/dell-spt/spt-storage-driver-s3/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/https/central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-s3/maven-metadata.xml.svg)](https://central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-s3)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-storage-driver-s3.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-storage-driver-s3)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-storage-driver-s3.svg)](https://hub.docker.com/r/dellspt/spt-storage-driver-s3/)
-
 # S3 Storage Driver
 
-Spt storage driver extention for testing of **S3 type storages**. The repo contains only the extension source code, the source code of the spt core and the full spt documentation is contained in the [`spt-base` repository](https://github.com/dell-spt/spt-base).
+Spt storage driver extention for testing of **S3 type storages**. The repo contains only the extension source code, the source code of the spt core and the full spt documentation is contained in the [`spt-base` repository](https://github.com/dell/storage-performance-tool).
 
 # Content
 
@@ -40,8 +32,8 @@ Spt storage driver extention for testing of **S3 type storages**. The repo conta
 * Path listing input (with XML response payload)
 * Data item operation types:
     * `create`
-        * [copy](https://github.com/dell-spt/spt-base/tree/master/doc/usage/load/operations/types#12-copy-mode)
-        * [Multipart Upload](https://github.com/dell-spt/spt-base/tree/master/doc/usage/load/operations/composite)
+        * [copy](https://github.com/dell/storage-performance-tool/tree/master/doc/usage/load/operations/types#12-copy-mode)
+        * [Multipart Upload](https://github.com/dell/storage-performance-tool/tree/master/doc/usage/load/operations/composite)
     * `read`
         * full
         * random byte ranges
@@ -70,23 +62,23 @@ Spt storage driver extention for testing of **S3 type storages**. The repo conta
 Java 21+ is required to build/run.
 
 1. Get the latest `spt-base` jar from the 
-[maven repo](https://repo.maven.apache.org/maven2/com/github/dell-spt/spt-base/)
+[maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-base/)
 and put it to your working directory. Note the particular version, which is referred as *BASE_VERSION* below.
 
 2. Get the latest `spt-storage-driver-coop` jar from the
-[maven repo](https://repo.maven.apache.org/maven2/com/github/dell-spt/spt-storage-driver-coop/)
+[maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-coop/)
 and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
 
 3. Get the latest `spt-storage-driver-netty` jar from the
-[maven repo](https://repo.maven.apache.org/maven2/com/github/dell-spt/spt-storage-driver-netty/)
+[maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-netty/)
 and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
 
 4. Get the latest `spt-storage-driver-http` jar from the
-[maven repo](https://repo.maven.apache.org/maven2/com/github/dell-spt/spt-storage-driver-http/)
+[maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-http/)
 and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
 
 5. Get the latest `spt-storage-driver-s3` jar from the
-[maven repo](https://repo.maven.apache.org/maven2/com/github/dell-spt/spt-storage-driver-s3/)
+[maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-s3/)
 and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
 
 ```bash
@@ -96,7 +88,7 @@ java -jar spt-base-<BASE_VERSION>.jar \
 ```
 ## 2.2. Docker
 
-[More deployment examples](https://github.com/dell-spt/spt-base/tree/master/doc/deployment)
+[More deployment examples](https://github.com/dell/storage-performance-tool/tree/master/doc/deployment)
 
 > NOTE: The base image doesn't contain any additonal load step types neither additional storage drivers. 
 
@@ -106,7 +98,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     [<SPT CLI ARGS>]
 ```
@@ -119,7 +111,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --run-node
 ```
 
@@ -127,7 +119,7 @@ docker run \
 > ```bash
 > docker run \
 >    --network host \
->    dellspt/spt-storage-driver-s3 \
+>    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
 >    --run-node \
 >    --load-step-node-port=<RMI PORT> \
 >    --run-port=<REST PORT> 
@@ -139,7 +131,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --load-step-node-addrs=<ADDR1,ADDR2,...> \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     [<SPT CLI ARGS>]
@@ -169,13 +161,13 @@ docker run \
 
 ### 4.1. Main functionality
 
-[Examples of spt core usage](https://github.com/dell-spt/spt-base/tree/master/doc/getstarted)
+[Examples of spt core usage](https://github.com/dell/storage-performance-tool/tree/master/doc/getstarted)
 
 ### 4.1. HTTP functionality
 
 > NOTE: Spt S3 SD depends on Spt HTTP SD, and the S3 bundle includes all the features of HTTP SD, so all http-specific parameters can be also used with this S3 driver.
 
-[Examples of HTTP headers usage](https://github.com/dell-spt/spt-storage-driver-http)
+[Examples of HTTP headers usage](https://github.com/dell/storage-performance-tool)
 
 ### 4.2. Object Tagging
 
@@ -187,7 +179,7 @@ https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectTagging.html
 
 Put (create or replace) the tags on the existing objects. The `update` load operation should be used for this. 
 The objects should be specified by an 
-[item input](https://github.com/dell-spt/spt-base/tree/master/doc/usage/item/input#items-input) 
+[item input](https://github.com/dell/storage-performance-tool/tree/master/doc/usage/item/input#items-input) 
 (the bucket listing or the items input CSV file). 
 
 Scenario example:
@@ -217,7 +209,7 @@ Command line example:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --item-input-file=objects_to_update_tagging.csv \
@@ -232,7 +224,7 @@ docker run \
 ##### 4.2.1.1. Tags Expressions
 
 Both tag names and values support the 
-[expression language](https://github.com/dell-spt/spt-base/blob/master/src/main/java/com/dell/spt/base/config/el/README.md):
+[expression language](https://github.com/dell/storage-performance-tool/blob/master/src/main/java/com/dell/spt/base/config/el/README.md):
 
 Example:
 ```javascript
@@ -264,7 +256,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --read \
     --item-input-path=/bucket1 \
@@ -279,7 +271,7 @@ https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectTagging.html
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --delete \
     --item-input-file=objects_to_delete_tagging.csv \
@@ -302,7 +294,7 @@ There are two approaches to do load testing with versioning. But first stage is 
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -324,7 +316,7 @@ that `recycle-mode` doesn't guarantee the exact amount of versions per object. B
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -356,7 +348,7 @@ for i in {1..1000}; do cat itemsInitialList.csv; done > itemsWithVersionsList.cs
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -381,7 +373,7 @@ PUT load:
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --load-op-type=read \
     --storage-auth-secret=**************************************** \
@@ -397,7 +389,7 @@ DELETEs are also simple. An `input-file` is again required.
 ```bash
 docker run \
     --network host \
-    dellspt/spt-storage-driver-s3 \
+    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
     --storage-auth-uid=user1 \ 
     --load-op-type=delete \
     --storage-auth-secret=**************************************** \
@@ -424,7 +416,7 @@ docker run -d --name s3_server \
 Spt run:
 ```
 docker run --network host \
-        dellspt/spt-storage-driver-s3  \
+        dcr.octo.dell.com/spt/spt-storage-driver-s3  \
         --storage-net-node-port=9000 \
         --storage-auth-uid=user1 \
         --storage-auth-secret=secretKey1 \

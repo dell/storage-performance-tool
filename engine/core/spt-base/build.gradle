@@ -40,7 +40,7 @@ repositories {
 }
 
 description = "Spt is a high-load storage performance testing tool"
-group = "com.github.dell-spt"
+group = "io.github.dell.spt"
 version = defineVersion()
 
 java {

@@ -12,7 +12,7 @@ ext {
 }
 
 allprojects {
-    group = 'com.github.dell-spt'
+    group = 'io.github.dell.spt'
     version = sptVersion
     
     repositories {

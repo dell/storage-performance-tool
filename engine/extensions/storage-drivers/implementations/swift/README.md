@@ -1,11 +1,3 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-storage-driver-swift/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-storage-driver-swift/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-storage-driver-swift.svg)](https://github.com/dell-spt/spt-storage-driver-swift/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/http/central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-swift/maven-metadata.xml.svg)](http://central.maven.org/maven2/com/github/dell-spt/spt-storage-driver-swift)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-storage-driver-swift.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-storage-driver-swift)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-storage-driver-swift.svg)](https://hub.docker.com/r/dellspt/spt-storage-driver-swift/)
-
 # Swift Storage Driver
 
 ## 1. Features

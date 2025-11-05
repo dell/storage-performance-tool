@@ -142,7 +142,7 @@ Tracker link: https://spt-issues.atlassian.net/projects/GOOSE
 
 # 4. Continuous Integration
 
-https://gitlab.com/dellspt/spt/pipelines
+https://github.com/dell/storage-performance-tool/spt/pipelines
 for Windows: https://ci.appveyor.com/project/veronikaKochugova/spt
 
 ## 4.1. Build
@@ -229,7 +229,7 @@ export ITEM_SIZE=large
 ### 4.2.5. Robot Tests
 
 *Note*:
-> Currently the Robot tests are failing when being executed locally and passing when being executed on the [Gitlab CI](https://gitlab.com/dell-spt/spt-base/pipelines)
+> Currently the Robot tests are failing when being executed locally and passing when being executed on the [Gitlab CI](https://github.com/dell/storage-performance-tool/actions)
 
 ```bash
 export SUITE=<SUITE>

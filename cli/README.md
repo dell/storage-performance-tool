@@ -645,4 +645,4 @@ Copyright © 2025 Dell Technologies
 
 - Built with [Cobra](https://github.com/spf13/cobra) for CLI structure
 - Uses [Bubble Tea](https://github.com/charmbracelet/bubbletea) for the TUI
-- Wraps the [Spt](https://github.com/dell-spt/spt) benchmarking tool
+- Wraps the [Spt](https://github.com/dell/storage-performance-tool/tree/main/engine) benchmarking tool
