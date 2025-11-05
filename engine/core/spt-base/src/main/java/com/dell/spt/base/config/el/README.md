@@ -251,7 +251,7 @@ operation.
 
 ## 5.3. HTTP Request Headers And Queries
 
-See the specific [HTTP storage driver documentation](https://github.com/dell-spt/spt-storage-driver-http) for the details.
+See the specific [HTTP storage driver documentation](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/storage-drivers/protocols/http) for the details.
 
 # 6. Future Enhancements
 

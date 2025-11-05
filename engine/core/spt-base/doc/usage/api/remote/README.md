@@ -149,11 +149,11 @@ curl -v -X DELETE -H "If-Match: 167514e6082" http://localhost:9999/run
 #### 4.2.2.2. Distributed mode
 To start Spt in distributed mode via REST you need to have 2 Spt nodes in `--run-node` mode. Let's say you have started them via docker. One using the default ports: 
 
-```docker run --network host dellspt/spt-base:4.2.17 --run-node```
+```docker run --network host dcr.octo.dell.com/spt/spt-base:4.2.17 --run-node```
 
 And one using port 1098: 
 
-```docker run -p 1098:1099 dellspt/spt-base:4.2.17 --run-node```
+```docker run -p 1098:1099 dcr.octo.dell.com/spt/spt-base:4.2.17 --run-node```
 
 Notice that we use `--network host` on the first node only. As both nodes run on the same machine in this example, it's important to remember not to use the same ports for different nodes. As Spt expects REST calls on 9999 port by default and we only open this port for the first node, this will be the node we send requests to.
 

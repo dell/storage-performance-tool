@@ -98,7 +98,7 @@ distclean: clean
 	rm -rf */*/build
 	rm -rf */*/*/build
 	rm -rf */*/*/*/build
-	rm -rf ~/.gradle/caches/modules-2/files-2.1/com.github.dell-spt
+	rm -rf ~/.gradle/caches/modules-2/files-2.1/io.github.dell.spt
 	find . -name "*.class" -delete
 	find . -name "*.jar" -not -path "./gradle/wrapper/*" -delete
 	@echo "Deep clean complete."

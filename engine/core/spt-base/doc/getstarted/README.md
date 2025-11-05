@@ -5,7 +5,7 @@ It's recommended to begin by exploring the 👉 **[basic terms](../design/archit
 ## Simple deploy
 
 ```
-docker run --network host dellspt/spt-base
+docker run --network host dcr.octo.dell.com/spt/spt-base
 ```
 
 ☝️ This command will launch spt in **standalone mode**, and the **storage mock** will be used as the tested storage.
@@ -20,7 +20,7 @@ docker run --network host dellspt/spt-base
 Spt supports CRUD (Create/Read/Update/Delete) notation for **load operations**.
 
 ```
-docker run --network host dellspt/spt-base \
+docker run --network host dcr.octo.dell.com/spt/spt-base \
     --load-op-limit-count=10000 \
     --item-data-size=1KB
 ```
@@ -28,7 +28,7 @@ docker run --network host dellspt/spt-base \
 ☝️ This command will **"create"** 10000 "[items](../design/architecture#1-basic-terms)" on storage (in this case not real storage, but storage mock) and each "item" will have size "1KB".
 
 ```
-docker run --network host dellspt/spt-base \
+docker run --network host dcr.octo.dell.com/spt/spt-base \
     --read \
     --item-input-path="some path to item on storage" \
     --load-step-limit-time=60s \
@@ -55,7 +55,7 @@ Run with mounted scenario:
 ```
 docker run -d --network host  \
     -v $(pwd)/scenario1.js:/opt/scenario.js \
-    dellspt/spt-base \
+    dcr.octo.dell.com/spt/spt-base \
     --run-scenario=/opt/scenario.js
     --load-step-limit-time=20s
 ```
@@ -91,7 +91,7 @@ Run with mounted scenario:
 ```
 docker run -d --network host  \
     -v $(pwd)/scenario2.js:/opt/scenario.js \
-    dellspt/spt-base \
+    dcr.octo.dell.com/spt/spt-base \
     --run-scenario=/opt/scenario.js
     --load-step-limit-time=20s
 ```
@@ -110,6 +110,6 @@ These examples describe only a small part of the functionality of the tool.
 * More complex scenarios can be viewed in the [`/src/main/resources/example/scenario/js`](/src/main/resources/example/scenario/js) directory.
   * The new [`s3_list_benchmark.js`](/src/main/resources/example/scenario/js/s3_list_benchmark.js) script demonstrates a high-throughput S3 LIST workload, including delimiter, pagination, and metadata toggles.
 
-* Storage-specific options and examples can be found in the [Storage driver repositories](https://github.com/dell-spt/spt#bundle-contents).
+* Storage-specific options and examples can be found in the [Storage driver repositories](https://github.com/dell/storage-performance-tool#bundle-contents).
 
 * A description of all components, options, design, etc. can be found in the [full documentation](/doc#documentation).

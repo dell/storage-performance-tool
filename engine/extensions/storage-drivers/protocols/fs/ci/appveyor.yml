@@ -4,7 +4,7 @@ image:
 
 environment:
   JAVA_HOME: "C:\\Progra~1\\Java\\jdk21"
-  MAVEN_HOME: "C:\\Users\\appveyor\\.m2\\repository\\com\\github\\dell-spt"
+  MAVEN_HOME: "C:\\Users\\appveyor\\.m2\\repository\\io\\github\\dell\\spt"
   HOME_DIR: "C:\\Users\\appveyor\\"
   DRIVER_DIR: "C:\\projects\\spt-storage-driver-fs\\"
   PATH_TO_TEST_LOGS: "C:\\projects\\spt-storage-driver-fs\\build\\robotest"
@@ -27,9 +27,9 @@ before_build:
       | % { $_.Matches } | % { $_.Value })
   - cmd: ECHO %BASE_VERSION% %COOP_VERSION% %NIO_VERSION%
   - cmd: mvn -v
-  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-storage-driver-nio:%NIO_VERSION%
-  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-storage-driver-coop:%COOP_VERSION%
-  - cmd: mvn dependency:get -Dartifact=com.github.dell-spt:spt-base:%BASE_VERSION%
+  - cmd: mvn dependency:get -Dartifact=io.github.dell.spt:spt-storage-driver-nio:%NIO_VERSION%
+  - cmd: mvn dependency:get -Dartifact=io.github.dell.spt:spt-storage-driver-coop:%COOP_VERSION%
+  - cmd: mvn dependency:get -Dartifact=io.github.dell.spt:spt-base:%BASE_VERSION%
 
 build: false
 build_script:

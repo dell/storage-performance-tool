@@ -1,11 +1,3 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-load-step-weighted/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-load-step-weighted/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-load-step-weighted.svg)](https://github.com/dell-spt/spt-load-step-weighted/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/http/central.maven.org/maven2/com/github/dell-spt/spt-load-step-weighted/maven-metadata.xml.svg)](http://central.maven.org/maven2/com/github/dell-spt/spt-load-step-weighted)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-load-step-weighted.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-load-step-weighted)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-load-step-weighted.svg)](https://hub.docker.com/r/dellspt/spt-load-step-weighted/)
-
 # Introduction
 
 Frequently there's a requirement to perform a specific load which may be
@@ -90,4 +82,4 @@ Specific log messages:
 4. `Weighted load step "<STEP_ID>" timeout`
 
 ## Jar & Sources
-https://mvnrepository.com/artifact/com.github.dell-spt/spt-load-step-weighted 
+https://mvnrepository.com/artifact/io.github.dell.spt/spt-load-step-weighted 

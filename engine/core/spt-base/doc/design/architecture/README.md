@@ -91,7 +91,7 @@ The driver is a "layer" between the *Load generator* and the tested Storage. Sin
 Storage mock in a spt is called **Dummy Mock**.
 It is set by a parameter `--storage-driver-type=dummy-mock`.
 
-To use spt with real Storage, use [Storage driver extentions](https://github.com/dell-spt/spt#bundle-contents). 
+To use spt with real Storage, use [Storage driver extentions](https://github.com/dell/storage-performance-tool#bundle-contents). 
 
 ## 2.2. Load Generator
 
@@ -120,7 +120,7 @@ component. Many load step contexts may be associated with the single metrics man
 
 This chapter describes how data is aggregated after Spt has finished a load step. 
 In standalone mode there is nothing to be done as we synchronously write in the file specified by `--output-fiie` as we go.
-But with [distributed mode](https://github.com/dell-spt/spt-base/tree/master/doc/design/modes/distributed_mode) 
+But with [distributed mode](https://github.com/dell/storage-performance-tool/tree/main/engine/core/spt-base/tree/master/doc/design/modes/distributed_mode) 
 we aggregate data from local temporary files from worker nodes as soon as workload is done. 
 It happens when `--item-output-file` or `--output-metrics-trace-persist` are specified (or both). 
 We read it by ~16Mb chunks (if there is enough data) and synchronously put it in the aggregated file on the entry 

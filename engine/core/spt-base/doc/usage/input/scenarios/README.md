@@ -389,7 +389,7 @@ type so the call may be included into the call chain.
 
 #### 3.1.3. Weighted Load
 
-See also the [weighted load spec](https://github.com/dell-spt/spt-load-step-weighted)
+See also the [weighted load spec](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)
 
 Example:
 
@@ -434,7 +434,7 @@ type so the call may be included into the call chain.
 
 #### 3.1.4. Pipeline Load
 
-See also the [pipeline load spec](https://github.com/dell-spt/spt-load-step-pipeline)
+See also the [pipeline load spec](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline)
 
 Example:
 

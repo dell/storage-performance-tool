@@ -142,14 +142,14 @@ This creates debug configurations for:
 make docker
 
 # Run a simple test
-docker run --rm dellspt/spt:latest \
+docker run --rm dcr.octo.dell.com/spt/spt:latest \
   --storage-driver-type=s3 \
   --storage-net-node-addrs=your-s3-endpoint.com \
   --storage-auth-uid=your-access-key \
   --storage-auth-secret=your-secret-key
 
 # Run with a built-in scenario
-docker run --rm dellspt/spt:latest \
+docker run --rm dcr.octo.dell.com/spt/spt:latest \
   --run-scenario=/opt/spt/scenarios/js/types/weighted.js \
   --storage-driver-type=s3 \
   --storage-net-node-addrs=localhost:9000
@@ -158,7 +158,7 @@ docker run --rm dellspt/spt:latest \
 docker run --rm \
   -v $(pwd):/workspace \
   -v $(pwd)/logs:/home/spt/log \
-  dellspt/spt:latest \
+  dcr.octo.dell.com/spt/spt:latest \
   --run-scenario=/workspace/my-scenario.js
 
 # List available built-in scenarios
@@ -182,7 +182,7 @@ docker run --rm \
   -v $(pwd)/scenarios:/workspace \
   -v $(pwd)/logs:/home/spt/log \
   -v $(pwd)/data:/data \
-  dellspt/spt:latest \
+  dcr.octo.dell.com/spt/spt:latest \
   --run-scenario=/workspace/my-test.js
 ```
 

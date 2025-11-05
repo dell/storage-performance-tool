@@ -1,6 +1,6 @@
 ARG SPT_VERSION=latest
 
-FROM dellspt/spt:${SPT_VERSION}
+FROM dcr.octo.dell.com/spt/spt:${SPT_VERSION}
 
 EXPOSE 5005
 

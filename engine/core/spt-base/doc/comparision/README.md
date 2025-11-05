@@ -50,8 +50,8 @@
 ## 6. Load Generation Patterns
 |                                                                                | Spt         | COSBench | LoadRunner | Locust |
 | ---                                                                            | :---:            | :---:    | :---:      | :---:  |
-|**[Weighted load](https://github.com/dell-spt/spt-load-step-weighted)**|:heavy_check_mark:| :heavy_check_mark:| TBD |:x:|
-|**[Pipeline load](https://github.com/dell-spt/spt-load-step-pipeline)**|:heavy_check_mark:| :x:      | TBD |:x:|
+|**[Weighted load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)**|:heavy_check_mark:| :heavy_check_mark:| TBD |:x:|
+|**[Pipeline load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline)**|:heavy_check_mark:| :x:      | TBD |:x:|
 |**[Recycle mode](../design/modes/recycle_mode)**                                |:heavy_check_mark:| :x:      | TBD |:x:|
 
 ## 7. Storages Support

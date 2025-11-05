@@ -1,11 +1,3 @@
-[![Gitter chat](https://badges.gitter.im/dell-spt.png)](https://gitter.im/dell-spt)
-[![Issue Tracker](https://img.shields.io/badge/Issue-Tracker-red.svg)](https://spt-issues.atlassian.net/projects/GOOSE)
-[![CI status](https://gitlab.com/dell-spt/spt-base/badges/master/pipeline.svg)](https://gitlab.com/dell-spt/spt-base/commits/master)
-[![Tag](https://img.shields.io/github/tag/dell-spt/spt-base.svg)](https://github.com/dell-spt/spt-base/tags)
-[![Maven metadata URL](https://img.shields.io/maven-metadata/v/http/central.maven.org/maven2/com/github/dell-spt/spt-base/maven-metadata.xml.svg)](http://central.maven.org/maven2/com/github/dell-spt/spt-base)
-[![Sonatype Nexus (Releases)](https://img.shields.io/nexus/r/http/oss.sonatype.org/com.github.dell-spt/spt-base.svg)](http://oss.sonatype.org/com.github.dell-spt/spt-base)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dellspt/spt-base.svg)](https://hub.docker.com/r/dellspt/spt-base/)
-
 # Contents
 
 1. [Overview](#1-overview)
@@ -55,8 +47,8 @@ bottleneck.
 * [Composite Operations](doc/usage/load/operations/composite)
 
 * Complex Load Steps
-    * [Pipeline Load](https://github.com/dell-spt/spt-load-step-pipeline)
-    * [Weighted Load](https://github.com/dell-spt/spt-load-step-weighted)
+    * [Pipeline Load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/pipeline)
+    * [Weighted Load](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)
 * [Recycle Mode](doc/design/modes/recycle_mode)
 
 * [Data Reentrancy](doc/design/data_reentrancy)
@@ -109,18 +101,16 @@ scenario language, different load step kinds.
 ### 2.3.1. Load Steps
 
 The load step is needed to define how to generate the load (operations type/order/ratio/etc).
-Spt basically includes the linear load step implementation which may be considered as a straightforward way to 
-generate a load. Other load step implementations allow to specify some custom and more complex load pattern. See the 
-known load step extensions among the [bundle components](https://github.com/dell-spt/spt#bundle-contents) 
-either among the [additional extensions](https://github.com/dell-spt/spt#additional-extensions).
+Spt basically includes the linear load step implementation which may be considered as a straightforward way to
+generate a load. Other load step implementations allow to specify some custom and more complex load pattern. See the
+load step extensions in the [extensions/load-steps](../../extensions/load-steps) directory.
 
 ### 2.3.2. Storage Drivers
 
-The storage driver is used by Spt to interact with the given storage. It translates the Spt's abstract 
-operations into the actual I/O requests and executes them. Spt basically includes the dummy storage driver only 
-which does nothing actually and useful only for demo/testing purposes. See the known storage driver extensions among the
-[bundle components](https://github.com/dell-spt/spt#bundle-contents) either among the 
-[additional extensions](https://github.com/dell-spt/spt#additional-extensions).
+The storage driver is used by Spt to interact with the given storage. It translates the Spt's abstract
+operations into the actual I/O requests and executes them. Spt basically includes the dummy storage driver only
+which does nothing actually and useful only for demo/testing purposes. See the storage driver extensions in the
+[extensions/storage-drivers](../../extensions/storage-drivers) directory.
 
 ### 2.3.3. Scenario Engine
 
@@ -129,7 +119,5 @@ out-of-the-box.
 
 # 3. Bundles and Extenstions
 
-This repo (`spt-base`) containts only base functionality. All extentions and additional spt tools located into the independent repos and the corresponding components. Each component has its own documentation, CI versioning.
-
-[List of all bundles and extentions](https://github.com/dell-spt/spt)
+This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.
 

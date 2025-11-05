@@ -7,7 +7,7 @@ Library  RequestsLibrary
 ${LOG_DIR} =  build/log
 ${SPT_CONTAINER_DATA_DIR} =  /data
 ${SPT_CONTAINER_NAME} =  spt
-${SPT_IMAGE_NAME} =  dellspt/spt-storage-driver-s3
+${SPT_IMAGE_NAME} =  dcr.octo.dell.com/spt/spt-storage-driver-s3
 ${SPT_NODE_PORT} =  9999
 
 *** Keywords ***
