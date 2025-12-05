@@ -6,10 +6,15 @@
 # It sets up the environment and launches Spt with the provided arguments.
 #
 
-# Exit on any error
-set -e
+# Strict error handling:
+# -e: Exit on any error
+# -u: Treat unset variables as errors
+# -o pipefail is not available in /bin/sh, but we avoid pipes in critical paths
+set -eu
 
-# Set Java options if not already set
+# Set Java options with safe defaults if not already set
+# Use parameter expansion to handle unset JAVA_OPTS safely
+JAVA_OPTS="${JAVA_OPTS:-}"
 if [ -z "$JAVA_OPTS" ]; then
     # Default Java options for Spt
     # - Use G1GC for better latency
@@ -19,6 +24,8 @@ if [ -z "$JAVA_OPTS" ]; then
 fi
 
 # Additional Java options that can be set via environment variables
+# Use parameter expansion for safe handling of unset variables
+SPT_JAVA_OPTS="${SPT_JAVA_OPTS:-}"
 if [ -n "$SPT_JAVA_OPTS" ]; then
     export JAVA_OPTS="$JAVA_OPTS $SPT_JAVA_OPTS"
 fi

@@ -1,0 +1,46 @@
+# .dockerignore for SPT Engine Bundle
+#
+# Reduces build context size for multi-arch Docker builds.
+# Only includes files needed for the Docker image.
+
+# Exclude everything by default
+**
+
+# Include only what's needed for the image
+!build/dist/spt.jar
+!build/dist/ext/
+!build/dist/ext/**
+!build/dist/scenarios/
+!build/dist/scenarios/**
+!docker/
+!docker/entrypoint.sh
+!Dockerfile
+
+# Explicitly exclude build artifacts that shouldn't be in context
+build/tmp/
+build/reports/
+build/distributions/
+build/libs/
+build/classes/
+build/generated/
+build/test-results/
+
+# Exclude Gradle files
+.gradle/
+gradle/
+gradlew
+gradlew.bat
+*.gradle
+*.gradle.kts
+
+# Exclude IDE and editor files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# Exclude documentation
+*.md
+docs/
