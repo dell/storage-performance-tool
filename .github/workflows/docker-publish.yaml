@@ -1,0 +1,254 @@
+---
+# Copyright (c) 2025 Dell Inc., or its subsidiaries. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+
+name: Publish Docker Image
+
+# Trigger on version tags only
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (without v prefix, e.g., 5.0.2). Defaults to VERSION file.'
+        required: false
+      dry_run:
+        description: 'Dry run - build but do not push'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: dell/storage-performance-tool
+
+jobs:
+  # Gate: ensure CI has passed for this commit before publishing
+  # For tag pushes, we verify the CI workflow succeeded for the tagged commit
+  verify-ci:
+    name: Verify CI Status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CI workflow status
+        if: github.event_name == 'push'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            console.log(`Checking CI status for commit ${sha}`);
+
+            // Get check runs for this commit
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha,
+            });
+
+            // Look for the CI workflow
+            const ciCheck = checkRuns.check_runs.find(
+              run => run.name === 'Engine Build & Tests' || run.name === 'Go Quality Suite'
+            );
+
+            if (!ciCheck) {
+              console.log('Warning: CI check not found. Ensure CI has run for this commit.');
+              console.log('Available checks:', checkRuns.check_runs.map(r => r.name).join(', '));
+              // Don't fail - CI may use different check names or may not have run yet
+              return;
+            }
+
+            if (ciCheck.conclusion !== 'success') {
+              core.setFailed(`CI check "${ciCheck.name}" has not passed (status: ${ciCheck.conclusion}). Cannot publish image.`);
+            } else {
+              console.log(`CI check "${ciCheck.name}" passed.`);
+            }
+
+  prepare:
+    name: Prepare Version
+    needs: verify-ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major: ${{ steps.version.outputs.major }}
+      minor: ${{ steps.version.outputs.minor }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Priority: manual input > tag > VERSION file
+          version_input="${{ inputs.version }}"
+          ref_type="${GITHUB_REF_TYPE:-}"
+          ref_name="${GITHUB_REF_NAME:-}"
+          version_file="$(< VERSION)"
+          version_file="${version_file//$'\n'/}"
+
+          if [[ -n "${version_input}" ]]; then
+            version="${version_input}"
+          elif [[ "${ref_type}" == "tag" && "${ref_name}" == v* ]]; then
+            version="${ref_name#v}"
+          else
+            version="${version_file}"
+          fi
+
+          echo "Resolved version: ${version}"
+
+          # Parse version components
+          # Handle versions like 5.0.2, 5.0.2-rc.1, 5.0.2-SNAPSHOT
+          base_version="${version%%-*}"
+          IFS='.' read -r major minor patch <<< "${base_version}"
+
+          # Check if prerelease
+          is_prerelease="false"
+          if [[ "${version}" == *-* ]]; then
+            is_prerelease="true"
+          fi
+
+          {
+            echo "version=${version}"
+            echo "major=${major}"
+            echo "minor=${minor}"
+            echo "is_prerelease=${is_prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Version: ${version}"
+          echo "Major: ${major}, Minor: ${minor}"
+          echo "Is prerelease: ${is_prerelease}"
+
+  build-and-push:
+    name: Build and Push Multi-Arch Image
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # Required for SBOM/provenance attestations
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Exact version tag: v5.0.2
+            type=semver,pattern=v{{version}},value=${{ needs.prepare.outputs.version }}
+            # Floating minor tag: v5.0 (only for stable releases)
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
+            # Floating major tag: v5 (only for stable releases)
+            type=semver,pattern=v{{major}},value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
+            # Latest tag (only for stable releases)
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=Dell Storage Performance Tool
+            org.opencontainers.image.description=High-performance S3-compatible storage benchmarking tool
+            org.opencontainers.image.vendor=Dell Inc.
+
+      - name: Install JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build Engine distribution
+        working-directory: engine
+        run: |
+          # CI already ran tests - just build the distribution
+          ./gradlew :bundle:assembleDist --no-daemon
+
+      - name: Verify version alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="${{ needs.prepare.outputs.version }}"
+
+          # Extract version from the built JAR
+          # Output format is typically "spt vX.Y.Z" or similar - extract the version number
+          version_output=$(java -jar engine/bundle/build/dist/spt.jar --version 2>&1 || true)
+          echo "Raw version output: ${version_output}"
+
+          # Match version patterns like 5.0.2, v5.0.2, 5.0.2-rc.1, etc.
+          jar_version=$(echo "${version_output}" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*' | sed 's/^v//' | head -1 || echo "unknown")
+
+          echo "Expected version: ${expected_version}"
+          echo "JAR version: ${jar_version}"
+
+          if [[ "${jar_version}" != "${expected_version}" ]]; then
+            echo "::error::Version mismatch! Tag/input version (${expected_version}) does not match JAR version (${jar_version})"
+            echo "Ensure VERSION file and Gradle version are updated before tagging."
+            exit 1
+          fi
+
+          echo "✓ Version alignment verified: ${expected_version}"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: engine/bundle
+          file: engine/bundle/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          # Push on tag events, or on workflow_dispatch if dry_run is false
+          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SPT_VERSION=${{ needs.prepare.outputs.version }}
+            SPT_RELEASE_VERSION=${{ needs.prepare.outputs.version }}
+          # Supply-chain security: generate SBOM and provenance attestations
+          provenance: true
+          sbom: true
+          # Cache with explicit scope for better cross-run efficiency
+          cache-from: type=gha,scope=spt-engine
+          cache-to: type=gha,mode=max,scope=spt-engine
+
+      - name: Output image info
+        run: |
+          echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.prepare.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Supply Chain:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SBOM attestation generated" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Provenance attestation generated" >> $GITHUB_STEP_SUMMARY

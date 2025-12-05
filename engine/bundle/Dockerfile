@@ -6,15 +6,28 @@
 # Build context should be the bundle directory after running the build.
 
 # Allow overriding the base image (default pins Eclipse Temurin JRE 21 LTS)
-ARG BASE_IMAGE=eclipse-temurin:21.0.7_6-jre-jammy
+# Pinned to digest for reproducibility - update via Dependabot/Renovate
+# To find latest digest: docker buildx imagetools inspect eclipse-temurin:21-jre-jammy
+ARG BASE_IMAGE=eclipse-temurin:21.0.9_10-jre-jammy@sha256:2843f155a9fe5aab6a73a71a9f65c38143e8e929366a1a7787f07c2a89c26887
 ARG SPT_VERSION=0.0.0-dev
 ARG SPT_RELEASE_VERSION=${SPT_VERSION}
 FROM ${BASE_IMAGE}
 
-# Metadata
-LABEL maintainer="spt-dev@dell.com"
-LABEL description="Spt Storage Performance Testing Tool - Bundle"
-LABEL version="${SPT_VERSION}"
+# Re-declare ARGs after FROM to make them available
+ARG SPT_VERSION
+ARG SPT_RELEASE_VERSION
+
+# OCI Image Spec labels
+# These provide standard metadata for container registries
+# See: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+LABEL org.opencontainers.image.title="Dell Storage Performance Tool" \
+      org.opencontainers.image.description="High-performance S3-compatible storage benchmarking tool" \
+      org.opencontainers.image.version="${SPT_VERSION}" \
+      org.opencontainers.image.vendor="Dell Technologies" \
+      org.opencontainers.image.url="https://github.com/dell/storage-performance-tool" \
+      org.opencontainers.image.source="https://github.com/dell/storage-performance-tool" \
+      org.opencontainers.image.licenses="MIT" \
+      maintainer="spt-dev@dell.com"
 
 # Install runtime dependencies
 # Note: Temurin images already include the JRE, so install only basic tools
