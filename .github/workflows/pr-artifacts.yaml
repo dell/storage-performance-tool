@@ -25,7 +25,7 @@ jobs:
     steps:
       - name: Checkout
         if: ${{ !env.ACT }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Go
         if: ${{ !env.ACT }}
@@ -52,7 +52,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install JDK 21 for act
         if: ${{ env.ACT }}
