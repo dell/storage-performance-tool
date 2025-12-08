@@ -1,5 +1,3 @@
-### WARNING: TECH PREVIEW RELEASE - This warning will be removed when CI/CD builds are in place and tool is fully ready for use
-
 # Dell Storage Performance Tool (SPT)
 
 The Dell **Storage Performance Tool (SPT)** is an open-source benchmark suite purpose-built for S3-compatible storage. SPT couples a task-oriented CLI/TUI with a high-performance engine so you can:

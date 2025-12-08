@@ -262,7 +262,7 @@ cache-report:
 # Docker targets ---------------------------------------------------------------
 
 # Docker registry configuration
-DOCKER_REGISTRY := dcr.octo.dell.com
+DOCKER_REGISTRY := ghcr.io
 DOCKER_NAMESPACE := spt
 DOCKER_IMAGE := $(DOCKER_REGISTRY)/$(DOCKER_NAMESPACE)/spt
 DOCKER_TAG := $(SPT_VERSION)

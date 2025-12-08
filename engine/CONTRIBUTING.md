@@ -21,7 +21,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 1. Fork the repository
 2. Clone your fork: `git clone <your-fork-url>`
-3. Add upstream remote: `git remote add upstream git@eos2git.cec.lab.dell.com:VSSW/spt.git`
+3. Add upstream remote: `git remote add upstream git@github.com:dell/storage-performance-tool.git`
 4. Create a feature branch: `git checkout -b feature/your-feature-name`
 
 ## Development Setup

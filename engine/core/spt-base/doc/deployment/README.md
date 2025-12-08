@@ -42,7 +42,7 @@ http://central.maven.org/maven2/io/github/dell/spt/spt-base/
 
 # Docker
 
-Spt images are stored in the [Docker Hub](Dell internal registry at dcr.octo.dell.com/spt/)
+Spt images are stored in [GitHub Container Registry](https://ghcr.io/dell/storage-performance-tool)
 
 ## Base image
 
@@ -56,7 +56,7 @@ The image may be used in the standalone mode:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     [<SPT CLI ARGS>]
 ```
 
@@ -67,7 +67,7 @@ An example for mounting and using a scenario. Thus, files for input/output, conf
 ```
 docker run -d --network host  \
     -v /path/to/scenario.js:/opt/scenario.js \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     --run-scenario=/opt/scenario.js
 ``` 
 
@@ -83,7 +83,7 @@ Additional node run command:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     --run-node 
 ```
 
@@ -95,7 +95,7 @@ Entry node run command:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     --load-step-node-addrs=<ADDR1,ADDR2:PORT,ADDR3...> \
     [<SPT CLI ARGS>]
 ```
@@ -109,7 +109,7 @@ docker run \
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     --run-node \
     --load-step-node-port=<CUSTOM RMI PORT> \
     --run-port=<CUSTOM HTTP PORT> 
@@ -119,7 +119,7 @@ docker run \
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt[-<TYPE>] \
+    ghcr.io/dell/storage-performance-tool \
     --load-step-node-addrs=ADDR:<CUSTOM RMI PORT> \
     [<SPT CLI ARGS>]
 ```
@@ -150,7 +150,7 @@ The example below mounts the host's directory `./log` to the container's
 docker run \
     --network host \
     --mount type=bind,source="$(pwd)"/log,target=/root/.spt/<VERSION>/log
-    dcr.octo.dell.com/spt/<IMAGE> \
+    ghcr.io/dell/storage-performance-tool \
     [<SPT CLI ARGS>]
 ```
 
@@ -163,11 +163,11 @@ At first it's need to build new docker image for debug:
 
 
 ```bash
-docker build --build-arg SPT_VERSION=latest -f ci/docker/Dockerfile.debug -t dcr.octo.dell.com/spt/<IMAGE>:debug .
+docker build --build-arg SPT_VERSION=latest -f ci/docker/Dockerfile.debug -t ghcr.io/dell/storage-performance-tool:debug .
 ```
 or with `SPT_VERSION` value bt default (latest):
 ```bash
-docker build -f ci/docker/Dockerfile.debug -t dcr.octo.dell.com/spt/<IMAGE>:debug .
+docker build -f ci/docker/Dockerfile.debug -t ghcr.io/dell/storage-performance-tool:debug .
 ```
 
 and run:
@@ -175,7 +175,7 @@ and run:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/<IMAGE>:debug \
+    ghcr.io/dell/storage-performance-tool:debug \
     [<SPT CLI ARGS>]
 ```
 
@@ -192,9 +192,9 @@ Check:
 ```bash
 # docker ps
 CONTAINER ID        IMAGE                                      COMMAND                  CREATED             STATUS              PORTS                                            NAMES
-6e3ec1f837c8        dcr.octo.dell.com/spt/spt-base:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1091->1099/tcp, 0.0.0.0:9991->9999/tcp   spt_spt-node_3
-f671b77ffd27        dcr.octo.dell.com/spt/spt-base:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1093->1099/tcp, 0.0.0.0:9993->9999/tcp   spt_spt-node_2
-40255c0a91d9        dcr.octo.dell.com/spt/spt-base:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1092->1099/tcp, 0.0.0.0:9992->9999/tcp   spt_spt-node_1
+6e3ec1f837c8        ghcr.io/dell/storage-performance-tool:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1091->1099/tcp, 0.0.0.0:9991->9999/tcp   spt_spt-node_3
+f671b77ffd27        ghcr.io/dell/storage-performance-tool:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1093->1099/tcp, 0.0.0.0:9993->9999/tcp   spt_spt-node_2
+40255c0a91d9        ghcr.io/dell/storage-performance-tool:latest           "/opt/spt/entry…"   14 seconds ago      Up 12 seconds       0.0.0.0:1092->1099/tcp, 0.0.0.0:9992->9999/tcp   spt_spt-node_1
 ...
 ```
 
@@ -202,7 +202,7 @@ f671b77ffd27        dcr.octo.dell.com/spt/spt-base:latest           "/opt/spt/en
 ```bash
 docker run -d --name spt \
               --network host \
-              dcr.octo.dell.com/spt/spt-base:latest \
+              ghcr.io/dell/storage-performance-tool:latest \
             --load-step-node-addrs=localhost:1091,localhost:1092,localhost:1093
 ```
 
@@ -210,7 +210,7 @@ or with created network `spt_default`:
 ```bash
 docker run -d --name spt \
               --network spt_default \
-              dcr.octo.dell.com/spt/spt-base:latest \
+              ghcr.io/dell/storage-performance-tool:latest \
             --load-step-node-addrs=spt_spt-node_1,spt_spt-node_2,spt_spt-node_3
 ```
 
@@ -241,7 +241,7 @@ docker stack deploy --compose-file docker-swarm.yaml spt-nodes
 ```
 $ docker stack ps spt-nodes
  ID                  NAME                       IMAGE                              NODE                DESIRED STATE       CURRENT STATE           ERROR               PORTS
- sy6krxo9vnj3        spt-nodes_spt-node.1   dcr.octo.dell.com/spt/spt-base:latest   node5               Running             Running 1 second ago
+ sy6krxo9vnj3        spt-nodes_spt-node.1   ghcr.io/dell/storage-performance-tool:latest   node5               Running             Running 1 second ago
 
 $ curl -I node5:9999/run
 HTTP/1.1 204 No Content
@@ -254,9 +254,9 @@ export REPLICAS=3; docker stack deploy --compose-file docker-swarm.yaml spt-node
 ```
 $ docker stack ps spt-nodes
 ID                  NAME                       IMAGE                              NODE                DESIRED STATE       CURRENT STATE           ERROR               PORTS
-sy6krxo9vnj3        spt-nodes_spt-node.1   dcr.octo.dell.com/spt/spt-base:latest   node5               Running             Running 1 second ago
-6m9d04e75ybd        spt-nodes_spt-node.2   dcr.octo.dell.com/spt/spt-base:latest   node4               Running             Running 3 seconds ago
-x7euup6ihumb        spt-nodes_spt-node.3   dcr.octo.dell.com/spt/spt-base:latest   node6               Running             Running 2 seconds ago
+sy6krxo9vnj3        spt-nodes_spt-node.1   ghcr.io/dell/storage-performance-tool:latest   node5               Running             Running 1 second ago
+6m9d04e75ybd        spt-nodes_spt-node.2   ghcr.io/dell/storage-performance-tool:latest   node4               Running             Running 3 seconds ago
+x7euup6ihumb        spt-nodes_spt-node.3   ghcr.io/dell/storage-performance-tool:latest   node6               Running             Running 2 seconds ago
 ```
 
 also you can specify `IMAGE` and `TAG` to use custom spt docker image:tag

@@ -10,7 +10,7 @@ Library        RequestsLibrary
 ${LOG_DIR}                      build/log
 ${SPT_CONTAINER_DATA_DIR}  /data
 ${SPT_CONTAINER_NAME}      spt
-${SPT_IMAGE_NAME}          dcr.octo.dell.com/spt/spt-base
+${SPT_IMAGE_NAME}          ghcr.io/dell/storage-performance-tool
 
 
 

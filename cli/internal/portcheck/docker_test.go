@@ -25,9 +25,9 @@ func TestIsSptContainer(t *testing.T) {
 			expected:  false,
 		},
 		{
-			name: "dcr.octo.dell.com/spt/spt image",
+			name: "ghcr.io/dell/storage-performance-tool image",
 			container: &ContainerInfo{
-				Image: "dcr.octo.dell.com/spt/spt:latest",
+				Image: "ghcr.io/dell/storage-performance-tool:latest",
 				Name:  "test-container",
 			},
 			expected: true,
@@ -35,7 +35,7 @@ func TestIsSptContainer(t *testing.T) {
 		{
 			name: "dell internal spt image",
 			container: &ContainerInfo{
-				Image: "dcr.octo.dell.com/spt/spt:5.0.2",
+				Image: "ghcr.io/dell/storage-performance-tool:5.0.2",
 				Name:  "spt-test",
 			},
 			expected: true,

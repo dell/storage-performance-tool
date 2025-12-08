@@ -21,7 +21,7 @@ func TestAggregateBuildsSummary(t *testing.T) {
 		Params: &RunParams{
 			GeneratedAt:        time.Date(2025, 9, 26, 17, 27, 28, 739494359, time.UTC),
 			WorkloadType:       "write",
-			SptImage:           "dcr.octo.dell.com/spt/spt",
+			SptImage:           "ghcr.io/dell/storage-performance-tool",
 			APIPort:            "9999",
 			BaseURL:            "http://spt-test-1.cec.delllabs.net:9999",
 			Label:              "mt",

@@ -10,8 +10,8 @@ A modern command-line interface wrapper for the Spt benchmarking tool, designed 
 
 ```bash
 # Build the tool
-git clone https://eos2git.cec.lab.dell.com/VSSW/spt-poc.git
-cd spt-poc
+git clone https://github.com/dell/storage-performance-tool.git
+cd storage-performance-tool/cli
 make build
 
 # Run a simple mock benchmark (no S3 endpoint required!)
@@ -105,7 +105,7 @@ Dependency management: this project does not vendor dependencies. Builds and tes
 
 ### Docker Requirements
 
-spt requires Docker to be installed and running. The tool uses the Spt container image (`dcr.octo.dell.com/spt/spt`) to execute benchmarks.
+spt requires Docker to be installed and running. The tool uses the Spt container image (`ghcr.io/dell/storage-performance-tool`) to execute benchmarks.
 
 If you encounter Docker-related errors:
 - Verify Docker is installed: `docker --version`
@@ -117,8 +117,8 @@ If you encounter Docker-related errors:
 ### Building from Source
 
 ```bash
-git clone https://eos2git.cec.lab.dell.com/VSSW/spt-poc.git
-cd spt-poc
+git clone https://github.com/dell/storage-performance-tool.git
+cd storage-performance-tool/cli
 make build
 ```
 
@@ -484,7 +484,7 @@ Lists and inspects past benchmark results. This feature is under development.
 ### Project Structure
 
 ``` text
-spt-poc/
+cli/
 ├── cmd/                  # Command implementations
 ├── tui/                  # Terminal UI components  
 ├── internal/
@@ -588,7 +588,7 @@ When no TTY is available (CI/CD environments, Docker containers, etc.), spt auto
 
 ```
 [2025-08-06 14:23:45] [INIT] Starting spt in headless mode
-[2025-08-06 14:23:45] [DOCKER] Starting container with image: dcr.octo.dell.com/spt/spt
+[2025-08-06 14:23:45] [DOCKER] Starting container with image: ghcr.io/dell/storage-performance-tool
 [2025-08-06 14:23:46] [DOCKER] Container started: abc123def456
 [2025-08-06 14:23:47] [SPT] Spt v5.0.2 starting...
 [2025-08-06 14:23:48] [METRICS] ops/sec=45 latency=1024µs type=CREATE success=100 concurrency=8.0

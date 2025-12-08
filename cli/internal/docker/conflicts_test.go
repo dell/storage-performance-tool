@@ -556,7 +556,7 @@ func TestPortChecker_containsSptContainers(t *testing.T) {
 				{
 					ID:    "abc123",
 					Name:  "test-container",
-					Image: "dcr.octo.dell.com/spt/spt",
+					Image: "ghcr.io/dell/storage-performance-tool",
 					State: "running",
 				},
 			},
@@ -698,7 +698,7 @@ func TestConflictInfo_GetSptContainers(t *testing.T) {
 		{
 			ID:    "ghi789",
 			Name:  "regular-container",
-			Image: "dcr.octo.dell.com/spt/spt",
+			Image: "ghcr.io/dell/storage-performance-tool",
 			State: "exited",
 		},
 		{
@@ -727,7 +727,7 @@ func TestConflictInfo_GetSptContainers(t *testing.T) {
 		if container.Name == "spt-verify-test" {
 			foundVerify = true
 		}
-		if strings.Contains(container.Image, "spt") {
+		if strings.Contains(container.Image, "spt") || strings.Contains(container.Image, "storage-performance-tool") {
 			foundSpt = true
 		}
 	}

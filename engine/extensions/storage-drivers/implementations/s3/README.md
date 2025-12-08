@@ -98,7 +98,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     [<SPT CLI ARGS>]
 ```
@@ -111,7 +111,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --run-node
 ```
 
@@ -119,7 +119,7 @@ docker run \
 > ```bash
 > docker run \
 >    --network host \
->    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+>    ghcr.io/dell/storage-performance-tool \
 >    --run-node \
 >    --load-step-node-port=<RMI PORT> \
 >    --run-port=<REST PORT> 
@@ -131,7 +131,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --load-step-node-addrs=<ADDR1,ADDR2,...> \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     [<SPT CLI ARGS>]
@@ -209,7 +209,7 @@ Command line example:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --item-input-file=objects_to_update_tagging.csv \
@@ -256,7 +256,7 @@ Example:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --read \
     --item-input-path=/bucket1 \
@@ -271,7 +271,7 @@ https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectTagging.html
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --delete \
     --item-input-file=objects_to_delete_tagging.csv \
@@ -294,7 +294,7 @@ There are two approaches to do load testing with versioning. But first stage is 
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -316,7 +316,7 @@ that `recycle-mode` doesn't guarantee the exact amount of versions per object. B
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -348,7 +348,7 @@ for i in {1..1000}; do cat itemsInitialList.csv; done > itemsWithVersionsList.cs
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
@@ -373,7 +373,7 @@ PUT load:
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --load-op-type=read \
     --storage-auth-secret=**************************************** \
@@ -389,7 +389,7 @@ DELETEs are also simple. An `input-file` is again required.
 ```bash
 docker run \
     --network host \
-    dcr.octo.dell.com/spt/spt-storage-driver-s3 \
+    ghcr.io/dell/storage-performance-tool \
     --storage-auth-uid=user1 \ 
     --load-op-type=delete \
     --storage-auth-secret=**************************************** \
@@ -416,7 +416,7 @@ docker run -d --name s3_server \
 Spt run:
 ```
 docker run --network host \
-        dcr.octo.dell.com/spt/spt-storage-driver-s3  \
+        ghcr.io/dell/storage-performance-tool  \
         --storage-net-node-port=9000 \
         --storage-auth-uid=user1 \
         --storage-auth-secret=secretKey1 \

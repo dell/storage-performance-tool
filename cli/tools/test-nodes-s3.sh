@@ -53,7 +53,7 @@ if [ -z "$WORKER_HOSTS" ]; then
     WORKER_HOSTS="root@spt-test-2.cec.delllabs.net,root@spt-test-3.cec.delllabs.net,root@spt-test-4.cec.delllabs.net"
   fi
 fi
-SPT_IMAGE=${SPT_IMAGE:-"dcr.octo.dell.com/spt/spt"}
+SPT_IMAGE=${SPT_IMAGE:-"ghcr.io/dell/storage-performance-tool"}
 RUN_PORT=${RUN_PORT:-9999}
 RMI_PORT=${RMI_PORT:-1099}
 

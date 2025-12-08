@@ -29,7 +29,7 @@ PRIMARY_HOST=${PRIMARY_HOST:-}
 WORKER_HOSTS=${WORKER_HOSTS:-${HOSTS:-}}
 RUN_PORT=${RUN_PORT:-9999}
 RMI_PORT=${RMI_PORT:-1099}
-SPT_IMAGE=${SPT_IMAGE:-${SPT_IMAGE:-"dcr.octo.dell.com/spt/spt"}}
+SPT_IMAGE=${SPT_IMAGE:-${SPT_IMAGE:-"ghcr.io/dell/storage-performance-tool"}}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}
 ENTRY_CONTAINER_NAME=${ENTRY_CONTAINER_NAME:-spt-primary}
 

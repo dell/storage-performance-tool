@@ -242,6 +242,7 @@ func (info *ConflictInfo) GetSptContainers() []*ContainerInfo {
 	sptContainers := make([]*ContainerInfo, 0)
 	for _, container := range info.Containers {
 		if strings.Contains(container.Image, "spt") ||
+			strings.Contains(container.Image, "storage-performance-tool") ||
 			strings.HasPrefix(container.Name, "spt-verify") {
 			sptContainers = append(sptContainers, container)
 		}

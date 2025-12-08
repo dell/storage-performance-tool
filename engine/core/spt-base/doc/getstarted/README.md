@@ -5,7 +5,7 @@ It's recommended to begin by exploring the 👉 **[basic terms](../design/archit
 ## Simple deploy
 
 ```
-docker run --network host dcr.octo.dell.com/spt/spt-base
+docker run --network host ghcr.io/dell/storage-performance-tool
 ```
 
 ☝️ This command will launch spt in **standalone mode**, and the **storage mock** will be used as the tested storage.
@@ -20,7 +20,7 @@ docker run --network host dcr.octo.dell.com/spt/spt-base
 Spt supports CRUD (Create/Read/Update/Delete) notation for **load operations**.
 
 ```
-docker run --network host dcr.octo.dell.com/spt/spt-base \
+docker run --network host ghcr.io/dell/storage-performance-tool \
     --load-op-limit-count=10000 \
     --item-data-size=1KB
 ```
@@ -28,7 +28,7 @@ docker run --network host dcr.octo.dell.com/spt/spt-base \
 ☝️ This command will **"create"** 10000 "[items](../design/architecture#1-basic-terms)" on storage (in this case not real storage, but storage mock) and each "item" will have size "1KB".
 
 ```
-docker run --network host dcr.octo.dell.com/spt/spt-base \
+docker run --network host ghcr.io/dell/storage-performance-tool \
     --read \
     --item-input-path="some path to item on storage" \
     --load-step-limit-time=60s \
@@ -55,7 +55,7 @@ Run with mounted scenario:
 ```
 docker run -d --network host  \
     -v $(pwd)/scenario1.js:/opt/scenario.js \
-    dcr.octo.dell.com/spt/spt-base \
+    ghcr.io/dell/storage-performance-tool \
     --run-scenario=/opt/scenario.js
     --load-step-limit-time=20s
 ```
@@ -91,7 +91,7 @@ Run with mounted scenario:
 ```
 docker run -d --network host  \
     -v $(pwd)/scenario2.js:/opt/scenario.js \
-    dcr.octo.dell.com/spt/spt-base \
+    ghcr.io/dell/storage-performance-tool \
     --run-scenario=/opt/scenario.js
     --load-step-limit-time=20s
 ```

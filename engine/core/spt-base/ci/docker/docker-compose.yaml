@@ -2,7 +2,7 @@ version: '3'
 
 services:
   spt-node:
-    image: ${IMAGE:-dcr.octo.dell.com/spt/spt-base}:${TAG:-latest}
+    image: ${IMAGE:-ghcr.io/dell/storage-performance-tool}:${TAG:-latest}
     command: ["--run-node"]
     ports:
       - "1090-1098:1099"

@@ -14,7 +14,7 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 		GeneratedAt: time.Date(2025, 9, 26, 17, 27, 28, 0, time.UTC),
 		Environment: EnvironmentSummary{
 			BaseURL:            "http://spt-test-1.cec.delllabs.net:9999",
-			SptImage:           "dcr.octo.dell.com/spt/spt",
+			SptImage:           "ghcr.io/dell/storage-performance-tool",
 			Hosts:              []HostSummary{{Original: "root@spt-test-1.cec.delllabs.net"}},
 			AutoResults:        true,
 			ShutdownOnComplete: true,
