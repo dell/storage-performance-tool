@@ -29,6 +29,9 @@ LABEL org.opencontainers.image.title="Dell Storage Performance Tool" \
       org.opencontainers.image.licenses="MIT" \
       maintainer="spt-dev@dell.com"
 
+# Legacy version label for backwards compatibility with version sync checks
+LABEL version="${SPT_VERSION}"
+
 # Install runtime dependencies
 # Note: Temurin images already include the JRE, so install only basic tools
 RUN apt-get update && \
