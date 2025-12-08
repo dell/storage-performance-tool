@@ -15,7 +15,7 @@ version: '3.8'
 services:
   # Basic Spt service with built-in scenario
   spt-basic:
-    image: dcr.octo.dell.com/spt/spt:latest
+    image: ghcr.io/dell/storage-performance-tool:latest
     command:
       - --run-scenario=/opt/spt/scenarios/js/default.js
       - --storage-driver-type=s3
@@ -30,7 +30,7 @@ services:
 
   # Spt with custom scenario from local filesystem
   spt-custom:
-    image: dcr.octo.dell.com/spt/spt:latest
+    image: ghcr.io/dell/storage-performance-tool:latest
     command:
       - --run-scenario=/workspace/my-custom-scenario.js
       - --storage-driver-type=s3
@@ -44,7 +44,7 @@ services:
 
   # Spt with weighted load scenario
   spt-weighted:
-    image: dcr.octo.dell.com/spt/spt:latest
+    image: ghcr.io/dell/storage-performance-tool:latest
     command:
       - --run-scenario=/opt/spt/scenarios/js/types/weighted.js
       - --storage-driver-type=s3
@@ -59,7 +59,7 @@ services:
 
   # Example: File system storage driver
   spt-filesystem:
-    image: dcr.octo.dell.com/spt/spt:latest
+    image: ghcr.io/dell/storage-performance-tool:latest
     command:
       - --run-scenario=/opt/spt/scenarios/js/default.js
       - --storage-driver-type=fs

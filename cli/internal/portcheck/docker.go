@@ -206,8 +206,8 @@ func IsSptContainer(container *ContainerInfo) bool {
 	// Known Spt image patterns
 	sptImages := []string{
 		"spt",
-		"dcr.octo.dell.com/spt/spt",
-		"dcr.octo.dell.com/spt/spt",
+		"ghcr.io/dell/storage-performance-tool",
+		"ghcr.io/dell/storage-performance-tool",
 	}
 
 	imageLower := strings.ToLower(container.Image)

@@ -83,7 +83,7 @@ func TestFilterContainersByImage(t *testing.T) {
 		{ID: "1", Image: "spt:5"},
 		{ID: "2", Image: "nginx:latest"},
 	}
-	match, non := vcr.filterContainersByImage(in, "dcr.octo.dell.com/spt/spt")
+	match, non := vcr.filterContainersByImage(in, "ghcr.io/dell/storage-performance-tool")
 	if len(match) != 1 || len(non) != 1 || match[0].ID != "1" {
 		t.Fatalf("unexpected split: match=%#v non=%#v", match, non)
 	}

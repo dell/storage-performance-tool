@@ -15,7 +15,7 @@ if [ -z "${WORKER_HOSTS}" ]; then
   HOSTS=${HOSTS:-"root@spt-test-1.cec.delllabs.net,root@spt-test-2.cec.delllabs.net,root@spt-test-3.cec.delllabs.net,root@spt-test-4.cec.delllabs.net"}
   WORKER_HOSTS="$HOSTS"
 fi
-SPT_IMAGE=${SPT_IMAGE:-"dcr.octo.dell.com/spt/spt"}
+SPT_IMAGE=${SPT_IMAGE:-"ghcr.io/dell/storage-performance-tool"}
 RUN_PORT=${RUN_PORT:-9999}
 RMI_PORT=${RMI_PORT:-1099}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}

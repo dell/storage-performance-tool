@@ -8,7 +8,7 @@ ADD gradlew ./gradlew
 ADD settings.gradle ./settings.gradle
 RUN ./gradlew clean jar
 
-FROM dcr.octo.dell.com/spt/spt-base:${BASE_VERSION}
+FROM ghcr.io/dell/storage-performance-tool:${BASE_VERSION}
 ARG BASE_VERSION
 ARG STORAGE_DRIVER_COOP_VERSION
 ARG STORAGE_DRIVER_NIO_VERSION

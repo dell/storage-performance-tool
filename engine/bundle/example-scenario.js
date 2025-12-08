@@ -10,7 +10,7 @@
 //   docker run --rm \
 //     -v $(pwd):/workspace \
 //     -v $(pwd)/logs:/home/spt/log \
-//     dellspt/spt:latest \
+//     ghcr.io/dell/storage-performance-tool:latest \
 //     --run-scenario=/workspace/example-scenario.js
 
 // Configuration that will be shared across all load steps

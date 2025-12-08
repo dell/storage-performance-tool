@@ -64,7 +64,7 @@ func TestGenerateRunSummaryCreatesFileAndSnippet(t *testing.T) {
 	meta := &runMetadata{
 		GeneratedAt:        time.Date(2025, 9, 26, 17, 27, 28, 0, time.UTC),
 		WorkloadType:       "write",
-		SptImage:           "dcr.octo.dell.com/spt/spt",
+		SptImage:           "ghcr.io/dell/storage-performance-tool",
 		APIPort:            "9999",
 		BaseURL:            "http://spt-test-1.cec.delllabs.net:9999",
 		Label:              "mt",
@@ -157,7 +157,7 @@ func TestGenerateRunSummaryHandlesListWorkload(t *testing.T) {
 	meta := &runMetadata{
 		GeneratedAt:        time.Date(2025, 9, 30, 12, 0, 0, 0, time.UTC),
 		WorkloadType:       "list",
-		SptImage:           "dcr.octo.dell.com/spt/spt",
+		SptImage:           "ghcr.io/dell/storage-performance-tool",
 		APIPort:            "9999",
 		BaseURL:            "http://localhost:9999",
 		Label:              "mt",

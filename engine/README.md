@@ -33,8 +33,8 @@ The project uses Gradle with the Gradle Wrapper for building. This ensures consi
 
 ```bash
 # Clone the repository
-git clone git@eos2git.cec.lab.dell.com:VSSW/spt.git
-cd spt
+git clone git@github.com:dell/storage-performance-tool.git
+cd storage-performance-tool/engine
 
 # Build all components using Gradle Wrapper
 ./gradlew clean build -x test    # Unix/Linux/macOS
@@ -142,14 +142,14 @@ This creates debug configurations for:
 make docker
 
 # Run a simple test
-docker run --rm dcr.octo.dell.com/spt/spt:latest \
+docker run --rm ghcr.io/dell/storage-performance-tool:latest \
   --storage-driver-type=s3 \
   --storage-net-node-addrs=your-s3-endpoint.com \
   --storage-auth-uid=your-access-key \
   --storage-auth-secret=your-secret-key
 
 # Run with a built-in scenario
-docker run --rm dcr.octo.dell.com/spt/spt:latest \
+docker run --rm ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/opt/spt/scenarios/js/types/weighted.js \
   --storage-driver-type=s3 \
   --storage-net-node-addrs=localhost:9000
@@ -158,7 +158,7 @@ docker run --rm dcr.octo.dell.com/spt/spt:latest \
 docker run --rm \
   -v $(pwd):/workspace \
   -v $(pwd)/logs:/home/spt/log \
-  dcr.octo.dell.com/spt/spt:latest \
+  ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/workspace/my-scenario.js
 
 # List available built-in scenarios
@@ -182,7 +182,7 @@ docker run --rm \
   -v $(pwd)/scenarios:/workspace \
   -v $(pwd)/logs:/home/spt/log \
   -v $(pwd)/data:/data \
-  dcr.octo.dell.com/spt/spt:latest \
+  ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/workspace/my-test.js
 ```
 

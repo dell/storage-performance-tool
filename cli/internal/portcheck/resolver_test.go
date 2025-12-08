@@ -371,7 +371,7 @@ func TestConflictResolver_displayConflictInfo(t *testing.T) {
 		Container: &ContainerInfo{
 			ID:    "abc123def456789",
 			Name:  "spt-test",
-			Image: "dcr.octo.dell.com/spt/spt:latest",
+			Image: "ghcr.io/dell/storage-performance-tool:latest",
 			State: "running",
 		},
 	}

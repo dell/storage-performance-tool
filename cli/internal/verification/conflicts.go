@@ -323,6 +323,7 @@ func (info *VerificationConflictInfo) GetSptContainers() []*VerificationContaine
 	sptContainers := make([]*VerificationContainer, 0)
 	for _, container := range info.Containers {
 		if strings.Contains(container.Image, "spt") ||
+			strings.Contains(container.Image, "storage-performance-tool") ||
 			strings.HasPrefix(container.Name, "spt-verify") {
 			sptContainers = append(sptContainers, container)
 		}
@@ -536,7 +537,7 @@ func (vcr *VerificationConflictResolver) displayConflictInfo(info *VerificationC
 
 		// Show SSH commands to stop containers if not using force cleanup
 		if !vcr.forceMode {
-			targetImage := "dcr.octo.dell.com/spt/spt" // Our target image
+			targetImage := "ghcr.io/dell/storage-performance-tool" // Our target image
 			stopCommands := info.GenerateSSHStopCommands(targetImage)
 			if len(stopCommands) > 0 {
 				fmt.Printf("\nTo manually stop conflicting containers, run:\n")
@@ -620,7 +621,7 @@ func (vcr *VerificationConflictResolver) executeForceResolution(ctx context.Cont
 	logging.LogInfo("verify-conflicts", "executing force resolution", "host", info.Host.Host)
 	fmt.Printf("[FORCE] Port conflicts on %s - attempting automated cleanup\n", info.Host.Host)
 
-	targetImage := "dcr.octo.dell.com/spt/spt"
+	targetImage := "ghcr.io/dell/storage-performance-tool"
 	matchingContainers, nonMatchingContainers := vcr.filterContainersByImage(info.Containers, targetImage)
 
 	if len(matchingContainers) > 0 {

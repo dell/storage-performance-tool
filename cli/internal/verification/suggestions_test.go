@@ -92,7 +92,7 @@ func TestDisplayConflictInfo_ShowsForceCleanupTip(t *testing.T) {
 		Host:          &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true},
 		ConflictPorts: []int{1099},
 		Containers: []*VerificationContainer{
-			{ID: "abcdef0123456789", Name: "spt-verify-z", Image: "dcr.octo.dell.com/spt/spt", Ports: []string{"0.0.0.0:1099->1099/tcp"}},
+			{ID: "abcdef0123456789", Name: "spt-verify-z", Image: "ghcr.io/dell/storage-performance-tool", Ports: []string{"0.0.0.0:1099->1099/tcp"}},
 		},
 		PortDetails: map[int][]string{
 			1099: {"tcp LISTEN 0 128 0.0.0.0:1099 0.0.0.0:* users:(\"docker-proxy\",pid=2222,fd=2)"},

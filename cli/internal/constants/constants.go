@@ -89,8 +89,10 @@ const (
 
 // Docker image references
 const (
+	// LegacyMongooseImage is the old internal Dell registry (deprecated)
 	LegacyMongooseImage = "dcr.octo.dell.com/mongoose-v5/mongoose"
-	DefaultSptImage     = LegacyMongooseImage
+	// DefaultSptImage is the official GHCR image for SPT
+	DefaultSptImage = "ghcr.io/dell/storage-performance-tool"
 )
 
 // REST API endpoint constants
