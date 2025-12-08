@@ -78,6 +78,23 @@ check_contains "engine/bundle/build.gradle" "rootProject.ext.SPT_VERSION"
 check_contains "engine/bundle/Dockerfile" "ARG SPT_VERSION="
 check_contains "engine/bundle/Dockerfile" "LABEL version=\"\${SPT_VERSION}\""
 
+# Check that defaults.yaml contains the correct version
+# This is critical because spt-base/build.gradle reads version from defaults.yaml
+check_version_in_yaml() {
+	local file="$1"
+	if [[ ! -f "${ROOT_DIR}/${file}" ]]; then
+		errors+=("Expected file ${file} not found")
+		return
+	fi
+	local yaml_version
+	yaml_version=$(grep -E '^\s*version:\s*' "${ROOT_DIR}/${file}" | tail -1 | sed 's/.*version:\s*//' | tr -d '[:space:]')
+	if [[ -n "${REPO_VERSION}" && "${yaml_version}" != "${REPO_VERSION}" ]]; then
+		errors+=("Version in ${file} is '${yaml_version}' but VERSION file has '${REPO_VERSION}'")
+	fi
+}
+
+check_version_in_yaml "engine/core/spt-base/src/main/resources/config/defaults.yaml"
+
 if [[ "${#errors[@]}" -gt 0 ]]; then
 	printf 'Version sync check failed:\n' >&2
 	for err in "${errors[@]}"; do
