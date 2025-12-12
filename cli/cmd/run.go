@@ -616,6 +616,14 @@ Available workload types:
 
 		// Create multi-host orchestrator if we have multiple hosts
 		if len(hostInfos) > 1 {
+			// Warn if using bridge mode with multiple hosts (distributed testing)
+			if networkMode == constants.BridgeNetworkMode {
+				fmt.Println("⚠️  WARNING: Bridge networking may not work for distributed testing.")
+				fmt.Println("   Java RMI requires host networking for inter-node communication.")
+				fmt.Println("   Consider using --network-mode host (the default).")
+				fmt.Println()
+			}
+
 			fmt.Printf("Multi-host mode: %d hosts, minimum required: %d\n", len(hostInfos), minHosts)
 			if attachExisting {
 				fmt.Println("Attach mode enabled: expecting worker nodes prestarted with --run-node; spt will launch the entry node.")
@@ -799,7 +807,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")
 
 	// RMI Configuration Options (for distributed testing)
-	runCmd.Flags().String("network-mode", "bridge", "Docker network mode (bridge/host)")
+	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 

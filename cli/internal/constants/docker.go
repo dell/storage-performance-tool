@@ -7,7 +7,12 @@ package constants
 // Docker network configuration constants
 const (
 	// Network modes
-	DefaultNetworkMode = "bridge" // Default Docker network mode for containers
+	// DefaultNetworkMode is "host" because Java RMI requires host networking for distributed
+	// testing. Bridge networking fails due to RMI's local-host security check rejecting
+	// connections from the Docker bridge gateway IP (172.17.0.1).
+	// See: mike/planning/RMI_HOST_NETWORKING_REQUIREMENT.md
+	DefaultNetworkMode = "host"
+	BridgeNetworkMode  = "bridge" // Bridge network mode (not compatible with distributed RMI)
 	HostNetworkMode    = "host"   // Host network mode for RMI communication
 
 	// Container configuration

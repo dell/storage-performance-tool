@@ -146,8 +146,8 @@ func TestMultiHostOrchestratorRMI_Constructor(t *testing.T) {
 
 	// Test default constructor
 	orchestrator1 := NewMultiHostOrchestrator(hostInfos, 1)
-	if orchestrator1.networkMode != "bridge" {
-		t.Errorf("Expected default network mode 'bridge', got %s", orchestrator1.networkMode)
+	if orchestrator1.networkMode != "host" {
+		t.Errorf("Expected default network mode 'host', got %s", orchestrator1.networkMode)
 	}
 	if orchestrator1.rmiPortStart != 40000 {
 		t.Errorf("Expected default RMI port start 40000, got %d", orchestrator1.rmiPortStart)

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/verification"
@@ -52,7 +53,7 @@ func init() {
 	verifyCmd.Flags().String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
 	// Removed MarkFlagRequired to allow localhost default
 	verifyCmd.Flags().Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
-	verifyCmd.Flags().String("network-mode", "bridge", "Docker network mode (bridge/host)")
+	verifyCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	verifyCmd.Flags().Int("api-port", 9999, "Spt API port to verify")
 	verifyCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	verifyCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
@@ -99,8 +100,16 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("min-hosts (%d) cannot be greater than total hosts (%d)", minHosts, len(hosts))
 	}
 
-	if networkMode != "bridge" && networkMode != "host" {
-		return fmt.Errorf("network-mode must be 'bridge' or 'host', got: %s", networkMode)
+	if networkMode != constants.BridgeNetworkMode && networkMode != constants.HostNetworkMode {
+		return fmt.Errorf("network-mode must be '%s' or '%s', got: %s", constants.BridgeNetworkMode, constants.HostNetworkMode, networkMode)
+	}
+
+	// Warn if using bridge mode with multiple hosts (distributed testing)
+	if networkMode == constants.BridgeNetworkMode && len(hosts) > 1 {
+		fmt.Println("⚠️  WARNING: Bridge networking may not work for distributed testing.")
+		fmt.Println("   Java RMI requires host networking for inter-node communication.")
+		fmt.Println("   Consider using --network-mode host (the default).")
+		fmt.Println()
 	}
 
 	// Display initial startup message
