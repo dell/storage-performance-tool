@@ -389,7 +389,7 @@ Pre-flight verification of distributed testing infrastructure. Ensures all speci
 **Optional Flags:**
 
 - `--min-hosts`: Minimum number of hosts that must pass verification (default: all)
-- `--network-mode`: Docker network mode - "bridge" or "host" (default: "bridge")
+- `--network-mode`: Docker network mode - "host" (default) or "bridge". Host networking is required for Java RMI distributed communication.
 - `--rmi-port-start`: Starting port for RMI object port range verification (default: 40000)
 - `--rmi-port-count`: Number of RMI ports to verify (default: 10)
 - `--force-cleanup`: Automatically clean up conflicting containers without prompting
@@ -430,10 +430,10 @@ Use `--force-cleanup` to automatically choose cleanup without prompting.
 
 ### Remote Multi‑Node Networking
 
-As of 2025‑09‑12, remote multi‑node runs use Docker host networking unconditionally for reliability with Java RMI.
+**Host networking is required** for distributed testing due to Java RMI's local-host security restrictions. Bridge networking fails because RMI rejects registry operations from Docker's bridge gateway IP (`172.17.0.1`) as "non-local". See `mike/planning/RMI_HOST_NETWORKING_REQUIREMENT.md` for technical details.
 
-- Workers and the entry node run with `--network host`.
-- spt detects a routable “advertised” IP per worker (default‑route IP) and sets both:
+- Workers and the entry node run with `--network host` (the default since v5.1.0).
+- spt detects a routable "advertised" IP per worker (default‑route IP) and sets both:
   - `JAVA_OPTS=-Djava.rmi.server.hostname=<ip>`
   - `JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=<ip>`
 - The entry node receives `--load-step-node-addrs=<ip:1099,...>` built from the detected worker IPs.
@@ -446,7 +446,7 @@ As of 2025‑09‑12, remote multi‑node runs use Docker host networking uncond
 
 Environment override: if detection is flaky on specific hosts, set `ADVERTISED_IPS` to a comma‑separated mapping like `ADVERTISED_IPS="workerA=10.0.0.11,root@workerB=10.0.0.12"`. When present, spt uses the mapped IPv4 for those hosts instead of auto‑detecting.
 
-Single‑node local runs remain bridge‑mode with 127.0.0.1 binding. Optionally set `SPT_LOCAL_RMI_LOOPBACK=1` to force the JVM’s advertised RMI hostname to loopback for local development.
+Single‑node local runs use host networking by default (same as distributed). For local development, optionally set `SPT_LOCAL_RMI_LOOPBACK=1` to force the JVM's advertised RMI hostname to loopback.
 
 Quick start (distributed):
 

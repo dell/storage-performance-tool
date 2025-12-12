@@ -15,7 +15,7 @@ func newVerifyTestCmd() *cobra.Command {
 	c := &cobra.Command{Use: "verify", RunE: runVerify}
 	c.Flags().String("test-hosts", "", "")
 	c.Flags().Int("min-hosts", 0, "")
-	c.Flags().String("network-mode", "bridge", "")
+	c.Flags().String("network-mode", "host", "")
 	c.Flags().Int("api-port", 9999, "")
 	c.Flags().Int("rmi-port-start", 40000, "")
 	c.Flags().Int("rmi-port-count", 10, "")

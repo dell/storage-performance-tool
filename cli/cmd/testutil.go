@@ -158,7 +158,7 @@ Available workload types:
 	// Add all verify flags with correct defaults
 	newVerifyCmd.Flags().String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
 	newVerifyCmd.Flags().Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
-	newVerifyCmd.Flags().String("network-mode", "bridge", "Docker network mode (bridge/host)")
+	newVerifyCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	newVerifyCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	newVerifyCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	newVerifyCmd.Flags().Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
