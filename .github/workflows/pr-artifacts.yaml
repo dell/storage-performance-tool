@@ -40,7 +40,7 @@ jobs:
 
       - name: Upload CLI binaries
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: cli-binaries-${{ github.sha }}
           path: cli/build/*
@@ -85,7 +85,7 @@ jobs:
 
       - name: Upload engine bundle artifacts
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: engine-bundle-${{ github.sha }}
           path: |
