@@ -88,8 +88,8 @@ dependencies {
 		libs.log4j.core,
 	)
 
-	// External dependencies bundled in extension JAR
-	implementation(
+	// Netty dependencies from parent classloader (not bundled)
+	compileOnly(
 		libs.netty.handler,
 		libs.netty.codec.http,
 	)

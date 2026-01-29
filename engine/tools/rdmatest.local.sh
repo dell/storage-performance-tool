@@ -4,6 +4,15 @@
 #
 set -euo pipefail
 
+# Require Java 21
+export JAVA_HOME="${JAVA_HOME:-/opt/java}"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# RDMA plugin paths (for cuObject RDMA provider)
+export CUFILE_ENV_PATH_JSON="${CUFILE_ENV_PATH_JSON:-/home/mike/repos/rdma-object-client/cuobj/cuobj.json}"
+export CUOBJ_S3_PLUGIN="${CUOBJ_S3_PLUGIN:-/home/mike/repos/aws-c-s3/plugins/cuobject/build/libcuobject_s3_plugin.so}"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/home/mike/repos/rdma-object-client/cuobj/lib"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_SCRIPT="$REPO_ROOT/bundle/build/dist/run.sh"
