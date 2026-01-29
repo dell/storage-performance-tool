@@ -18,6 +18,7 @@ fi
 : "${S3_ACCESS_KEY:=AWS_ACCESS_KEY_ID_EXAMPLE}"
 : "${S3_SECRET_KEY:=AWS_SECRET_ACCESS_KEY_EXAMPLE}"
 : "${S3_BUCKET:=testwrites}"
+: "${S3_AUTH_VERSION:=4}"
 : "${JARTEST_CONCURRENCY:=4}"
 : "${JARTEST_OBJECT_SIZE:=1MB}"
 : "${JARTEST_OP_LIMIT_COUNT:=5000}"
@@ -34,7 +35,7 @@ fi
 exec "$RUN_SCRIPT" \
   --storage-driver-type=s3 \
   --storage-net-node-addrs="${NODE_ADDRS}" \
-  --storage-auth-version=4 \
+  --storage-auth-version="${S3_AUTH_VERSION}" \
   --storage-auth-uid="${S3_ACCESS_KEY}" \
   --storage-auth-secret="${S3_SECRET_KEY}" \
   --item-output-path="/${S3_BUCKET}" \

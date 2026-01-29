@@ -16,12 +16,47 @@ public final class RdmaConfig {
 	private final String logLevel;
 
 	public RdmaConfig(final Config rdmaConfig) {
-		this.enabled = rdmaConfig.boolVal("enabled");
-		this.thresholdBytes = rdmaConfig.longVal("threshold-bytes");
-		this.fallbackEnabled = rdmaConfig.boolVal("fallback-enabled");
-		this.device = rdmaConfig.stringVal("device");
-		this.localIp = rdmaConfig.stringVal("local-ip");
-		this.logLevel = rdmaConfig.stringVal("log-level");
+		if (rdmaConfig == null) {
+			// Use all defaults if no config provided
+			this.enabled = true;
+			this.thresholdBytes = DEFAULT_THRESHOLD_BYTES;
+			this.fallbackEnabled = true;
+			this.device = DEFAULT_DEVICE;
+			this.localIp = "";
+			this.logLevel = DEFAULT_LOG_LEVEL;
+		} else {
+			this.enabled = getBoolean(rdmaConfig, "enabled", true);
+			this.thresholdBytes = getLong(rdmaConfig, "threshold-bytes", DEFAULT_THRESHOLD_BYTES);
+			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback-enabled", true);
+			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
+			this.localIp = getString(rdmaConfig, "local-ip", "");
+			this.logLevel = getString(rdmaConfig, "log-level", DEFAULT_LOG_LEVEL);
+		}
+	}
+
+	private static boolean getBoolean(final Config config, final String key, final boolean defaultValue) {
+		try {
+			return config.boolVal(key);
+		} catch (final Exception e) {
+			return defaultValue;
+		}
+	}
+
+	private static long getLong(final Config config, final String key, final long defaultValue) {
+		try {
+			return config.longVal(key);
+		} catch (final Exception e) {
+			return defaultValue;
+		}
+	}
+
+	private static String getString(final Config config, final String key, final String defaultValue) {
+		try {
+			final String val = config.stringVal(key);
+			return val != null ? val : defaultValue;
+		} catch (final Exception e) {
+			return defaultValue;
+		}
 	}
 
 	public RdmaConfig(
