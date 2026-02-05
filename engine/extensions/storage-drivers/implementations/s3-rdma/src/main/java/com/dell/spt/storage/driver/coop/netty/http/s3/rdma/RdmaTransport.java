@@ -7,11 +7,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Abstraction over native RDMA operations via libobjclient.
+ * Abstraction over native RDMA operations via NVIDIA cuObject.
  *
- * This class provides a JNI bridge to the rdma-object-client library for
- * RDMA-accelerated S3 PUT/GET operations. When the native library is not
- * available, all methods fail gracefully to allow fallback to HTTP.
+ * <p>This class provides a JNI bridge to the NVIDIA cuObject client library
+ * (from CUDA 13.1.1+) for RDMA-accelerated S3 PUT/GET operations. When the
+ * native library is not available, all methods fail gracefully to allow
+ * transparent fallback to HTTP.
+ *
+ * <p>V2 Architecture uses the hybrid HTTP control + RDMA data transfer model:
+ * <ul>
+ *   <li>HTTP sends/receives metadata and control (x-amz-rdma-token header)</li>
+ *   <li>RDMA transfers bulk data directly between registered memory regions</li>
+ *   <li>Server responds with x-amz-rdma-reply header (200=accepted, 501=declined)</li>
+ * </ul>
+ *
+ * @see <a href="https://docs.nvidia.com/gpudirect-storage/cuobject/index.html">cuObject Documentation</a>
  */
 public class RdmaTransport implements AutoCloseable {
 
@@ -50,15 +60,39 @@ public class RdmaTransport implements AutoCloseable {
 
 	private native ByteBuffer nativeWrapBuffer(long bufferPtr, int size);
 
+	private native int nativeIsRdmaAvailable();
+
 	private final RdmaConfig config;
 	private volatile boolean initialized;
 	private volatile long nativeHandle;
+	private volatile RdmaBufferPool bufferPool;
 
 	/**
-	 * Track native buffer pointers for ByteBuffers allocated via {@link #allocateBuffer}.
-	 * This allows us to free them properly in {@link #freeBuffer}.
+	 * Identity-based key for tracking ByteBuffers without calling their content-based hashCode().
 	 */
-	private final ConcurrentMap<ByteBuffer, Long> nativeBufferPointers = new ConcurrentHashMap<>();
+	private static final class IdentityKey {
+		private final ByteBuffer buffer;
+
+		IdentityKey(final ByteBuffer buffer) {
+			this.buffer = buffer;
+		}
+
+		@Override
+		public int hashCode() {
+			return System.identityHashCode(buffer);
+		}
+
+		@Override
+		public boolean equals(final Object obj) {
+			return obj instanceof IdentityKey && ((IdentityKey) obj).buffer == this.buffer;
+		}
+	}
+
+	/**
+	 * Track native buffer pointers for ByteBuffers allocated via {@link #allocateNative}.
+	 * This allows us to free them properly in {@link #freeNative}.
+	 */
+	private final ConcurrentMap<IdentityKey, Long> nativeBufferPointers = new ConcurrentHashMap<>();
 
 	public RdmaTransport(final RdmaConfig config) {
 		this.config = config;
@@ -92,6 +126,13 @@ public class RdmaTransport implements AutoCloseable {
 			if (nativeHandle != 0) {
 				initialized = true;
 				Loggers.MSG.info("RDMA transport initialized: endpoint={}", endpoint);
+
+				// Initialize buffer pool if configured
+				if (config.getPoolSize() > 0) {
+					bufferPool = new RdmaBufferPool(this, config.getBufferSize(), config.getPoolSize());
+					bufferPool.init();
+				}
+
 				return true;
 			} else {
 				Loggers.MSG.warn("RDMA transport initialization failed");
@@ -154,8 +195,9 @@ public class RdmaTransport implements AutoCloseable {
 	/**
 	 * Allocate a buffer suitable for RDMA operations.
 	 *
-	 * When native RDMA is available, this allocates RDMA-registered memory for
-	 * optimal zero-copy transfers. Otherwise, it returns a standard direct ByteBuffer.
+	 * When native RDMA is available, this attempts to acquire a pre-registered buffer
+	 * from the pool. If the requested size exceeds the pool's buffer size or the pool
+	 * is empty, it falls back to a slow on-demand allocation and registration.
 	 *
 	 * @param size buffer size in bytes
 	 * @return a direct ByteBuffer
@@ -166,30 +208,34 @@ public class RdmaTransport implements AutoCloseable {
 			return ByteBuffer.allocateDirect(size);
 		}
 
-		try {
-			final long ptr = nativeAllocateBuffer(size);
-			if (ptr != 0) {
-				final ByteBuffer buffer = nativeWrapBuffer(ptr, size);
-				if (buffer != null) {
-					nativeBufferPointers.put(buffer, ptr);
-					return buffer;
+		// Try to use the buffer pool first
+		final RdmaBufferPool pool = bufferPool;
+		if (pool != null && size <= pool.getBufferSize()) {
+			try {
+				final ByteBuffer pooledBuf = pool.acquire(0, java.util.concurrent.TimeUnit.MILLISECONDS);
+				if (pooledBuf != null) {
+					return pooledBuf;
 				}
-				// Failed to wrap, free the native memory
-				nativeFreeBuffer(ptr);
+				Loggers.MSG.trace("RDMA buffer pool empty, falling back to slow allocation");
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
-		} catch (final Exception e) {
-			Loggers.MSG.debug("Native buffer allocation failed, using fallback: {}", e.getMessage());
 		}
 
-		// Fallback: use standard direct buffer
+		// Fallback to slow path: allocate and register on-demand
+		final ByteBuffer buf = allocateNative(size);
+		if (buf != null) {
+			return buf;
+		}
+
+		// Absolute fallback: use standard direct buffer (not RDMA capable)
 		return ByteBuffer.allocateDirect(size);
 	}
 
 	/**
 	 * Free a buffer previously allocated by {@link #allocateBuffer}.
 	 *
-	 * For buffers allocated with native RDMA memory, this deregisters and frees
-	 * the memory. For standard direct ByteBuffers, this is a no-op.
+	 * Returns pooled buffers to the pool, or deregisters and frees on-demand buffers.
 	 *
 	 * @param buffer the buffer to free
 	 */
@@ -198,8 +244,44 @@ public class RdmaTransport implements AutoCloseable {
 			return;
 		}
 
-		// Check if this is a native buffer we allocated
-		final Long ptr = nativeBufferPointers.remove(buffer);
+		final RdmaBufferPool pool = bufferPool;
+		if (pool != null && buffer.capacity() == pool.getBufferSize()) {
+			pool.release(buffer);
+			return;
+		}
+
+		freeNative(buffer);
+	}
+
+	/**
+	 * Internal: Allocate a native RDMA-registered buffer.
+	 */
+	public ByteBuffer allocateNative(final int size) {
+		if (!NATIVE_AVAILABLE)
+			return null;
+		try {
+			final long ptr = nativeAllocateBuffer(size);
+			if (ptr != 0) {
+				final ByteBuffer buffer = nativeWrapBuffer(ptr, size);
+				if (buffer != null) {
+					nativeBufferPointers.put(new IdentityKey(buffer), ptr);
+					return buffer;
+				}
+				nativeFreeBuffer(ptr);
+			}
+		} catch (final Exception e) {
+			Loggers.MSG.debug("Native buffer allocation failed: {}", e.getMessage());
+		}
+		return null;
+	}
+
+	/**
+	 * Internal: Free a native RDMA-registered buffer.
+	 */
+	public void freeNative(final ByteBuffer buffer) {
+		if (buffer == null)
+			return;
+		final Long ptr = nativeBufferPointers.remove(new IdentityKey(buffer));
 		if (ptr != null && NATIVE_AVAILABLE) {
 			try {
 				nativeFreeBuffer(ptr);
@@ -207,7 +289,6 @@ public class RdmaTransport implements AutoCloseable {
 				Loggers.MSG.debug("Native buffer free failed: {}", e.getMessage());
 			}
 		}
-		// Standard direct ByteBuffers are handled by GC
 	}
 
 	/**
@@ -224,8 +305,35 @@ public class RdmaTransport implements AutoCloseable {
 		return initialized && nativeHandle != 0;
 	}
 
+	/**
+	 * Check if RDMA hardware capabilities are available on this system.
+	 * This checks for CUDA runtime and RDMA device availability.
+	 *
+	 * @return true if RDMA hardware appears available
+	 */
+	public boolean isRdmaHardwareAvailable() {
+		if (!NATIVE_AVAILABLE) {
+			return false;
+		}
+		try {
+			return nativeIsRdmaAvailable() != 0;
+		} catch (final Exception e) {
+			Loggers.MSG.debug("RDMA hardware check failed: {}", e.getMessage());
+			return false;
+		}
+	}
+
 	@Override
 	public void close() {
+		if (bufferPool != null) {
+			try {
+				bufferPool.close();
+			} catch (final Exception e) {
+				Loggers.MSG.debug("Native pool close failed: {}", e.getMessage());
+			}
+			bufferPool = null;
+		}
+
 		if (nativeHandle != 0 && NATIVE_AVAILABLE) {
 			try {
 				nativeClose(nativeHandle);

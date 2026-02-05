@@ -18,6 +18,7 @@ import org.apache.logging.log4j.Level;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.List;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -72,9 +73,38 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
 		if (shouldUseRdma(op)) {
+			Loggers.MSG.trace("{}: submit(op) routing to RDMA, op={}", stepId, op.type());
 			return submitRdma(op);
 		}
 		return super.submit(op);
+	}
+
+	/**
+	 * Override batch submit to route RDMA-eligible operations through our RDMA path.
+	 *
+	 * The parent class's batch submit doesn't call single-item submit(), so we must
+	 * intercept here to ensure RDMA operations are properly routed.
+	 */
+	@Override
+	protected int submit(final List<O> ops, final int from, final int to) throws IllegalStateException {
+		if (!rdmaTransport.isAvailable()) {
+			// Fast path: if RDMA is not available, use parent's optimized batch submit
+			return super.submit(ops, from, to);
+		}
+
+		// Process operations individually to allow RDMA routing decisions per-operation
+		int submitted = 0;
+		for (int i = from; i < to; i++) {
+			final O op = ops.get(i);
+			if (submit(op)) {
+				submitted++;
+			} else {
+				// Stop on first failure (throttle exhausted)
+				break;
+			}
+		}
+		Loggers.MSG.trace("{}: submit(batch) processed {} of {} ops", stepId, submitted, to - from);
+		return submitted;
 	}
 
 	/**
@@ -87,19 +117,29 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	private boolean shouldUseRdma(final O op) {
 		if (!rdmaTransport.isAvailable()) {
+			// TRACE level - checked on every operation in high-throughput workloads
+			Loggers.MSG.trace("{}: RDMA skip: transport not available", stepId);
 			return false;
 		}
 		if (!(op instanceof DataOperation)) {
+			Loggers.MSG.trace("{}: RDMA skip: not a DataOperation", stepId);
 			return false;
 		}
 		final var opType = op.type();
 		if (opType != OpType.CREATE && opType != OpType.READ) {
+			Loggers.MSG.trace("{}: RDMA skip: opType={} not CREATE/READ", stepId, opType);
 			return false;
 		}
 		final var dataOp = (DataOperation) op;
 		try {
-			return dataOp.item().size() >= rdmaConfig.getThresholdBytes();
+			final long size = dataOp.item().size();
+			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
+			if (!useRdma) {
+				Loggers.MSG.trace("{}: RDMA skip: size={} < threshold={}", stepId, size, rdmaConfig.getThresholdBytes());
+			}
+			return useRdma;
 		} catch (final IOException e) {
+			Loggers.MSG.warn("{}: RDMA skip: IOException getting size", stepId);
 			return false;
 		}
 	}
@@ -138,25 +178,35 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final String key = extractKey(item);
 			int status;
 
+			// Perform RDMA operation - do NOT call op.startRequest() yet,
+			// so we can cleanly fall back to HTTP if RDMA fails
 			if (opType == OpType.CREATE) {
 				transferDataItemToBuffer((DataItem) item, buf, size);
-				op.startRequest();
 				status = rdmaTransport.putObject(bucket, key, buf, size);
+				Loggers.MSG.trace("{}: RDMA PUT status={} for key={}", stepId, status, key);
 			} else {
 				// READ
-				op.startRequest();
 				status = rdmaTransport.getObject(bucket, key, buf, size);
+				Loggers.MSG.trace("{}: RDMA GET status={} for key={}", stepId, status, key);
 			}
 
+			// Check for RDMA failure BEFORE modifying operation state
+			if (status < 0 && rdmaConfig.isFallbackEnabled()) {
+				// RDMA failed — release throttle and fall back to HTTP
+				// Operation state is untouched, so HTTP path can proceed normally
+				concurrencyThrottle.release();
+				rdmaTransport.freeBuffer(buf);
+				buf = null;  // Prevent double-free in finally block
+				Loggers.MSG.trace("{}: RDMA failed for {}, falling back to HTTP", stepId, item.name());
+				return super.submit(op);
+			}
+
+			// RDMA completed (success or non-recoverable failure) - now record timing
+			op.startRequest();
 			op.startResponse();
 
 			if (status >= 200 && status < 300) {
 				op.status(Operation.Status.SUCC);
-			} else if (status < 0 && rdmaConfig.isFallbackEnabled()) {
-				// RDMA failed — release throttle and fall back to HTTP
-				concurrencyThrottle.release();
-				Loggers.MSG.debug("{}: RDMA failed for {}, falling back to HTTP", stepId, item.name());
-				return super.submit(op);
 			} else {
 				Loggers.MSG.warn("{}: RDMA operation failed with status {}", stepId, status);
 				op.status(Operation.Status.FAIL_IO);
@@ -173,11 +223,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			concurrencyThrottle.release();
 
 			if (rdmaConfig.isFallbackEnabled()) {
-				Loggers.MSG.debug("{}: falling back to HTTP after RDMA exception", stepId);
+				Loggers.MSG.trace("{}: falling back to HTTP after RDMA exception", stepId);
 				return super.submit(op);
 			}
 
+			// Complete operation as failed - need to call state transitions in order
 			op.status(Operation.Status.FAIL_IO);
+			try {
+				op.startRequest();
+			} catch (final IllegalStateException ignored) {}
 			try {
 				op.startResponse();
 			} catch (final IllegalStateException ignored) {}

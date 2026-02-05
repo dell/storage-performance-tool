@@ -9,8 +9,12 @@ ext {
 	rootPkg = "com.dell.spt.storage.driver.coop.netty.http.s3.rdma"
 	nativeDir = "${projectDir}/src/main/native"
 	nativeBuildDir = "${nativeDir}/build"
-	// Path to rdma-object-client (override with -PobjclientDir=...)
+	// Path to rdma-object-client containing V1 cuObject (override with -PobjclientDir=...)
 	objclientDir = project.hasProperty('objclientDir') ? project.objclientDir : "${System.getProperty('user.home')}/repos/rdma-object-client"
+	// Path to V1 cuObject directory (cuobj subdirectory of objclientDir)
+	cuobjV1Dir = "${objclientDir}/cuobj"
+	// Whether to use V1 cuObject (no CUDA runtime required)
+	useCuobjV1 = project.hasProperty('useCuobjV1') ? project.useCuobjV1.toBoolean() : file(cuobjV1Dir).exists()
 }
 
 // Helper to check if cmake is available
@@ -26,9 +30,15 @@ def cmakeAvailable = {
 
 // Helper to check if native build prerequisites are met
 def canBuildNative = {
-	cmakeAvailable() &&
-	file("${nativeDir}/CMakeLists.txt").exists() &&
-	file("${objclientDir}/utils/include/obj_client.h").exists()
+	if (!cmakeAvailable()) return false
+	if (!file("${nativeDir}/CMakeLists.txt").exists()) return false
+
+	// Check for V1 cuObject headers OR CUDA toolkit
+	def hasV1 = file("${cuobjV1Dir}/include/cuobjclient.h").exists()
+	def hasCuda = file("/usr/local/cuda/include/cuobjclient.h").exists() ||
+				file("/usr/local/cuda-13.1/targets/x86_64-linux/include/cuobjclient.h").exists()
+
+	return hasV1 || hasCuda
 }
 
 // Task to configure CMake build
@@ -37,7 +47,19 @@ task cmakeConfigure(type: Exec) {
 	group = 'native'
 
 	workingDir nativeDir
-	commandLine 'cmake', '-B', 'build', '-DOBJCLIENT_DIR=' + objclientDir, '.'
+
+	// Build CMake command based on V1 vs V2 mode
+	def cmakeArgs = ['cmake', '-B', 'build']
+	if (useCuobjV1 && file(cuobjV1Dir).exists()) {
+		// V1 mode: Use standalone cuObject without CUDA runtime
+		cmakeArgs.add("-DCUOBJ_V1_DIR=${cuobjV1Dir}")
+		logger.lifecycle("Configuring V1 cuObject build (no CUDA runtime required)")
+	} else {
+		// V2 mode: Use CUDA 13.1+ cuObject
+		logger.lifecycle("Configuring V2 cuObject build (CUDA 13.1+ required)")
+	}
+	cmakeArgs.add('.')
+	commandLine cmakeArgs
 
 	// Only run if all prerequisites are met
 	onlyIf { canBuildNative() }
@@ -107,17 +129,10 @@ dependencies {
 
 // Configure shadowJar to include native library if built
 shadowJar {
-	// Include native library from build directory
+	// Include native library from build directory into the correct platform directory
 	from("${nativeBuildDir}") {
 		include 'libspt_rdma_native.so'
 		into 'native/linux-amd64'
-	}
-
-	// Also check for pre-built native library in resources
-	from("${projectDir}/src/main/resources/native") {
-		include '**/*.so'
-		include '**/*.dylib'
-		include '**/*.dll'
 	}
 }
 

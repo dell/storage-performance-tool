@@ -16,7 +16,7 @@ public class RdmaTransportTest {
 	@BeforeEach
 	void setUp() {
 		config = new RdmaConfig(
-						true, 1_048_576L, true, "auto", "", "WARN");
+						true, 1_048_576L, true, 0, 0, "auto", "", "WARN");
 		transport = new RdmaTransport(config);
 	}
 
@@ -101,5 +101,75 @@ public class RdmaTransportTest {
 		transport.init("http://localhost:9020", "access", "secret");
 		assertDoesNotThrow(() -> transport.close());
 		assertFalse(transport.isAvailable());
+	}
+
+	@Test
+	void testIsRdmaHardwareAvailableFalseInStubMode() {
+		// Without the native library, this should return false
+		assertFalse(transport.isRdmaHardwareAvailable());
+	}
+
+	@Test
+	void testIsNativeAvailable() {
+		// Static method check - will be false without native library
+		assertFalse(RdmaTransport.isNativeAvailable());
+	}
+
+	@Test
+	void testPutObjectWithZeroSize() {
+		final ByteBuffer buf = transport.allocateBuffer(0);
+		// putObject with 0 size should return -1 (not initialized)
+		final int status = transport.putObject("bucket", "key", buf, 0);
+		assertEquals(-1, status);
+	}
+
+	@Test
+	void testGetObjectWithZeroSize() {
+		final ByteBuffer buf = transport.allocateBuffer(0);
+		// getObject with 0 size should return -1 (not initialized)
+		final int status = transport.getObject("bucket", "key", buf, 0);
+		assertEquals(-1, status);
+	}
+
+	@Test
+	void testMultipleAllocateFree() {
+		// Test multiple allocations and frees
+		final ByteBuffer buf1 = transport.allocateBuffer(1024);
+		final ByteBuffer buf2 = transport.allocateBuffer(2048);
+		final ByteBuffer buf3 = transport.allocateBuffer(4096);
+
+		assertNotNull(buf1);
+		assertNotNull(buf2);
+		assertNotNull(buf3);
+
+		assertDoesNotThrow(() -> transport.freeBuffer(buf1));
+		assertDoesNotThrow(() -> transport.freeBuffer(buf2));
+		assertDoesNotThrow(() -> transport.freeBuffer(buf3));
+	}
+
+	@Test
+	void testFreeBufferTwice() {
+		final ByteBuffer buf = transport.allocateBuffer(4096);
+		transport.freeBuffer(buf);
+		// Second free should not throw
+		assertDoesNotThrow(() -> transport.freeBuffer(buf));
+	}
+
+	@Test
+	void testInitWithNullEndpoint() {
+		final boolean result = transport.init(null, "access", "secret");
+		assertFalse(result);
+	}
+
+	@Test
+	void testInitWithEmptyEndpoint() {
+		final boolean result = transport.init("", "access", "secret");
+		assertFalse(result);
+	}
+
+	@Test
+	void testInitWithNullCredentials() {
+		final boolean result = transport.init("http://localhost:9020", null, null);
+		assertFalse(result);
 	}
 }

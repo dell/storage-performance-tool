@@ -9,6 +9,7 @@
 #include <string>
 #include <cstring>
 #include <memory>
+#include <sys/stat.h>
 
 #include "obj_client.h"
 #include "memory.h"
@@ -343,6 +344,29 @@ JNIEXPORT jobject JNICALL Java_com_dell_spt_storage_driver_coop_netty_http_s3_rd
 
     void *ptr = reinterpret_cast<void*>(bufferPtr);
     return env->NewDirectByteBuffer(ptr, static_cast<jlong>(size));
+}
+
+/**
+ * Check if RDMA is likely available on this system.
+ *
+ * Performs basic checks for RDMA hardware availability:
+ * 1. Checks for /dev/infiniband directory (RDMA device nodes)
+ * 2. Checks for /sys/class/infiniband (kernel RDMA subsystem)
+ *
+ * @return 1 if RDMA hardware appears available, 0 otherwise
+ */
+JNIEXPORT jint JNICALL Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIsRdmaAvailable(
+        JNIEnv* env,
+        jobject self) {
+    // Check for RDMA device nodes
+    struct stat st;
+    if (stat("/dev/infiniband", &st) == 0 && S_ISDIR(st.st_mode)) {
+        // /dev/infiniband exists, check for at least one device
+        if (stat("/sys/class/infiniband", &st) == 0 && S_ISDIR(st.st_mode)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 } // extern "C"
