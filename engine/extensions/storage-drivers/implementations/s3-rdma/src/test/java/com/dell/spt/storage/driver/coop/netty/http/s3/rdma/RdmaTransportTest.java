@@ -77,17 +77,26 @@ public class RdmaTransportTest {
 	}
 
 	@Test
-	void testPutObjectReturnsNegativeInStubMode() {
+	void testRegisterBufferReturnsZeroInStubMode() {
 		final ByteBuffer buf = transport.allocateBuffer(1024);
-		final int status = transport.putObject("bucket", "key", buf, 1024);
-		assertEquals(-1, status);
+		// In stub mode (no native library), registerBuffer should return 0
+		final long mrHandle = transport.registerBuffer(buf, 1024);
+		assertEquals(0, mrHandle);
 	}
 
 	@Test
-	void testGetObjectReturnsNegativeInStubMode() {
+	void testDeregisterBufferDoesNotThrow() {
 		final ByteBuffer buf = transport.allocateBuffer(1024);
-		final int status = transport.getObject("bucket", "key", buf, 1024);
-		assertEquals(-1, status);
+		// Even with mrHandle=0, this should not throw
+		assertDoesNotThrow(() -> transport.deregisterBuffer(buf, 0));
+	}
+
+	@Test
+	void testGenerateTokenReturnsNullInStubMode() {
+		final ByteBuffer buf = transport.allocateBuffer(1024);
+		// In stub mode, generateToken should return null
+		final String token = transport.generateToken(0, 1024);
+		assertNull(token);
 	}
 
 	@Test
@@ -116,19 +125,18 @@ public class RdmaTransportTest {
 	}
 
 	@Test
-	void testPutObjectWithZeroSize() {
+	void testRegisterBufferWithZeroSize() {
 		final ByteBuffer buf = transport.allocateBuffer(0);
-		// putObject with 0 size should return -1 (not initialized)
-		final int status = transport.putObject("bucket", "key", buf, 0);
-		assertEquals(-1, status);
+		// registerBuffer with 0 size should return 0 (not initialized)
+		final long mrHandle = transport.registerBuffer(buf, 0);
+		assertEquals(0, mrHandle);
 	}
 
 	@Test
-	void testGetObjectWithZeroSize() {
-		final ByteBuffer buf = transport.allocateBuffer(0);
-		// getObject with 0 size should return -1 (not initialized)
-		final int status = transport.getObject("bucket", "key", buf, 0);
-		assertEquals(-1, status);
+	void testGenerateTokenWithZeroMrHandle() {
+		// generateToken with 0 mrHandle should return null
+		final String token = transport.generateToken(0, 1024);
+		assertNull(token);
 	}
 
 	@Test
@@ -171,5 +179,29 @@ public class RdmaTransportTest {
 	void testInitWithNullCredentials() {
 		final boolean result = transport.init("http://localhost:9020", null, null);
 		assertFalse(result);
+	}
+
+	@Test
+	void testGetMrHandleReturnsZeroForUnregistered() {
+		final ByteBuffer buf = transport.allocateBuffer(1024);
+		// Buffer was never registered, should return 0
+		final long mrHandle = transport.getMrHandle(buf);
+		assertEquals(0, mrHandle);
+	}
+
+	@Test
+	void testGetMrHandleNull() {
+		assertEquals(0, transport.getMrHandle(null));
+	}
+
+	@Test
+	void testAllocateNativeReturnsNullInStubMode() {
+		// In stub mode (not initialized), allocateNative should return null
+		assertNull(transport.allocateNative(1024));
+	}
+
+	@Test
+	void testFreeNativeDoesNotThrowForNull() {
+		assertDoesNotThrow(() -> transport.freeNative(null));
 	}
 }

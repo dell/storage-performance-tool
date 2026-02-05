@@ -7,21 +7,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Abstraction over native RDMA operations via NVIDIA cuObject.
+ * V3 RDMA Transport - Direct libibverbs implementation.
  *
- * <p>This class provides a JNI bridge to the NVIDIA cuObject client library
- * (from CUDA 13.1.1+) for RDMA-accelerated S3 PUT/GET operations. When the
- * native library is not available, all methods fail gracefully to allow
- * transparent fallback to HTTP.
+ * <p>This class provides a JNI bridge to libibverbs/libmlx5 for RDMA token
+ * generation. Unlike V2 (which used cuObject for full PUT/GET operations),
+ * V3 only handles memory registration and token generation - the actual
+ * HTTP requests are sent through the parent S3StorageDriver's Netty pipeline
+ * with the RDMA token added as an HTTP header.
  *
- * <p>V2 Architecture uses the hybrid HTTP control + RDMA data transfer model:
+ * <p>Token format: {@code addr:size:rkey:lid:dctn:g:gid}
+ *
+ * <p>The S3-RDMA protocol works as follows:
  * <ul>
- *   <li>HTTP sends/receives metadata and control (x-amz-rdma-token header)</li>
- *   <li>RDMA transfers bulk data directly between registered memory regions</li>
- *   <li>Server responds with x-amz-rdma-reply header (200=accepted, 501=declined)</li>
+ *   <li>PUT: Client sends HTTP with token header, server performs RDMA READ from client</li>
+ *   <li>GET: Client sends HTTP with token header, server performs RDMA WRITE to client</li>
  * </ul>
- *
- * @see <a href="https://docs.nvidia.com/gpudirect-storage/cuobject/index.html">cuObject Documentation</a>
  */
 public class RdmaTransport implements AutoCloseable {
 
@@ -31,36 +31,24 @@ public class RdmaTransport implements AutoCloseable {
 	static {
 		boolean loaded = false;
 		try {
-			NativeLibraryLoader.load("spt_rdma_native");
+			NativeLibraryLoader.load("spt_rdma_v3");
 			loaded = true;
-			Loggers.MSG.info("RDMA native library loaded successfully");
+			Loggers.MSG.info("RDMA V3 native library loaded successfully");
 		} catch (final UnsatisfiedLinkError e) {
-			Loggers.MSG.info("RDMA native library not available: {}", e.getMessage());
+			Loggers.MSG.info("RDMA V3 native library not available: {}", e.getMessage());
 		} catch (final Exception e) {
-			Loggers.MSG.warn("Failed to load RDMA native library: {}", e.getMessage());
+			Loggers.MSG.warn("Failed to load RDMA V3 native library: {}", e.getMessage());
 		}
 		NATIVE_AVAILABLE = loaded;
 	}
 
-	// Native methods - only called when NATIVE_AVAILABLE is true
-	private native long nativeInit(String endpoint, String accessKey, String secretKey,
-					String localIp, String logLevel, int concurrency);
-
-	private native void nativeClose(long handle);
-
-	private native int nativePutObject(long handle, String bucket, String key,
-					ByteBuffer buffer, int size);
-
-	private native int nativeGetObject(long handle, String bucket, String key,
-					ByteBuffer buffer, int maxSize);
-
-	private native long nativeAllocateBuffer(int size);
-
-	private native void nativeFreeBuffer(long bufferPtr);
-
-	private native ByteBuffer nativeWrapBuffer(long bufferPtr, int size);
-
-	private native int nativeIsRdmaAvailable();
+	// V3 Native methods - only called when NATIVE_AVAILABLE is true
+	private native long nativeInitV3(String deviceName);
+	private native void nativeCloseV3(long handle);
+	private native long nativeRegisterBuffer(long handle, ByteBuffer buffer, int size);
+	private native void nativeDeregisterBuffer(long handle, long mrHandle);
+	private native String nativeGenerateToken(long handle, long mrHandle, int size);
+	private native int nativeIsRdmaAvailableV3();
 
 	private final RdmaConfig config;
 	private volatile boolean initialized;
@@ -89,43 +77,53 @@ public class RdmaTransport implements AutoCloseable {
 	}
 
 	/**
-	 * Track native buffer pointers for ByteBuffers allocated via {@link #allocateNative}.
-	 * This allows us to free them properly in {@link #freeNative}.
+	 * Track memory registration handles for ByteBuffers.
 	 */
-	private final ConcurrentMap<IdentityKey, Long> nativeBufferPointers = new ConcurrentHashMap<>();
+	private final ConcurrentMap<IdentityKey, Long> mrHandles = new ConcurrentHashMap<>();
 
 	public RdmaTransport(final RdmaConfig config) {
 		this.config = config;
 	}
 
 	/**
-	 * Initialize the native RDMA client.
+	 * Initialize the RDMA transport.
 	 *
-	 * @param endpoint  S3 endpoint URL (e.g. "http://ecs-node:9020")
-	 * @param accessKey S3 access key
-	 * @param secretKey S3 secret key
+	 * <p>V3 initialization only requires the device name (or "auto" for auto-detection).
+	 * S3 credentials are not needed here as HTTP authentication is handled by the
+	 * parent driver's Netty pipeline.
+	 *
+	 * @param endpoint  S3 endpoint URL (unused in V3, kept for API compatibility)
+	 * @param accessKey S3 access key (unused in V3, kept for API compatibility)
+	 * @param secretKey S3 secret key (unused in V3, kept for API compatibility)
 	 * @return true if RDMA is available and initialized, false otherwise
 	 */
 	public boolean init(final String endpoint, final String accessKey, final String secretKey) {
 		if (!NATIVE_AVAILABLE) {
-			Loggers.MSG.info("RDMA transport: native library not available (stub mode)");
+			Loggers.MSG.info("RDMA V3 transport: native library not available (stub mode)");
+			initialized = false;
+			return false;
+		}
+
+		// Validate parameters (fail fast on null/empty endpoint for consistency)
+		if (endpoint == null || endpoint.isEmpty()) {
+			Loggers.MSG.warn("RDMA V3 transport: invalid endpoint");
+			initialized = false;
+			return false;
+		}
+		if (accessKey == null || secretKey == null) {
+			Loggers.MSG.warn("RDMA V3 transport: invalid credentials");
 			initialized = false;
 			return false;
 		}
 
 		try {
-			nativeHandle = nativeInit(
-							endpoint,
-							accessKey,
-							secretKey,
-							config.getLocalIp(),
-							config.getLogLevel(),
-							0  // Use default concurrency
-			);
+			// V3 only needs device name - credentials are handled by HTTP layer
+			final String deviceName = config.getDevice();
+			nativeHandle = nativeInitV3(deviceName);
 
 			if (nativeHandle != 0) {
 				initialized = true;
-				Loggers.MSG.info("RDMA transport initialized: endpoint={}", endpoint);
+				Loggers.MSG.info("RDMA V3 transport initialized: device={}", deviceName);
 
 				// Initialize buffer pool if configured
 				if (config.getPoolSize() > 0) {
@@ -135,69 +133,88 @@ public class RdmaTransport implements AutoCloseable {
 
 				return true;
 			} else {
-				Loggers.MSG.warn("RDMA transport initialization failed");
+				Loggers.MSG.warn("RDMA V3 transport initialization failed");
 				initialized = false;
 				return false;
 			}
 		} catch (final Exception e) {
-			Loggers.MSG.warn("RDMA transport init exception: {}", e.getMessage());
+			Loggers.MSG.warn("RDMA V3 transport init exception: {}", e.getMessage());
 			initialized = false;
 			return false;
 		}
 	}
 
 	/**
-	 * PUT an object via RDMA.
+	 * Register a buffer for RDMA operations.
 	 *
-	 * @param bucket S3 bucket name
-	 * @param key    S3 object key
-	 * @param buffer direct ByteBuffer containing the object data
-	 * @param size   number of bytes to write from the buffer
-	 * @return HTTP status code on success, or -1 on failure
+	 * @param buffer direct ByteBuffer to register
+	 * @param size   buffer size
+	 * @return memory registration handle, or 0 if registration failed
 	 */
-	public int putObject(final String bucket, final String key,
-					final ByteBuffer buffer, final int size) {
-		if (!initialized || nativeHandle == 0) {
-			return -1;
+	public long registerBuffer(final ByteBuffer buffer, final int size) {
+		if (!initialized || nativeHandle == 0 || buffer == null) {
+			return 0;
 		}
 
 		try {
-			return nativePutObject(nativeHandle, bucket, key, buffer, size);
+			final long mrHandle = nativeRegisterBuffer(nativeHandle, buffer, size);
+			if (mrHandle != 0) {
+				mrHandles.put(new IdentityKey(buffer), mrHandle);
+			}
+			return mrHandle;
 		} catch (final Exception e) {
-			Loggers.MSG.warn("RDMA putObject exception: {}", e.getMessage());
-			return -1;
+			Loggers.MSG.warn("RDMA buffer registration failed: {}", e.getMessage());
+			return 0;
 		}
 	}
 
 	/**
-	 * GET an object via RDMA.
+	 * Deregister a buffer previously registered with {@link #registerBuffer}.
 	 *
-	 * @param bucket  S3 bucket name
-	 * @param key     S3 object key
-	 * @param buffer  direct ByteBuffer to receive the object data
-	 * @param maxSize maximum number of bytes to read
-	 * @return HTTP status code on success, or -1 on failure
+	 * @param buffer   the buffer to deregister
+	 * @param mrHandle the memory registration handle
 	 */
-	public int getObject(final String bucket, final String key,
-					final ByteBuffer buffer, final int maxSize) {
-		if (!initialized || nativeHandle == 0) {
-			return -1;
+	public void deregisterBuffer(final ByteBuffer buffer, final long mrHandle) {
+		if (buffer != null) {
+			mrHandles.remove(new IdentityKey(buffer));
+		}
+		if (mrHandle != 0 && NATIVE_AVAILABLE && nativeHandle != 0) {
+			try {
+				nativeDeregisterBuffer(nativeHandle, mrHandle);
+			} catch (final Exception e) {
+				Loggers.MSG.debug("RDMA buffer deregistration failed: {}", e.getMessage());
+			}
+		}
+	}
+
+	/**
+	 * Generate an RDMA token for the given registered buffer.
+	 *
+	 * <p>Token format: {@code addr:size:rkey:lid:dctn:g:gid}
+	 *
+	 * @param mrHandle memory registration handle from {@link #registerBuffer}
+	 * @param size     size of data to transfer
+	 * @return RDMA token string, or null if generation failed
+	 */
+	public String generateToken(final long mrHandle, final int size) {
+		if (!initialized || nativeHandle == 0 || mrHandle == 0) {
+			return null;
 		}
 
 		try {
-			return nativeGetObject(nativeHandle, bucket, key, buffer, maxSize);
+			return nativeGenerateToken(nativeHandle, mrHandle, size);
 		} catch (final Exception e) {
-			Loggers.MSG.warn("RDMA getObject exception: {}", e.getMessage());
-			return -1;
+			Loggers.MSG.warn("RDMA token generation failed: {}", e.getMessage());
+			return null;
 		}
 	}
 
 	/**
 	 * Allocate a buffer suitable for RDMA operations.
 	 *
-	 * When native RDMA is available, this attempts to acquire a pre-registered buffer
-	 * from the pool. If the requested size exceeds the pool's buffer size or the pool
-	 * is empty, it falls back to a slow on-demand allocation and registration.
+	 * <p>When native RDMA is available, this attempts to acquire a pre-registered
+	 * buffer from the pool. If the pool is empty or the size exceeds pool buffer
+	 * size, falls back to a standard direct buffer.
 	 *
 	 * @param size buffer size in bytes
 	 * @return a direct ByteBuffer
@@ -216,26 +233,18 @@ public class RdmaTransport implements AutoCloseable {
 				if (pooledBuf != null) {
 					return pooledBuf;
 				}
-				Loggers.MSG.trace("RDMA buffer pool empty, falling back to slow allocation");
+				Loggers.MSG.trace("RDMA buffer pool empty, using direct buffer");
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 			}
 		}
 
-		// Fallback to slow path: allocate and register on-demand
-		final ByteBuffer buf = allocateNative(size);
-		if (buf != null) {
-			return buf;
-		}
-
-		// Absolute fallback: use standard direct buffer (not RDMA capable)
+		// Fallback: use standard direct buffer
 		return ByteBuffer.allocateDirect(size);
 	}
 
 	/**
 	 * Free a buffer previously allocated by {@link #allocateBuffer}.
-	 *
-	 * Returns pooled buffers to the pool, or deregisters and frees on-demand buffers.
 	 *
 	 * @param buffer the buffer to free
 	 */
@@ -250,24 +259,27 @@ public class RdmaTransport implements AutoCloseable {
 			return;
 		}
 
-		freeNative(buffer);
+		// For non-pooled buffers, just let GC handle it
+		// (standard direct buffers don't need explicit freeing)
 	}
 
 	/**
-	 * Internal: Allocate a native RDMA-registered buffer.
+	 * Allocate a native RDMA-registered buffer (for pool use).
+	 *
+	 * @param size buffer size
+	 * @return direct ByteBuffer, or null if allocation failed
 	 */
 	public ByteBuffer allocateNative(final int size) {
-		if (!NATIVE_AVAILABLE)
+		if (!NATIVE_AVAILABLE || !initialized || nativeHandle == 0) {
 			return null;
+		}
+
+		// Allocate a direct buffer and register it
 		try {
-			final long ptr = nativeAllocateBuffer(size);
-			if (ptr != 0) {
-				final ByteBuffer buffer = nativeWrapBuffer(ptr, size);
-				if (buffer != null) {
-					nativeBufferPointers.put(new IdentityKey(buffer), ptr);
-					return buffer;
-				}
-				nativeFreeBuffer(ptr);
+			final ByteBuffer buffer = ByteBuffer.allocateDirect(size);
+			final long mrHandle = registerBuffer(buffer, size);
+			if (mrHandle != 0) {
+				return buffer;
 			}
 		} catch (final Exception e) {
 			Loggers.MSG.debug("Native buffer allocation failed: {}", e.getMessage());
@@ -276,19 +288,32 @@ public class RdmaTransport implements AutoCloseable {
 	}
 
 	/**
-	 * Internal: Free a native RDMA-registered buffer.
+	 * Free a native RDMA-registered buffer (for pool use).
+	 *
+	 * @param buffer the buffer to free
 	 */
 	public void freeNative(final ByteBuffer buffer) {
-		if (buffer == null)
+		if (buffer == null) {
 			return;
-		final Long ptr = nativeBufferPointers.remove(new IdentityKey(buffer));
-		if (ptr != null && NATIVE_AVAILABLE) {
-			try {
-				nativeFreeBuffer(ptr);
-			} catch (final Exception e) {
-				Loggers.MSG.debug("Native buffer free failed: {}", e.getMessage());
-			}
 		}
+		final Long mrHandle = mrHandles.remove(new IdentityKey(buffer));
+		if (mrHandle != null) {
+			deregisterBuffer(buffer, mrHandle);
+		}
+	}
+
+	/**
+	 * Get the memory registration handle for a buffer.
+	 *
+	 * @param buffer the buffer
+	 * @return mrHandle, or 0 if not registered
+	 */
+	public long getMrHandle(final ByteBuffer buffer) {
+		if (buffer == null) {
+			return 0;
+		}
+		final Long mrHandle = mrHandles.get(new IdentityKey(buffer));
+		return mrHandle != null ? mrHandle : 0;
 	}
 
 	/**
@@ -307,7 +332,6 @@ public class RdmaTransport implements AutoCloseable {
 
 	/**
 	 * Check if RDMA hardware capabilities are available on this system.
-	 * This checks for CUDA runtime and RDMA device availability.
 	 *
 	 * @return true if RDMA hardware appears available
 	 */
@@ -316,7 +340,7 @@ public class RdmaTransport implements AutoCloseable {
 			return false;
 		}
 		try {
-			return nativeIsRdmaAvailable() != 0;
+			return nativeIsRdmaAvailableV3() != 0;
 		} catch (final Exception e) {
 			Loggers.MSG.debug("RDMA hardware check failed: {}", e.getMessage());
 			return false;
@@ -329,29 +353,29 @@ public class RdmaTransport implements AutoCloseable {
 			try {
 				bufferPool.close();
 			} catch (final Exception e) {
-				Loggers.MSG.debug("Native pool close failed: {}", e.getMessage());
+				Loggers.MSG.debug("Buffer pool close failed: {}", e.getMessage());
 			}
 			bufferPool = null;
 		}
 
+		// Deregister all remaining buffers
+		for (final var entry : mrHandles.entrySet()) {
+			if (NATIVE_AVAILABLE && nativeHandle != 0) {
+				try {
+					nativeDeregisterBuffer(nativeHandle, entry.getValue());
+				} catch (final Exception ignored) {}
+			}
+		}
+		mrHandles.clear();
+
 		if (nativeHandle != 0 && NATIVE_AVAILABLE) {
 			try {
-				nativeClose(nativeHandle);
+				nativeCloseV3(nativeHandle);
 			} catch (final Exception e) {
 				Loggers.MSG.debug("Native close failed: {}", e.getMessage());
 			}
 		}
 		nativeHandle = 0;
 		initialized = false;
-
-		// Free any remaining native buffers
-		for (final var entry : nativeBufferPointers.entrySet()) {
-			if (NATIVE_AVAILABLE) {
-				try {
-					nativeFreeBuffer(entry.getValue());
-				} catch (final Exception ignored) {}
-			}
-		}
-		nativeBufferPointers.clear();
 	}
 }

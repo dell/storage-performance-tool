@@ -3,18 +3,12 @@ plugins {
 	alias(libs.plugins.shadow)
 }
 
-version = "0.1.0"
+version = "0.3.0"
 
 ext {
 	rootPkg = "com.dell.spt.storage.driver.coop.netty.http.s3.rdma"
 	nativeDir = "${projectDir}/src/main/native"
 	nativeBuildDir = "${nativeDir}/build"
-	// Path to rdma-object-client containing V1 cuObject (override with -PobjclientDir=...)
-	objclientDir = project.hasProperty('objclientDir') ? project.objclientDir : "${System.getProperty('user.home')}/repos/rdma-object-client"
-	// Path to V1 cuObject directory (cuobj subdirectory of objclientDir)
-	cuobjV1Dir = "${objclientDir}/cuobj"
-	// Whether to use V1 cuObject (no CUDA runtime required)
-	useCuobjV1 = project.hasProperty('useCuobjV1') ? project.useCuobjV1.toBoolean() : file(cuobjV1Dir).exists()
 }
 
 // Helper to check if cmake is available
@@ -28,17 +22,20 @@ def cmakeAvailable = {
 	}
 }
 
-// Helper to check if native build prerequisites are met
+// Helper to check if native build prerequisites are met (V3: libibverbs only)
 def canBuildNative = {
 	if (!cmakeAvailable()) return false
 	if (!file("${nativeDir}/CMakeLists.txt").exists()) return false
 
-	// Check for V1 cuObject headers OR CUDA toolkit
-	def hasV1 = file("${cuobjV1Dir}/include/cuobjclient.h").exists()
-	def hasCuda = file("/usr/local/cuda/include/cuobjclient.h").exists() ||
-				file("/usr/local/cuda-13.1/targets/x86_64-linux/include/cuobjclient.h").exists()
+	// V3: Check for libibverbs headers (from rdma-core-devel)
+	def hasVerbs = file("/usr/include/infiniband/verbs.h").exists() ||
+				   file("/usr/local/include/infiniband/verbs.h").exists()
+	def hasMlx5dv = file("/usr/include/infiniband/mlx5dv.h").exists() ||
+					file("/usr/local/include/infiniband/mlx5dv.h").exists()
+	def hasRdmaCm = file("/usr/include/rdma/rdma_cma.h").exists() ||
+					file("/usr/local/include/rdma/rdma_cma.h").exists()
 
-	return hasV1 || hasCuda
+	return hasVerbs && hasMlx5dv && hasRdmaCm
 }
 
 // Task to configure CMake build
@@ -48,17 +45,8 @@ task cmakeConfigure(type: Exec) {
 
 	workingDir nativeDir
 
-	// Build CMake command based on V1 vs V2 mode
-	def cmakeArgs = ['cmake', '-B', 'build']
-	if (useCuobjV1 && file(cuobjV1Dir).exists()) {
-		// V1 mode: Use standalone cuObject without CUDA runtime
-		cmakeArgs.add("-DCUOBJ_V1_DIR=${cuobjV1Dir}")
-		logger.lifecycle("Configuring V1 cuObject build (no CUDA runtime required)")
-	} else {
-		// V2 mode: Use CUDA 13.1+ cuObject
-		logger.lifecycle("Configuring V2 cuObject build (CUDA 13.1+ required)")
-	}
-	cmakeArgs.add('.')
+	// V3: Simple cmake configuration - no external dependencies
+	def cmakeArgs = ['cmake', '-B', 'build', '.']
 	commandLine cmakeArgs
 
 	// Only run if all prerequisites are met
@@ -66,6 +54,7 @@ task cmakeConfigure(type: Exec) {
 
 	doFirst {
 		mkdir nativeBuildDir
+		logger.lifecycle("Configuring V3 native build (libibverbs/libmlx5/librdmacm)")
 	}
 }
 
@@ -129,9 +118,9 @@ dependencies {
 
 // Configure shadowJar to include native library if built
 shadowJar {
-	// Include native library from build directory into the correct platform directory
+	// V3: Include native library from build directory into the correct platform directory
 	from("${nativeBuildDir}") {
-		include 'libspt_rdma_native.so'
+		include 'libspt_rdma_v3.so'
 		into 'native/linux-amd64'
 	}
 }

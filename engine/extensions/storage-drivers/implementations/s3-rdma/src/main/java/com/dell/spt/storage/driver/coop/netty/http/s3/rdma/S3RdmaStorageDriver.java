@@ -23,13 +23,29 @@ import java.util.List;
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
  *
- * Extends {@link S3StorageDriver} to reuse S3 authentication, listing, versioning,
- * tagging, and bucket management. Overrides {@code submit()} to route large data
- * operations (PUT/GET) through RDMA via libobjclient (JNI), while all other
- * operations use the inherited HTTP/Netty path.
+ * <p>Extends {@link S3StorageDriver} to reuse S3 authentication, listing, versioning,
+ * tagging, and bucket management. Routes large data operations (PUT/GET) through
+ * RDMA when available, while all other operations use the inherited HTTP/Netty path.
+ *
+ * <h2>V3 Architecture</h2>
+ * <p>V3 uses direct libibverbs for RDMA token generation. The protocol flow is:
+ * <ol>
+ *   <li>Client registers memory buffer with RDMA NIC</li>
+ *   <li>Client generates RDMA token (addr:size:rkey:lid:dctn:g:gid)</li>
+ *   <li>Client sends HTTP request with {@code x-amz-rdma-token} header</li>
+ *   <li>Server performs RDMA READ (PUT) or WRITE (GET) to client memory</li>
+ *   <li>Server responds with HTTP status</li>
+ *   <li>Client deregisters buffer</li>
+ * </ol>
+ *
+ * <p><b>Note:</b> V3 HTTP integration (adding RDMA token headers to Netty requests)
+ * is not yet implemented. Currently falls back to HTTP for all operations.
  */
 public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				extends S3StorageDriver<I, O> {
+
+	/** HTTP header name for RDMA token. */
+	public static final String RDMA_TOKEN_HEADER = "x-amz-rdma-token";
 
 	private final RdmaConfig rdmaConfig;
 	private final RdmaTransport rdmaTransport;
@@ -57,7 +73,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final boolean ok = rdmaTransport.init(
 							endpointUrl, credential.getUid(), credential.getSecret());
 			if (ok) {
-				Loggers.MSG.info("{}: RDMA transport initialized for endpoint {}", stepId, endpointUrl);
+				Loggers.MSG.info("{}: RDMA V3 transport initialized for endpoint {}", stepId, endpointUrl);
 			} else if (rdmaConfig.isFallbackEnabled()) {
 				Loggers.MSG.warn(
 								"{}: RDMA unavailable, falling back to HTTP for all operations", stepId);
@@ -147,15 +163,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/**
 	 * Submit a data operation via the RDMA path.
 	 *
-	 * This bypasses the Netty pipeline entirely — libobjclient has its own
-	 * HTTP/RDMA stack. The call is synchronous (blocking).
+	 * <p>V3 Architecture: This method should:
+	 * <ol>
+	 *   <li>Allocate and register a buffer</li>
+	 *   <li>For PUT: copy data to buffer</li>
+	 *   <li>Generate RDMA token</li>
+	 *   <li>Submit HTTP request with x-amz-rdma-token header</li>
+	 *   <li>Wait for response</li>
+	 *   <li>Deregister buffer</li>
+	 * </ol>
+	 *
+	 * <p><b>TODO:</b> HTTP header integration with Netty pipeline is not yet implemented.
+	 * Currently falls back to standard HTTP.
 	 */
 	private boolean submitRdma(final O op) {
 		if (!isStarted()) {
 			throw new IllegalStateException();
-		}
-		if (!concurrencyThrottle.tryAcquire()) {
-			return false;
 		}
 
 		final var dataOp = (DataOperation) op;
@@ -165,86 +188,72 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			size = (int) item.size();
 		} catch (final IOException e) {
-			concurrencyThrottle.release();
 			op.status(Operation.Status.FAIL_IO);
 			handleCompleted(op);
-			return false;
+			return true; // Operation completed (with failure)
 		}
-		ByteBuffer buf = null;
 
+		// V3: Allocate buffer and register for RDMA
+		ByteBuffer buf = null;
+		long mrHandle = 0;
 		try {
 			buf = rdmaTransport.allocateBuffer(size);
-			final String bucket = extractBucket();
-			final String key = extractKey(item);
-			int status;
+			mrHandle = rdmaTransport.registerBuffer(buf, size);
 
-			// Perform RDMA operation - do NOT call op.startRequest() yet,
-			// so we can cleanly fall back to HTTP if RDMA fails
-			if (opType == OpType.CREATE) {
-				transferDataItemToBuffer((DataItem) item, buf, size);
-				status = rdmaTransport.putObject(bucket, key, buf, size);
-				Loggers.MSG.trace("{}: RDMA PUT status={} for key={}", stepId, status, key);
-			} else {
-				// READ
-				status = rdmaTransport.getObject(bucket, key, buf, size);
-				Loggers.MSG.trace("{}: RDMA GET status={} for key={}", stepId, status, key);
-			}
-
-			// Check for RDMA failure BEFORE modifying operation state
-			if (status < 0 && rdmaConfig.isFallbackEnabled()) {
-				// RDMA failed — release throttle and fall back to HTTP
-				// Operation state is untouched, so HTTP path can proceed normally
-				concurrencyThrottle.release();
+			if (mrHandle == 0) {
+				// Registration failed - fall back to HTTP
+				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
 				rdmaTransport.freeBuffer(buf);
-				buf = null;  // Prevent double-free in finally block
-				Loggers.MSG.trace("{}: RDMA failed for {}, falling back to HTTP", stepId, item.name());
 				return super.submit(op);
 			}
 
-			// RDMA completed (success or non-recoverable failure) - now record timing
-			op.startRequest();
-			op.startResponse();
-
-			if (status >= 200 && status < 300) {
-				op.status(Operation.Status.SUCC);
-			} else {
-				Loggers.MSG.warn("{}: RDMA operation failed with status {}", stepId, status);
-				op.status(Operation.Status.FAIL_IO);
+			// For PUT: copy data into registered buffer
+			if (opType == OpType.CREATE) {
+				transferDataItemToBuffer((DataItem) item, buf, size);
 			}
 
-			op.finishResponse();
-			concurrencyThrottle.release();
-			handleCompleted(op);
-			return true;
+			// Generate RDMA token
+			final String token = rdmaTransport.generateToken(mrHandle, size);
+			if (token == null) {
+				// Token generation failed - fall back to HTTP
+				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
+				rdmaTransport.deregisterBuffer(buf, mrHandle);
+				rdmaTransport.freeBuffer(buf);
+				return super.submit(op);
+			}
+
+			// TODO: V3 HTTP Integration
+			// The token needs to be added as an HTTP header (x-amz-rdma-token) to the request.
+			// This requires integration with the Netty pipeline in S3StorageDriver.
+			// For now, fall back to standard HTTP.
+			Loggers.MSG.debug("{}: RDMA token generated: {} (HTTP integration pending)", stepId, token);
+
+			// Fall back to HTTP until header integration is complete
+			rdmaTransport.deregisterBuffer(buf, mrHandle);
+			rdmaTransport.freeBuffer(buf);
+			return super.submit(op);
 
 		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "{}: RDMA submit failed for {}", stepId,
-							op instanceof DataOperation ? ((DataOperation) op).item().name() : op.toString());
-			concurrencyThrottle.release();
+			LogUtil.exception(Level.WARN, e, "{}: RDMA submit failed for {}",
+							stepId, item.name());
+
+			// Clean up
+			if (mrHandle != 0) {
+				rdmaTransport.deregisterBuffer(buf, mrHandle);
+			}
+			if (buf != null) {
+				rdmaTransport.freeBuffer(buf);
+			}
 
 			if (rdmaConfig.isFallbackEnabled()) {
 				Loggers.MSG.trace("{}: falling back to HTTP after RDMA exception", stepId);
 				return super.submit(op);
 			}
 
-			// Complete operation as failed - need to call state transitions in order
+			// Complete operation as failed
 			op.status(Operation.Status.FAIL_IO);
-			try {
-				op.startRequest();
-			} catch (final IllegalStateException ignored) {}
-			try {
-				op.startResponse();
-			} catch (final IllegalStateException ignored) {}
-			try {
-				op.finishResponse();
-			} catch (final IllegalStateException ignored) {}
 			handleCompleted(op);
-			return false;
-
-		} finally {
-			if (buf != null) {
-				rdmaTransport.freeBuffer(buf);
-			}
+			return true; // Operation completed (with failure)
 		}
 	}
 
