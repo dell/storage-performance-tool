@@ -44,7 +44,7 @@ public class RdmaTransport implements AutoCloseable {
 	}
 
 	// Native methods - only called when NATIVE_AVAILABLE is true
-	private native long nativeInit(String deviceName);
+	private native long nativeInit(String deviceName, String localIp);
 	private native void nativeClose(long handle);
 	private native long nativeRegisterBuffer(long handle, ByteBuffer buffer, int size);
 	private native void nativeDeregisterBuffer(long handle, long mrHandle);
@@ -118,13 +118,15 @@ public class RdmaTransport implements AutoCloseable {
 		}
 
 		try {
-			// Only device name needed - credentials are handled by HTTP layer
+			// Only device name and local IP needed - credentials are handled by HTTP layer
 			final String deviceName = config.getDevice();
-			nativeHandle = nativeInit(deviceName);
+			final String localIp = config.getLocalIp();
+			nativeHandle = nativeInit(deviceName, localIp);
 
 			if (nativeHandle != 0) {
 				initialized = true;
-				Loggers.MSG.info("S3-RDMA transport initialized: device={}", deviceName);
+				Loggers.MSG.info("S3-RDMA transport initialized: device={}, localIp={}",
+								deviceName, localIp.isEmpty() ? "auto" : localIp);
 
 				// Initialize buffer pool if configured
 				if (config.getPoolSize() > 0) {

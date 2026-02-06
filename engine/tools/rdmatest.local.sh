@@ -81,7 +81,7 @@ if [[ -d "$EXT_DIR" ]]; then
 fi
 
 # Build JVM options
-JAVA_OPTS="-XX:MaxDirectMemorySize=2g -Xshare:off"
+JAVA_OPTS="-XX:MaxDirectMemorySize=4g -Xshare:off"
 JAVA_OPTS="$JAVA_OPTS -Djava.library.path=${NATIVE_LIB_DIR}"
 
 # Check for RDMA hardware
@@ -112,14 +112,15 @@ echo "Native lib:  ${NATIVE_LIB_DIR}" >&2
 echo "==========================================" >&2
 
 # Build RDMA CLI args
+# Note: config keys use camelCase (not dashes) because '-' is the CLI path separator
 RDMA_ARGS=(
-  "--storage-rdma-threshold-bytes=${RDMA_THRESHOLD_BYTES}"
-  "--storage-rdma-fallback-enabled=${RDMA_FALLBACK_ENABLED}"
+  "--storage-rdma-threshold=${RDMA_THRESHOLD_BYTES}"
+  "--storage-rdma-fallback=${RDMA_FALLBACK_ENABLED}"
   "--storage-rdma-device=${RDMA_DEVICE}"
-  "--storage-rdma-log-level=${RDMA_LOG_LEVEL}"
+  "--storage-rdma-logLevel=${RDMA_LOG_LEVEL}"
 )
 if [[ -n "${RDMA_LOCAL_IP}" ]]; then
-  RDMA_ARGS+=("--storage-rdma-local-ip=${RDMA_LOCAL_IP}")
+  RDMA_ARGS+=("--storage-rdma-localIp=${RDMA_LOCAL_IP}")
 fi
 
 exec java $JAVA_OPTS -jar "$SPT_JAR" \

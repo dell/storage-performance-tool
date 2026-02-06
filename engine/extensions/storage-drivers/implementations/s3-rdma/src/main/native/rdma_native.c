@@ -66,8 +66,6 @@ static struct rdma_cm_id *open_device_via_cm(const char *local_addr) {
     /* Create CM ID for address resolution */
     ret = rdma_create_id(NULL, &cm_id, NULL, RDMA_PS_TCP);
     if (ret != 0) {
-        fprintf(stderr, "RDMA CM: Failed to create CM ID (errno=%d: %s)\n",
-                errno, strerror(errno));
         return NULL;
     }
 
@@ -84,20 +82,14 @@ static struct rdma_cm_id *open_device_via_cm(const char *local_addr) {
 
     ret = rdma_bind_addr(cm_id, (struct sockaddr *)&addr);
     if (ret != 0) {
-        fprintf(stderr, "RDMA CM: Failed to bind address (errno=%d: %s)\n",
-                errno, strerror(errno));
         rdma_destroy_id(cm_id);
         return NULL;
     }
 
     if (cm_id->verbs == NULL) {
-        fprintf(stderr, "RDMA CM: No RDMA device found for address\n");
         rdma_destroy_id(cm_id);
         return NULL;
     }
-
-    fprintf(stderr, "RDMA CM: Bound to device %s\n",
-            ibv_get_device_name(cm_id->verbs->device));
 
     return cm_id;
 }
@@ -143,12 +135,8 @@ static struct ibv_context *open_device_direct(const char *deviceName) {
     if (ctx == NULL && (deviceName == NULL || strcmp(deviceName, "auto") == 0)) {
         if (preferred_idx >= 0) {
             ctx = ibv_open_device(dev_list[preferred_idx]);
-            fprintf(stderr, "S3-RDMA: Selected non-bonded device: %s\n",
-                    ibv_get_device_name(dev_list[preferred_idx]));
         } else if (fallback_idx >= 0) {
             ctx = ibv_open_device(dev_list[fallback_idx]);
-            fprintf(stderr, "S3-RDMA: Warning - using bonded device: %s\n",
-                    ibv_get_device_name(dev_list[fallback_idx]));
         } else if (num_devices > 0) {
             ctx = ibv_open_device(dev_list[0]);
         }
@@ -206,8 +194,6 @@ static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
             if (f) {
                 if (fgets(type, sizeof(type), f)) {
                     type[strcspn(type, "\n")] = 0;
-                    fprintf(stderr, "S3-RDMA: GID[%d] for IP %s type: %s\n",
-                            i, local_ip, type);
                     if (strstr(type, "RoCE v2") != NULL) {
                         *out_gid = gid;
                         fclose(f);
@@ -220,8 +206,6 @@ static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
     }
 
     /* Fallback: try GID index 3 (common default for RoCE v2) */
-    fprintf(stderr, "S3-RDMA: Could not find RoCE v2 GID for IP %s, using index 3\n",
-            local_ip);
     if (ibv_query_gid(ctx, port, 3, out_gid) == 0) {
         return 3;
     }
@@ -233,13 +217,15 @@ static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
     return -1;
 }
 
-static int query_port_info(struct rdma_context *rctx, const char *local_ip) {
+static int query_port_info(struct rdma_context *rctx, const char *local_ip,
+                           char *errbuf, size_t errlen) {
     struct ibv_port_attr port_attr;
 
     rctx->port_num = 1;
 
     if (ibv_query_port(rctx->ctx, rctx->port_num, &port_attr) != 0) {
-        fprintf(stderr, "S3-RDMA: Failed to query port %d\n", rctx->port_num);
+        snprintf(errbuf, errlen, "Failed to query port %d (errno=%d: %s)",
+                 rctx->port_num, errno, strerror(errno));
         return -1;
     }
     rctx->lid = port_attr.lid;
@@ -248,12 +234,10 @@ static int query_port_info(struct rdma_context *rctx, const char *local_ip) {
     rctx->gid_index = find_roce_v2_gid_index(rctx->ctx, rctx->port_num,
                                               local_ip, &rctx->gid);
     if (rctx->gid_index < 0) {
-        fprintf(stderr, "S3-RDMA: Failed to find valid GID\n");
+        snprintf(errbuf, errlen, "Failed to find valid RoCE v2 GID for IP %s",
+                 (local_ip && strlen(local_ip) > 0) ? local_ip : "auto");
         return -1;
     }
-
-    fprintf(stderr, "S3-RDMA: Port %d LID=%d GID_index=%d\n",
-            rctx->port_num, rctx->lid, rctx->gid_index);
 
     return 0;
 }
@@ -262,7 +246,8 @@ static int query_port_info(struct rdma_context *rctx, const char *local_ip) {
  * DC Target Creation
  * ============================================================================ */
 
-static int create_dc_target(struct rdma_context *rctx) {
+static int create_dc_target(struct rdma_context *rctx,
+                            char *errbuf, size_t errlen) {
     struct ibv_srq_init_attr srq_attr = {0};
     struct ibv_qp_init_attr_ex qp_attr = {0};
     struct mlx5dv_qp_init_attr mlx5_qp_attr = {0};
@@ -271,8 +256,8 @@ static int create_dc_target(struct rdma_context *rctx) {
     /* Create Completion Queue */
     rctx->cq = ibv_create_cq(rctx->ctx, 128, NULL, NULL, 0);
     if (rctx->cq == NULL) {
-        fprintf(stderr, "S3-RDMA: Failed to create CQ (errno=%d: %s)\n",
-                errno, strerror(errno));
+        snprintf(errbuf, errlen, "Failed to create CQ (errno=%d: %s)",
+                 errno, strerror(errno));
         return -1;
     }
 
@@ -281,8 +266,8 @@ static int create_dc_target(struct rdma_context *rctx) {
     srq_attr.attr.max_sge = 1;
     rctx->srq = ibv_create_srq(rctx->pd, &srq_attr);
     if (rctx->srq == NULL) {
-        fprintf(stderr, "S3-RDMA: Failed to create SRQ (errno=%d: %s)\n",
-                errno, strerror(errno));
+        snprintf(errbuf, errlen, "Failed to create SRQ (errno=%d: %s)",
+                 errno, strerror(errno));
         ibv_destroy_cq(rctx->cq);
         rctx->cq = NULL;
         return -1;
@@ -304,16 +289,14 @@ static int create_dc_target(struct rdma_context *rctx) {
 
     rctx->dct_qp = mlx5dv_create_qp(rctx->ctx, &qp_attr, &mlx5_qp_attr);
     if (rctx->dct_qp == NULL) {
-        fprintf(stderr, "S3-RDMA: Failed to create DC Target QP (errno=%d: %s)\n",
-                errno, strerror(errno));
+        snprintf(errbuf, errlen, "Failed to create DC Target QP (errno=%d: %s)",
+                 errno, strerror(errno));
         ibv_destroy_srq(rctx->srq);
         ibv_destroy_cq(rctx->cq);
         rctx->srq = NULL;
         rctx->cq = NULL;
         return -1;
     }
-
-    fprintf(stderr, "S3-RDMA: DCT QP created (initial qp_num=%u)\n", rctx->dct_qp->qp_num);
 
     /* Transition DCT to INIT state */
     struct ibv_qp_attr qp_modify_attr = {0};
@@ -327,11 +310,10 @@ static int create_dc_target(struct rdma_context *rctx) {
     ret = ibv_modify_qp(rctx->dct_qp, &qp_modify_attr,
                         IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
     if (ret != 0) {
-        fprintf(stderr, "S3-RDMA: DCT INIT failed (errno=%d: %s)\n",
-                errno, strerror(errno));
+        snprintf(errbuf, errlen, "DCT INIT transition failed (errno=%d: %s)",
+                 errno, strerror(errno));
         goto cleanup;
     }
-    fprintf(stderr, "S3-RDMA: DCT transitioned to INIT\n");
 
     /*
      * Transition DCT to RTR state.
@@ -354,15 +336,13 @@ static int create_dc_target(struct rdma_context *rctx) {
     ret = ibv_modify_qp(rctx->dct_qp, &qp_modify_attr,
                         IBV_QP_STATE | IBV_QP_MIN_RNR_TIMER | IBV_QP_PATH_MTU | IBV_QP_AV);
     if (ret != 0) {
-        fprintf(stderr, "S3-RDMA: DCT RTR failed (errno=%d: %s)\n",
-                errno, strerror(errno));
+        snprintf(errbuf, errlen, "DCT RTR transition failed (errno=%d: %s)",
+                 errno, strerror(errno));
         goto cleanup;
     }
 
     /* DCT number is valid after RTR transition */
     rctx->dctn = rctx->dct_qp->qp_num;
-    fprintf(stderr, "S3-RDMA: DCT ready - dctn=0x%06x gid_index=%d\n",
-            rctx->dctn, rctx->gid_index);
 
     return 0;
 
@@ -460,10 +440,11 @@ static void throw_rdma_exception(JNIEnv *env, const char *message) {
  */
 JNIEXPORT jlong JNICALL
 Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeInit(
-        JNIEnv *env, jobject self, jstring deviceName) {
+        JNIEnv *env, jobject self, jstring deviceName, jstring localIp) {
 
     struct rdma_context *rctx = NULL;
     const char *device_str = NULL;
+    const char *local_ip_str = NULL;
     int use_cm = 0;
 
     rctx = calloc(1, sizeof(struct rdma_context));
@@ -475,22 +456,18 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
     if (deviceName != NULL) {
         device_str = (*env)->GetStringUTFChars(env, deviceName, NULL);
     }
+    if (localIp != NULL) {
+        local_ip_str = (*env)->GetStringUTFChars(env, localIp, NULL);
+    }
 
     /* Try rdma_cm first (better bonding support) */
-    /* For bonded interfaces, we need a specific local IP */
-    /* TODO: Get this from configuration - for now test with hardcoded IP */
-    const char *local_ip = "10.247.128.125";
-
-    fprintf(stderr, "S3-RDMA: Trying rdma_cm with local IP: %s\n", local_ip);
-    rctx->cm_id = open_device_via_cm(local_ip);
+    rctx->cm_id = open_device_via_cm(local_ip_str);
 
     if (rctx->cm_id != NULL) {
         rctx->ctx = rctx->cm_id->verbs;
         use_cm = 1;
-        fprintf(stderr, "S3-RDMA: Using rdma_cm for device access\n");
     } else {
         /* Fallback to direct device open */
-        fprintf(stderr, "S3-RDMA: rdma_cm failed, trying direct device open\n");
         rctx->ctx = open_device_direct(device_str);
     }
 
@@ -499,6 +476,9 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
     }
 
     if (rctx->ctx == NULL) {
+        if (local_ip_str != NULL) {
+            (*env)->ReleaseStringUTFChars(env, localIp, local_ip_str);
+        }
         free(rctx);
         throw_rdma_exception(env, "Failed to open RDMA device");
         return 0;
@@ -509,6 +489,9 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
     /* Allocate Protection Domain */
     rctx->pd = ibv_alloc_pd(rctx->ctx);
     if (rctx->pd == NULL) {
+        if (local_ip_str != NULL) {
+            (*env)->ReleaseStringUTFChars(env, localIp, local_ip_str);
+        }
         if (use_cm) rdma_destroy_id(rctx->cm_id);
         else ibv_close_device(rctx->ctx);
         free(rctx);
@@ -517,22 +500,32 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
     }
 
     /* Query port info - pass local_ip for RoCE GID lookup */
-    if (query_port_info(rctx, local_ip) != 0) {
+    char errbuf[256] = {0};
+    if (query_port_info(rctx, local_ip_str, errbuf, sizeof(errbuf)) != 0) {
+        if (local_ip_str != NULL) {
+            (*env)->ReleaseStringUTFChars(env, localIp, local_ip_str);
+        }
         ibv_dealloc_pd(rctx->pd);
         if (use_cm) rdma_destroy_id(rctx->cm_id);
         else ibv_close_device(rctx->ctx);
         free(rctx);
-        throw_rdma_exception(env, "Failed to query port info");
+        throw_rdma_exception(env, errbuf[0] ? errbuf : "Failed to query port info");
         return 0;
     }
 
+    /* local_ip no longer needed */
+    if (local_ip_str != NULL) {
+        (*env)->ReleaseStringUTFChars(env, localIp, local_ip_str);
+    }
+
     /* Create DC Target */
-    if (create_dc_target(rctx) != 0) {
+    errbuf[0] = '\0';
+    if (create_dc_target(rctx, errbuf, sizeof(errbuf)) != 0) {
         ibv_dealloc_pd(rctx->pd);
         if (use_cm) rdma_destroy_id(rctx->cm_id);
         else ibv_close_device(rctx->ctx);
         free(rctx);
-        throw_rdma_exception(env, "Failed to create DC Target");
+        throw_rdma_exception(env, errbuf[0] ? errbuf : "Failed to create DC Target");
         return 0;
     }
 

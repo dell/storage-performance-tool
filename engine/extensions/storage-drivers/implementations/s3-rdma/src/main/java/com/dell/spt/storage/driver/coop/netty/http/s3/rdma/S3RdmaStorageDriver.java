@@ -14,11 +14,21 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver;
 import com.github.akurilov.confuse.Config;
 
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.EmptyHttpHeaders;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpRequest;
+
 import org.apache.logging.log4j.Level;
 
 import java.io.IOException;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -38,14 +48,44 @@ import java.util.List;
  *   <li>Client deregisters buffer</li>
  * </ol>
  *
- * <p><b>Note:</b> HTTP integration (adding RDMA token headers to Netty requests)
- * is not yet implemented. Currently falls back to HTTP for all operations.
+ * <p>See RDMA_ARCHITECTURE_V3.md for design details.
  */
 public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				extends S3StorageDriver<I, O> {
 
 	/** HTTP header name for RDMA token. */
 	public static final String RDMA_TOKEN_HEADER = "x-amz-rdma-token";
+
+	/**
+	 * Per-operation RDMA state tracked across the request/response lifecycle.
+	 * Created in submitRdma(), read in httpRequest(), cleaned up in complete().
+	 */
+	private static final class RdmaContext {
+		final String token;
+		final ByteBuffer buffer;
+		final long mrHandle;
+		final OpType opType;
+		final int size;
+
+		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
+						final OpType opType, final int size) {
+			this.token = token;
+			this.buffer = buffer;
+			this.mrHandle = mrHandle;
+			this.opType = opType;
+			this.size = size;
+		}
+	}
+
+	/** In-flight RDMA operations keyed by Operation identity. */
+	private final ConcurrentMap<Operation<?>, RdmaContext> rdmaOps = new ConcurrentHashMap<>();
+
+	/**
+	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
+	 * Used because applyMetaDataHeaders() does not receive the Operation as a parameter.
+	 * The ThreadLocal is only live during the synchronous httpRequest() call.
+	 */
+	private static final ThreadLocal<String> CURRENT_RDMA_TOKEN = new ThreadLocal<>();
 
 	private final RdmaConfig rdmaConfig;
 	private final RdmaTransport rdmaTransport;
@@ -163,18 +203,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/**
 	 * Submit a data operation via the RDMA path.
 	 *
-	 * <p>This method should:
-	 * <ol>
-	 *   <li>Allocate and register a buffer</li>
-	 *   <li>For PUT: copy data to buffer</li>
-	 *   <li>Generate RDMA token</li>
-	 *   <li>Submit HTTP request with x-amz-rdma-token header</li>
-	 *   <li>Wait for response</li>
-	 *   <li>Deregister buffer</li>
-	 * </ol>
-	 *
-	 * <p><b>TODO:</b> HTTP header integration with Netty pipeline is not yet implemented.
-	 * Currently falls back to standard HTTP.
+	 * <p>Registers a buffer, generates an RDMA token, stores the per-operation
+	 * RDMA context, then delegates to the standard HTTP pipeline. The overridden
+	 * {@link #httpRequest} and {@link #applyMetaDataHeaders} methods inject the
+	 * token header, and the overridden {@link #complete} method cleans up RDMA
+	 * resources after the server responds.
 	 */
 	private boolean submitRdma(final O op) {
 		if (!isStarted()) {
@@ -190,10 +223,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		} catch (final IOException e) {
 			op.status(Operation.Status.FAIL_IO);
 			handleCompleted(op);
-			return true; // Operation completed (with failure)
+			return true;
 		}
 
-		// Allocate buffer and register for RDMA
 		ByteBuffer buf = null;
 		long mrHandle = 0;
 		try {
@@ -201,48 +233,51 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			mrHandle = rdmaTransport.registerBuffer(buf, size);
 
 			if (mrHandle == 0) {
-				// Registration failed - fall back to HTTP
 				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
 				rdmaTransport.freeBuffer(buf);
 				return super.submit(op);
 			}
 
-			// For PUT: copy data into registered buffer
+			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
 				transferDataItemToBuffer((DataItem) item, buf, size);
+				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
+				// because httpRequest() returns a FullHttpRequest with empty body
+				dataOp.countBytesDone(size);
 			}
 
-			// Generate RDMA token
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
-				// Token generation failed - fall back to HTTP
 				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
 				rdmaTransport.deregisterBuffer(buf, mrHandle);
 				rdmaTransport.freeBuffer(buf);
 				return super.submit(op);
 			}
 
-			// TODO: HTTP Integration
-			// The token needs to be added as an HTTP header (x-amz-rdma-token) to the request.
-			// This requires integration with the Netty pipeline in S3StorageDriver.
-			// For now, fall back to standard HTTP.
-			Loggers.MSG.debug("{}: RDMA token generated: {} (HTTP integration pending)", stepId, token);
+			// Store RDMA context — httpRequest() adds the header, complete() cleans up
+			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size));
 
-			// Fall back to HTTP until header integration is complete
-			rdmaTransport.deregisterBuffer(buf, mrHandle);
-			rdmaTransport.freeBuffer(buf);
-			return super.submit(op);
+			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
+
+			final boolean submitted = super.submit(op);
+			if (!submitted) {
+				// Throttle exhausted — clean up since complete() won't be called
+				cleanupRdmaContext(op);
+			}
+			return submitted;
 
 		} catch (final Exception e) {
 			LogUtil.exception(Level.WARN, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
 
-			// Clean up
-			if (mrHandle != 0) {
-				rdmaTransport.deregisterBuffer(buf, mrHandle);
-			}
-			if (buf != null) {
-				rdmaTransport.freeBuffer(buf);
+			// Clean up — check rdmaOps first (context may already be stored)
+			if (!cleanupRdmaContext(op)) {
+				if (mrHandle != 0) {
+					rdmaTransport.deregisterBuffer(buf, mrHandle);
+				}
+				if (buf != null) {
+					rdmaTransport.freeBuffer(buf);
+				}
 			}
 
 			if (rdmaConfig.isFallbackEnabled()) {
@@ -250,11 +285,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				return super.submit(op);
 			}
 
-			// Complete operation as failed
 			op.status(Operation.Status.FAIL_IO);
 			handleCompleted(op);
-			return true; // Operation completed (with failure)
+			return true;
 		}
+	}
+
+	/** Remove and clean up RDMA context for an operation. Returns true if found. */
+	private boolean cleanupRdmaContext(final O op) {
+		final RdmaContext ctx = rdmaOps.remove(op);
+		if (ctx != null) {
+			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			rdmaTransport.freeBuffer(ctx.buffer);
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -316,8 +361,84 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		return scheme + "://" + host + ":" + port;
 	}
 
+	/**
+	 * Override to inject the RDMA token header and suppress the HTTP body for PUT.
+	 *
+	 * <p>For RDMA PUT (CREATE): returns a {@link DefaultFullHttpRequest} with an empty body.
+	 * This causes {@code sendRequest()} to skip {@code sendRequestData()}, since the server
+	 * reads the data directly from client memory via RDMA READ. Content-Length is preserved
+	 * from the base class so the server knows how much to read.
+	 *
+	 * <p>For RDMA GET (READ): returns the normal request unchanged. The server will RDMA WRITE
+	 * data to the client buffer; the response body handling is in {@link #complete}.
+	 */
+	@Override
+	protected HttpRequest httpRequest(final O op, final String nodeAddr) throws URISyntaxException {
+		final RdmaContext ctx = rdmaOps.get(op);
+		if (ctx != null) {
+			CURRENT_RDMA_TOKEN.set(ctx.token);
+		}
+		try {
+			final HttpRequest request = super.httpRequest(op, nodeAddr);
+			if (ctx != null && ctx.opType == OpType.CREATE) {
+				// Return FullHttpRequest with empty body — suppresses sendRequestData()
+				return new DefaultFullHttpRequest(
+								request.protocolVersion(), request.method(), request.uri(),
+								Unpooled.EMPTY_BUFFER, request.headers(), EmptyHttpHeaders.INSTANCE);
+			}
+			return request;
+		} finally {
+			CURRENT_RDMA_TOKEN.remove();
+		}
+	}
+
+	/**
+	 * Inject the RDMA token as an HTTP header before auth signing.
+	 *
+	 * <p>This is called from {@code HttpStorageDriverBase.httpRequest()} at line 243,
+	 * before {@code applyAuthHeaders()} at line 246, ensuring the token is included
+	 * in the SigV4 canonical request.
+	 */
+	@Override
+	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {
+		super.applyMetaDataHeaders(httpHeaders);
+		final String token = CURRENT_RDMA_TOKEN.get();
+		if (token != null) {
+			httpHeaders.set(RDMA_TOKEN_HEADER, token);
+		}
+	}
+
+	/**
+	 * Clean up RDMA resources after the server responds.
+	 *
+	 * <p>For GET operations, the server has already RDMA-written data to our buffer
+	 * by the time the HTTP response arrives, so we account for the transferred bytes.
+	 */
+	@Override
+	public void complete(final Channel channel, final O op) {
+		final RdmaContext ctx = rdmaOps.remove(op);
+		if (ctx != null) {
+			try {
+				if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
+					((DataOperation) op).countBytesDone(ctx.size);
+				}
+			} finally {
+				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				rdmaTransport.freeBuffer(ctx.buffer);
+			}
+		}
+		super.complete(channel, op);
+	}
+
 	@Override
 	protected void doClose() throws IOException {
+		// Drain any leaked RDMA contexts (e.g. from interrupted operations)
+		for (final var entry : rdmaOps.entrySet()) {
+			final var ctx = entry.getValue();
+			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			rdmaTransport.freeBuffer(ctx.buffer);
+		}
+		rdmaOps.clear();
 		rdmaTransport.close();
 		super.doClose();
 	}

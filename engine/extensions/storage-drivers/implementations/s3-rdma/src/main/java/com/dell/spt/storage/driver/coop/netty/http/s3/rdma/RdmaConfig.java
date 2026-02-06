@@ -5,8 +5,8 @@ import com.github.akurilov.confuse.Config;
 public final class RdmaConfig {
 
 	private static final long DEFAULT_THRESHOLD_BYTES = 1_048_576; // 1MB
-	private static final int DEFAULT_POOL_SIZE = 128;
-	private static final int DEFAULT_BUFFER_SIZE = 33_554_432; // 32MB
+	private static final int DEFAULT_POOL_SIZE = 0; // disabled by default
+	private static final int DEFAULT_BUFFER_SIZE = 1_048_576; // 1MB
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
 
@@ -32,13 +32,13 @@ public final class RdmaConfig {
 			this.logLevel = DEFAULT_LOG_LEVEL;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
-			this.thresholdBytes = getLong(rdmaConfig, "threshold-bytes", DEFAULT_THRESHOLD_BYTES);
-			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback-enabled", true);
-			this.poolSize = getInt(rdmaConfig, "pool-size", DEFAULT_POOL_SIZE);
-			this.bufferSize = getInt(rdmaConfig, "buffer-size", DEFAULT_BUFFER_SIZE);
+			this.thresholdBytes = getLong(rdmaConfig, "threshold", DEFAULT_THRESHOLD_BYTES);
+			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback", true);
+			this.poolSize = getInt(rdmaConfig, "poolSize", DEFAULT_POOL_SIZE);
+			this.bufferSize = getInt(rdmaConfig, "bufferSize", DEFAULT_BUFFER_SIZE);
 			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
-			this.localIp = getString(rdmaConfig, "local-ip", "");
-			this.logLevel = getString(rdmaConfig, "log-level", DEFAULT_LOG_LEVEL);
+			this.localIp = getString(rdmaConfig, "localIp", "");
+			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);
 		}
 	}
 
