@@ -67,14 +67,17 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final long mrHandle;
 		final OpType opType;
 		final int size;
+		/** True if buffer came from the pool (pre-registered; must not be deregistered). */
+		final boolean pooled;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
-						final OpType opType, final int size) {
+						final OpType opType, final int size, final boolean pooled) {
 			this.token = token;
 			this.buffer = buffer;
 			this.mrHandle = mrHandle;
 			this.opType = opType;
 			this.size = size;
+			this.pooled = pooled;
 		}
 	}
 
@@ -229,14 +232,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		ByteBuffer buf = null;
 		long mrHandle = 0;
+		boolean pooled = false;
 		try {
 			buf = rdmaTransport.allocateBuffer(size);
-			mrHandle = rdmaTransport.registerBuffer(buf, size);
 
-			if (mrHandle == 0) {
-				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
-				rdmaTransport.freeBuffer(buf);
-				return super.submit(op);
+			// Pool buffers are pre-registered; skip expensive ibv_reg_mr for them
+			mrHandle = rdmaTransport.getMrHandle(buf);
+			if (mrHandle != 0) {
+				pooled = true;
+			} else {
+				mrHandle = rdmaTransport.registerBuffer(buf, size);
+				if (mrHandle == 0) {
+					Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
+					rdmaTransport.freeBuffer(buf);
+					return super.submit(op);
+				}
 			}
 
 			// For PUT: copy data into the registered buffer
@@ -250,15 +260,17 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
 				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
-				rdmaTransport.deregisterBuffer(buf, mrHandle);
+				if (!pooled) {
+					rdmaTransport.deregisterBuffer(buf, mrHandle);
+				}
 				rdmaTransport.freeBuffer(buf);
 				return super.submit(op);
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
-			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size));
+			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size, pooled));
 
-			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
+			Loggers.MSG.debug("{}: RDMA submit: type={} size={} pooled={} token={}", stepId, opType, size, pooled, token);
 
 			final boolean submitted = super.submit(op);
 			if (!submitted) {
@@ -273,7 +285,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// Clean up — check rdmaOps first (context may already be stored)
 			if (!cleanupRdmaContext(op)) {
-				if (mrHandle != 0) {
+				if (mrHandle != 0 && !pooled) {
 					rdmaTransport.deregisterBuffer(buf, mrHandle);
 				}
 				if (buf != null) {
@@ -296,7 +308,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private boolean cleanupRdmaContext(final O op) {
 		final RdmaContext ctx = rdmaOps.remove(op);
 		if (ctx != null) {
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			if (!ctx.pooled) {
+				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			}
 			rdmaTransport.freeBuffer(ctx.buffer);
 			return true;
 		}
@@ -433,7 +447,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					((DataOperation) op).countBytesDone(ctx.size);
 				}
 			} finally {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				if (!ctx.pooled) {
+					rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				}
 				rdmaTransport.freeBuffer(ctx.buffer);
 			}
 		}
@@ -445,10 +461,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations)
 		for (final var entry : rdmaOps.entrySet()) {
 			final var ctx = entry.getValue();
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			if (!ctx.pooled) {
+				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			}
 			rdmaTransport.freeBuffer(ctx.buffer);
 		}
 		rdmaOps.clear();
+		// Pool close deregisters all pool buffers; must happen before native close
 		rdmaTransport.close();
 		super.doClose();
 	}

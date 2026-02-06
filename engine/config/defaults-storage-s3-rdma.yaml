@@ -17,8 +17,8 @@ storage:
     enabled: true
     threshold: 1048576
     fallback: true
-    poolSize: 128
-    bufferSize: 33554432
+    poolSize: 0
+    bufferSize: 1048576
     device: auto
     localIp: ""
     logLevel: WARN

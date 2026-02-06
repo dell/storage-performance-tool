@@ -5,7 +5,7 @@ import com.github.akurilov.confuse.Config;
 public final class RdmaConfig {
 
 	private static final long DEFAULT_THRESHOLD_BYTES = 1_048_576; // 1MB
-	private static final int DEFAULT_POOL_SIZE = 0; // disabled by default
+	private static final int DEFAULT_POOL_SIZE = 0; // disabled by default; registration overhead is negligible
 	private static final int DEFAULT_BUFFER_SIZE = 1_048_576; // 1MB
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
