@@ -42,6 +42,7 @@ struct rdma_context {
     uint8_t port_num;               /* Port number (typically 1) */
     uint16_t lid;                   /* Local ID */
     uint32_t dctn;                  /* DC Target Number */
+    enum ibv_mtu active_mtu;        /* Active port MTU */
     union ibv_gid gid;              /* Global ID */
     int gid_index;                  /* GID index (for RoCE v2) */
     int use_cm;                     /* Whether rdma_cm was used */
@@ -229,6 +230,7 @@ static int query_port_info(struct rdma_context *rctx, const char *local_ip,
         return -1;
     }
     rctx->lid = port_attr.lid;
+    rctx->active_mtu = port_attr.active_mtu;
 
     /* For RoCE, find the correct GID index */
     rctx->gid_index = find_roce_v2_gid_index(rctx->ctx, rctx->port_num,
@@ -322,7 +324,7 @@ static int create_dc_target(struct rdma_context *rctx,
      */
     memset(&qp_modify_attr, 0, sizeof(qp_modify_attr));
     qp_modify_attr.qp_state = IBV_QPS_RTR;
-    qp_modify_attr.path_mtu = IBV_MTU_4096;
+    qp_modify_attr.path_mtu = rctx->active_mtu;
     qp_modify_attr.min_rnr_timer = 12;
 
     /* Set AH attributes - required for RoCE */

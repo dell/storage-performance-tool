@@ -18,6 +18,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpRequest;
 
@@ -398,6 +399,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * <p>This is called from {@code HttpStorageDriverBase.httpRequest()} at line 243,
 	 * before {@code applyAuthHeaders()} at line 246, ensuring the token is included
 	 * in the SigV4 canonical request.
+	 *
+	 * <p>For RDMA PUT, Content-Length must be set to 0. The server's HTTP framework
+	 * (Jetty) blocks until Content-Length bytes of body data arrive over TCP; since
+	 * RDMA PUT sends no HTTP body (the server reads data via RDMA READ from the
+	 * client's registered memory), a non-zero Content-Length causes the request to
+	 * hang until timeout. The actual data size is conveyed in the RDMA token.
 	 */
 	@Override
 	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {
@@ -405,6 +412,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final String token = CURRENT_RDMA_TOKEN.get();
 		if (token != null) {
 			httpHeaders.set(RDMA_TOKEN_HEADER, token);
+			// RDMA PUT: set Content-Length to 0 so Jetty dispatches immediately
+			// (applyAuthHeaders reads Content-Length to choose the payload hash)
+			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		}
 	}
 
