@@ -22,12 +22,12 @@ def cmakeAvailable = {
 	}
 }
 
-// Helper to check if native build prerequisites are met (V3: libibverbs only)
+// Helper to check if native build prerequisites are met (libibverbs, libmlx5, librdmacm)
 def canBuildNative = {
 	if (!cmakeAvailable()) return false
 	if (!file("${nativeDir}/CMakeLists.txt").exists()) return false
 
-	// V3: Check for libibverbs headers (from rdma-core-devel)
+	// Check for libibverbs headers (from rdma-core-devel)
 	def hasVerbs = file("/usr/include/infiniband/verbs.h").exists() ||
 				   file("/usr/local/include/infiniband/verbs.h").exists()
 	def hasMlx5dv = file("/usr/include/infiniband/mlx5dv.h").exists() ||
@@ -45,7 +45,7 @@ task cmakeConfigure(type: Exec) {
 
 	workingDir nativeDir
 
-	// V3: Simple cmake configuration - no external dependencies
+	// Simple cmake configuration - no external dependencies beyond rdma-core
 	def cmakeArgs = ['cmake', '-B', 'build', '.']
 	commandLine cmakeArgs
 
@@ -54,7 +54,7 @@ task cmakeConfigure(type: Exec) {
 
 	doFirst {
 		mkdir nativeBuildDir
-		logger.lifecycle("Configuring V3 native build (libibverbs/libmlx5/librdmacm)")
+		logger.lifecycle("Configuring native RDMA build (libibverbs/libmlx5/librdmacm)")
 	}
 }
 
@@ -118,9 +118,9 @@ dependencies {
 
 // Configure shadowJar to include native library if built
 shadowJar {
-	// V3: Include native library from build directory into the correct platform directory
+	// Include native library from build directory into the correct platform directory
 	from("${nativeBuildDir}") {
-		include 'libspt_rdma_v3.so'
+		include 'libspt_rdma.so'
 		into 'native/linux-amd64'
 	}
 }

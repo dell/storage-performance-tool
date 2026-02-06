@@ -2,7 +2,6 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import com.dell.spt.base.logging.Loggers;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -55,19 +54,9 @@ public final class NativeLibraryLoader {
 			System.loadLibrary(libraryName);
 			Loggers.MSG.info("Loaded native library from system path: {}", libraryName);
 		} catch (final UnsatisfiedLinkError e) {
-			// Try loading from rdma-object-client dist directory as last resort
-			final String distPath = System.getProperty("user.home") +
-							"/repos/rdma-object-client/dist/lib/" + libFileName;
-			final File distFile = new File(distPath);
-			if (distFile.exists()) {
-				Loggers.MSG.debug("Trying to load from rdma-object-client dist: {}", distPath);
-				System.load(distFile.getAbsolutePath());
-				Loggers.MSG.info("Loaded native library from dist: {}", distPath);
-			} else {
-				throw new UnsatisfiedLinkError(
-								"Native library '" + libraryName + "' not found in JAR (" +
-												resourcePath + "), system path, or dist directory");
-			}
+			throw new UnsatisfiedLinkError(
+							"Native library '" + libraryName + "' not found in JAR (" +
+											resourcePath + ") or system path");
 		}
 	}
 

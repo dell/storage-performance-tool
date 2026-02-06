@@ -7,13 +7,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * V3 RDMA Transport - Direct libibverbs implementation.
+ * RDMA Transport - Direct libibverbs implementation.
  *
  * <p>This class provides a JNI bridge to libibverbs/libmlx5 for RDMA token
- * generation. Unlike V2 (which used cuObject for full PUT/GET operations),
- * V3 only handles memory registration and token generation - the actual
- * HTTP requests are sent through the parent S3StorageDriver's Netty pipeline
- * with the RDMA token added as an HTTP header.
+ * generation. The native layer handles memory registration and token generation;
+ * the actual HTTP requests are sent through the parent S3StorageDriver's Netty
+ * pipeline with the RDMA token added as an HTTP header.
+ *
+ * <p>See RDMA_ARCHITECTURE_V3.md for design details and implementation notes.
  *
  * <p>Token format: {@code addr:size:rkey:lid:dctn:g:gid}
  *
@@ -31,24 +32,24 @@ public class RdmaTransport implements AutoCloseable {
 	static {
 		boolean loaded = false;
 		try {
-			NativeLibraryLoader.load("spt_rdma_v3");
+			NativeLibraryLoader.load("spt_rdma");
 			loaded = true;
-			Loggers.MSG.info("RDMA V3 native library loaded successfully");
+			Loggers.MSG.info("S3-RDMA native library loaded successfully");
 		} catch (final UnsatisfiedLinkError e) {
-			Loggers.MSG.info("RDMA V3 native library not available: {}", e.getMessage());
+			Loggers.MSG.info("S3-RDMA native library not available: {}", e.getMessage());
 		} catch (final Exception e) {
-			Loggers.MSG.warn("Failed to load RDMA V3 native library: {}", e.getMessage());
+			Loggers.MSG.warn("Failed to load S3-RDMA native library: {}", e.getMessage());
 		}
 		NATIVE_AVAILABLE = loaded;
 	}
 
-	// V3 Native methods - only called when NATIVE_AVAILABLE is true
-	private native long nativeInitV3(String deviceName);
-	private native void nativeCloseV3(long handle);
+	// Native methods - only called when NATIVE_AVAILABLE is true
+	private native long nativeInit(String deviceName);
+	private native void nativeClose(long handle);
 	private native long nativeRegisterBuffer(long handle, ByteBuffer buffer, int size);
 	private native void nativeDeregisterBuffer(long handle, long mrHandle);
 	private native String nativeGenerateToken(long handle, long mrHandle, int size);
-	private native int nativeIsRdmaAvailableV3();
+	private native int nativeIsRdmaAvailable();
 
 	private final RdmaConfig config;
 	private volatile boolean initialized;
@@ -88,42 +89,42 @@ public class RdmaTransport implements AutoCloseable {
 	/**
 	 * Initialize the RDMA transport.
 	 *
-	 * <p>V3 initialization only requires the device name (or "auto" for auto-detection).
-	 * S3 credentials are not needed here as HTTP authentication is handled by the
-	 * parent driver's Netty pipeline.
+	 * <p>Initialization only requires the device name (or "auto" for auto-detection).
+	 * S3 credentials are not needed for RDMA setup, but are validated for consistency
+	 * since HTTP authentication is handled by the parent driver's Netty pipeline.
 	 *
-	 * @param endpoint  S3 endpoint URL (unused in V3, kept for API compatibility)
-	 * @param accessKey S3 access key (unused in V3, kept for API compatibility)
-	 * @param secretKey S3 secret key (unused in V3, kept for API compatibility)
+	 * @param endpoint  S3 endpoint URL (validated but unused for RDMA setup)
+	 * @param accessKey S3 access key (validated but unused for RDMA setup)
+	 * @param secretKey S3 secret key (validated but unused for RDMA setup)
 	 * @return true if RDMA is available and initialized, false otherwise
 	 */
 	public boolean init(final String endpoint, final String accessKey, final String secretKey) {
 		if (!NATIVE_AVAILABLE) {
-			Loggers.MSG.info("RDMA V3 transport: native library not available (stub mode)");
+			Loggers.MSG.info("S3-RDMA transport: native library not available (stub mode)");
 			initialized = false;
 			return false;
 		}
 
 		// Validate parameters (fail fast on null/empty endpoint for consistency)
 		if (endpoint == null || endpoint.isEmpty()) {
-			Loggers.MSG.warn("RDMA V3 transport: invalid endpoint");
+			Loggers.MSG.warn("S3-RDMA transport: invalid endpoint");
 			initialized = false;
 			return false;
 		}
 		if (accessKey == null || secretKey == null) {
-			Loggers.MSG.warn("RDMA V3 transport: invalid credentials");
+			Loggers.MSG.warn("S3-RDMA transport: invalid credentials");
 			initialized = false;
 			return false;
 		}
 
 		try {
-			// V3 only needs device name - credentials are handled by HTTP layer
+			// Only device name needed - credentials are handled by HTTP layer
 			final String deviceName = config.getDevice();
-			nativeHandle = nativeInitV3(deviceName);
+			nativeHandle = nativeInit(deviceName);
 
 			if (nativeHandle != 0) {
 				initialized = true;
-				Loggers.MSG.info("RDMA V3 transport initialized: device={}", deviceName);
+				Loggers.MSG.info("S3-RDMA transport initialized: device={}", deviceName);
 
 				// Initialize buffer pool if configured
 				if (config.getPoolSize() > 0) {
@@ -133,12 +134,12 @@ public class RdmaTransport implements AutoCloseable {
 
 				return true;
 			} else {
-				Loggers.MSG.warn("RDMA V3 transport initialization failed");
+				Loggers.MSG.warn("S3-RDMA transport initialization failed");
 				initialized = false;
 				return false;
 			}
 		} catch (final Exception e) {
-			Loggers.MSG.warn("RDMA V3 transport init exception: {}", e.getMessage());
+			Loggers.MSG.warn("S3-RDMA transport init exception: {}", e.getMessage());
 			initialized = false;
 			return false;
 		}
@@ -340,7 +341,7 @@ public class RdmaTransport implements AutoCloseable {
 			return false;
 		}
 		try {
-			return nativeIsRdmaAvailableV3() != 0;
+			return nativeIsRdmaAvailable() != 0;
 		} catch (final Exception e) {
 			Loggers.MSG.debug("RDMA hardware check failed: {}", e.getMessage());
 			return false;
@@ -370,7 +371,7 @@ public class RdmaTransport implements AutoCloseable {
 
 		if (nativeHandle != 0 && NATIVE_AVAILABLE) {
 			try {
-				nativeCloseV3(nativeHandle);
+				nativeClose(nativeHandle);
 			} catch (final Exception e) {
 				Loggers.MSG.debug("Native close failed: {}", e.getMessage());
 			}

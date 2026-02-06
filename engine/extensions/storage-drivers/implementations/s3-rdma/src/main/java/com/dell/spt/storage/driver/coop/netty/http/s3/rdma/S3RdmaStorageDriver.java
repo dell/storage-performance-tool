@@ -27,8 +27,8 @@ import java.util.List;
  * tagging, and bucket management. Routes large data operations (PUT/GET) through
  * RDMA when available, while all other operations use the inherited HTTP/Netty path.
  *
- * <h2>V3 Architecture</h2>
- * <p>V3 uses direct libibverbs for RDMA token generation. The protocol flow is:
+ * <h2>Architecture</h2>
+ * <p>Uses direct libibverbs for RDMA token generation. The protocol flow is:
  * <ol>
  *   <li>Client registers memory buffer with RDMA NIC</li>
  *   <li>Client generates RDMA token (addr:size:rkey:lid:dctn:g:gid)</li>
@@ -38,7 +38,7 @@ import java.util.List;
  *   <li>Client deregisters buffer</li>
  * </ol>
  *
- * <p><b>Note:</b> V3 HTTP integration (adding RDMA token headers to Netty requests)
+ * <p><b>Note:</b> HTTP integration (adding RDMA token headers to Netty requests)
  * is not yet implemented. Currently falls back to HTTP for all operations.
  */
 public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
@@ -73,7 +73,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final boolean ok = rdmaTransport.init(
 							endpointUrl, credential.getUid(), credential.getSecret());
 			if (ok) {
-				Loggers.MSG.info("{}: RDMA V3 transport initialized for endpoint {}", stepId, endpointUrl);
+				Loggers.MSG.info("{}: RDMA transport initialized for endpoint {}", stepId, endpointUrl);
 			} else if (rdmaConfig.isFallbackEnabled()) {
 				Loggers.MSG.warn(
 								"{}: RDMA unavailable, falling back to HTTP for all operations", stepId);
@@ -163,7 +163,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/**
 	 * Submit a data operation via the RDMA path.
 	 *
-	 * <p>V3 Architecture: This method should:
+	 * <p>This method should:
 	 * <ol>
 	 *   <li>Allocate and register a buffer</li>
 	 *   <li>For PUT: copy data to buffer</li>
@@ -193,7 +193,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			return true; // Operation completed (with failure)
 		}
 
-		// V3: Allocate buffer and register for RDMA
+		// Allocate buffer and register for RDMA
 		ByteBuffer buf = null;
 		long mrHandle = 0;
 		try {
@@ -222,7 +222,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				return super.submit(op);
 			}
 
-			// TODO: V3 HTTP Integration
+			// TODO: HTTP Integration
 			// The token needs to be added as an HTTP header (x-amz-rdma-token) to the request.
 			// This requires integration with the Netty pipeline in S3StorageDriver.
 			// For now, fall back to standard HTTP.

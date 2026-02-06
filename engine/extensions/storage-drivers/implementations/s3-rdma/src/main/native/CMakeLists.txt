@@ -1,4 +1,4 @@
-# SPT S3-RDMA V3 Native Build
+# SPT S3-RDMA Native Build
 #
 # Direct libibverbs implementation - no CUDA, no cuObject dependencies.
 # Target: NVIDIA/Mellanox ConnectX-4+ with mlx5 driver
@@ -13,7 +13,7 @@
 #   - JDK 21+ (provides JNI headers)
 
 cmake_minimum_required(VERSION 3.16)
-project(spt_rdma_v3 C)
+project(spt_rdma C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -86,13 +86,13 @@ message(STATUS "Found librdmacm: ${RDMACM_LIB}")
 message(STATUS "JNI include: ${JNI_INCLUDE_DIRS}")
 
 # Create the shared library
-# Use rdma_v3_cm.c which has rdma_cm support for better bonded interface handling
-add_library(spt_rdma_v3 SHARED
-    rdma_v3_cm.c
+# Uses rdma_cm for device binding (supports bonded interfaces)
+add_library(spt_rdma SHARED
+    rdma_native.c
 )
 
 # Include directories
-target_include_directories(spt_rdma_v3 PRIVATE
+target_include_directories(spt_rdma PRIVATE
     ${JNI_INCLUDE_DIRS}
     ${VERBS_INCLUDE_DIR}
     ${MLX5DV_INCLUDE_DIR}
@@ -100,7 +100,7 @@ target_include_directories(spt_rdma_v3 PRIVATE
 )
 
 # Link libraries
-target_link_libraries(spt_rdma_v3 PRIVATE
+target_link_libraries(spt_rdma PRIVATE
     ${VERBS_LIB}
     ${MLX5_LIB}
     ${RDMACM_LIB}
@@ -108,28 +108,24 @@ target_link_libraries(spt_rdma_v3 PRIVATE
 )
 
 # Set output name
-set_target_properties(spt_rdma_v3 PROPERTIES
-    OUTPUT_NAME "spt_rdma_v3"
+set_target_properties(spt_rdma PROPERTIES
+    OUTPUT_NAME "spt_rdma"
     # RPATH for finding libraries at runtime
     INSTALL_RPATH "$ORIGIN:/usr/lib64:/usr/local/lib"
     BUILD_WITH_INSTALL_RPATH TRUE
 )
 
 # Installation
-install(TARGETS spt_rdma_v3
+install(TARGETS spt_rdma
     LIBRARY DESTINATION lib
 )
 
 # Summary
 message(STATUS "")
-message(STATUS "=== SPT S3-RDMA V3 Build Configuration ===")
+message(STATUS "=== SPT S3-RDMA Build Configuration ===")
 message(STATUS "  libibverbs: ${VERBS_LIB}")
 message(STATUS "  libmlx5:    ${MLX5_LIB}")
 message(STATUS "  librdmacm:  ${RDMACM_LIB}")
 message(STATUS "  JNI:        ${JNI_INCLUDE_DIRS}")
-message(STATUS "  Output:     libspt_rdma_v3.so")
-message(STATUS "")
-message(STATUS "  NO CUDA dependencies")
-message(STATUS "  NO cuObject dependencies")
-message(STATUS "  NO rdma-object-client dependencies")
-message(STATUS "==========================================")
+message(STATUS "  Output:     libspt_rdma.so")
+message(STATUS "========================================")
