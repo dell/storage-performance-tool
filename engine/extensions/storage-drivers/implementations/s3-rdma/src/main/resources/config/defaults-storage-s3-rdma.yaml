@@ -22,3 +22,4 @@ storage:
     device: auto
     localIp: ""
     logLevel: WARN
+    timeoutMs: 30000

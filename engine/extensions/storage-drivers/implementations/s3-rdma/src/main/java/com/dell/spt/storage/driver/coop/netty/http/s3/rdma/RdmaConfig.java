@@ -9,6 +9,7 @@ public final class RdmaConfig {
 	private static final int DEFAULT_BUFFER_SIZE = 1_048_576; // 1MB
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
+	private static final long DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
 
 	private final boolean enabled;
 	private final long thresholdBytes;
@@ -18,6 +19,7 @@ public final class RdmaConfig {
 	private final String device;
 	private final String localIp;
 	private final String logLevel;
+	private final long timeoutMs;
 
 	public RdmaConfig(final Config rdmaConfig) {
 		if (rdmaConfig == null) {
@@ -30,6 +32,7 @@ public final class RdmaConfig {
 			this.device = DEFAULT_DEVICE;
 			this.localIp = "";
 			this.logLevel = DEFAULT_LOG_LEVEL;
+			this.timeoutMs = DEFAULT_TIMEOUT_MS;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "threshold", DEFAULT_THRESHOLD_BYTES);
@@ -39,6 +42,7 @@ public final class RdmaConfig {
 			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
 			this.localIp = getString(rdmaConfig, "localIp", "");
 			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);
+			this.timeoutMs = getLong(rdmaConfig, "timeoutMs", DEFAULT_TIMEOUT_MS);
 		}
 	}
 
@@ -84,6 +88,19 @@ public final class RdmaConfig {
 					final String device,
 					final String localIp,
 					final String logLevel) {
+		this(enabled, thresholdBytes, fallbackEnabled, poolSize, bufferSize, device, localIp, logLevel, DEFAULT_TIMEOUT_MS);
+	}
+
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final int poolSize,
+					final int bufferSize,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs) {
 		this.enabled = enabled;
 		this.thresholdBytes = thresholdBytes;
 		this.fallbackEnabled = fallbackEnabled;
@@ -92,6 +109,7 @@ public final class RdmaConfig {
 		this.device = device;
 		this.localIp = localIp;
 		this.logLevel = logLevel;
+		this.timeoutMs = timeoutMs;
 	}
 
 	public boolean isEnabled() {
@@ -126,6 +144,10 @@ public final class RdmaConfig {
 		return logLevel;
 	}
 
+	public long getTimeoutMs() {
+		return timeoutMs;
+	}
+
 	@Override
 	public String toString() {
 		return "RdmaConfig{" +
@@ -137,6 +159,7 @@ public final class RdmaConfig {
 						", device='" + device + '\'' +
 						", localIp='" + localIp + '\'' +
 						", logLevel='" + logLevel + '\'' +
+						", timeoutMs=" + timeoutMs +
 						'}';
 	}
 }

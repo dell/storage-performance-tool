@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import com.dell.spt.base.logging.Loggers;
 
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -29,6 +30,13 @@ public class RdmaTransport implements AutoCloseable {
 	/** Whether the native library was successfully loaded. */
 	private static final boolean NATIVE_AVAILABLE;
 
+	/**
+	 * Cached reference to {@code sun.misc.Unsafe.invokeCleaner(ByteBuffer)} for explicit
+	 * direct buffer deallocation (JDK 9+). Null if reflective access is unavailable.
+	 */
+	private static final Object UNSAFE_INSTANCE;
+	private static final Method INVOKE_CLEANER;
+
 	static {
 		boolean loaded = false;
 		try {
@@ -41,14 +49,35 @@ public class RdmaTransport implements AutoCloseable {
 			Loggers.MSG.warn("Failed to load S3-RDMA native library: {}", e.getMessage());
 		}
 		NATIVE_AVAILABLE = loaded;
+
+		// Cache Unsafe.invokeCleaner for explicit direct buffer deallocation
+		Object unsafe = null;
+		Method cleaner = null;
+		try {
+			final Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+			final var theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+			theUnsafe.setAccessible(true);
+			unsafe = theUnsafe.get(null);
+			cleaner = unsafeClass.getMethod("invokeCleaner", ByteBuffer.class);
+		} catch (final Exception e) {
+			Loggers.MSG.debug("Unsafe.invokeCleaner not available, direct buffers will rely on GC: {}",
+							e.getMessage());
+		}
+		UNSAFE_INSTANCE = unsafe;
+		INVOKE_CLEANER = cleaner;
 	}
 
 	// Native methods - only called when NATIVE_AVAILABLE is true
 	private native long nativeInit(String deviceName, String localIp);
+
 	private native void nativeClose(long handle);
+
 	private native long nativeRegisterBuffer(long handle, ByteBuffer buffer, int size);
+
 	private native void nativeDeregisterBuffer(long handle, long mrHandle);
+
 	private native String nativeGenerateToken(long handle, long mrHandle, int size);
+
 	private native int nativeIsRdmaAvailable();
 
 	private final RdmaConfig config;
@@ -262,8 +291,26 @@ public class RdmaTransport implements AutoCloseable {
 			return;
 		}
 
-		// For non-pooled buffers, just let GC handle it
-		// (standard direct buffers don't need explicit freeing)
+		// Explicitly free non-pooled direct buffers to avoid native memory pressure
+		cleanDirectBuffer(buffer);
+	}
+
+	/**
+	 * Explicitly deallocate a direct ByteBuffer's native memory via
+	 * {@code sun.misc.Unsafe.invokeCleaner()} (JDK 9+). Falls back to GC
+	 * if Unsafe is unavailable (e.g., restricted module access).
+	 */
+	private static void cleanDirectBuffer(final ByteBuffer buffer) {
+		if (buffer == null || !buffer.isDirect()) {
+			return;
+		}
+		if (INVOKE_CLEANER != null && UNSAFE_INSTANCE != null) {
+			try {
+				INVOKE_CLEANER.invoke(UNSAFE_INSTANCE, buffer);
+			} catch (final Exception e) {
+				Loggers.MSG.trace("Direct buffer cleanup failed, relying on GC: {}", e.getMessage());
+			}
+		}
 	}
 
 	/**

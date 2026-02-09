@@ -29,7 +29,7 @@ def canBuildNative = {
 
 	// Check for libibverbs headers (from rdma-core-devel)
 	def hasVerbs = file("/usr/include/infiniband/verbs.h").exists() ||
-				   file("/usr/local/include/infiniband/verbs.h").exists()
+				file("/usr/local/include/infiniband/verbs.h").exists()
 	def hasMlx5dv = file("/usr/include/infiniband/mlx5dv.h").exists() ||
 					file("/usr/local/include/infiniband/mlx5dv.h").exists()
 	def hasRdmaCm = file("/usr/include/rdma/rdma_cma.h").exists() ||

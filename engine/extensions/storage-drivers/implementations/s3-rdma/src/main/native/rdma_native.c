@@ -25,7 +25,9 @@
  * Constants
  * ============================================================================ */
 
-#define DC_KEY 0xffeeddcc   /* DC key - must match server configuration */
+#define DC_KEY 0xffeeddcc   /* DC access key - must match Dell ECS RDMA server configuration.
+                             * This is the standard value used by Dell ECS and NVIDIA cuObject.
+                             * If the server uses a different key, this constant must be updated. */
 #define MAX_TOKEN_LEN 128   /* Maximum RDMA token string length */
 
 /* ============================================================================

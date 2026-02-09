@@ -21,3 +21,4 @@ storage:
     device: string
     localIp: string
     logLevel: string
+    timeoutMs: long

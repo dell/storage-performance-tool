@@ -30,6 +30,9 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -69,6 +72,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final int size;
 		/** True if buffer came from the pool (pre-registered; must not be deregistered). */
 		final boolean pooled;
+		final long startTimeNanos;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size, final boolean pooled) {
@@ -78,6 +82,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			this.opType = opType;
 			this.size = size;
 			this.pooled = pooled;
+			this.startTimeNanos = System.nanoTime();
 		}
 	}
 
@@ -94,6 +99,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private final RdmaConfig rdmaConfig;
 	private final RdmaTransport rdmaTransport;
 	private final String endpointUrl;
+	private final ScheduledExecutorService rdmaReaper;
 
 	public S3RdmaStorageDriver(
 					final String stepId,
@@ -113,20 +119,43 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		// Initialize RDMA transport
 		rdmaTransport = new RdmaTransport(rdmaConfig);
-		if (rdmaConfig.isEnabled()) {
-			final boolean ok = rdmaTransport.init(
-							endpointUrl, credential.getUid(), credential.getSecret());
-			if (ok) {
-				Loggers.MSG.info("{}: RDMA transport initialized for endpoint {}", stepId, endpointUrl);
-			} else if (rdmaConfig.isFallbackEnabled()) {
-				Loggers.MSG.warn(
-								"{}: RDMA unavailable, falling back to HTTP for all operations", stepId);
+		boolean transportInitialized = false;
+		try {
+			if (rdmaConfig.isEnabled()) {
+				final boolean ok = rdmaTransport.init(
+								endpointUrl, credential.getUid(), credential.getSecret());
+				if (ok) {
+					Loggers.MSG.info("{}: RDMA transport initialized for endpoint {}", stepId, endpointUrl);
+				} else if (rdmaConfig.isFallbackEnabled()) {
+					Loggers.MSG.warn(
+									"{}: RDMA unavailable, falling back to HTTP for all operations", stepId);
+				} else {
+					throw new IllegalConfigurationException(
+									"RDMA initialization failed and fallback is disabled");
+				}
 			} else {
-				throw new IllegalConfigurationException(
-								"RDMA initialization failed and fallback is disabled");
+				Loggers.MSG.info("{}: RDMA disabled by configuration, using HTTP", stepId);
 			}
-		} else {
-			Loggers.MSG.info("{}: RDMA disabled by configuration, using HTTP", stepId);
+
+			// Start the RDMA operation timeout reaper
+			if (rdmaTransport.isAvailable() && rdmaConfig.getTimeoutMs() > 0) {
+				rdmaReaper = Executors.newSingleThreadScheduledExecutor(r -> {
+					final Thread t = new Thread(r, stepId + "-rdma-reaper");
+					t.setDaemon(true);
+					return t;
+				});
+				final long intervalMs = Math.max(rdmaConfig.getTimeoutMs() / 2, 1000);
+				rdmaReaper.scheduleAtFixedRate(this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+				Loggers.MSG.info("{}: RDMA operation timeout reaper started (timeoutMs={}, intervalMs={})",
+								stepId, rdmaConfig.getTimeoutMs(), intervalMs);
+			} else {
+				rdmaReaper = null;
+			}
+			transportInitialized = true;
+		} finally {
+			if (!transportInitialized) {
+				rdmaTransport.close();
+			}
 		}
 	}
 
@@ -223,7 +252,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final var opType = op.type();
 		final int size;
 		try {
-			size = (int) item.size();
+			final long rawSize = item.size();
+			if (rawSize > Integer.MAX_VALUE) {
+				Loggers.MSG.trace("{}: RDMA skip: size={} exceeds int range, falling back to HTTP", stepId, rawSize);
+				return super.submit(op);
+			}
+			size = (int) rawSize;
 		} catch (final IOException e) {
 			op.status(Operation.Status.FAIL_IO);
 			handleCompleted(op);
@@ -456,8 +490,50 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		super.complete(channel, op);
 	}
 
+	/**
+	 * Reap RDMA operations that have exceeded the configured timeout.
+	 * Called periodically by the scheduled reaper thread.
+	 */
+	@SuppressWarnings("unchecked")
+	private void reapTimedOutOps() {
+		try {
+			final long timeoutNanos = TimeUnit.MILLISECONDS.toNanos(rdmaConfig.getTimeoutMs());
+			final long now = System.nanoTime();
+			int reaped = 0;
+			for (final var entry : rdmaOps.entrySet()) {
+				final var ctx = entry.getValue();
+				if (now - ctx.startTimeNanos > timeoutNanos) {
+					final Operation<?> op = entry.getKey();
+					if (rdmaOps.remove(op, ctx)) {
+						final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(now - ctx.startTimeNanos);
+						Loggers.MSG.warn("{}: RDMA operation timed out: type={} size={} elapsed={}ms status={} item={}",
+										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
+										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
+						if (!ctx.pooled) {
+							rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+						}
+						rdmaTransport.freeBuffer(ctx.buffer);
+						op.status(Operation.Status.FAIL_IO);
+						handleCompleted((O) op);
+						reaped++;
+					}
+				}
+			}
+			if (reaped > 0) {
+				Loggers.MSG.warn("{}: RDMA reaper cleaned up {} timed-out operations ({} still in-flight)",
+								stepId, reaped, rdmaOps.size());
+			}
+		} catch (final Exception e) {
+			Loggers.MSG.warn("{}: RDMA reaper exception: {}", stepId, e.getMessage());
+		}
+	}
+
 	@Override
 	protected void doClose() throws IOException {
+		// Stop the reaper first
+		if (rdmaReaper != null) {
+			rdmaReaper.shutdownNow();
+		}
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations)
 		for (final var entry : rdmaOps.entrySet()) {
 			final var ctx = entry.getValue();
