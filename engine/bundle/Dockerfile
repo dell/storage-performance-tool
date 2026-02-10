@@ -34,11 +34,16 @@ LABEL version="${SPT_VERSION}"
 
 # Install runtime dependencies
 # Note: Temurin images already include the JRE, so install only basic tools
+# RDMA libraries (libibverbs1, librdmacm1, libmlx5-1) enable S3-RDMA when
+# hardware is present; harmless on non-RDMA hosts (native probe returns false).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
-        curl && \
+        curl \
+        libibverbs1 \
+        librdmacm1 \
+        libmlx5-1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Create spt user and directories

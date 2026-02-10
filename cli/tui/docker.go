@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	units "github.com/docker/go-units"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -382,6 +383,23 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 		PortBindings: portBindings,
 	}
 
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for worker node",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
+	}
+
 	// Create container
 	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
@@ -456,6 +474,23 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 				HostPort: constants.SptAPIPort,
 			}},
 		},
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for entry node",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
 	}
 
 	// Create container

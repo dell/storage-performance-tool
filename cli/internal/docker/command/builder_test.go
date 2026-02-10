@@ -129,6 +129,26 @@ func TestDockerCommandBuilderImpl_BuildRunCommand(t *testing.T) {
 			},
 		},
 		{
+			name: "container with RDMA device passthrough",
+			config: ContainerConfig{
+				Image:       constants.DefaultSptImage,
+				Name:        "rdma-worker",
+				NetworkMode: NetworkModeHost,
+				Detached:    true,
+				Devices:     []string{constants.RdmaDevicePath},
+				CapAdd:      []string{constants.RdmaCapIpcLock},
+				Ulimits:     []string{constants.RdmaUlimitMemlock},
+			},
+			expected: []string{
+				"docker", "run", "-d", "--name", "rdma-worker",
+				"--network", "host",
+				"--device", constants.RdmaDevicePath,
+				"--cap-add", constants.RdmaCapIpcLock,
+				"--ulimit", constants.RdmaUlimitMemlock,
+				constants.DefaultSptImage,
+			},
+		},
+		{
 			name: "empty container name",
 			config: ContainerConfig{
 				Image:    constants.DefaultSptImage,

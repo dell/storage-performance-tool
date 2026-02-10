@@ -40,6 +40,9 @@ type ContainerConfig struct {
 	Command      []string          // Container command to run
 	ExposedPorts []int             // Ports to expose
 	Detached     bool              // Run in detached mode
+	Devices      []string          // Host devices to pass through (--device flags)
+	CapAdd       []string          // Linux capabilities to add (--cap-add flags)
+	Ulimits      []string          // Resource limits (--ulimit flags, e.g. "memlock=-1:-1")
 }
 
 // PortMapping represents a Docker port mapping

@@ -10,4 +10,5 @@ const (
 	EnvS3Bucket      = "S3_BUCKET"
 	EnvS3AuthVersion = "S3_AUTH_VERSION"
 	EnvSkipImagePull = "SPT_SKIP_IMAGE_PULL"
+	EnvRdmaEnabled   = "SPT_RDMA"
 )
