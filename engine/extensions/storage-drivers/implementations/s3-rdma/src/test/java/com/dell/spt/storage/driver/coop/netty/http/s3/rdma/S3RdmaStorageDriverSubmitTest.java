@@ -164,7 +164,8 @@ public class S3RdmaStorageDriverSubmitTest {
 	void testBuildEndpointAddrs_multipleNodes() throws Exception {
 		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		setFieldInHierarchy(driver, "storageNodeAddrs",
-						new String[]{"10.0.0.1:9020", "10.0.0.2:9020", "10.0.0.3:9020"});
+						new String[]{"10.0.0.1:9020", "10.0.0.2:9020", "10.0.0.3:9020"
+						});
 		setFieldInHierarchy(driver, "storageNodePort", 9020);
 		assertEquals("http://10.0.0.1:9020,http://10.0.0.2:9020,http://10.0.0.3:9020",
 						invokeBuildEndpointAddrs(driver));
@@ -225,7 +226,7 @@ public class S3RdmaStorageDriverSubmitTest {
 	// ==================== Helpers ====================
 
 	private static RdmaConfig enabledConfig() {
-		return new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN");
+		return new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 	}
 
 	private static RdmaTransport availableTransport() {

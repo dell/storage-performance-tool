@@ -16,8 +16,6 @@ storage:
     enabled: boolean
     threshold: long
     fallback: boolean
-    poolSize: int
-    bufferSize: int
     device: string
     localIp: string
     logLevel: string

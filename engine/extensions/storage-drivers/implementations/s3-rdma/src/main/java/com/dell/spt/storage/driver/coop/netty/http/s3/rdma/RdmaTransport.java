@@ -92,7 +92,6 @@ public class RdmaTransport implements AutoCloseable {
 	private final RdmaConfig config;
 	private volatile boolean initialized;
 	private volatile long nativeHandle;
-	private volatile RdmaBufferPool bufferPool;
 
 	/**
 	 * Identity-based key for tracking ByteBuffers without calling their content-based hashCode().
@@ -165,12 +164,6 @@ public class RdmaTransport implements AutoCloseable {
 				initialized = true;
 				Loggers.MSG.info("S3-RDMA transport initialized: device={}, localIp={}",
 								deviceName, localIp.isEmpty() ? "auto" : localIp);
-
-				// Initialize buffer pool if configured
-				if (config.getPoolSize() > 0) {
-					bufferPool = new RdmaBufferPool(this, config.getBufferSize(), config.getPoolSize());
-					bufferPool.init();
-				}
 
 				return true;
 			} else {
@@ -251,60 +244,6 @@ public class RdmaTransport implements AutoCloseable {
 	}
 
 	/**
-	 * Allocate a buffer suitable for RDMA operations.
-	 *
-	 * <p>When native RDMA is available, this attempts to acquire a pre-registered
-	 * buffer from the pool. If the pool is empty or the size exceeds pool buffer
-	 * size, falls back to a standard direct buffer.
-	 *
-	 * @param size buffer size in bytes
-	 * @return a direct ByteBuffer
-	 */
-	public ByteBuffer allocateBuffer(final int size) {
-		if (!NATIVE_AVAILABLE) {
-			// Fallback: use standard direct buffer
-			return ByteBuffer.allocateDirect(size);
-		}
-
-		// Try to use the buffer pool first
-		final RdmaBufferPool pool = bufferPool;
-		if (pool != null && size <= pool.getBufferSize()) {
-			try {
-				final ByteBuffer pooledBuf = pool.acquire(0, java.util.concurrent.TimeUnit.MILLISECONDS);
-				if (pooledBuf != null) {
-					return pooledBuf;
-				}
-				Loggers.MSG.trace("RDMA buffer pool empty, using direct buffer");
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
-			}
-		}
-
-		// Fallback: use standard direct buffer
-		return ByteBuffer.allocateDirect(size);
-	}
-
-	/**
-	 * Free a buffer previously allocated by {@link #allocateBuffer}.
-	 *
-	 * @param buffer the buffer to free
-	 */
-	public void freeBuffer(final ByteBuffer buffer) {
-		if (buffer == null) {
-			return;
-		}
-
-		final RdmaBufferPool pool = bufferPool;
-		if (pool != null && pool.isPoolBuffer(buffer)) {
-			pool.release(buffer);
-			return;
-		}
-
-		// Explicitly free non-pooled direct buffers to avoid native memory pressure
-		cleanDirectBuffer(buffer);
-	}
-
-	/**
 	 * Explicitly deallocate a direct ByteBuffer's native memory via
 	 * {@code sun.misc.Unsafe.invokeCleaner()} (JDK 9+). Falls back to GC
 	 * if Unsafe is unavailable (e.g., restricted module access).
@@ -320,66 +259,6 @@ public class RdmaTransport implements AutoCloseable {
 				Loggers.MSG.trace("Direct buffer cleanup failed, relying on GC: {}", e.getMessage());
 			}
 		}
-	}
-
-	/**
-	 * Allocate a native RDMA-registered buffer (for pool use).
-	 *
-	 * @param size buffer size
-	 * @return direct ByteBuffer, or null if allocation failed
-	 */
-	public ByteBuffer allocateNative(final int size) {
-		if (!NATIVE_AVAILABLE || !initialized || nativeHandle == 0) {
-			return null;
-		}
-
-		// Allocate a direct buffer and register it
-		try {
-			final ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-			final long mrHandle = registerBuffer(buffer, size);
-			if (mrHandle != 0) {
-				return buffer;
-			}
-			// Registration failed — free the direct buffer immediately to avoid
-			// leaking pinned native memory (GC may not reclaim it under pressure)
-			cleanDirectBuffer(buffer);
-		} catch (final Exception e) {
-			Loggers.MSG.debug("Native buffer allocation failed: {}", e.getMessage());
-		}
-		return null;
-	}
-
-	/**
-	 * Free a native RDMA-registered buffer (for pool use).
-	 *
-	 * @param buffer the buffer to free
-	 */
-	public void freeNative(final ByteBuffer buffer) {
-		if (buffer == null) {
-			return;
-		}
-		final Long mrHandle = mrHandles.remove(new IdentityKey(buffer));
-		if (mrHandle != null && mrHandle != 0 && NATIVE_AVAILABLE && nativeHandle != 0) {
-			try {
-				nativeDeregisterBuffer(nativeHandle, mrHandle);
-			} catch (final Exception e) {
-				Loggers.MSG.debug("RDMA buffer deregistration failed in freeNative: {}", e.getMessage());
-			}
-		}
-	}
-
-	/**
-	 * Get the memory registration handle for a buffer.
-	 *
-	 * @param buffer the buffer
-	 * @return mrHandle, or 0 if not registered
-	 */
-	public long getMrHandle(final ByteBuffer buffer) {
-		if (buffer == null) {
-			return 0;
-		}
-		final Long mrHandle = mrHandles.get(new IdentityKey(buffer));
-		return mrHandle != null ? mrHandle : 0;
 	}
 
 	/**
@@ -420,15 +299,6 @@ public class RdmaTransport implements AutoCloseable {
 		// concurrent call that checks initialized after this point will see false and
 		// bail out before touching the native handle.
 		initialized = false;
-
-		if (bufferPool != null) {
-			try {
-				bufferPool.close();
-			} catch (final Exception e) {
-				Loggers.MSG.debug("Buffer pool close failed: {}", e.getMessage());
-			}
-			bufferPool = null;
-		}
 
 		// Deregister all remaining buffers
 		final long handle = nativeHandle;

@@ -43,7 +43,7 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/lib64:${NATIVE_LIB_DIR}"
 declare -A _cli_overrides=()
 for _var in S3_ENDPOINTS S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_AUTH_VERSION \
             RDMA_CONCURRENCY RDMA_OBJECT_SIZE RDMA_TIME_LIMIT RDMA_THRESHOLD_BYTES \
-            RDMA_FALLBACK_ENABLED RDMA_DEVICE RDMA_LOCAL_IP RDMA_POOL_SIZE RDMA_LOG_LEVEL; do
+            RDMA_FALLBACK_ENABLED RDMA_DEVICE RDMA_LOCAL_IP RDMA_LOG_LEVEL; do
   if [[ -n "${!_var+set}" ]]; then
     _cli_overrides[$_var]="${!_var}"
   fi
@@ -76,7 +76,6 @@ unset _cli_overrides _var
 : "${RDMA_FALLBACK_ENABLED:=true}"
 : "${RDMA_DEVICE:=auto}"
 : "${RDMA_LOCAL_IP:=}"
-: "${RDMA_POOL_SIZE:=0}"
 : "${RDMA_LOG_LEVEL:=WARN}"
 
 # Parse test mode from first positional arg
@@ -100,7 +99,6 @@ case "$MODE" in
     echo "  RDMA_OBJECT_SIZE     Object size (default: 1MB)"
     echo "  RDMA_TIME_LIMIT      Duration per phase (default: 60s)"
     echo "  RDMA_LOCAL_IP        Local RDMA interface IP (default: auto)"
-    echo "  RDMA_POOL_SIZE       Pre-registered buffer pool size (default: 64, 0=disabled)"
     echo "  RDMA_LOG_LEVEL       Native log level (default: WARN)"
     exit 0
     ;;
@@ -154,7 +152,6 @@ RDMA_ARGS=(
   "--storage-rdma-threshold=${RDMA_THRESHOLD_BYTES}"
   "--storage-rdma-fallback=${RDMA_FALLBACK_ENABLED}"
   "--storage-rdma-device=${RDMA_DEVICE}"
-  "--storage-rdma-poolSize=${RDMA_POOL_SIZE}"
   "--storage-rdma-logLevel=${RDMA_LOG_LEVEL}"
 )
 if [[ -n "${RDMA_LOCAL_IP}" ]]; then
@@ -189,7 +186,6 @@ print_header() {
   echo "Threshold:   ${RDMA_THRESHOLD_BYTES} bytes" >&2
   echo "Device:      ${RDMA_DEVICE}" >&2
   echo "Local IP:    ${RDMA_LOCAL_IP:-auto}" >&2
-  echo "Pool Size:   ${RDMA_POOL_SIZE}" >&2
   echo "Log Level:   ${RDMA_LOG_LEVEL}" >&2
   echo "Native lib:  ${NATIVE_LIB_DIR}" >&2
   echo "==========================================" >&2

@@ -16,7 +16,7 @@ public class RdmaTransportTest {
 	@BeforeEach
 	void setUp() {
 		config = new RdmaConfig(
-						true, 1_048_576L, true, 0, 0, "auto", "", "WARN");
+						true, 1_048_576L, true, "auto", "", "WARN");
 		transport = new RdmaTransport(config);
 	}
 
@@ -43,42 +43,8 @@ public class RdmaTransportTest {
 	}
 
 	@Test
-	void testAllocateBufferReturnsDirect() {
-		final ByteBuffer buf = transport.allocateBuffer(4096);
-		assertNotNull(buf);
-		assertTrue(buf.isDirect(), "Buffer should be direct ByteBuffer");
-		assertEquals(4096, buf.capacity());
-	}
-
-	@Test
-	void testAllocateBufferSmallSize() {
-		final ByteBuffer buf = transport.allocateBuffer(1);
-		assertNotNull(buf);
-		assertEquals(1, buf.capacity());
-	}
-
-	@Test
-	void testAllocateBufferLargeSize() {
-		final int tenMb = 10 * 1024 * 1024;
-		final ByteBuffer buf = transport.allocateBuffer(tenMb);
-		assertNotNull(buf);
-		assertEquals(tenMb, buf.capacity());
-	}
-
-	@Test
-	void testFreeBufferDoesNotThrow() {
-		final ByteBuffer buf = transport.allocateBuffer(4096);
-		assertDoesNotThrow(() -> transport.freeBuffer(buf));
-	}
-
-	@Test
-	void testFreeBufferNull() {
-		assertDoesNotThrow(() -> transport.freeBuffer(null));
-	}
-
-	@Test
 	void testRegisterBufferReturnsZeroInStubMode() {
-		final ByteBuffer buf = transport.allocateBuffer(1024);
+		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		// In stub mode (no native library), registerBuffer should return 0
 		final long mrHandle = transport.registerBuffer(buf, 1024);
 		assertEquals(0, mrHandle);
@@ -86,14 +52,14 @@ public class RdmaTransportTest {
 
 	@Test
 	void testDeregisterBufferDoesNotThrow() {
-		final ByteBuffer buf = transport.allocateBuffer(1024);
+		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		// Even with mrHandle=0, this should not throw
 		assertDoesNotThrow(() -> transport.deregisterBuffer(buf, 0));
 	}
 
 	@Test
 	void testGenerateTokenReturnsNullInStubMode() {
-		final ByteBuffer buf = transport.allocateBuffer(1024);
+		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		// In stub mode, generateToken should return null
 		final String token = transport.generateToken(0, 1024);
 		assertNull(token);
@@ -126,7 +92,7 @@ public class RdmaTransportTest {
 
 	@Test
 	void testRegisterBufferWithZeroSize() {
-		final ByteBuffer buf = transport.allocateBuffer(0);
+		final ByteBuffer buf = ByteBuffer.allocateDirect(0);
 		// registerBuffer with 0 size should return 0 (not initialized)
 		final long mrHandle = transport.registerBuffer(buf, 0);
 		assertEquals(0, mrHandle);
@@ -137,30 +103,6 @@ public class RdmaTransportTest {
 		// generateToken with 0 mrHandle should return null
 		final String token = transport.generateToken(0, 1024);
 		assertNull(token);
-	}
-
-	@Test
-	void testMultipleAllocateFree() {
-		// Test multiple allocations and frees
-		final ByteBuffer buf1 = transport.allocateBuffer(1024);
-		final ByteBuffer buf2 = transport.allocateBuffer(2048);
-		final ByteBuffer buf3 = transport.allocateBuffer(4096);
-
-		assertNotNull(buf1);
-		assertNotNull(buf2);
-		assertNotNull(buf3);
-
-		assertDoesNotThrow(() -> transport.freeBuffer(buf1));
-		assertDoesNotThrow(() -> transport.freeBuffer(buf2));
-		assertDoesNotThrow(() -> transport.freeBuffer(buf3));
-	}
-
-	@Test
-	void testFreeBufferTwice() {
-		final ByteBuffer buf = transport.allocateBuffer(4096);
-		transport.freeBuffer(buf);
-		// Second free should not throw
-		assertDoesNotThrow(() -> transport.freeBuffer(buf));
 	}
 
 	@Test
@@ -181,27 +123,4 @@ public class RdmaTransportTest {
 		assertFalse(result);
 	}
 
-	@Test
-	void testGetMrHandleReturnsZeroForUnregistered() {
-		final ByteBuffer buf = transport.allocateBuffer(1024);
-		// Buffer was never registered, should return 0
-		final long mrHandle = transport.getMrHandle(buf);
-		assertEquals(0, mrHandle);
-	}
-
-	@Test
-	void testGetMrHandleNull() {
-		assertEquals(0, transport.getMrHandle(null));
-	}
-
-	@Test
-	void testAllocateNativeReturnsNullInStubMode() {
-		// In stub mode (not initialized), allocateNative should return null
-		assertNull(transport.allocateNative(1024));
-	}
-
-	@Test
-	void testFreeNativeDoesNotThrowForNull() {
-		assertDoesNotThrow(() -> transport.freeNative(null));
-	}
 }

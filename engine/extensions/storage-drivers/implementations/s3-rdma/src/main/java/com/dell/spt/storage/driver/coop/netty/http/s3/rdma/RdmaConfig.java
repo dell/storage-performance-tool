@@ -5,8 +5,6 @@ import com.github.akurilov.confuse.Config;
 public final class RdmaConfig {
 
 	private static final long DEFAULT_THRESHOLD_BYTES = 1_048_576; // 1MB
-	private static final int DEFAULT_POOL_SIZE = 0; // disabled by default; registration overhead is negligible
-	private static final int DEFAULT_BUFFER_SIZE = 1_048_576; // 1MB
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
 	private static final long DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
@@ -14,8 +12,6 @@ public final class RdmaConfig {
 	private final boolean enabled;
 	private final long thresholdBytes;
 	private final boolean fallbackEnabled;
-	private final int poolSize;
-	private final int bufferSize;
 	private final String device;
 	private final String localIp;
 	private final String logLevel;
@@ -27,8 +23,6 @@ public final class RdmaConfig {
 			this.enabled = true;
 			this.thresholdBytes = DEFAULT_THRESHOLD_BYTES;
 			this.fallbackEnabled = true;
-			this.poolSize = DEFAULT_POOL_SIZE;
-			this.bufferSize = DEFAULT_BUFFER_SIZE;
 			this.device = DEFAULT_DEVICE;
 			this.localIp = "";
 			this.logLevel = DEFAULT_LOG_LEVEL;
@@ -37,8 +31,6 @@ public final class RdmaConfig {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "threshold", DEFAULT_THRESHOLD_BYTES);
 			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback", true);
-			this.poolSize = getInt(rdmaConfig, "poolSize", DEFAULT_POOL_SIZE);
-			this.bufferSize = getInt(rdmaConfig, "bufferSize", DEFAULT_BUFFER_SIZE);
 			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
 			this.localIp = getString(rdmaConfig, "localIp", "");
 			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);
@@ -83,20 +75,16 @@ public final class RdmaConfig {
 					final boolean enabled,
 					final long thresholdBytes,
 					final boolean fallbackEnabled,
-					final int poolSize,
-					final int bufferSize,
 					final String device,
 					final String localIp,
 					final String logLevel) {
-		this(enabled, thresholdBytes, fallbackEnabled, poolSize, bufferSize, device, localIp, logLevel, DEFAULT_TIMEOUT_MS);
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, DEFAULT_TIMEOUT_MS);
 	}
 
 	public RdmaConfig(
 					final boolean enabled,
 					final long thresholdBytes,
 					final boolean fallbackEnabled,
-					final int poolSize,
-					final int bufferSize,
 					final String device,
 					final String localIp,
 					final String logLevel,
@@ -104,8 +92,6 @@ public final class RdmaConfig {
 		this.enabled = enabled;
 		this.thresholdBytes = thresholdBytes;
 		this.fallbackEnabled = fallbackEnabled;
-		this.poolSize = poolSize;
-		this.bufferSize = bufferSize;
 		this.device = device;
 		this.localIp = localIp;
 		this.logLevel = logLevel;
@@ -122,14 +108,6 @@ public final class RdmaConfig {
 
 	public boolean isFallbackEnabled() {
 		return fallbackEnabled;
-	}
-
-	public int getPoolSize() {
-		return poolSize;
-	}
-
-	public int getBufferSize() {
-		return bufferSize;
 	}
 
 	public String getDevice() {
@@ -154,8 +132,6 @@ public final class RdmaConfig {
 						"enabled=" + enabled +
 						", thresholdBytes=" + thresholdBytes +
 						", fallbackEnabled=" + fallbackEnabled +
-						", poolSize=" + poolSize +
-						", bufferSize=" + bufferSize +
 						", device='" + device + '\'' +
 						", localIp='" + localIp + '\'' +
 						", logLevel='" + logLevel + '\'' +

@@ -70,18 +70,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final long mrHandle;
 		final OpType opType;
 		final int size;
-		/** True if buffer came from the pool (pre-registered; must not be deregistered). */
-		final boolean pooled;
 		final long startTimeNanos;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
-						final OpType opType, final int size, final boolean pooled) {
+						final OpType opType, final int size) {
 			this.token = token;
 			this.buffer = buffer;
 			this.mrHandle = mrHandle;
 			this.opType = opType;
 			this.size = size;
-			this.pooled = pooled;
 			this.startTimeNanos = System.nanoTime();
 		}
 	}
@@ -267,21 +264,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		ByteBuffer buf = null;
 		long mrHandle = 0;
-		boolean pooled = false;
 		try {
-			buf = rdmaTransport.allocateBuffer(size);
+			buf = ByteBuffer.allocateDirect(size);
 
-			// Pool buffers are pre-registered; skip expensive ibv_reg_mr for them
-			mrHandle = rdmaTransport.getMrHandle(buf);
-			if (mrHandle != 0) {
-				pooled = true;
-			} else {
-				mrHandle = rdmaTransport.registerBuffer(buf, size);
-				if (mrHandle == 0) {
-					Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
-					rdmaTransport.freeBuffer(buf);
-					return super.submit(op);
-				}
+			mrHandle = rdmaTransport.registerBuffer(buf, size);
+			if (mrHandle == 0) {
+				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
+				return super.submit(op);
 			}
 
 			// For PUT: copy data into the registered buffer
@@ -295,17 +284,14 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
 				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
-				if (!pooled) {
-					rdmaTransport.deregisterBuffer(buf, mrHandle);
-				}
-				rdmaTransport.freeBuffer(buf);
+				rdmaTransport.deregisterBuffer(buf, mrHandle);
 				return super.submit(op);
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
-			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size, pooled));
+			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size));
 
-			Loggers.MSG.debug("{}: RDMA submit: type={} size={} pooled={} token={}", stepId, opType, size, pooled, token);
+			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
 			final boolean submitted = super.submit(op);
 			if (!submitted) {
@@ -320,11 +306,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// Clean up — check rdmaOps first (context may already be stored)
 			if (!cleanupRdmaContext(op)) {
-				if (mrHandle != 0 && !pooled) {
+				if (mrHandle != 0) {
 					rdmaTransport.deregisterBuffer(buf, mrHandle);
-				}
-				if (buf != null) {
-					rdmaTransport.freeBuffer(buf);
 				}
 			}
 
@@ -343,10 +326,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private boolean cleanupRdmaContext(final O op) {
 		final RdmaContext ctx = rdmaOps.remove(op);
 		if (ctx != null) {
-			if (!ctx.pooled) {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-			}
-			rdmaTransport.freeBuffer(ctx.buffer);
+			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 			return true;
 		}
 		return false;
@@ -401,7 +381,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private String buildEndpointAddrs() {
 		final var sb = new StringBuilder();
 		for (int i = 0; i < storageNodeAddrs.length; i++) {
-			if (i > 0) sb.append(',');
+			if (i > 0)
+				sb.append(',');
 			final String addr = storageNodeAddrs[i];
 			final int colonPos = addr.lastIndexOf(':');
 			final String host;
@@ -493,10 +474,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					((DataOperation) op).countBytesDone(ctx.size);
 				}
 			} finally {
-				if (!ctx.pooled) {
-					rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-				}
-				rdmaTransport.freeBuffer(ctx.buffer);
+				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 			}
 		}
 		super.complete(channel, op);
@@ -521,10 +499,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						Loggers.MSG.warn("{}: RDMA operation timed out: type={} size={} elapsed={}ms status={} item={}",
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
-						if (!ctx.pooled) {
-							rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-						}
-						rdmaTransport.freeBuffer(ctx.buffer);
+						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 						op.status(Operation.Status.FAIL_IO);
 						handleCompleted((O) op);
 						reaped++;
@@ -557,17 +532,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
 		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
 		// if a concurrent complete() is still draining the last in-flight operations.
-		for (final var it = rdmaOps.entrySet().iterator(); it.hasNext(); ) {
+		for (final var it = rdmaOps.entrySet().iterator(); it.hasNext();) {
 			final var entry = it.next();
 			final var ctx = entry.getValue();
 			if (rdmaOps.remove(entry.getKey(), ctx)) {
-				if (!ctx.pooled) {
-					rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-				}
-				rdmaTransport.freeBuffer(ctx.buffer);
+				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 			}
 		}
-		// Pool close deregisters all pool buffers; must happen before native close
 		rdmaTransport.close();
 		super.doClose();
 	}

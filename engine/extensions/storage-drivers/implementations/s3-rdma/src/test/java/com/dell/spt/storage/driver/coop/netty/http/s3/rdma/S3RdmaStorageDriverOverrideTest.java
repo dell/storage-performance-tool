@@ -100,7 +100,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		final long mrHandle = 42L;
 
-		final var ctx = newRdmaContext("token123", buf, mrHandle, OpType.CREATE, (int) THRESHOLD, false);
+		final var ctx = newRdmaContext("token123", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
 
 		final boolean found = invokeCleanupRdmaContext(driver, op);
@@ -108,28 +108,6 @@ public class S3RdmaStorageDriverOverrideTest {
 		assertTrue(found);
 		assertFalse(rdmaOps.containsKey(op));
 		Mockito.verify(transport).deregisterBuffer(buf, mrHandle);
-		Mockito.verify(transport).freeBuffer(buf);
-	}
-
-	@Test
-	void testCleanup_skipsDeregisterForPooledBuffer() throws Exception {
-		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
-		final var rdmaOps = getRdmaOps(driver);
-
-		final var op = dataOp(OpType.CREATE, THRESHOLD);
-		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
-		final long mrHandle = 55L;
-
-		final var ctx = newRdmaContext("tokenPooled", buf, mrHandle, OpType.CREATE, (int) THRESHOLD, true);
-		rdmaOps.put(op, ctx);
-
-		final boolean found = invokeCleanupRdmaContext(driver, op);
-
-		assertTrue(found);
-		assertFalse(rdmaOps.containsKey(op));
-		Mockito.verify(transport, Mockito.never()).deregisterBuffer(buf, mrHandle);
-		Mockito.verify(transport).freeBuffer(buf);
 	}
 
 	@Test
@@ -142,7 +120,6 @@ public class S3RdmaStorageDriverOverrideTest {
 
 		assertFalse(found);
 		Mockito.verify(transport, Mockito.never()).deregisterBuffer(Mockito.any(), Mockito.anyLong());
-		Mockito.verify(transport, Mockito.never()).freeBuffer(Mockito.any());
 	}
 
 	@Test
@@ -153,7 +130,7 @@ public class S3RdmaStorageDriverOverrideTest {
 
 		final var op = dataOp(OpType.READ, THRESHOLD);
 		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
-		final var ctx = newRdmaContext("tokenRead", buf, 99L, OpType.READ, (int) THRESHOLD, false);
+		final var ctx = newRdmaContext("tokenRead", buf, 99L, OpType.READ, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
 
 		assertEquals(1, rdmaOps.size());
@@ -168,7 +145,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	void testReaper_cleansUpTimedOutOps() throws Exception {
 		final var transport = availableTransport();
 		// Use a very short timeout so the entry is already expired
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN", 1L);
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
 		final var driver = newMockDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
@@ -176,7 +153,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		final long mrHandle = 77L;
 
-		final var ctx = newRdmaContext("tokenExpired", buf, mrHandle, OpType.CREATE, (int) THRESHOLD, false);
+		final var ctx = newRdmaContext("tokenExpired", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
 
 		// Sleep briefly to ensure the 1ms timeout elapses
@@ -188,14 +165,13 @@ public class S3RdmaStorageDriverOverrideTest {
 		// Context should have been reaped
 		assertTrue(rdmaOps.isEmpty());
 		Mockito.verify(transport).deregisterBuffer(buf, mrHandle);
-		Mockito.verify(transport).freeBuffer(buf);
 	}
 
 	@Test
 	void testReaper_doesNotReapFreshOps() throws Exception {
 		final var transport = availableTransport();
 		// Use a long timeout
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN", 60_000L);
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 60_000L);
 		final var driver = newMockDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
@@ -203,7 +179,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		final long mrHandle = 88L;
 
-		final var ctx = newRdmaContext("tokenFresh", buf, mrHandle, OpType.CREATE, (int) THRESHOLD, false);
+		final var ctx = newRdmaContext("tokenFresh", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
 
 		invokeReapTimedOutOps(driver);
@@ -263,13 +239,13 @@ public class S3RdmaStorageDriverOverrideTest {
 
 	@Test
 	void testConfigDefaultTimeout() {
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN");
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 		assertEquals(30_000L, config.getTimeoutMs());
 	}
 
 	@Test
 	void testConfigCustomTimeout() {
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN", 5_000L);
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 5_000L);
 		assertEquals(5_000L, config.getTimeoutMs());
 	}
 
@@ -322,7 +298,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		assertNull(rdmaOps.get(op), "No context before put");
 
 		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
-		final var ctx = newRdmaContext("token-gate", buf, 42L, OpType.CREATE, (int) THRESHOLD, false);
+		final var ctx = newRdmaContext("token-gate", buf, 42L, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
 		assertNotNull(rdmaOps.get(op), "Context available after put");
 
@@ -371,7 +347,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		// Verifies the P0.1 fix (atomic remove) prevents double cleanup.
 		final var transport = availableTransport();
 		// 1ms timeout so reaper can claim entries
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN", 1L);
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
 		final var driver = newMockDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
@@ -383,7 +359,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		for (int i = 0; i < opCount; i++) {
 			final var op = dataOp(OpType.CREATE, THRESHOLD);
 			final ByteBuffer buf = ByteBuffer.allocateDirect(64);
-			final var ctx = newRdmaContext("tok" + i, buf, 100L + i, OpType.CREATE, (int) THRESHOLD, false);
+			final var ctx = newRdmaContext("tok" + i, buf, 100L + i, OpType.CREATE, (int) THRESHOLD);
 			rdmaOps.put(op, ctx);
 			ops.add(op);
 		}
@@ -403,8 +379,7 @@ public class S3RdmaStorageDriverOverrideTest {
 					startGate.await();
 					if (threadIdx % 2 == 0) {
 						// Simulate complete() — pick entries from our slice
-						for (int i = threadIdx * (opCount / threads);
-							 i < (threadIdx + 1) * (opCount / threads) && i < opCount; i++) {
+						for (int i = threadIdx * (opCount / threads); i < (threadIdx + 1) * (opCount / threads) && i < opCount; i++) {
 							if (invokeCleanupRdmaContext(driver, ops.get(i))) {
 								cleanupCount.incrementAndGet();
 							}
@@ -437,7 +412,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	void testConcurrency_doCloseWhileCompleteInFlight() throws Exception {
 		// Simulates the P0.1 scenario: doClose() drains while complete() is racing
 		final var transport = availableTransport();
-		final var config = new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN", 60_000L);
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 60_000L);
 		final var driver = newMockDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
@@ -447,7 +422,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		for (int i = 0; i < opCount; i++) {
 			final var op = dataOp(OpType.CREATE, THRESHOLD);
 			final ByteBuffer buf = ByteBuffer.allocateDirect(64);
-			final var ctx = newRdmaContext("tok" + i, buf, 200L + i, OpType.CREATE, (int) THRESHOLD, false);
+			final var ctx = newRdmaContext("tok" + i, buf, 200L + i, OpType.CREATE, (int) THRESHOLD);
 			rdmaOps.put(op, ctx);
 			ops.add(op);
 		}
@@ -477,7 +452,7 @@ public class S3RdmaStorageDriverOverrideTest {
 			try {
 				startGate.await();
 				// Atomic drain like the fixed doClose()
-				for (final var it = rdmaOps.entrySet().iterator(); it.hasNext(); ) {
+				for (final var it = rdmaOps.entrySet().iterator(); it.hasNext();) {
 					final var entry = it.next();
 					final var ctx = entry.getValue();
 					rdmaOps.remove(entry.getKey(), ctx);
@@ -497,7 +472,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	// ==================== Helpers ====================
 
 	private static RdmaConfig enabledConfig() {
-		return new RdmaConfig(true, THRESHOLD, true, 0, 0, "auto", "", "WARN");
+		return new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 	}
 
 	private static RdmaTransport availableTransport() {
@@ -533,13 +508,12 @@ public class S3RdmaStorageDriverOverrideTest {
 	}
 
 	private static Object newRdmaContext(final String token, final ByteBuffer buffer,
-					final long mrHandle, final OpType opType, final int size,
-					final boolean pooled) throws Exception {
+					final long mrHandle, final OpType opType, final int size) throws Exception {
 		final var ctxClass = Class.forName(
 						S3RdmaStorageDriver.class.getName() + "$RdmaContext");
 		final var ctor = ctxClass.getDeclaredConstructors()[0];
 		ctor.setAccessible(true);
-		return ctor.newInstance(token, buffer, mrHandle, opType, size, pooled);
+		return ctor.newInstance(token, buffer, mrHandle, opType, size);
 	}
 
 	private static void invokeApplyMetaDataHeaders(
