@@ -128,36 +128,46 @@ public class S3RdmaStorageDriverSubmitTest {
 		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("a/b/c")));
 	}
 
-	// ---------- buildEndpointUrl ----------
+	// ---------- buildEndpointAddrs ----------
 
 	@Test
-	void testBuildEndpointUrl_httpForPort9020() throws Exception {
+	void testBuildEndpointAddrs_httpForPort9020() throws Exception {
 		assertEquals("http://10.0.0.1:9020",
-						invokeBuildEndpointUrl(driverWithNode("10.0.0.1:9020", 9020)));
+						invokeBuildEndpointAddrs(driverWithNode("10.0.0.1:9020", 9020)));
 	}
 
 	@Test
-	void testBuildEndpointUrl_httpsForPort443() throws Exception {
+	void testBuildEndpointAddrs_httpsForPort443() throws Exception {
 		assertEquals("https://s3.example.com:443",
-						invokeBuildEndpointUrl(driverWithNode("s3.example.com:443", 443)));
+						invokeBuildEndpointAddrs(driverWithNode("s3.example.com:443", 443)));
 	}
 
 	@Test
-	void testBuildEndpointUrl_httpsForPort9021() throws Exception {
+	void testBuildEndpointAddrs_httpsForPort9021() throws Exception {
 		assertEquals("https://10.0.0.1:9021",
-						invokeBuildEndpointUrl(driverWithNode("10.0.0.1:9021", 9021)));
+						invokeBuildEndpointAddrs(driverWithNode("10.0.0.1:9021", 9021)));
 	}
 
 	@Test
-	void testBuildEndpointUrl_usesPortFromAddr() throws Exception {
+	void testBuildEndpointAddrs_usesPortFromAddr() throws Exception {
 		assertEquals("http://10.0.0.1:8080",
-						invokeBuildEndpointUrl(driverWithNode("10.0.0.1:8080", 9020)));
+						invokeBuildEndpointAddrs(driverWithNode("10.0.0.1:8080", 9020)));
 	}
 
 	@Test
-	void testBuildEndpointUrl_usesStorageNodePortWhenNoPortInAddr() throws Exception {
+	void testBuildEndpointAddrs_usesStorageNodePortWhenNoPortInAddr() throws Exception {
 		assertEquals("http://10.0.0.1:9020",
-						invokeBuildEndpointUrl(driverWithNode("10.0.0.1", 9020)));
+						invokeBuildEndpointAddrs(driverWithNode("10.0.0.1", 9020)));
+	}
+
+	@Test
+	void testBuildEndpointAddrs_multipleNodes() throws Exception {
+		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		setFieldInHierarchy(driver, "storageNodeAddrs",
+						new String[]{"10.0.0.1:9020", "10.0.0.2:9020", "10.0.0.3:9020"});
+		setFieldInHierarchy(driver, "storageNodePort", 9020);
+		assertEquals("http://10.0.0.1:9020,http://10.0.0.2:9020,http://10.0.0.3:9020",
+						invokeBuildEndpointAddrs(driver));
 	}
 
 	// ---------- batch submit ----------
@@ -280,9 +290,9 @@ public class S3RdmaStorageDriverSubmitTest {
 		return (String) m.invoke(driver, item);
 	}
 
-	private static String invokeBuildEndpointUrl(
+	private static String invokeBuildEndpointAddrs(
 					final S3RdmaStorageDriver<Item, Operation<Item>> driver) throws Exception {
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("buildEndpointUrl");
+		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("buildEndpointAddrs");
 		m.setAccessible(true);
 		return (String) m.invoke(driver);
 	}

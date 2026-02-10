@@ -98,7 +98,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	private final RdmaConfig rdmaConfig;
 	private final RdmaTransport rdmaTransport;
-	private final String endpointUrl;
+	private final String endpointAddrs;
 	private final ScheduledExecutorService rdmaReaper;
 
 	public S3RdmaStorageDriver(
@@ -114,8 +114,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		rdmaConfig = new RdmaConfig(storageConfig.configVal("rdma"));
 		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
 
-		// Build endpoint URL from storage node config
-		endpointUrl = buildEndpointUrl();
+		// Build endpoint address summary from storage node config
+		endpointAddrs = buildEndpointAddrs();
 
 		// Initialize RDMA transport
 		rdmaTransport = new RdmaTransport(rdmaConfig);
@@ -123,9 +123,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			if (rdmaConfig.isEnabled()) {
 				final boolean ok = rdmaTransport.init(
-								endpointUrl, credential.getUid(), credential.getSecret());
+								endpointAddrs, credential.getUid(), credential.getSecret());
 				if (ok) {
-					Loggers.MSG.info("{}: RDMA transport initialized for endpoint {}", stepId, endpointUrl);
+					Loggers.MSG.info("{}: RDMA transport initialized, {} node(s): {}",
+									stepId, storageNodeAddrs.length, endpointAddrs);
 				} else if (rdmaConfig.isFallbackEnabled()) {
 					Loggers.MSG.warn(
 									"{}: RDMA unavailable, falling back to HTTP for all operations", stepId);
@@ -394,23 +395,28 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Build the S3 endpoint URL from the storage node configuration.
+	 * Build a comma-separated summary of all configured S3 endpoint addresses.
+	 * Used for logging and for the non-null validation in {@link RdmaTransport#init}.
 	 */
-	private String buildEndpointUrl() {
-		final String addr = storageNodeAddrs[0];
-		final String host;
-		final int port;
-		final int colonPos = addr.lastIndexOf(':');
-		if (colonPos > 0) {
-			host = addr.substring(0, colonPos);
-			port = Integer.parseInt(addr.substring(colonPos + 1));
-		} else {
-			host = addr;
-			port = storageNodePort;
+	private String buildEndpointAddrs() {
+		final var sb = new StringBuilder();
+		for (int i = 0; i < storageNodeAddrs.length; i++) {
+			if (i > 0) sb.append(',');
+			final String addr = storageNodeAddrs[i];
+			final int colonPos = addr.lastIndexOf(':');
+			final String host;
+			final int port;
+			if (colonPos > 0) {
+				host = addr.substring(0, colonPos);
+				port = Integer.parseInt(addr.substring(colonPos + 1));
+			} else {
+				host = addr;
+				port = storageNodePort;
+			}
+			final String scheme = (port == 443 || port == 9021) ? "https" : "http";
+			sb.append(scheme).append("://").append(host).append(':').append(port);
 		}
-		// Determine scheme: use HTTPS if port is 443 or 9021, otherwise HTTP
-		final String scheme = (port == 443 || port == 9021) ? "https" : "http";
-		return scheme + "://" + host + ":" + port;
+		return sb.toString();
 	}
 
 	/**
@@ -447,8 +453,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/**
 	 * Inject the RDMA token as an HTTP header before auth signing.
 	 *
-	 * <p>This is called from {@code HttpStorageDriverBase.httpRequest()} at line 243,
-	 * before {@code applyAuthHeaders()} at line 246, ensuring the token is included
+	 * <p>This is called from {@code HttpStorageDriverBase.httpRequest()},
+	 * before {@code applyAuthHeaders()}, ensuring the token is included
 	 * in the SigV4 canonical request.
 	 *
 	 * <p>For RDMA PUT, Content-Length must be set to 0. The server's HTTP framework
