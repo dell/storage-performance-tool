@@ -13,9 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <inttypes.h>
 
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
@@ -52,6 +54,7 @@ struct rdma_context {
 
 /* Forward declarations */
 static void throw_rdma_exception(JNIEnv *env, const char *message);
+static void log_warn(JNIEnv *env, const char *fmt, ...);
 
 /* ============================================================================
  * rdma_cm-based Device Initialization
@@ -158,7 +161,7 @@ static struct ibv_context *open_device_direct(const char *deviceName) {
  * For RoCE (Ethernet), we need to use the correct GID type.
  * IPv4 addresses are stored as IPv4-mapped IPv6 addresses in GID table.
  */
-static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
+static int find_roce_v2_gid_index(JNIEnv *env, struct ibv_context *ctx, uint8_t port,
                                    const char *local_ip, union ibv_gid *out_gid) {
     struct in_addr ip;
     uint8_t ipv4_mapped[16] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,0,0,0,0};
@@ -166,8 +169,10 @@ static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
     if (local_ip == NULL || strlen(local_ip) == 0) {
         /* No IP specified, try default GID index 3 (common for RoCE v2) */
         if (ibv_query_gid(ctx, port, 3, out_gid) == 0) {
+            log_warn(env, "no local_ip specified, using default GID index 3");
             return 3;
         }
+        log_warn(env, "no local_ip specified and GID index 3 unavailable, falling back to GID 0");
         return 0;  /* Fallback to GID 0 */
     }
 
@@ -210,17 +215,19 @@ static int find_roce_v2_gid_index(struct ibv_context *ctx, uint8_t port,
 
     /* Fallback: try GID index 3 (common default for RoCE v2) */
     if (ibv_query_gid(ctx, port, 3, out_gid) == 0) {
+        log_warn(env, "no RoCE v2 GID matched IP %s, falling back to GID index 3", local_ip);
         return 3;
     }
 
     /* Last resort: use GID 0 */
     if (ibv_query_gid(ctx, port, 0, out_gid) == 0) {
+        log_warn(env, "no RoCE v2 GID matched IP %s, falling back to GID index 0", local_ip);
         return 0;
     }
     return -1;
 }
 
-static int query_port_info(struct rdma_context *rctx, const char *local_ip,
+static int query_port_info(JNIEnv *env, struct rdma_context *rctx, const char *local_ip,
                            char *errbuf, size_t errlen) {
     struct ibv_port_attr port_attr;
 
@@ -235,7 +242,7 @@ static int query_port_info(struct rdma_context *rctx, const char *local_ip,
     rctx->active_mtu = port_attr.active_mtu;
 
     /* For RoCE, find the correct GID index */
-    rctx->gid_index = find_roce_v2_gid_index(rctx->ctx, rctx->port_num,
+    rctx->gid_index = find_roce_v2_gid_index(env, rctx->ctx, rctx->port_num,
                                               local_ip, &rctx->gid);
     if (rctx->gid_index < 0) {
         snprintf(errbuf, errlen, "Failed to find valid RoCE v2 GID for IP %s",
@@ -373,8 +380,8 @@ static int format_token(struct rdma_context *rctx, void *addr, uint32_t size,
     }
 
     int written = snprintf(out, out_len,
-        "%016lx:%08x:%08x:%04x:%06x:1:%s",
-        (unsigned long)(uintptr_t)addr,
+        "%016" PRIxPTR ":%08x:%08x:%04x:%06x:1:%s",
+        (uintptr_t)addr,
         size,
         rkey,
         rctx->lid,
@@ -391,6 +398,10 @@ static int format_token(struct rdma_context *rctx, void *addr, uint32_t size,
 static jclass rdmaExceptionClass = NULL;
 static jmethodID rdmaExceptionCtor = NULL;
 
+/* Cached reference to RdmaTransport.nativeLogWarn(String) for JNI logging callback */
+static jclass rdmaTransportClass = NULL;
+static jmethodID logWarnMid = NULL;
+
 static int cache_exception_class(JNIEnv *env) {
     jclass localClass = (*env)->FindClass(env,
         "com/dell/spt/storage/driver/coop/netty/http/s3/rdma/RdmaException");
@@ -405,6 +416,48 @@ static int cache_exception_class(JNIEnv *env) {
         "(Ljava/lang/String;ILjava/lang/String;)V");
 
     return (rdmaExceptionCtor != NULL) ? 0 : -1;
+}
+
+/**
+ * Cache RdmaTransport.nativeLogWarn(String) for native-to-Java log routing.
+ * Called once during nativeInit(). Best-effort: if caching fails, log_warn()
+ * silently does nothing.
+ */
+static void cache_logger_callback(JNIEnv *env) {
+    jclass localClass = (*env)->FindClass(env,
+        "com/dell/spt/storage/driver/coop/netty/http/s3/rdma/RdmaTransport");
+    if (localClass == NULL) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    rdmaTransportClass = (*env)->NewGlobalRef(env, localClass);
+    (*env)->DeleteLocalRef(env, localClass);
+
+    logWarnMid = (*env)->GetStaticMethodID(env, rdmaTransportClass,
+        "nativeLogWarn", "(Ljava/lang/String;)V");
+    if (logWarnMid == NULL) {
+        (*env)->ExceptionClear(env);
+    }
+}
+
+/**
+ * Route a warning message through the Java logging framework.
+ * Falls back to no-op if the JNI callback was not cached.
+ */
+static void log_warn(JNIEnv *env, const char *fmt, ...) {
+    if (rdmaTransportClass == NULL || logWarnMid == NULL) return;
+
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    jstring jmsg = (*env)->NewStringUTF(env, buf);
+    if (jmsg != NULL) {
+        (*env)->CallStaticVoidMethod(env, rdmaTransportClass, logWarnMid, jmsg);
+        (*env)->DeleteLocalRef(env, jmsg);
+    }
 }
 
 static void throw_rdma_exception(JNIEnv *env, const char *message) {
@@ -505,7 +558,10 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
 
     /* Query port info - pass local_ip for RoCE GID lookup */
     char errbuf[256] = {0};
-    if (query_port_info(rctx, local_ip_str, errbuf, sizeof(errbuf)) != 0) {
+    /* Cache JNI logger callback before query_port_info (which may log warnings) */
+    cache_logger_callback(env);
+
+    if (query_port_info(env, rctx, local_ip_str, errbuf, sizeof(errbuf)) != 0) {
         if (local_ip_str != NULL) {
             (*env)->ReleaseStringUTFChars(env, localIp, local_ip_str);
         }
@@ -543,7 +599,14 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeClo
     struct rdma_context *rctx = (struct rdma_context *)(uintptr_t)handle;
     if (rctx == NULL) return;
 
-    if (rctx->dct_qp) ibv_destroy_qp(rctx->dct_qp);
+    if (rctx->dct_qp) {
+        /* Transition QP to RESET before destroy for portability across
+         * verbs providers. mlx5 tolerates skipping this, but the verbs
+         * spec recommends it and other providers may require it. */
+        struct ibv_qp_attr attr = { .qp_state = IBV_QPS_RESET };
+        ibv_modify_qp(rctx->dct_qp, &attr, IBV_QP_STATE);  /* best-effort */
+        ibv_destroy_qp(rctx->dct_qp);
+    }
     if (rctx->srq) ibv_destroy_srq(rctx->srq);
     if (rctx->cq) ibv_destroy_cq(rctx->cq);
     if (rctx->pd) ibv_dealloc_pd(rctx->pd);

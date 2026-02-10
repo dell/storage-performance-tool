@@ -67,6 +67,15 @@ public class RdmaTransport implements AutoCloseable {
 		INVOKE_CLEANER = cleaner;
 	}
 
+	/**
+	 * JNI callback: native code calls this to route warnings through the Java logging framework.
+	 * Must be static so the native layer can call it without an instance reference.
+	 */
+	@SuppressWarnings("unused")  // called from native code via JNI
+	private static void nativeLogWarn(final String msg) {
+		Loggers.MSG.warn("S3-RDMA native: {}", msg);
+	}
+
 	// Native methods - only called when NATIVE_AVAILABLE is true
 	private native long nativeInit(String deviceName, String localIp);
 
@@ -286,7 +295,7 @@ public class RdmaTransport implements AutoCloseable {
 		}
 
 		final RdmaBufferPool pool = bufferPool;
-		if (pool != null && buffer.capacity() == pool.getBufferSize()) {
+		if (pool != null && pool.isPoolBuffer(buffer)) {
 			pool.release(buffer);
 			return;
 		}
@@ -331,6 +340,9 @@ public class RdmaTransport implements AutoCloseable {
 			if (mrHandle != 0) {
 				return buffer;
 			}
+			// Registration failed — free the direct buffer immediately to avoid
+			// leaking pinned native memory (GC may not reclaim it under pressure)
+			cleanDirectBuffer(buffer);
 		} catch (final Exception e) {
 			Loggers.MSG.debug("Native buffer allocation failed: {}", e.getMessage());
 		}
@@ -347,8 +359,12 @@ public class RdmaTransport implements AutoCloseable {
 			return;
 		}
 		final Long mrHandle = mrHandles.remove(new IdentityKey(buffer));
-		if (mrHandle != null) {
-			deregisterBuffer(buffer, mrHandle);
+		if (mrHandle != null && mrHandle != 0 && NATIVE_AVAILABLE && nativeHandle != 0) {
+			try {
+				nativeDeregisterBuffer(nativeHandle, mrHandle);
+			} catch (final Exception e) {
+				Loggers.MSG.debug("RDMA buffer deregistration failed in freeNative: {}", e.getMessage());
+			}
 		}
 	}
 
@@ -399,6 +415,12 @@ public class RdmaTransport implements AutoCloseable {
 
 	@Override
 	public void close() {
+		// Set initialized=false FIRST — volatile write creates happens-before with
+		// the volatile reads in registerBuffer/deregisterBuffer/generateToken, so any
+		// concurrent call that checks initialized after this point will see false and
+		// bail out before touching the native handle.
+		initialized = false;
+
 		if (bufferPool != null) {
 			try {
 				bufferPool.close();
@@ -409,23 +431,23 @@ public class RdmaTransport implements AutoCloseable {
 		}
 
 		// Deregister all remaining buffers
+		final long handle = nativeHandle;
 		for (final var entry : mrHandles.entrySet()) {
-			if (NATIVE_AVAILABLE && nativeHandle != 0) {
+			if (NATIVE_AVAILABLE && handle != 0) {
 				try {
-					nativeDeregisterBuffer(nativeHandle, entry.getValue());
+					nativeDeregisterBuffer(handle, entry.getValue());
 				} catch (final Exception ignored) {}
 			}
 		}
 		mrHandles.clear();
 
-		if (nativeHandle != 0 && NATIVE_AVAILABLE) {
+		if (handle != 0 && NATIVE_AVAILABLE) {
 			try {
-				nativeClose(nativeHandle);
+				nativeClose(handle);
 			} catch (final Exception e) {
 				Loggers.MSG.debug("Native close failed: {}", e.getMessage());
 			}
 		}
 		nativeHandle = 0;
-		initialized = false;
 	}
 }

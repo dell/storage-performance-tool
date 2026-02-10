@@ -61,6 +61,42 @@ public class RdmaBufferPoolTest {
 		verify(mockTransport).freeNative(oddBuffer);
 	}
 
+	// ---------- P1.2: identity-based pool ownership ----------
+
+	@Test
+	void testRelease_rejectsSameSizeNonPoolBuffer() {
+		// A non-pool buffer with the SAME capacity must NOT enter the pool
+		pool.init();
+		ByteBuffer impostor = ByteBuffer.allocateDirect(BUFFER_SIZE);
+		assertFalse(pool.isPoolBuffer(impostor));
+		pool.release(impostor);
+		// Should be freed, not returned to pool
+		verify(mockTransport).freeNative(impostor);
+	}
+
+	@Test
+	void testIsPoolBuffer_trueForPoolBuffer() throws InterruptedException {
+		pool.init();
+		ByteBuffer buf = pool.acquire(0, TimeUnit.MILLISECONDS);
+		assertNotNull(buf);
+		assertTrue(pool.isPoolBuffer(buf));
+	}
+
+	@Test
+	void testIsPoolBuffer_falseForNull() {
+		assertFalse(pool.isPoolBuffer(null));
+	}
+
+	@Test
+	void testIsPoolBuffer_falseAfterClose() throws InterruptedException {
+		pool.init();
+		ByteBuffer buf = pool.acquire(0, TimeUnit.MILLISECONDS);
+		pool.release(buf);
+		pool.close();
+		// After close, owned set is cleared
+		assertFalse(pool.isPoolBuffer(buf));
+	}
+
 	@Test
 	void testCloseFreesBuffers() {
 		pool.init();

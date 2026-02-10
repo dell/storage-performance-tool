@@ -3,9 +3,12 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 import com.dell.spt.base.logging.Loggers;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A pool of pre-registered RDMA buffers.
@@ -20,6 +23,9 @@ public class RdmaBufferPool implements AutoCloseable {
 	private final int bufferSize;
 	private final BlockingQueue<ByteBuffer> pool;
 	private final int maxCount;
+	/** Identity-based set of all buffers owned by this pool (checked out or queued). */
+	private final Set<ByteBuffer> owned = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+	private final AtomicInteger outstanding = new AtomicInteger();
 
 	public RdmaBufferPool(final RdmaTransport transport, final int bufferSize, final int count) {
 		this.transport = transport;
@@ -38,6 +44,9 @@ public class RdmaBufferPool implements AutoCloseable {
 			final ByteBuffer buf = transport.allocateNative(bufferSize);
 			if (buf != null) {
 				if (pool.offer(buf)) {
+					synchronized (owned) {
+						owned.add(buf);
+					}
 					allocated++;
 				} else {
 					transport.freeNative(buf);
@@ -58,7 +67,11 @@ public class RdmaBufferPool implements AutoCloseable {
 	 * @return a pre-registered ByteBuffer, or null if timeout reached
 	 */
 	public ByteBuffer acquire(final long timeout, final TimeUnit unit) throws InterruptedException {
-		return pool.poll(timeout, unit);
+		final ByteBuffer buf = pool.poll(timeout, unit);
+		if (buf != null) {
+			outstanding.incrementAndGet();
+		}
+		return buf;
 	}
 
 	/**
@@ -70,15 +83,35 @@ public class RdmaBufferPool implements AutoCloseable {
 		if (buffer == null) {
 			return;
 		}
-		if (buffer.capacity() != bufferSize) {
+		final boolean mine;
+		synchronized (owned) {
+			mine = owned.contains(buffer);
+		}
+		if (!mine) {
 			// This buffer doesn't belong to the pool (probably allocated via fallback)
 			transport.freeNative(buffer);
 			return;
 		}
+		outstanding.decrementAndGet();
 		buffer.clear();
 		if (!pool.offer(buffer)) {
 			// Pool is full (should not happen if logic is correct), free it
+			synchronized (owned) {
+				owned.remove(buffer);
+			}
 			transport.freeNative(buffer);
+		}
+	}
+
+	/**
+	 * Check if a buffer belongs to this pool (by identity, not capacity).
+	 */
+	public boolean isPoolBuffer(final ByteBuffer buffer) {
+		if (buffer == null) {
+			return false;
+		}
+		synchronized (owned) {
+			return owned.contains(buffer);
 		}
 	}
 
@@ -88,10 +121,17 @@ public class RdmaBufferPool implements AutoCloseable {
 
 	@Override
 	public void close() {
+		final int out = outstanding.get();
+		if (out > 0) {
+			Loggers.MSG.warn("Closing RDMA buffer pool with {} buffers still checked out", out);
+		}
 		Loggers.MSG.info("Closing RDMA buffer pool");
 		ByteBuffer buf;
 		while ((buf = pool.poll()) != null) {
 			transport.freeNative(buf);
+		}
+		synchronized (owned) {
+			owned.clear();
 		}
 	}
 }

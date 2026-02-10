@@ -366,6 +366,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			}
 			totalRead += bytesRead;
 		}
+		if (totalRead < size) {
+			throw new IOException("RDMA short read: expected " + size + " bytes but got " + totalRead);
+		}
 		dst.flip();
 	}
 
@@ -460,9 +463,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final String token = CURRENT_RDMA_TOKEN.get();
 		if (token != null) {
 			httpHeaders.set(RDMA_TOKEN_HEADER, token);
-			// RDMA PUT: set Content-Length to 0 so Jetty dispatches immediately
-			// (applyAuthHeaders reads Content-Length to choose the payload hash)
-			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+			// RDMA PUT: Content-Length must be 0 so Jetty dispatches immediately
+			// instead of blocking for body bytes. Only override when the original
+			// Content-Length > 0 (i.e., PUT); GET already has Content-Length 0.
+			if (httpHeaders.getInt(HttpHeaderNames.CONTENT_LENGTH, 0) > 0) {
+				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+			}
 		}
 	}
 
@@ -530,19 +536,31 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doClose() throws IOException {
-		// Stop the reaper first
+		// Stop the reaper and wait for it to finish — prevents race where the reaper
+		// calls deregisterBuffer() on a transport that close() has already destroyed
 		if (rdmaReaper != null) {
 			rdmaReaper.shutdownNow();
-		}
-		// Drain any leaked RDMA contexts (e.g. from interrupted operations)
-		for (final var entry : rdmaOps.entrySet()) {
-			final var ctx = entry.getValue();
-			if (!ctx.pooled) {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			try {
+				if (!rdmaReaper.awaitTermination(5, TimeUnit.SECONDS)) {
+					Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
+				}
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
-			rdmaTransport.freeBuffer(ctx.buffer);
 		}
-		rdmaOps.clear();
+		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
+		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
+		// if a concurrent complete() is still draining the last in-flight operations.
+		for (final var it = rdmaOps.entrySet().iterator(); it.hasNext(); ) {
+			final var entry = it.next();
+			final var ctx = entry.getValue();
+			if (rdmaOps.remove(entry.getKey(), ctx)) {
+				if (!ctx.pooled) {
+					rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				}
+				rdmaTransport.freeBuffer(ctx.buffer);
+			}
+		}
 		// Pool close deregisters all pool buffers; must happen before native close
 		rdmaTransport.close();
 		super.doClose();
