@@ -525,6 +525,48 @@ func TestBuildRMIPortMappings(t *testing.T) {
 	}
 }
 
+func TestDockerCommandBuilderImpl_BuildWorkerNodeCommand_RdmaPassthrough(t *testing.T) {
+	// Set SPT_RDMA=true to trigger RDMA device passthrough
+	t.Setenv("SPT_RDMA", "true")
+
+	builder := NewDockerCommandBuilder()
+	result := builder.BuildWorkerNodeCommand(constants.DefaultSptImage, "rdma-worker", "10.247.128.125", 40000, 3)
+
+	// Verify RDMA device passthrough is present
+	wantElements := []string{
+		"--device", constants.RdmaDevicePath,
+		"--cap-add", constants.RdmaCapIpcLock,
+		"--ulimit", constants.RdmaUlimitMemlock,
+	}
+	for _, elem := range wantElements {
+		if !containsElement(result, elem) {
+			t.Errorf("BuildWorkerNodeCommand() with SPT_RDMA=true missing %q in result %v", elem, result)
+		}
+	}
+
+	if err := AssertDockerCommand(result); err != nil {
+		t.Errorf("Invalid Docker command structure: %v", err)
+	}
+}
+
+func TestDockerCommandBuilderImpl_BuildWorkerNodeCommand_NoRdmaByDefault(t *testing.T) {
+	// Ensure SPT_RDMA is not set
+	t.Setenv("SPT_RDMA", "")
+
+	builder := NewDockerCommandBuilder()
+	result := builder.BuildWorkerNodeCommand(constants.DefaultSptImage, "worker-noardma", "localhost", 40000, 3)
+
+	// Verify RDMA flags are NOT present
+	forbiddenElements := []string{
+		"--device", "--cap-add", "--ulimit",
+	}
+	for _, elem := range forbiddenElements {
+		if containsElement(result, elem) {
+			t.Errorf("BuildWorkerNodeCommand() without SPT_RDMA should not contain %q, got %v", elem, result)
+		}
+	}
+}
+
 // Helper functions for testing
 
 // containsElement checks if a slice contains a specific element

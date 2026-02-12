@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -229,6 +230,90 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	}
 	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
 		t.Fatal("rdma-fallback not applied from env (expected false)")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	// User explicitly sets --use-rdma=false on CLI
+	_ = cmd.Flags().Set("use-rdma", "false")
+
+	// Env says true
+	os.Setenv(constants.EnvRdmaEnabled, "true")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	// Explicit CLI flag should win
+	if v, _ := cmd.Flags().GetBool("use-rdma"); v {
+		t.Fatal("CLI flag --use-rdma=false should win over SPT_RDMA=true env")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaInvalidThreshold(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvRdmaThreshold, "not-a-number")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaThreshold) })
+
+	err := applyEnvDefaultsToRunFlags(cmd)
+	if err == nil {
+		t.Fatal("expected error for invalid RDMA_THRESHOLD_BYTES value")
+	}
+	if !strings.Contains(err.Error(), constants.EnvRdmaThreshold) {
+		t.Errorf("error should mention %s, got: %v", constants.EnvRdmaThreshold, err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaInvalidTimeout(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvRdmaTimeout, "abc")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaTimeout) })
+
+	err := applyEnvDefaultsToRunFlags(cmd)
+	if err == nil {
+		t.Fatal("expected error for invalid RDMA_TIMEOUT_MS value")
+	}
+	if !strings.Contains(err.Error(), constants.EnvRdmaTimeout) {
+		t.Errorf("error should mention %s, got: %v", constants.EnvRdmaTimeout, err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaInvalidBoolIgnored(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	// Invalid bool for SPT_RDMA should be silently ignored (not error)
+	os.Setenv(constants.EnvRdmaEnabled, "maybe")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("expected no error for invalid SPT_RDMA bool, got: %v", err)
+	}
+
+	// Flag should remain at default (false)
+	if v, _ := cmd.Flags().GetBool("use-rdma"); v {
+		t.Fatal("use-rdma should remain false when SPT_RDMA has invalid bool value")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaInvalidFallbackIgnored(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	// Invalid bool for RDMA_FALLBACK_ENABLED should be silently ignored
+	os.Setenv(constants.EnvRdmaFallback, "sometimes")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaFallback) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("expected no error for invalid RDMA_FALLBACK_ENABLED, got: %v", err)
+	}
+
+	// Flag should remain at default (true)
+	if v, _ := cmd.Flags().GetBool("rdma-fallback"); !v {
+		t.Fatal("rdma-fallback should remain true (default) when env has invalid bool")
 	}
 }
 

@@ -419,6 +419,56 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "S3 list workload with RDMA sets s3-rdma driver in defaults",
+			params: Params{
+				WorkloadType: "list",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "listbucket",
+				Threads:      4,
+				UseRdma:      true,
+				RdmaFallback: true,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				// defaults.yaml configures the engine driver; s3-rdma handles all S3 ops
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma' for list+RDMA defaults, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section in defaults when RDMA enabled")
+				}
+			},
+		},
+		{
+			name: "Mock workload ignores UseRdma",
+			params: Params{
+				WorkloadType: "mock",
+				Threads:      4,
+				UseRdma:      true, // should be ignored for mock workloads
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "dummy-mock" {
+					t.Errorf("Mock workload should use dummy-mock driver, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma != nil {
+					t.Error("Mock workload should not have storage.rdma section")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
