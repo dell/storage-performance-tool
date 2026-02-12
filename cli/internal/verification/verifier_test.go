@@ -824,3 +824,97 @@ func TestEdgeCases_SingleHost(t *testing.T) {
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestRdmaDeviceCheck_DevicePresent(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "uverbs0\nuverbs1\n",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if !result.Passed {
+		t.Errorf("Expected RDMA device check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "uverbs") {
+		t.Errorf("Expected message to mention uverbs devices, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDeviceCheck_NoDevice(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "",
+				Stderr: "ls: cannot access '/dev/infiniband/': No such file or directory",
+				Error:  fmt.Errorf("exit status 2"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if result.Passed {
+		t.Error("Expected RDMA device check to fail when directory is missing")
+	}
+	if !strings.Contains(result.Message, "not found") {
+		t.Errorf("Expected 'not found' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDeviceCheck_EmptyDirectory(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if result.Passed {
+		t.Error("Expected RDMA device check to fail when no uverbs devices found")
+	}
+	if !strings.Contains(result.Message, "No uverbs") {
+		t.Errorf("Expected 'No uverbs' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaChecksSkippedWhenDisabled(t *testing.T) {
+	mockCmd := &FlexibleMockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	// UseRdma is false (default)
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.verifyNode(host)
+
+	// RDMA checks should not have been populated
+	if result.RdmaDevice.Message != "" {
+		t.Errorf("Expected empty RDMA device check when RDMA disabled, got: %s", result.RdmaDevice.Message)
+	}
+	if result.RdmaDriver.Message != "" {
+		t.Errorf("Expected empty RDMA driver check when RDMA disabled, got: %s", result.RdmaDriver.Message)
+	}
+}

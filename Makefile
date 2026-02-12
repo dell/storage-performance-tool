@@ -8,7 +8,7 @@ MAKEFLAGS += --warn-undefined-variables
 CLI_DIR := cli
 ENGINE_DIR := engine
 
-.PHONY: help setup build test lint build-cli test-cli lint-cli build-engine test-engine lint-engine clean test-coverage test-coverage-cli test-coverage-engine
+.PHONY: help setup build test lint build-cli test-cli lint-cli build-engine test-engine lint-engine clean distclean test-coverage test-coverage-cli test-coverage-engine
 
 help:
 	@echo "Storage Performance Tool (SPT) — available targets"
@@ -18,6 +18,7 @@ help:
 	@echo "  make lint          Run linters/format checks for CLI and engine"
 	@echo "  make test-coverage Run CLI and engine coverage workflows"
 	@echo "  make clean         Remove build artifacts in both projects"
+	@echo "  make distclean     Deep clean all artifacts (CLI + engine + native libs)"
 	@echo "  make build-cli     Build only the CLI binary"
 	@echo "  make test-cli      Run only the CLI test suite"
 	@echo "  make lint-cli      Run only the CLI lint workflow"
@@ -81,3 +82,7 @@ test-coverage-engine:
 clean:
 	$(MAKE) -C $(CLI_DIR) clean
 	$(MAKE) -C $(ENGINE_DIR) clean
+
+distclean:
+	$(MAKE) -C $(CLI_DIR) distclean
+	$(MAKE) -C $(ENGINE_DIR) distclean

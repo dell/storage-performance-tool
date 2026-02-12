@@ -18,12 +18,21 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().Int("threads", 1, "")
 	c.Flags().String("test-hosts", "127.0.0.1", "")
 	c.Flags().Bool(flagSkipImagePull, false, "")
+	// RDMA flags
+	c.Flags().Bool("use-rdma", false, "")
+	c.Flags().String("rdma-local-ip", "", "")
+	c.Flags().Int64("rdma-threshold", 1048576, "")
+	c.Flags().Bool("rdma-fallback", true, "")
+	c.Flags().String("rdma-device", "auto", "")
+	c.Flags().String("rdma-log-level", "WARN", "")
+	c.Flags().Int64("rdma-timeout", 30000, "")
 	return c
 }
 
 func newVerifyLikeCmd() *cobra.Command {
 	c := &cobra.Command{Use: "verify"}
 	c.Flags().String("test-hosts", "", "")
+	c.Flags().Bool("use-rdma", false, "")
 	return c
 }
 
@@ -173,5 +182,67 @@ func TestApplyEnvDefaultsToVerifyFlags(t *testing.T) {
 	}
 	if v, _ := cmd.Flags().GetString("test-hosts"); v != "cli1,cli2" {
 		t.Fatalf("user flag should win, got %q", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvRdmaEnabled, "true")
+	os.Setenv(constants.EnvRdmaLocalIp, "10.247.128.125")
+	os.Setenv(constants.EnvRdmaDevice, "mlx5_0")
+	os.Setenv(constants.EnvRdmaLogLevel, "DEBUG")
+	os.Setenv(constants.EnvRdmaThreshold, "4194304")
+	os.Setenv(constants.EnvRdmaTimeout, "60000")
+	os.Setenv(constants.EnvRdmaFallback, "false")
+	t.Cleanup(func() {
+		os.Unsetenv(constants.EnvRdmaEnabled)
+		os.Unsetenv(constants.EnvRdmaLocalIp)
+		os.Unsetenv(constants.EnvRdmaDevice)
+		os.Unsetenv(constants.EnvRdmaLogLevel)
+		os.Unsetenv(constants.EnvRdmaThreshold)
+		os.Unsetenv(constants.EnvRdmaTimeout)
+		os.Unsetenv(constants.EnvRdmaFallback)
+	})
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetBool("use-rdma"); !v {
+		t.Fatal("use-rdma not applied from SPT_RDMA env")
+	}
+	if v, _ := cmd.Flags().GetString("rdma-local-ip"); v != "10.247.128.125" {
+		t.Fatalf("rdma-local-ip not applied from env, got %q", v)
+	}
+	if v, _ := cmd.Flags().GetString("rdma-device"); v != "mlx5_0" {
+		t.Fatalf("rdma-device not applied from env, got %q", v)
+	}
+	if v, _ := cmd.Flags().GetString("rdma-log-level"); v != "DEBUG" {
+		t.Fatalf("rdma-log-level not applied from env, got %q", v)
+	}
+	if v, _ := cmd.Flags().GetInt64("rdma-threshold"); v != 4194304 {
+		t.Fatalf("rdma-threshold not applied from env, got %d", v)
+	}
+	if v, _ := cmd.Flags().GetInt64("rdma-timeout"); v != 60000 {
+		t.Fatalf("rdma-timeout not applied from env, got %d", v)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
+		t.Fatal("rdma-fallback not applied from env (expected false)")
+	}
+}
+
+func TestApplyEnvDefaultsToVerifyFlags_RdmaFromEnv(t *testing.T) {
+	cmd := newVerifyLikeCmd()
+
+	os.Setenv(constants.EnvRdmaEnabled, "1")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
+
+	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetBool("use-rdma"); !v {
+		t.Fatal("use-rdma not applied from SPT_RDMA env for verify")
 	}
 }

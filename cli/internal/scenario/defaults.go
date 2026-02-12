@@ -26,6 +26,17 @@ type StorageConfig struct {
 	Driver DriverConfig `yaml:"driver,omitempty"`
 	Net    NetConfig    `yaml:"net,omitempty"`
 	Auth   AuthConfig   `yaml:"auth,omitempty"`
+	Rdma   *RdmaConfig  `yaml:"rdma,omitempty"` // pointer so omitted when nil
+}
+
+// RdmaConfig represents RDMA acceleration configuration for the s3-rdma driver
+type RdmaConfig struct {
+	Threshold int64  `yaml:"threshold,omitempty"`
+	Fallback  bool   `yaml:"fallback,omitempty"`
+	Device    string `yaml:"device,omitempty"`
+	LocalIp   string `yaml:"localIp,omitempty"`
+	LogLevel  string `yaml:"logLevel,omitempty"`
+	TimeoutMs int64  `yaml:"timeoutMs,omitempty"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -221,6 +232,37 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				SSL: SSLConfig{Enabled: scheme == schemeHTTPS},
 			},
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
+		}
+
+		// RDMA acceleration: override driver type and populate rdma config section
+		if params.UseRdma {
+			config.Storage.Driver.Type = "s3-rdma"
+
+			threshold := params.RdmaThresholdBytes
+			if threshold == 0 {
+				threshold = 1048576 // 1MB default
+			}
+			device := params.RdmaDevice
+			if device == "" {
+				device = "auto"
+			}
+			logLevel := params.RdmaLogLevel
+			if logLevel == "" {
+				logLevel = "WARN"
+			}
+			timeoutMs := params.RdmaTimeoutMs
+			if timeoutMs == 0 {
+				timeoutMs = 30000
+			}
+
+			config.Storage.Rdma = &RdmaConfig{
+				Threshold: threshold,
+				Fallback:  params.RdmaFallback,
+				Device:    device,
+				LocalIp:   params.RdmaLocalIp,
+				LogLevel:  logLevel,
+				TimeoutMs: timeoutMs,
+			}
 		}
 
 	default:

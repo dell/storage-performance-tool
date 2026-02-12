@@ -138,6 +138,13 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 	if v.stepStartContainer(host, result) {
 		return result
 	}
+	if v.config.UseRdma {
+		if v.stepRdmaDevice(host, result) {
+			v.stepCleanup(host, result)
+			return result
+		}
+		v.stepRdmaDriver(host, result)
+	}
 	v.stepWaitForServices(result)
 	v.stepVerifyPorts(host, result)
 	v.stepCheckEndpoints(host, result)
@@ -304,6 +311,107 @@ func (v *Verifier) stepCleanup(host *hostparse.HostInfo, result *NodeResult) {
 	}
 }
 
+func (v *Verifier) stepRdmaDevice(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking RDMA device availability...")
+	}
+	result.RdmaDevice = v.checkRdmaDevice(host)
+	if !result.RdmaDevice.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "RDMA device not available"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepRdmaDriver(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking RDMA driver in container...")
+	}
+	result.RdmaDriver = v.checkRdmaDriver(host, result.containerID)
+	if v.config.ShowProgress {
+		if result.RdmaDriver.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ⚠️")
+		}
+	}
+}
+
+// checkRdmaDevice verifies that RDMA hardware is accessible on the host
+func (v *Verifier) checkRdmaDevice(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check for /dev/infiniband/ uverbs devices
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"ls", constants.RdmaDevicePath})
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("RDMA device directory %s not found", constants.RdmaDevicePath),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	if !strings.Contains(stdout, "uverbs") {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("No uverbs devices found in %s", constants.RdmaDevicePath),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("RDMA devices found: %s", strings.TrimSpace(stdout)),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// checkRdmaDriver verifies the container has RDMA runtime libraries
+func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string) Check {
+	start := v.timeProvider.Now()
+
+	if containerID == "" {
+		return Check{
+			Passed:   false,
+			Message:  "No container to check RDMA driver",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if libibverbs is available inside the container
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "ls", "/usr/lib64/libibverbs.so.1",
+	})
+	_ = stdout
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  "RDMA runtime library (libibverbs) not found in container",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  "RDMA runtime libraries present in container",
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
 // checkSSHDocker verifies SSH connectivity and Docker access
 func (v *Verifier) checkSSHDocker(host *hostparse.HostInfo) Check {
 	start := v.timeProvider.Now()
@@ -431,6 +539,13 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		},
 		Command:  []string{constants.SptNodeCommand},
 		Detached: true,
+	}
+
+	// Add RDMA device passthrough when verifying RDMA support
+	if v.config.UseRdma {
+		config.Devices = []string{constants.RdmaDevicePath}
+		config.CapAdd = []string{constants.RdmaCapIpcLock}
+		config.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
 	// Start the container

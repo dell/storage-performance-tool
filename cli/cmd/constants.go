@@ -50,8 +50,9 @@ const (
 // Spt parameter constants
 const (
 	SptStorageDriverType      = "--storage-driver-type"
-	SptStorageDriverTypeS3    = "s3"
-	SptStorageDriverTypeMock  = "dummy-mock"
+	SptStorageDriverTypeS3     = "s3"
+	SptStorageDriverTypeS3Rdma = "s3-rdma"
+	SptStorageDriverTypeMock   = "dummy-mock"
 	SptStorageNetNodeAddrs    = "--storage-net-node-addrs"
 	SptStorageNetNodePort     = "--storage-net-node-port"
 	SptStorageNetSSLEnabled   = "--storage-net-ssl-enabled"

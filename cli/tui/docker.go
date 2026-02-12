@@ -274,6 +274,27 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
 
+	hostConfig := &container.HostConfig{
+		PortBindings: portBinding,
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for node mode",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
+	}
+
 	// Create container with port mapping
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
 		Image:        image,
@@ -283,9 +304,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 		AttachStderr: true,
 		Env:          envVars,
 		Labels:       labels,
-	}, &container.HostConfig{
-		PortBindings: portBinding,
-	}, nil, nil, "")
+	}, hostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)

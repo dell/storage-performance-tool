@@ -302,6 +302,123 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "S3 write with RDMA enabled (defaults)",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      4,
+				UseRdma:      true,
+				RdmaFallback: true,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma', got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.Threshold != 1048576 {
+					t.Errorf("Expected default threshold 1048576, got %d", config.Storage.Rdma.Threshold)
+				}
+				if !config.Storage.Rdma.Fallback {
+					t.Error("Expected fallback to be true")
+				}
+				if config.Storage.Rdma.Device != "auto" {
+					t.Errorf("Expected default device 'auto', got %s", config.Storage.Rdma.Device)
+				}
+				if config.Storage.Rdma.LogLevel != "WARN" {
+					t.Errorf("Expected default log level 'WARN', got %s", config.Storage.Rdma.LogLevel)
+				}
+				if config.Storage.Rdma.TimeoutMs != 30000 {
+					t.Errorf("Expected default timeout 30000, got %d", config.Storage.Rdma.TimeoutMs)
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA custom settings",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            16,
+				UseRdma:            true,
+				RdmaLocalIp:        "10.247.128.125",
+				RdmaThresholdBytes: 4194304,
+				RdmaFallback:       false,
+				RdmaDevice:         "mlx5_0",
+				RdmaLogLevel:       "DEBUG",
+				RdmaTimeoutMs:      60000,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma', got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.LocalIp != "10.247.128.125" {
+					t.Errorf("Expected localIp '10.247.128.125', got %s", config.Storage.Rdma.LocalIp)
+				}
+				if config.Storage.Rdma.Threshold != 4194304 {
+					t.Errorf("Expected threshold 4194304, got %d", config.Storage.Rdma.Threshold)
+				}
+				if config.Storage.Rdma.Fallback {
+					t.Error("Expected fallback to be false")
+				}
+				if config.Storage.Rdma.Device != "mlx5_0" {
+					t.Errorf("Expected device 'mlx5_0', got %s", config.Storage.Rdma.Device)
+				}
+				if config.Storage.Rdma.LogLevel != "DEBUG" {
+					t.Errorf("Expected log level 'DEBUG', got %s", config.Storage.Rdma.LogLevel)
+				}
+				if config.Storage.Rdma.TimeoutMs != 60000 {
+					t.Errorf("Expected timeout 60000, got %d", config.Storage.Rdma.TimeoutMs)
+				}
+			},
+		},
+		{
+			name: "S3 write without RDMA has no rdma section",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "" {
+					t.Errorf("Expected no driver type for non-RDMA S3, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma != nil {
+					t.Error("Expected no storage.rdma section when RDMA is not enabled")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

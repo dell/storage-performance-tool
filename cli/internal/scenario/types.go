@@ -18,6 +18,15 @@ type Params struct {
 	KeepScenario bool // Keep the scenario file after test completes
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
+
+	// RDMA acceleration
+	UseRdma            bool   // Use s3-rdma driver instead of s3
+	RdmaLocalIp        string // Local RDMA interface IP (required for RDMA)
+	RdmaThresholdBytes int64  // Min object size for RDMA (default: 1048576)
+	RdmaFallback       bool   // Fall back to HTTP if RDMA init fails (default: true)
+	RdmaDevice         string // RDMA device name (default: "auto")
+	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
+	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
 }
 
 // ScenarioParams is a temporary alias for Params kept for backward

@@ -89,16 +89,68 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// RDMA opt-in: --use-rdma flag or SPT_RDMA env var
+	if f := cmd.Flags().Lookup("use-rdma"); f != nil && !cmd.Flags().Changed("use-rdma") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaEnabled)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("use-rdma", strconv.FormatBool(b))
+			}
+		}
+	}
+
+	// RDMA string settings
+	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIp)
+	_ = setIf("rdma-device", constants.EnvRdmaDevice)
+	_ = setIf("rdma-log-level", constants.EnvRdmaLogLevel)
+
+	// RDMA int settings
+	if f := cmd.Flags().Lookup("rdma-threshold"); f != nil && !cmd.Flags().Changed("rdma-threshold") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaThreshold)); v != "" {
+			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaThreshold, v, err)
+			}
+			_ = cmd.Flags().Set("rdma-threshold", v)
+		}
+	}
+	if f := cmd.Flags().Lookup("rdma-timeout"); f != nil && !cmd.Flags().Changed("rdma-timeout") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaTimeout)); v != "" {
+			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaTimeout, v, err)
+			}
+			_ = cmd.Flags().Set("rdma-timeout", v)
+		}
+	}
+
+	// RDMA bool setting
+	if f := cmd.Flags().Lookup("rdma-fallback"); f != nil && !cmd.Flags().Changed("rdma-fallback") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaFallback)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("rdma-fallback", strconv.FormatBool(b))
+			}
+		}
+	}
+
 	return nil
 }
 
 // applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided.
 func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
-	if cmd.Flags().Changed("test-hosts") {
-		return nil
+	if !cmd.Flags().Changed("test-hosts") {
+		if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
+			if err := cmd.Flags().Set("test-hosts", v); err != nil {
+				return err
+			}
+		}
 	}
-	if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
-		return cmd.Flags().Set("test-hosts", v)
+
+	// RDMA opt-in for verify
+	if f := cmd.Flags().Lookup("use-rdma"); f != nil && !cmd.Flags().Changed("use-rdma") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaEnabled)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("use-rdma", strconv.FormatBool(b))
+			}
+		}
 	}
+
 	return nil
 }

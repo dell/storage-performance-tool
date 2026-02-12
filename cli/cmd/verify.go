@@ -58,6 +58,7 @@ func init() {
 	verifyCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	verifyCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	verifyCmd.Flags().Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
+	verifyCmd.Flags().Bool("use-rdma", false, "Include RDMA hardware and configuration checks")
 }
 
 func runVerify(cmd *cobra.Command, _ []string) error {
@@ -75,6 +76,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	rmiPortStart, _ := cmd.Flags().GetInt("rmi-port-start")
 	rmiPortCount, _ := cmd.Flags().GetInt("rmi-port-count")
 	forceCleanup, _ := cmd.Flags().GetBool("force-cleanup")
+	useRdma, _ := cmd.Flags().GetBool("use-rdma")
 
 	logging.LogInfo("verify", "starting verification",
 		"hosts", hostString,
@@ -82,7 +84,8 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		"network_mode", networkMode,
 		"api_port", apiPort,
 		"rmi_port_range", fmt.Sprintf("%d-%d", rmiPortStart, rmiPortStart+rmiPortCount-1),
-		"force_cleanup", forceCleanup)
+		"force_cleanup", forceCleanup,
+		"use_rdma", useRdma)
 
 	// Parse hosts
 	hosts, err := hostparse.ParseTestHosts(hostString)
@@ -116,6 +119,10 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	printStartupMessage(hosts)
 	fmt.Println()
 
+	if useRdma {
+		_ = os.Setenv(constants.EnvRdmaEnabled, "true")
+	}
+
 	// Create and run verifier
 	config := verification.Config{
 		NetworkMode:  networkMode,
@@ -125,6 +132,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		MinHosts:     minHosts,
 		ForceCleanup: forceCleanup,
 		ShowProgress: len(hosts) == 1, // Show detailed progress for single host verification
+		UseRdma:      useRdma,
 	}
 
 	verifier := verification.NewVerifier(hosts, config)

@@ -497,6 +497,11 @@ Available workload types:
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
 
+		if params.UseRdma {
+			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
+			fmt.Println("RDMA mode enabled: using s3-rdma driver with device passthrough.")
+		}
+
 		// Check for port conflicts before launching Spt
 		if err := checkPortConflicts(cmd); err != nil {
 			// Clean up scenario file on conflict resolution failure
@@ -811,6 +816,15 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 
+	// RDMA Acceleration Options
+	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
+	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
+	runCmd.Flags().Int64("rdma-threshold", 1048576, "Minimum object size in bytes for RDMA transfer (env: RDMA_THRESHOLD_BYTES)")
+	runCmd.Flags().Bool("rdma-fallback", true, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
+	runCmd.Flags().String("rdma-device", "auto", "RDMA device name or 'auto' for auto-detection (env: RDMA_DEVICE)")
+	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
+	runCmd.Flags().Int64("rdma-timeout", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
+
 	// Headless Mode Options
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	runCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
@@ -906,6 +920,18 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Param
 
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
+
+	// RDMA acceleration
+	useRdma, _ := cmd.Flags().GetBool("use-rdma")
+	params.UseRdma = useRdma
+	if useRdma {
+		params.RdmaLocalIp, _ = cmd.Flags().GetString("rdma-local-ip")
+		params.RdmaThresholdBytes, _ = cmd.Flags().GetInt64("rdma-threshold")
+		params.RdmaFallback, _ = cmd.Flags().GetBool("rdma-fallback")
+		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")
+		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
+		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout")
+	}
 
 	// Set defaults
 	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList {

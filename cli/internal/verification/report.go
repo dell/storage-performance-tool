@@ -68,6 +68,12 @@ func (r *Report) printNodeResult(host string, result *NodeResult) {
 	r.printCheck("Docker Available", result.DockerAvailable)
 	r.printCheck("Docker Image Pull", result.DockerImagePull)
 	r.printCheck("Container Start", result.ContainerStart)
+	if result.RdmaDevice.Message != "" {
+		r.printCheck("RDMA Device", result.RdmaDevice)
+	}
+	if result.RdmaDriver.Message != "" {
+		r.printCheck("RDMA Driver", result.RdmaDriver)
+	}
 	r.printCheck("Ports Accessible", result.PortsAccessible)
 	r.printCheck("Metrics Endpoint", result.MetricsEndpoint)
 	r.printCheck("Control Endpoint", result.ControlEndpoint)

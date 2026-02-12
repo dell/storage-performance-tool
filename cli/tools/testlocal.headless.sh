@@ -130,6 +130,7 @@ fi
 $FORCE && cmd+=(--force) || true
 $VERBOSE && cmd+=(--verbose) || true
 $CLEANUP && cmd+=(--cleanup) || true
+$USE_RDMA && cmd+=(--use-rdma) || true
 
 "${cmd[@]}"
 

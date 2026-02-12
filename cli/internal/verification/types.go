@@ -21,6 +21,7 @@ type Config struct {
 	MinHosts     int    // Minimum hosts that must pass
 	ForceCleanup bool   // Automatically clean up conflicts without prompting
 	ShowProgress bool   // Show detailed step-by-step progress messages
+	UseRdma      bool   // Include RDMA hardware/config verification
 }
 
 // Check represents the result of a single verification check
@@ -40,6 +41,8 @@ type NodeResult struct {
 	DockerAvailable  Check
 	DockerImagePull  Check
 	ContainerStart   Check
+	RdmaDevice       Check // /dev/infiniband/ accessible (RDMA only)
+	RdmaDriver       Check // s3-rdma runtime present in container (RDMA only)
 	PortsAccessible  Check
 	MetricsEndpoint  Check
 	ControlEndpoint  Check
