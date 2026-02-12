@@ -171,6 +171,81 @@ public class S3RdmaStorageDriverSubmitTest {
 						invokeBuildEndpointAddrs(driver));
 	}
 
+	// ---------- buildEndpointAddrs: edge cases ----------
+
+	@Test
+	void testBuildEndpointAddrs_emptyNodeArray() throws Exception {
+		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		setFieldInHierarchy(driver, "storageNodeAddrs", new String[]{});
+		setFieldInHierarchy(driver, "storageNodePort", 9020);
+		assertEquals("", invokeBuildEndpointAddrs(driver));
+	}
+
+	@Test
+	void testBuildEndpointAddrs_singleNode() throws Exception {
+		assertEquals("http://localhost:9020",
+						invokeBuildEndpointAddrs(driverWithNode("localhost:9020", 9020)));
+	}
+
+	@Test
+	void testBuildEndpointAddrs_httpsForPort443WithoutPortInAddr() throws Exception {
+		// When addr has no port and storageNodePort=443, scheme should be https
+		assertEquals("https://s3.example.com:443",
+						invokeBuildEndpointAddrs(driverWithNode("s3.example.com", 443)));
+	}
+
+	@Test
+	void testBuildEndpointAddrs_ipv6BracketedAddr() throws Exception {
+		// IPv6 addresses with brackets: lastIndexOf(':') finds port separator correctly
+		assertEquals("http://[::1]:9020",
+						invokeBuildEndpointAddrs(driverWithNode("[::1]:9020", 9020)));
+	}
+
+	// ---------- extractBucket: edge cases ----------
+
+	@Test
+	void testExtractBucket_slashOnly() throws Exception {
+		// Namespace "/" → after stripping leading slash, empty → return ""
+		assertEquals("", invokeExtractBucket(driverWithNamespace("/")));
+	}
+
+	@Test
+	void testExtractBucket_trailingSlash() throws Exception {
+		// "/mybucket/" → strips leading slash → "mybucket/" → indexOf('/') at 8 → "mybucket"
+		assertEquals("mybucket", invokeExtractBucket(driverWithNamespace("/mybucket/")));
+	}
+
+	// ---------- extractKey: edge cases ----------
+
+	@Test
+	void testExtractKey_leadingSlashWithNestedPath() throws Exception {
+		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("/a/b/c")));
+	}
+
+	@Test
+	void testExtractKey_slashOnly() throws Exception {
+		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		assertEquals("", invokeExtractKey(driver, new ItemImpl("/")));
+	}
+
+	// ---------- shouldUseRdma: zero threshold ----------
+
+	@Test
+	void testShouldUseRdma_zeroThresholdAcceptsAnySizeCreate() throws Exception {
+		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
+		final var driver = newMockDriver(config, availableTransport());
+		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
+		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 1)));
+	}
+
+	@Test
+	void testShouldUseRdma_zeroThresholdAcceptsZeroSizeCreate() throws Exception {
+		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
+		final var driver = newMockDriver(config, availableTransport());
+		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 0)));
+	}
+
 	// ---------- batch submit ----------
 
 	@Test
