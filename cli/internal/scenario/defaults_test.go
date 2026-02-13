@@ -354,7 +354,7 @@ func TestGenerateDefaults(t *testing.T) {
 				Bucket:             "testbucket",
 				Threads:            16,
 				UseRdma:            true,
-				RdmaLocalIp:        "10.247.128.125",
+				RdmaLocalIP:        "10.247.128.125",
 				RdmaThresholdBytes: 4194304,
 				RdmaFallback:       false,
 				RdmaDevice:         "mlx5_0",
@@ -374,8 +374,8 @@ func TestGenerateDefaults(t *testing.T) {
 				if config.Storage.Rdma == nil {
 					t.Fatal("Expected storage.rdma section to be present")
 				}
-				if config.Storage.Rdma.LocalIp != "10.247.128.125" {
-					t.Errorf("Expected localIp '10.247.128.125', got %s", config.Storage.Rdma.LocalIp)
+				if config.Storage.Rdma.LocalIP != "10.247.128.125" {
+					t.Errorf("Expected localIp '10.247.128.125', got %s", config.Storage.Rdma.LocalIP)
 				}
 				if config.Storage.Rdma.Threshold != 4194304 {
 					t.Errorf("Expected threshold 4194304, got %d", config.Storage.Rdma.Threshold)

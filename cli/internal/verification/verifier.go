@@ -144,6 +144,7 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 			return result
 		}
 		v.stepRdmaDriver(host, result)
+		v.stepRdmaReadiness(host, result)
 	}
 	v.stepWaitForServices(result)
 	v.stepVerifyPorts(host, result)
@@ -343,6 +344,87 @@ func (v *Verifier) stepRdmaDriver(host *hostparse.HostInfo, result *NodeResult) 
 	}
 }
 
+func (v *Verifier) stepRdmaReadiness(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Probing RDMA device readiness in container...")
+	}
+	result.RdmaReadiness = v.checkRdmaReadiness(host, result.containerID)
+	if v.config.ShowProgress {
+		if result.RdmaReadiness.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ⚠️")
+		}
+	}
+}
+
+// checkRdmaReadiness verifies that the RDMA device is accessible and active
+// from inside the container by reading /sys/class/infiniband/.  This proves
+// the full stack: device mapped in, kernel driver loaded, and port link up.
+func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID string) Check {
+	start := v.timeProvider.Now()
+
+	if containerID == "" {
+		return Check{
+			Passed:   false,
+			Message:  "No container to check RDMA readiness",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Discover RDMA devices visible inside the container via sysfs
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "ls", "/sys/class/infiniband/",
+	})
+	if err != nil || strings.TrimSpace(stdout) == "" {
+		return Check{
+			Passed:   false,
+			Message:  "No RDMA devices found in container (/sys/class/infiniband/ empty or missing)",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	device := strings.Fields(stdout)[0]
+
+	// Read port state — expect "4: ACTIVE"
+	portState, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/state", device),
+	})
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("Cannot read port state for %s", device),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+	portState = strings.TrimSpace(portState)
+
+	if !strings.Contains(portState, "ACTIVE") {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("RDMA port not active: %s (device %s)", portState, device),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	// Read link layer (Ethernet = RoCE, InfiniBand = IB)
+	linkLayer, _, _ := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/link_layer", device),
+	})
+	linkLayer = strings.TrimSpace(linkLayer)
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("%s port 1 %s (%s)", device, portState, linkLayer),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
 // checkRdmaDevice verifies that RDMA hardware is accessible on the host
 func (v *Verifier) checkRdmaDevice(host *hostparse.HostInfo) Check {
 	start := v.timeProvider.Now()
@@ -391,17 +473,29 @@ func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Check if libibverbs is available inside the container
+	// Use ldconfig to check whether libibverbs is loadable inside the container.
+	// This is distro-agnostic — it works regardless of whether the library lives
+	// under /usr/lib64 (RHEL/SUSE), /usr/lib/x86_64-linux-gnu (Debian/Ubuntu),
+	// or any other path the dynamic linker knows about.
+	//
+	// We run ldconfig -p without a shell pipe and check the output in Go to
+	// avoid quoting issues between local exec and remote SSH execution.
 	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		"docker", "exec", containerID, "ls", "/usr/lib64/libibverbs.so.1",
+		"docker", "exec", containerID, "ldconfig", "-p",
 	})
-	_ = stdout
 	if err != nil {
 		return Check{
 			Passed:   false,
 			Message:  "RDMA runtime library (libibverbs) not found in container",
 			Duration: v.timeProvider.Since(start),
 			Error:    err,
+		}
+	}
+	if !strings.Contains(stdout, "libibverbs") {
+		return Check{
+			Passed:   false,
+			Message:  "RDMA runtime library (libibverbs) not found in container",
+			Duration: v.timeProvider.Since(start),
 		}
 	}
 
@@ -511,14 +605,15 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	// Build port mappings for bridge mode
 	var portMappings []command.PortMapping
 	if networkMode == command.NetworkModeBridge {
+		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
+		portMappings = make([]command.PortMapping, 0, 2+len(rmiMappings))
 		// Standard ports
-		portMappings = []command.PortMapping{
-			{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
-			{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
-		}
+		portMappings = append(portMappings,
+			command.PortMapping{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
+			command.PortMapping{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
+		)
 
 		// Add RMI object port range
-		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
 		portMappings = append(portMappings, rmiMappings...)
 	}
 

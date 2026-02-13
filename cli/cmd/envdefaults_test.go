@@ -190,7 +190,7 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
 
 	os.Setenv(constants.EnvRdmaEnabled, "true")
-	os.Setenv(constants.EnvRdmaLocalIp, "10.247.128.125")
+	os.Setenv(constants.EnvRdmaLocalIP, "10.247.128.125")
 	os.Setenv(constants.EnvRdmaDevice, "mlx5_0")
 	os.Setenv(constants.EnvRdmaLogLevel, "DEBUG")
 	os.Setenv(constants.EnvRdmaThreshold, "4194304")
@@ -198,7 +198,7 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	os.Setenv(constants.EnvRdmaFallback, "false")
 	t.Cleanup(func() {
 		os.Unsetenv(constants.EnvRdmaEnabled)
-		os.Unsetenv(constants.EnvRdmaLocalIp)
+		os.Unsetenv(constants.EnvRdmaLocalIP)
 		os.Unsetenv(constants.EnvRdmaDevice)
 		os.Unsetenv(constants.EnvRdmaLogLevel)
 		os.Unsetenv(constants.EnvRdmaThreshold)

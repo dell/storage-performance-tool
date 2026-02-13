@@ -925,7 +925,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Param
 	useRdma, _ := cmd.Flags().GetBool("use-rdma")
 	params.UseRdma = useRdma
 	if useRdma {
-		params.RdmaLocalIp, _ = cmd.Flags().GetString("rdma-local-ip")
+		params.RdmaLocalIP, _ = cmd.Flags().GetString("rdma-local-ip")
 		params.RdmaThresholdBytes, _ = cmd.Flags().GetInt64("rdma-threshold")
 		params.RdmaFallback, _ = cmd.Flags().GetBool("rdma-fallback")
 		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")

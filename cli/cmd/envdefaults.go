@@ -99,7 +99,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	}
 
 	// RDMA string settings
-	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIp)
+	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
 	_ = setIf("rdma-device", constants.EnvRdmaDevice)
 	_ = setIf("rdma-log-level", constants.EnvRdmaLogLevel)
 

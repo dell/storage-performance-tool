@@ -333,7 +333,7 @@ func (info *VerificationConflictInfo) GetSptContainers() []*VerificationContaine
 
 // GenerateSSHStopCommands creates copy-pasteable SSH commands to stop conflicting containers
 func (info *VerificationConflictInfo) GenerateSSHStopCommands(_ string) []string {
-	commands := []string{}
+	commands := make([]string, 0, len(info.Containers))
 
 	for _, container := range info.Containers {
 		// Only generate stop command for containers not matching the target image (in non-force mode)

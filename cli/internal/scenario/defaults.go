@@ -34,7 +34,7 @@ type RdmaConfig struct {
 	Threshold int64  `yaml:"threshold,omitempty"`
 	Fallback  bool   `yaml:"fallback,omitempty"`
 	Device    string `yaml:"device,omitempty"`
-	LocalIp   string `yaml:"localIp,omitempty"`
+	LocalIP   string `yaml:"localIp,omitempty"`
 	LogLevel  string `yaml:"logLevel,omitempty"`
 	TimeoutMs int64  `yaml:"timeoutMs,omitempty"`
 }
@@ -259,7 +259,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				Threshold: threshold,
 				Fallback:  params.RdmaFallback,
 				Device:    device,
-				LocalIp:   params.RdmaLocalIp,
+				LocalIP:   params.RdmaLocalIP,
 				LogLevel:  logLevel,
 				TimeoutMs: timeoutMs,
 			}

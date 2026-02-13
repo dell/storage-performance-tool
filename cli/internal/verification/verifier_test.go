@@ -903,8 +903,8 @@ func TestRdmaDeviceCheck_EmptyDirectory(t *testing.T) {
 func TestRdmaDriverCheck_LibPresent(t *testing.T) {
 	mockCmd := &MockCommandExecutor{
 		Commands: map[string]MockCommandResponse{
-			"docker exec abc123 ls /usr/lib64/libibverbs.so.1": {
-				Stdout: "/usr/lib64/libibverbs.so.1",
+			"docker exec abc123 ldconfig -p": {
+				Stdout: "\tlibibverbs.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libibverbs.so.1\n",
 				Stderr: "",
 				Error:  nil,
 			},
@@ -928,10 +928,10 @@ func TestRdmaDriverCheck_LibPresent(t *testing.T) {
 func TestRdmaDriverCheck_LibMissing(t *testing.T) {
 	mockCmd := &MockCommandExecutor{
 		Commands: map[string]MockCommandResponse{
-			"docker exec abc123 ls /usr/lib64/libibverbs.so.1": {
-				Stdout: "",
-				Stderr: "ls: cannot access '/usr/lib64/libibverbs.so.1': No such file or directory",
-				Error:  fmt.Errorf("exit status 2"),
+			"docker exec abc123 ldconfig -p": {
+				Stdout: "\tlibc.so.6 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libc.so.6\n",
+				Stderr: "",
+				Error:  nil,
 			},
 		},
 	}
@@ -961,6 +961,114 @@ func TestRdmaDriverCheck_EmptyContainerID(t *testing.T) {
 
 	if result.Passed {
 		t.Error("Expected RDMA driver check to fail with empty container ID")
+	}
+	if !strings.Contains(result.Message, "No container") {
+		t.Errorf("Expected 'No container' in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_Active(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "mlx5_bond_0\n",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_bond_0/ports/1/state": {
+				Stdout: "4: ACTIVE",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_bond_0/ports/1/link_layer": {
+				Stdout: "Ethernet",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if !result.Passed {
+		t.Errorf("Expected RDMA readiness check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "mlx5_bond_0") {
+		t.Errorf("Expected device name in message, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "ACTIVE") {
+		t.Errorf("Expected ACTIVE in message, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "Ethernet") {
+		t.Errorf("Expected link layer in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_PortDown(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "mlx5_0\n",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_0/ports/1/state": {
+				Stdout: "1: DOWN",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail when port is DOWN")
+	}
+	if !strings.Contains(result.Message, "not active") || !strings.Contains(result.Message, "DOWN") {
+		t.Errorf("Expected port-down message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_NoSysfs(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "",
+				Stderr: "No such file or directory",
+				Error:  fmt.Errorf("exit status 2"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail when sysfs is missing")
+	}
+	if !strings.Contains(result.Message, "No RDMA devices") {
+		t.Errorf("Expected 'No RDMA devices' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_EmptyContainerID(t *testing.T) {
+	mockCmd := &MockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail with empty container ID")
 	}
 	if !strings.Contains(result.Message, "No container") {
 		t.Errorf("Expected 'No container' in message, got: %s", result.Message)

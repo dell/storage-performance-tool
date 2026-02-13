@@ -21,7 +21,7 @@ type Params struct {
 
 	// RDMA acceleration
 	UseRdma            bool   // Use s3-rdma driver instead of s3
-	RdmaLocalIp        string // Local RDMA interface IP (required for RDMA)
+	RdmaLocalIP        string // Local RDMA interface IP (required for RDMA)
 	RdmaThresholdBytes int64  // Min object size for RDMA (default: 1048576)
 	RdmaFallback       bool   // Fall back to HTTP if RDMA init fails (default: true)
 	RdmaDevice         string // RDMA device name (default: "auto")

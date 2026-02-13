@@ -74,6 +74,9 @@ func (r *Report) printNodeResult(host string, result *NodeResult) {
 	if result.RdmaDriver.Message != "" {
 		r.printCheck("RDMA Driver", result.RdmaDriver)
 	}
+	if result.RdmaReadiness.Message != "" {
+		r.printCheck("RDMA Readiness", result.RdmaReadiness)
+	}
 	r.printCheck("Ports Accessible", result.PortsAccessible)
 	r.printCheck("Metrics Endpoint", result.MetricsEndpoint)
 	r.printCheck("Control Endpoint", result.ControlEndpoint)

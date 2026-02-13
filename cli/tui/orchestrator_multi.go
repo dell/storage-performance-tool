@@ -1627,7 +1627,7 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	params scenario.ScenarioParams,
 ) error {
 	// Build worker addresses for RMI using detected advertised IPs where available
-	workerAddresses := []string{}
+	workerAddresses := make([]string, 0, len(workers))
 	for _, worker := range workers {
 		hostOrIP := worker.AdvertisedIP
 		if strings.TrimSpace(hostOrIP) == "" {

@@ -201,7 +201,8 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	}
 
 	// Build command with scenario file and additional CLI arguments
-	cmd := []string{"--run-scenario=/tmp/scenario.js"}
+	cmd := make([]string, 0, 1+len(additionalArgs))
+	cmd = append(cmd, "--run-scenario=/tmp/scenario.js")
 	cmd = append(cmd, additionalArgs...)
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "scenario", "cmd", cmd)
 
@@ -286,7 +287,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 			CgroupPermissions: "rwm",
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
-		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
 			Name: "memlock",
 			Soft: -1,
 			Hard: -1,
@@ -410,7 +411,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 			CgroupPermissions: "rwm",
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
-		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
 			Name: "memlock",
 			Soft: -1,
 			Hard: -1,
@@ -460,11 +461,12 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	}
 
 	// Build command for entry node (API server mode with RMI coordination)
-	cmd := []string{
-		"--load-step-node-addrs=" + strings.Join(workerAddresses, ","),
+	cmd := make([]string, 0, 3+len(additionalArgs))
+	cmd = append(cmd,
+		"--load-step-node-addrs="+strings.Join(workerAddresses, ","),
 		"--run-node=true",
-		"--run-port=" + constants.SptAPIPort,
-	}
+		"--run-port="+constants.SptAPIPort,
+	)
 
 	// Add additional arguments (e.g., S3 endpoint parameters)
 	cmd = append(cmd, additionalArgs...)
@@ -503,7 +505,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 			CgroupPermissions: "rwm",
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
-		hostConfig.Resources.Ulimits = append(hostConfig.Resources.Ulimits, &units.Ulimit{
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
 			Name: "memlock",
 			Soft: -1,
 			Hard: -1,

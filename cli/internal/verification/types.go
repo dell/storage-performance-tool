@@ -42,7 +42,8 @@ type NodeResult struct {
 	DockerImagePull  Check
 	ContainerStart   Check
 	RdmaDevice       Check // /dev/infiniband/ accessible (RDMA only)
-	RdmaDriver       Check // s3-rdma runtime present in container (RDMA only)
+	RdmaDriver       Check // libibverbs loadable in container (RDMA only)
+	RdmaReadiness    Check // RDMA port active inside container (RDMA only)
 	PortsAccessible  Check
 	MetricsEndpoint  Check
 	ControlEndpoint  Check

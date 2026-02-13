@@ -13,7 +13,7 @@ const (
 	EnvRdmaEnabled   = "SPT_RDMA"
 
 	// RDMA configuration environment variables
-	EnvRdmaLocalIp   = "RDMA_LOCAL_IP"
+	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"
 	EnvRdmaThreshold = "RDMA_THRESHOLD_BYTES"
 	EnvRdmaFallback  = "RDMA_FALLBACK_ENABLED"
 	EnvRdmaDevice    = "RDMA_DEVICE"

@@ -323,7 +323,7 @@ func (l *LiveViewRenderer) formatPercentCell(metric *PerformanceMetric) string {
 
 // formatEmptyTable generates a table when no metrics are available
 func (l *LiveViewRenderer) formatEmptyTable(width int) string {
-	var rows []string
+	rows := make([]string, 0, 2)
 	totalPrefix := fmt.Sprintf("%5s %3s %9d %8d %6d %7d %8d",
 		"Total", l.formatPercentCell(nil), 0, 0, 0, 0, 0)
 	rows = append(rows, l.appendHostColumn(totalPrefix, "", NodeConnectionStatus{}, width))
