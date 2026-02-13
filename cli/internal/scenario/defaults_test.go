@@ -383,6 +383,10 @@ func TestGenerateDefaults(t *testing.T) {
 				if config.Storage.Rdma.Fallback {
 					t.Error("Expected fallback to be false")
 				}
+				// Verify "fallback: false" is present in raw YAML (not omitted by omitempty)
+				if !strings.Contains(string(data), "fallback: false") {
+					t.Error("Expected raw YAML to contain 'fallback: false' but it was omitted")
+				}
 				if config.Storage.Rdma.Device != "mlx5_0" {
 					t.Errorf("Expected device 'mlx5_0', got %s", config.Storage.Rdma.Device)
 				}
