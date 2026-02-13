@@ -246,6 +246,37 @@ public class S3RdmaStorageDriverSubmitTest {
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 0)));
 	}
 
+	// ---------- shouldUseRdma: below-threshold warning ----------
+
+	@Test
+	void testShouldUseRdma_warnsBelowThresholdOnce() throws Exception {
+		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
+		final var driver = newMockDriver(config, availableTransport());
+
+		// Before any sub-threshold op, the guard should be false
+		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should start false");
+
+		// First sub-threshold call should trip the guard
+		final var smallOp = dataOp(OpType.CREATE, THRESHOLD - 1);
+		assertFalse(invokeShouldUseRdma(driver, smallOp));
+		assertTrue(getBelowThresholdWarned(driver), "belowThresholdWarned should be true after first sub-threshold op");
+
+		// Second call — guard stays true (log-once behaviour)
+		assertFalse(invokeShouldUseRdma(driver, smallOp));
+		assertTrue(getBelowThresholdWarned(driver));
+	}
+
+	@Test
+	void testShouldUseRdma_noWarningWhenAboveThreshold() throws Exception {
+		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
+		final var driver = newMockDriver(config, availableTransport());
+
+		// Above-threshold op should not trip the guard
+		final var largeOp = dataOp(OpType.CREATE, THRESHOLD + 1);
+		assertTrue(invokeShouldUseRdma(driver, largeOp));
+		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should remain false for above-threshold ops");
+	}
+
 	// ---------- batch submit ----------
 
 	@Test
@@ -317,6 +348,9 @@ public class S3RdmaStorageDriverSubmitTest {
 						Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
 		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
 		setField(S3RdmaStorageDriver.class, driver, "rdmaTransport", transport);
+		setField(S3RdmaStorageDriver.class, driver, "belowThresholdWarned",
+						new java.util.concurrent.atomic.AtomicBoolean(false));
+		setFieldInHierarchy(driver, "stepId", "test-step");
 		return driver;
 	}
 
@@ -371,6 +405,13 @@ public class S3RdmaStorageDriverSubmitTest {
 		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("buildEndpointAddrs");
 		m.setAccessible(true);
 		return (String) m.invoke(driver);
+	}
+
+	private static boolean getBelowThresholdWarned(
+					final S3RdmaStorageDriver<Item, Operation<Item>> driver) throws Exception {
+		final Field f = S3RdmaStorageDriver.class.getDeclaredField("belowThresholdWarned");
+		f.setAccessible(true);
+		return ((java.util.concurrent.atomic.AtomicBoolean) f.get(driver)).get();
 	}
 
 	private static void setField(final Class<?> clazz, final Object obj,

@@ -303,16 +303,18 @@ func TestGenerateDefaults(t *testing.T) {
 			},
 		},
 		{
-			name: "S3 write with RDMA enabled (defaults)",
+			name: "S3 write with RDMA enabled (Cobra defaults)",
 			params: Params{
-				WorkloadType: "write",
-				Endpoint:     "http://minio:9000",
-				AccessKey:    "testkey",
-				SecretKey:    "testsecret",
-				Bucket:       "testbucket",
-				Threads:      4,
-				UseRdma:      true,
-				RdmaFallback: true,
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				UseRdma:            true,
+				RdmaFallback:       true,
+				RdmaThresholdBytes: 1048576, // Cobra default
+				RdmaTimeoutMs:      30000,   // Cobra default
 			},
 			wantErr: false,
 			checkOutput: func(t *testing.T, data []byte) {
@@ -341,6 +343,39 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 				if config.Storage.Rdma.TimeoutMs != 30000 {
 					t.Errorf("Expected default timeout 30000, got %d", config.Storage.Rdma.TimeoutMs)
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA threshold zero",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				UseRdma:            true,
+				RdmaFallback:       true,
+				RdmaThresholdBytes: 0,     // explicit zero — force RDMA for all sizes
+				RdmaTimeoutMs:      30000, // Cobra default
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.Threshold != 0 {
+					t.Errorf("Expected threshold 0, got %d", config.Storage.Rdma.Threshold)
+				}
+				// Verify "threshold: 0" appears in raw YAML (not dropped by omitempty)
+				if !strings.Contains(string(data), "threshold: 0") {
+					t.Error("Expected raw YAML to contain 'threshold: 0' but it was omitted")
 				}
 			},
 		},

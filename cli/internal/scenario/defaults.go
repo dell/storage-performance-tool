@@ -31,12 +31,12 @@ type StorageConfig struct {
 
 // RdmaConfig represents RDMA acceleration configuration for the s3-rdma driver
 type RdmaConfig struct {
-	Threshold int64  `yaml:"threshold,omitempty"`
+	Threshold int64  `yaml:"threshold"`
 	Fallback  bool   `yaml:"fallback"`
 	Device    string `yaml:"device,omitempty"`
 	LocalIP   string `yaml:"localIp,omitempty"`
 	LogLevel  string `yaml:"logLevel,omitempty"`
-	TimeoutMs int64  `yaml:"timeoutMs,omitempty"`
+	TimeoutMs int64  `yaml:"timeoutMs"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -239,9 +239,6 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			config.Storage.Driver.Type = "s3-rdma"
 
 			threshold := params.RdmaThresholdBytes
-			if threshold == 0 {
-				threshold = 1048576 // 1MB default
-			}
 			device := params.RdmaDevice
 			if device == "" {
 				device = "auto"
@@ -251,9 +248,6 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				logLevel = "WARN"
 			}
 			timeoutMs := params.RdmaTimeoutMs
-			if timeoutMs == 0 {
-				timeoutMs = 30000
-			}
 
 			config.Storage.Rdma = &RdmaConfig{
 				Threshold: threshold,

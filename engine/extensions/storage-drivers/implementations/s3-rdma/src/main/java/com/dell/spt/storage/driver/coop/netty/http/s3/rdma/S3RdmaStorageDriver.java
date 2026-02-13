@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -85,6 +86,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** In-flight RDMA operations keyed by Operation identity. */
 	private final ConcurrentMap<Operation<?>, RdmaContext> rdmaOps = new ConcurrentHashMap<>();
+
+	/** Log-once guard for the below-threshold warning. */
+	private final AtomicBoolean belowThresholdWarned = new AtomicBoolean(false);
 
 	/**
 	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
@@ -222,6 +226,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final long size = dataOp.item().size();
 			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
 			if (!useRdma) {
+				if (belowThresholdWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn(
+									"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
+													+ " To force RDMA for all sizes, set storage.rdma.threshold=0",
+									stepId, size, rdmaConfig.getThresholdBytes());
+				}
 				Loggers.MSG.trace("{}: RDMA skip: size={} < threshold={}", stepId, size, rdmaConfig.getThresholdBytes());
 			}
 			return useRdma;
