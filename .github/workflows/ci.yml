@@ -141,7 +141,9 @@ jobs:
             -y \
             --no-install-recommends \
             openjdk-21-jdk \
-            ca-certificates
+            ca-certificates \
+            libibverbs-dev \
+            librdmacm-dev
           java -version
 
       - name: Set up Temurin JDK 21
@@ -151,6 +153,14 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+
+      - name: Install RDMA build dependencies
+        if: ${{ !env.ACT }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libibverbs-dev \
+            librdmacm-dev
 
       - name: Show version metadata
         run: |
