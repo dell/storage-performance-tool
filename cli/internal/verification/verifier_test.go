@@ -825,6 +825,84 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
+func TestClockSkew_Synchronized(t *testing.T) {
+	now := time.Now()
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: fmt.Sprintf("%d\n", now.Unix()),
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(now)
+	mockTime.TimeAdvance = 0 // Don't advance time between calls
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	if !result.Passed {
+		t.Errorf("Expected clock skew check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "Clock offset") {
+		t.Errorf("Expected message to contain 'Clock offset', got: %s", result.Message)
+	}
+}
+
+func TestClockSkew_LargeSkew(t *testing.T) {
+	now := time.Now()
+	fiveHoursAgo := now.Add(-5 * time.Hour)
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: fmt.Sprintf("%d\n", fiveHoursAgo.Unix()),
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(now)
+	mockTime.TimeAdvance = 0
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	if result.Passed {
+		t.Error("Expected clock skew check to fail for 5-hour skew")
+	}
+	if !strings.Contains(result.Message, "Clock skew") {
+		t.Errorf("Expected warning about clock skew, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "SigV4") {
+		t.Errorf("Expected message to mention SigV4, got: %s", result.Message)
+	}
+}
+
+func TestClockSkew_CommandFailure(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: "",
+				Error:  fmt.Errorf("command not found"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	// Should still pass (graceful degradation)
+	if !result.Passed {
+		t.Error("Expected clock skew check to pass (graceful) on command failure")
+	}
+}
+
 func TestRdmaDeviceCheck_DevicePresent(t *testing.T) {
 	mockCmd := &MockCommandExecutor{
 		Commands: map[string]MockCommandResponse{

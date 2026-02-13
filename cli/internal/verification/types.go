@@ -41,6 +41,7 @@ type NodeResult struct {
 	DockerAvailable  Check
 	DockerImagePull  Check
 	ContainerStart   Check
+	ClockSkew        Check // Clock skew relative to entry node (multi-host)
 	RdmaDevice       Check // /dev/infiniband/ accessible (RDMA only)
 	RdmaDriver       Check // libibverbs loadable in container (RDMA only)
 	RdmaReadiness    Check // RDMA port active inside container (RDMA only)

@@ -65,6 +65,9 @@ func (r *Report) printNodeResult(host string, result *NodeResult) {
 
 	// Show each check with appropriate symbol
 	r.printCheck("SSH Connectivity", result.SSHConnectivity)
+	if result.ClockSkew.Message != "" {
+		r.printCheck("Clock Sync", result.ClockSkew)
+	}
 	r.printCheck("Docker Available", result.DockerAvailable)
 	r.printCheck("Docker Image Pull", result.DockerImagePull)
 	r.printCheck("Container Start", result.ContainerStart)

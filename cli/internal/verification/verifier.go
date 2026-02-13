@@ -126,6 +126,9 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 	if v.stepSSHConnectivity(host, result) {
 		return result
 	}
+	if !host.IsLocal && len(v.hosts) > 1 {
+		v.stepClockSkew(host, result)
+	}
 	if v.stepDockerDaemon(host, result) {
 		return result
 	}
@@ -175,6 +178,74 @@ func (v *Verifier) stepSSHConnectivity(host *hostparse.HostInfo, result *NodeRes
 		fmt.Println(" ✅")
 	}
 	return false
+}
+
+func (v *Verifier) stepClockSkew(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking clock synchronization...")
+	}
+	result.ClockSkew = v.checkClockSkew(host)
+	if v.config.ShowProgress {
+		if result.ClockSkew.Passed {
+			fmt.Println(" ✅")
+		} else {
+			fmt.Println(" ⚠️")
+		}
+	}
+}
+
+// checkClockSkew compares the remote host's clock to the local clock.
+// SigV4 authentication requires clocks within ~15 minutes; we warn at 1 minute.
+func (v *Verifier) checkClockSkew(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"date", "-u", "+%s"})
+	if err != nil {
+		return Check{
+			Passed:   true, // Don't fail verification if we can't check
+			Message:  "Could not read remote clock",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	remoteEpoch := strings.TrimSpace(stdout)
+	var remoteTime int64
+	if _, err := fmt.Sscanf(remoteEpoch, "%d", &remoteTime); err != nil {
+		return Check{
+			Passed:   true,
+			Message:  fmt.Sprintf("Could not parse remote clock: %s", remoteEpoch),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	localTime := v.timeProvider.Now().Unix()
+	skew := localTime - remoteTime
+	if skew < 0 {
+		skew = -skew
+	}
+
+	skewDuration := time.Duration(skew) * time.Second
+
+	const warnThreshold = 60 // 1 minute — well before SigV4's 15 min limit
+
+	if skew > warnThreshold {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("Clock skew: %s behind entry node (S3 SigV4 auth requires <15m)", skewDuration),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("Clock offset: %s", skewDuration),
+		Duration: v.timeProvider.Since(start),
+	}
 }
 
 func (v *Verifier) stepDockerDaemon(host *hostparse.HostInfo, result *NodeResult) bool {
