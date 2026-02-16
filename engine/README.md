@@ -360,7 +360,7 @@ The driver is implemented in three layers:
 - `rdma-core` system packages (`libibverbs`, `librdmacm`, `libmlx5`)
 - Docker device passthrough (`--device /dev/infiniband`) for containerized deployments
 
-On systems without RDMA hardware, the driver detects this at initialization and fails by default. Set `storage.rdma.fallbackEnabled` to `true` to fall back to HTTP instead.
+On systems without RDMA hardware, the driver detects this at initialization and fails by default. Set `storage.rdma.fallback` to `true` to fall back to HTTP instead.
 
 ### Engine Configuration
 
@@ -371,7 +371,7 @@ RDMA settings are passed through the scenario YAML under the `storage.rdma` name
 | `storage.rdma.thresholdBytes` | `1048576` | Minimum object size (bytes) for RDMA transfer. Set to `0` to use RDMA for all sizes. |
 | `storage.rdma.timeoutMs` | `30000` | RDMA operation timeout in milliseconds |
 | `storage.rdma.device` | `auto` | RDMA device name or `auto` for auto-detection |
-| `storage.rdma.fallbackEnabled` | `false` | Fall back to HTTP if RDMA initialization fails |
+| `storage.rdma.fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
 
 ## Contributing
 
