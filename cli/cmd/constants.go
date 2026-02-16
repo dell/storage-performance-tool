@@ -49,22 +49,22 @@ const (
 
 // Spt parameter constants
 const (
-	SptStorageDriverType      = "--storage-driver-type"
+	SptStorageDriverType       = "--storage-driver-type"
 	SptStorageDriverTypeS3     = "s3"
 	SptStorageDriverTypeS3Rdma = "s3-rdma"
 	SptStorageDriverTypeMock   = "dummy-mock"
-	SptStorageNetNodeAddrs    = "--storage-net-node-addrs"
-	SptStorageNetNodePort     = "--storage-net-node-port"
-	SptStorageNetSSLEnabled   = "--storage-net-ssl-enabled"
-	SptStorageAuthUID         = "--storage-auth-uid"
-	SptStorageAuthSecret      = "--storage-auth-secret" // #nosec G101: CLI flag name, not a credential
-	SptItemOutputPath         = "--item-output-path"
-	SptLoadOpType             = "--load-op-type"
-	SptLoadOpTypeCreate       = "create"
-	SptStorageDriverLimitConc = "--storage-driver-limit-concurrency"
-	SptItemDataSize           = "--item-data-size"
-	SptLoadOpLimitCount       = "--load-op-limit-count"
-	SptLoadStepLimitTime      = "--load-step-limit-time"
+	SptStorageNetNodeAddrs     = "--storage-net-node-addrs"
+	SptStorageNetNodePort      = "--storage-net-node-port"
+	SptStorageNetSSLEnabled    = "--storage-net-ssl-enabled"
+	SptStorageAuthUID          = "--storage-auth-uid"
+	SptStorageAuthSecret       = "--storage-auth-secret" // #nosec G101: CLI flag name, not a credential
+	SptItemOutputPath          = "--item-output-path"
+	SptLoadOpType              = "--load-op-type"
+	SptLoadOpTypeCreate        = "create"
+	SptStorageDriverLimitConc  = "--storage-driver-limit-concurrency"
+	SptItemDataSize            = "--item-data-size"
+	SptLoadOpLimitCount        = "--load-op-limit-count"
+	SptLoadStepLimitTime       = "--load-step-limit-time"
 )
 
 // URL scheme constants

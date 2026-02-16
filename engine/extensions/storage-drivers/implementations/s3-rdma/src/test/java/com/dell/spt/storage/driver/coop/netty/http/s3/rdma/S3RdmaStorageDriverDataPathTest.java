@@ -367,8 +367,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		assertTrue(fake.wasDeregistered(handle));
 
 		// Second deregister of the same handle should throw
-		assertThrows(IllegalStateException.class, () ->
-						fake.deregisterBuffer(buf, handle),
+		assertThrows(IllegalStateException.class, () -> fake.deregisterBuffer(buf, handle),
 						"Double deregister should be detected");
 	}
 

@@ -1160,10 +1160,10 @@ func TestNoOpLimitInGeneratedScenarios(t *testing.T) {
 // is generated in the JavaScript scenario based on UseRdma flag.
 func TestStorageDriverType(t *testing.T) {
 	tests := []struct {
-		name            string
-		params          Params
-		wantDriverType  string // expected "type": "..." in output
-		notDriverType   string // must NOT appear
+		name           string
+		params         Params
+		wantDriverType string // expected "type": "..." in output
+		notDriverType  string // must NOT appear
 	}{
 		{
 			name: "write count - default s3 driver",

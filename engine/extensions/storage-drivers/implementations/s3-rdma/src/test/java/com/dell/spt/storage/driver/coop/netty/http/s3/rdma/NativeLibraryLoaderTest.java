@@ -92,16 +92,14 @@ public class NativeLibraryLoaderTest {
 	@Test
 	void testLoad_nonExistentLibrary() {
 		// Loading a library that doesn't exist should throw UnsatisfiedLinkError
-		final var error = assertThrows(UnsatisfiedLinkError.class, () ->
-						NativeLibraryLoader.load("nonexistent_library_xyz123"));
+		final var error = assertThrows(UnsatisfiedLinkError.class, () -> NativeLibraryLoader.load("nonexistent_library_xyz123"));
 		assertTrue(error.getMessage().contains("nonexistent_library_xyz123"),
 						"Error message should mention the library name, got: " + error.getMessage());
 	}
 
 	@Test
 	void testLoad_errorMessageIncludesResourcePath() {
-		final var error = assertThrows(UnsatisfiedLinkError.class, () ->
-						NativeLibraryLoader.load("missing_rdma_lib"));
+		final var error = assertThrows(UnsatisfiedLinkError.class, () -> NativeLibraryLoader.load("missing_rdma_lib"));
 		// The custom error message should mention both JAR path and system path
 		assertTrue(error.getMessage().contains("not found"),
 						"Error should indicate library not found, got: " + error.getMessage());
