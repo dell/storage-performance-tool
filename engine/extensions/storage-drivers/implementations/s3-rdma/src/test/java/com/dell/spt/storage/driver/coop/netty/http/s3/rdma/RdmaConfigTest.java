@@ -77,7 +77,7 @@ public class RdmaConfigTest {
 		final var config = new RdmaConfig((Config) null);
 		assertTrue(config.isEnabled());
 		assertEquals(1_048_576L, config.getThresholdBytes());
-		assertTrue(config.isFallbackEnabled());
+		assertFalse(config.isFallbackEnabled());
 		assertEquals("auto", config.getDevice());
 		assertEquals("", config.getLocalIp());
 		assertEquals("WARN", config.getLogLevel());
@@ -123,7 +123,7 @@ public class RdmaConfigTest {
 		// All should be defaults
 		assertTrue(config.isEnabled());
 		assertEquals(1_048_576L, config.getThresholdBytes());
-		assertTrue(config.isFallbackEnabled());
+		assertFalse(config.isFallbackEnabled());
 		assertEquals("auto", config.getDevice());
 		assertEquals("", config.getLocalIp());
 		assertEquals("WARN", config.getLogLevel());

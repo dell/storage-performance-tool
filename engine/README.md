@@ -1,11 +1,10 @@
-# Spt - Storage Performance Testing Tool
-
+# SPT Engine
 
 ## Overview
 
-Spt is a powerful distributed storage performance testing tool designed to validate and measure the performance of storage systems at scale. Originally developed to test object storage systems, Spt has evolved into a comprehensive performance testing framework supporting multiple storage protocols and complex testing scenarios.
+The SPT Engine is the high-performance Java core of the Dell Storage Performance Tool. It executes storage workloads, collects metrics, and supports distributed testing across multiple nodes. The engine is typically managed by the [SPT CLI](../README.md), but can also be run standalone for advanced use cases.
 
-This repository contains the Spt monorepo, consolidating all core components and extensions into a single, cohesive codebase.
+This directory contains the engine source, extensions (storage drivers, load patterns), and Docker bundle configuration.
 
 ## Key Features
 
@@ -33,7 +32,7 @@ The project uses Gradle with the Gradle Wrapper for building. This ensures consi
 
 ```bash
 # Clone the repository
-git clone git@github.com:dell/storage-performance-tool.git
+git clone https://github.com/dell/storage-performance-tool.git
 cd storage-performance-tool/engine
 
 # Build all components using Gradle Wrapper
@@ -110,14 +109,14 @@ Note: The run scripts automatically handle setting up the extensions in the corr
 
 After building, the distribution contains:
 
-- **spt.jar** - The main application JAR containing core Spt functionality
+- **spt.jar** - The main application JAR containing core SPT functionality
 - **ext/** - Directory containing all extension JARs (storage drivers, load patterns)
 - **run.sh/run.bat** - Platform-specific launcher scripts that properly configure the classpath
 
 The launcher scripts handle:
 - Setting up the correct extension directory structure
 - Linking/copying extensions to `~/.spt/<version>/ext/`
-- Launching Spt with the proper classpath configuration
+- Launching SPT with the proper classpath configuration
 
 ### IDE Integration
 
@@ -131,7 +130,7 @@ make vscode
 ```
 
 This creates debug configurations for:
-- Running Spt with `--help`
+- Running SPT with `--help`
 - Running S3 performance tests
 - Checking version with `--version`
 
@@ -170,7 +169,7 @@ make docker-scenario SCENARIO=example-scenario.js
 
 #### Docker Volumes
 
-The Spt Docker image supports several volume mount points:
+The SPT Docker image supports several volume mount points:
 
 - `/home/spt/log` - Log files output directory
 - `/workspace` - Custom scenarios and data files
@@ -189,7 +188,7 @@ docker run --rm \
 #### Docker Compose
 
 A `docker-compose.yml` example is provided in the `bundle/` directory that includes:
-- Multiple Spt service configurations
+- Multiple SPT service configurations
 - Volume mounts for scenarios and logs
 - Environment variable support for storage configuration
 - Example `.env.example` file for easy setup
@@ -217,7 +216,7 @@ make docker-compose-weighted
 
 ### S3 Configuration
 
-To run Spt against an S3-compatible storage system, you need to configure the following environment variables:
+To run SPT against an S3-compatible storage system, you need to configure the following environment variables:
 
 #### Required Environment Variables
 
@@ -251,6 +250,15 @@ export SPT_S3_SECRET_KEY=minioadmin
 export SPT_S3_BUCKET=test-bucket
 ```
 
+For Dell ObjectScale (ECS) with multiple S3 endpoints:
+```bash
+# Comma-separated list of data node addresses
+export SPT_S3_ENDPOINT=http://ecs-node1:9020,http://ecs-node2:9020,http://ecs-node3:9020
+export SPT_S3_ACCESS_KEY=your-objectscale-access-key
+export SPT_S3_SECRET_KEY=your-objectscale-secret-key
+export SPT_S3_BUCKET=perf-test
+```
+
 #### Security Note
 
 Never commit credentials to version control. Consider using:
@@ -261,9 +269,9 @@ Never commit credentials to version control. Consider using:
 ## Project Structure
 
 ```
-spt/
+engine/
 ├── core/
-│   └── spt-base/          # Core functionality and APIs
+│   └── spt-base/              # Core functionality and APIs
 ├── extensions/
 │   ├── load-steps/            # Load pattern extensions
 │   │   ├── pipeline/          # Sequential operations
@@ -271,8 +279,8 @@ spt/
 │   └── storage-drivers/       # Storage protocol implementations
 │       ├── primitives/        # Base driver implementations
 │       ├── protocols/         # Protocol-specific drivers
-│       └── implementations/   # Storage-specific drivers
-├── bundle/                    # Bundle aggregator configuration
+│       └── implementations/   # Storage-specific drivers (S3, S3-RDMA, etc.)
+├── bundle/                    # Docker bundle and distribution packaging
 └── docs/                      # Additional documentation
 ```
 
@@ -295,9 +303,75 @@ These endpoints are useful for orchestrators and for spt to simplify startup log
 
 - **S3**: Amazon S3 and S3-compatible storage (MinIO, Ceph, etc.)
 - **Swift**: OpenStack Swift
-- **Atmos**: Dell Dell Atmos
+- **Atmos**: Dell Atmos
 - **Filesystem**: Local or network filesystems
 - **Custom**: Extensible framework for custom storage drivers
+
+## S3-RDMA Acceleration
+
+The S3-RDMA storage driver provides an optional RDMA (Remote Direct Memory Access) data path for S3 PUT and GET operations. When enabled, object data bypasses the kernel networking stack entirely — the storage server reads from and writes to the client's memory directly over the RDMA fabric.
+
+### How It Works
+
+SPT acts as an **RDMA target**: it registers a memory buffer, creates a DC (Dynamically Connected) Target endpoint, and sends a standard S3 HTTP request with an additional `x-amz-rdma-token` header. The storage server uses the token to perform the actual RDMA data transfer.
+
+| S3 Operation | RDMA Action |
+|-------------|-------------|
+| PUT (write) | Server performs **RDMA READ** from client memory |
+| GET (read)  | Server performs **RDMA WRITE** to client memory |
+
+Because the server initiates the data transfer, the HTTP request body is empty and **`Content-Length` is set to 0**. The actual object size is encoded in the RDMA token. This is critical for compatibility with HTTP frameworks (e.g. Jetty) that block until the declared body bytes arrive.
+
+### RDMA Token Format
+
+The `x-amz-rdma-token` header carries all information the server needs to perform the transfer:
+
+```
+addr:size:rkey:lid:dctn:g:gid
+```
+
+| Field  | Hex Digits | Description |
+|--------|-----------|-------------|
+| `addr` | 16 | Virtual address of the registered buffer |
+| `size` | 8  | Buffer size in bytes |
+| `rkey` | 8  | Remote key for RDMA memory access |
+| `lid`  | 4  | Local ID (0 for RoCE, used in InfiniBand) |
+| `dctn` | 6  | DC Target Number (connection endpoint) |
+| `g`    | 1  | Global addressing flag (1 for RoCE) |
+| `gid`  | 32 | Global ID for RoCE routing |
+
+Example token for a 1 MB buffer:
+```
+00007fffc3200000:00100000:00004d16:0000:00133f:1:fe80000000000000000000000012ab34
+```
+
+### Architecture
+
+The driver is implemented in three layers:
+
+- **`S3RdmaStorageDriver`** (Java) — extends `S3StorageDriver`, overrides `submit()` to route operations above a configurable size threshold to the RDMA path. Falls back to `super.submit()` for small objects or when RDMA is unavailable.
+- **`RdmaTransport`** (Java) — JNI bridge that manages buffer registration, token generation, and native lifecycle.
+- **`libspt_rdma.so`** (`rdma_native.c`, ~675 lines of C) — native implementation using `libibverbs`, `libmlx5`, and `librdmacm`. Handles device initialization, DC Target creation, memory registration, and token formatting.
+
+### Requirements
+
+- RDMA-capable NIC (NVIDIA/Mellanox ConnectX-4 or newer)
+- An S3-compatible storage target with RDMA support (e.g. Dell ObjectScale / ECS)
+- `rdma-core` system packages (`libibverbs`, `librdmacm`, `libmlx5`)
+- Docker device passthrough (`--device /dev/infiniband`) for containerized deployments
+
+On systems without RDMA hardware, the driver detects this at initialization and fails by default. Set `storage.rdma.fallbackEnabled` to `true` to fall back to HTTP instead.
+
+### Engine Configuration
+
+RDMA settings are passed through the scenario YAML under the `storage.rdma` namespace:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `storage.rdma.thresholdBytes` | `1048576` | Minimum object size (bytes) for RDMA transfer. Set to `0` to use RDMA for all sizes. |
+| `storage.rdma.timeoutMs` | `30000` | RDMA operation timeout in milliseconds |
+| `storage.rdma.device` | `auto` | RDMA device name or `auto` for auto-detection |
+| `storage.rdma.fallbackEnabled` | `false` | Fall back to HTTP if RDMA initialization fails |
 
 ## Contributing
 
@@ -311,7 +385,3 @@ See the [LICENSE](core/spt-base/LICENSE) file for license rights and limitations
 
 - [Documentation](core/spt-base/doc/README.md) - Comprehensive documentation
 
-## Migration Notes
-
-This is the monorepo version of Spt, consolidating multiple repositories into a single codebase. For information about the migration, see:
-- [MONOREPO.md](MONOREPO.md) - Monorepo structure and rationale

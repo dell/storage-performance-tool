@@ -15,8 +15,8 @@ storage:
     versioning: false
   rdma:
     enabled: true
-    threshold: 1048576
-    fallback: true
+    thresholdBytes: 1048576
+    fallback: false
     device: auto
     localIp: ""
     logLevel: WARN

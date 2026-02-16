@@ -824,7 +824,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
 	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
 	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
-	runCmd.Flags().Bool("rdma-fallback", true, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
+	runCmd.Flags().Bool("rdma-fallback", false, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
 	runCmd.Flags().String("rdma-device", "auto", "RDMA device name or 'auto' for auto-detection (env: RDMA_DEVICE)")
 	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
 	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")

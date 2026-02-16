@@ -36,6 +36,7 @@ cli/*.so
 cli/*.dylib
 cli/mcli
 cli/spt
+/spt
 cli/build/spt-darwin-amd64
 cli/build/spt-darwin-arm64
 cli/build/spt-linux-amd64
@@ -60,8 +61,11 @@ cli/*.zst
 cli/tools/work/
 cli/_tmp/
 cli/results/
+/results/
+/engine/results/
 cli/tools/codehealth/deadfinder/report.json
 cli/tools/codehealth/deadfinder/deadfinder
+spt-scenario-*.js
 
 # Local documentation exports
 cli/*.pdf

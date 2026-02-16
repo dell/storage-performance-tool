@@ -22,7 +22,7 @@ public final class RdmaConfig {
 			// Use all defaults if no config provided
 			this.enabled = true;
 			this.thresholdBytes = DEFAULT_THRESHOLD_BYTES;
-			this.fallbackEnabled = true;
+			this.fallbackEnabled = false;
 			this.device = DEFAULT_DEVICE;
 			this.localIp = "";
 			this.logLevel = DEFAULT_LOG_LEVEL;
@@ -30,7 +30,7 @@ public final class RdmaConfig {
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
-			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback", true);
+			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback", false);
 			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
 			this.localIp = getString(rdmaConfig, "localIp", "");
 			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);

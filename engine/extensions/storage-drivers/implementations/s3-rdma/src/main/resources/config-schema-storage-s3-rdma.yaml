@@ -14,7 +14,7 @@ storage:
     versioning: boolean
   rdma:
     enabled: boolean
-    threshold: long
+    thresholdBytes: long
     fallback: boolean
     device: string
     localIp: string

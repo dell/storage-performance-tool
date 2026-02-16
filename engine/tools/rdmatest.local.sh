@@ -73,7 +73,7 @@ unset _cli_overrides _var
 : "${RDMA_OBJECT_SIZE:=1MB}"
 : "${RDMA_TIME_LIMIT:=60s}"
 : "${RDMA_THRESHOLD_BYTES:=1048576}"
-: "${RDMA_FALLBACK_ENABLED:=true}"
+: "${RDMA_FALLBACK_ENABLED:=false}"
 : "${RDMA_DEVICE:=auto}"
 : "${RDMA_LOCAL_IP:=}"
 : "${RDMA_LOG_LEVEL:=WARN}"

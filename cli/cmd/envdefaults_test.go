@@ -23,7 +23,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().Bool("use-rdma", false, "")
 	c.Flags().String("rdma-local-ip", "", "")
 	c.Flags().String("rdma-threshold", "1MB", "")
-	c.Flags().Bool("rdma-fallback", true, "")
+	c.Flags().Bool("rdma-fallback", false, "")
 	c.Flags().String("rdma-device", "auto", "")
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
@@ -325,9 +325,9 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidFallbackIgnored(t *testing.T) {
 		t.Fatalf("expected no error for invalid RDMA_FALLBACK_ENABLED, got: %v", err)
 	}
 
-	// Flag should remain at default (true)
-	if v, _ := cmd.Flags().GetBool("rdma-fallback"); !v {
-		t.Fatal("rdma-fallback should remain true (default) when env has invalid bool")
+	// Flag should remain at default (false)
+	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
+		t.Fatal("rdma-fallback should remain false (default) when env has invalid bool")
 	}
 }
 
