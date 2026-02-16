@@ -109,6 +109,7 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: true
+          cache-dependency-path: cli/go.sum
 
       - name: Build multi-platform binaries
         run: make -C cli build-all
