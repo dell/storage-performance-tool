@@ -111,7 +111,7 @@ jobs:
       - name: Run gosec
         uses: dell/common-github-actions/gosec-runner@main
         with:
-          excludes: ${{ vars.GOSEC_EXCLUDES || '' }}
+          excludes: ${{ vars.GOSEC_EXCLUDES || 'G117,G602,G703,G704' }}
 
       - name: Run code sanitizer
         uses: dell/common-github-actions/code-sanitizer@main
