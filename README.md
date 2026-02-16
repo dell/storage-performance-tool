@@ -157,7 +157,7 @@ Key flags:
 | `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 
-**Requirements:** RDMA-capable NICs (e.g. Mellanox ConnectX), an RDMA-capable storage target, and Docker device passthrough (`--device /dev/infiniband`). If RDMA hardware is not available, the driver will fail by default. Set `--rdma-fallback` to fall back to HTTP instead.
+**Requirements:** Linux only. RDMA-capable NICs (e.g. Mellanox ConnectX), an RDMA-capable storage target, `rdma-core` system packages, and Docker device passthrough (`--device /dev/infiniband`). If RDMA hardware is not available, the driver will fail by default. Set `--rdma-fallback` to fall back to HTTP instead.
 
 ---
 

@@ -355,6 +355,7 @@ The driver is implemented in three layers:
 
 ### Requirements
 
+- **Linux only** (RDMA stack depends on `libibverbs` / kernel verbs)
 - RDMA-capable NIC (NVIDIA/Mellanox ConnectX-4 or newer)
 - An S3-compatible storage target with RDMA support (e.g. Dell ObjectScale / ECS)
 - `rdma-core` system packages (`libibverbs`, `librdmacm`, `libmlx5`)
