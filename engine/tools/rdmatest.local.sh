@@ -149,7 +149,7 @@ fi
 # Build RDMA CLI args (shared between write and read)
 # Note: config keys use camelCase (not dashes) because '-' is the CLI path separator
 RDMA_ARGS=(
-  "--storage-rdma-threshold=${RDMA_THRESHOLD_BYTES}"
+  "--storage-rdma-thresholdBytes=${RDMA_THRESHOLD_BYTES}"
   "--storage-rdma-fallback=${RDMA_FALLBACK_ENABLED}"
   "--storage-rdma-device=${RDMA_DEVICE}"
   "--storage-rdma-logLevel=${RDMA_LOG_LEVEL}"

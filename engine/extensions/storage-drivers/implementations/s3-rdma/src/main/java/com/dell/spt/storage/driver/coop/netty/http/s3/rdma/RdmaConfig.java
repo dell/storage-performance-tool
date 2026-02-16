@@ -29,7 +29,7 @@ public final class RdmaConfig {
 			this.timeoutMs = DEFAULT_TIMEOUT_MS;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
-			this.thresholdBytes = getLong(rdmaConfig, "threshold", DEFAULT_THRESHOLD_BYTES);
+			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
 			this.fallbackEnabled = getBoolean(rdmaConfig, "fallback", true);
 			this.device = getString(rdmaConfig, "device", DEFAULT_DEVICE);
 			this.localIp = getString(rdmaConfig, "localIp", "");

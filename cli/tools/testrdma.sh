@@ -68,7 +68,7 @@ while [ $# -gt 0 ]; do
     --rdma-device) RDMA_DEVICE="${2:-}"; shift 2 ;;
     --rdma-local-ip) RDMA_LOCAL_IP="${2:-}"; shift 2 ;;
     --rdma-log-level) RDMA_LOG_LEVEL="${2:-}"; shift 2 ;;
-    --rdma-timeout) RDMA_TIMEOUT="${2:-}"; shift 2 ;;
+    --rdma-timeout|--rdma-timeout-ms) RDMA_TIMEOUT="${2:-}"; shift 2 ;;
     -h|--help)
       cat << EOF
 Usage: $(basename "$0") [options]
@@ -92,11 +92,11 @@ Workload:
 
 RDMA:
   --[no-]rdma-fallback     Fall back to HTTP on RDMA failure (default: $RDMA_FALLBACK)
-  --rdma-threshold BYTES   Min object size for RDMA (default: $RDMA_THRESHOLD)
+  --rdma-threshold SIZE    Min object size for RDMA, e.g. 0, 256KB, 1MB (default: $RDMA_THRESHOLD)
   --rdma-device NAME       Device name or 'auto' (default: $RDMA_DEVICE)
   --rdma-local-ip IP       Local RDMA interface IP (default: auto-detect)
   --rdma-log-level LEVEL   WARN, INFO, DEBUG, TRACE (default: $RDMA_LOG_LEVEL)
-  --rdma-timeout MS        RDMA op timeout in ms (default: $RDMA_TIMEOUT)
+  --rdma-timeout-ms MS     RDMA op timeout in ms (default: $RDMA_TIMEOUT)
 
 General:
   --[no-]verbose           Enable verbose output (default: $VERBOSE)
@@ -146,7 +146,7 @@ cmd=("$ROOT_DIR"/spt run write \
   --rdma-threshold "$RDMA_THRESHOLD" \
   --rdma-device "$RDMA_DEVICE" \
   --rdma-log-level "$RDMA_LOG_LEVEL" \
-  --rdma-timeout "$RDMA_TIMEOUT")
+  --rdma-timeout-ms "$RDMA_TIMEOUT")
 
 if [ -n "$S3_ENDPOINTS" ]; then
   cmd+=(--endpoints "$S3_ENDPOINTS")

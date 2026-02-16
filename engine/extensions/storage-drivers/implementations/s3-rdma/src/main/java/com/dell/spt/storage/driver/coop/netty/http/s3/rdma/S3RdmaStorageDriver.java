@@ -229,7 +229,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				if (belowThresholdWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn(
 									"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
-													+ " To force RDMA for all sizes, set storage.rdma.threshold=0",
+													+ " To force RDMA for all sizes, set storage.rdma.thresholdBytes=0",
 									stepId, size, rdmaConfig.getThresholdBytes());
 				}
 				Loggers.MSG.trace("{}: RDMA skip: size={} < threshold={}", stepId, size, rdmaConfig.getThresholdBytes());

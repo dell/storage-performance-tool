@@ -22,11 +22,11 @@ func newRunLikeCmd() *cobra.Command {
 	// RDMA flags
 	c.Flags().Bool("use-rdma", false, "")
 	c.Flags().String("rdma-local-ip", "", "")
-	c.Flags().Int64("rdma-threshold", 1048576, "")
+	c.Flags().String("rdma-threshold", "1MB", "")
 	c.Flags().Bool("rdma-fallback", true, "")
 	c.Flags().String("rdma-device", "auto", "")
 	c.Flags().String("rdma-log-level", "WARN", "")
-	c.Flags().Int64("rdma-timeout", 30000, "")
+	c.Flags().Int64("rdma-timeout-ms", 30000, "")
 	return c
 }
 
@@ -222,11 +222,11 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	if v, _ := cmd.Flags().GetString("rdma-log-level"); v != "DEBUG" {
 		t.Fatalf("rdma-log-level not applied from env, got %q", v)
 	}
-	if v, _ := cmd.Flags().GetInt64("rdma-threshold"); v != 4194304 {
-		t.Fatalf("rdma-threshold not applied from env, got %d", v)
+	if v, _ := cmd.Flags().GetString("rdma-threshold"); v != "4194304" {
+		t.Fatalf("rdma-threshold not applied from env, got %q", v)
 	}
-	if v, _ := cmd.Flags().GetInt64("rdma-timeout"); v != 60000 {
-		t.Fatalf("rdma-timeout not applied from env, got %d", v)
+	if v, _ := cmd.Flags().GetInt64("rdma-timeout-ms"); v != 60000 {
+		t.Fatalf("rdma-timeout-ms not applied from env, got %d", v)
 	}
 	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
 		t.Fatal("rdma-fallback not applied from env (expected false)")
@@ -280,6 +280,20 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), constants.EnvRdmaTimeout) {
 		t.Errorf("error should mention %s, got: %v", constants.EnvRdmaTimeout, err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaHumanizedThreshold(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvRdmaThreshold, "256KB")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaThreshold) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetString("rdma-threshold"); v != "256KB" {
+		t.Fatalf("rdma-threshold not applied from env, got %q", v)
 	}
 }
 

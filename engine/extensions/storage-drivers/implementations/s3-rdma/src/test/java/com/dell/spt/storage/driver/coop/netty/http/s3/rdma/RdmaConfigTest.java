@@ -90,7 +90,7 @@ public class RdmaConfigTest {
 	void testConfigConstructor_parsesAllFields() {
 		final Config mockCfg = Mockito.mock(Config.class);
 		when(mockCfg.boolVal("enabled")).thenReturn(false);
-		when(mockCfg.longVal("threshold")).thenReturn(4_194_304L);
+		when(mockCfg.longVal("thresholdBytes")).thenReturn(4_194_304L);
 		when(mockCfg.boolVal("fallback")).thenReturn(false);
 		when(mockCfg.stringVal("device")).thenReturn("mlx5_bond_0");
 		when(mockCfg.stringVal("localIp")).thenReturn("10.247.128.125");
@@ -112,7 +112,7 @@ public class RdmaConfigTest {
 		// When config throws on missing keys, defaults should be used
 		final Config mockCfg = Mockito.mock(Config.class);
 		when(mockCfg.boolVal("enabled")).thenThrow(new RuntimeException("no key"));
-		when(mockCfg.longVal("threshold")).thenThrow(new RuntimeException("missing"));
+		when(mockCfg.longVal("thresholdBytes")).thenThrow(new RuntimeException("missing"));
 		when(mockCfg.boolVal("fallback")).thenThrow(new RuntimeException("missing"));
 		when(mockCfg.stringVal("device")).thenThrow(new RuntimeException("missing"));
 		when(mockCfg.stringVal("localIp")).thenThrow(new RuntimeException("missing"));
@@ -134,7 +134,7 @@ public class RdmaConfigTest {
 	void testConfigConstructor_nullStringValReturnsDefault() {
 		final Config mockCfg = Mockito.mock(Config.class);
 		when(mockCfg.boolVal("enabled")).thenReturn(true);
-		when(mockCfg.longVal("threshold")).thenReturn(1_048_576L);
+		when(mockCfg.longVal("thresholdBytes")).thenReturn(1_048_576L);
 		when(mockCfg.boolVal("fallback")).thenReturn(true);
 		when(mockCfg.stringVal("device")).thenReturn(null);
 		when(mockCfg.stringVal("localIp")).thenReturn(null);

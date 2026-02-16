@@ -20,6 +20,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
@@ -440,7 +441,10 @@ Available workload types:
 		}
 
 		// Build scenario parameters
-		params := buildScenarioParams(workloadType, cmd)
+		params, err := buildScenarioParams(workloadType, cmd)
+		if err != nil {
+			return err
+		}
 
 		// Generate scenario content
 		scenarioContent, err := scenario.GenerateScenario(params)
@@ -819,11 +823,11 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	// RDMA Acceleration Options
 	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
 	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
-	runCmd.Flags().Int64("rdma-threshold", 1048576, "Minimum object size in bytes for RDMA transfer (env: RDMA_THRESHOLD_BYTES)")
+	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
 	runCmd.Flags().Bool("rdma-fallback", true, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
 	runCmd.Flags().String("rdma-device", "auto", "RDMA device name or 'auto' for auto-detection (env: RDMA_DEVICE)")
 	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
-	runCmd.Flags().Int64("rdma-timeout", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
+	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
 
 	// Headless Mode Options
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
@@ -833,7 +837,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 }
 
 // buildScenarioParams builds scenario parameters from command flags
-func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Params {
+func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Params, error) {
 	params := scenario.Params{
 		WorkloadType: workloadType,
 	}
@@ -926,11 +930,16 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Param
 	params.UseRdma = useRdma
 	if useRdma {
 		params.RdmaLocalIP, _ = cmd.Flags().GetString("rdma-local-ip")
-		params.RdmaThresholdBytes, _ = cmd.Flags().GetInt64("rdma-threshold")
+		thresholdStr, _ := cmd.Flags().GetString("rdma-threshold")
+		thresholdBytes, err := sizeparse.Parse(thresholdStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --rdma-threshold value %q: %w", thresholdStr, err)
+		}
+		params.RdmaThresholdBytes = thresholdBytes
 		params.RdmaFallback, _ = cmd.Flags().GetBool("rdma-fallback")
 		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")
 		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
-		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout")
+		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout-ms")
 	}
 
 	// Set defaults
@@ -938,7 +947,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Param
 		params.ObjectSize = "1MB"
 	}
 
-	return params
+	return params, nil
 }
 
 // ResultsOptions captures Phase 1 results-related CLI settings.

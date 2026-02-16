@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/spf13/cobra"
 )
 
@@ -103,21 +104,22 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	_ = setIf("rdma-device", constants.EnvRdmaDevice)
 	_ = setIf("rdma-log-level", constants.EnvRdmaLogLevel)
 
-	// RDMA int settings
+	// RDMA threshold (accepts humanized sizes like "1MB" or plain bytes "1048576")
 	if f := cmd.Flags().Lookup("rdma-threshold"); f != nil && !cmd.Flags().Changed("rdma-threshold") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaThreshold)); v != "" {
-			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+			if _, err := sizeparse.Parse(v); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaThreshold, v, err)
 			}
 			_ = cmd.Flags().Set("rdma-threshold", v)
 		}
 	}
-	if f := cmd.Flags().Lookup("rdma-timeout"); f != nil && !cmd.Flags().Changed("rdma-timeout") {
+	// RDMA timeout (milliseconds, integer only)
+	if f := cmd.Flags().Lookup("rdma-timeout-ms"); f != nil && !cmd.Flags().Changed("rdma-timeout-ms") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaTimeout)); v != "" {
 			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaTimeout, v, err)
 			}
-			_ = cmd.Flags().Set("rdma-timeout", v)
+			_ = cmd.Flags().Set("rdma-timeout-ms", v)
 		}
 	}
 

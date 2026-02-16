@@ -373,9 +373,9 @@ func TestGenerateDefaults(t *testing.T) {
 				if config.Storage.Rdma.Threshold != 0 {
 					t.Errorf("Expected threshold 0, got %d", config.Storage.Rdma.Threshold)
 				}
-				// Verify "threshold: 0" appears in raw YAML (not dropped by omitempty)
-				if !strings.Contains(string(data), "threshold: 0") {
-					t.Error("Expected raw YAML to contain 'threshold: 0' but it was omitted")
+				// Verify "thresholdBytes: 0" appears in raw YAML (not dropped by omitempty)
+				if !strings.Contains(string(data), "thresholdBytes: 0") {
+					t.Error("Expected raw YAML to contain 'thresholdBytes: 0' but it was omitted")
 				}
 			},
 		},

@@ -31,7 +31,7 @@ type StorageConfig struct {
 
 // RdmaConfig represents RDMA acceleration configuration for the s3-rdma driver
 type RdmaConfig struct {
-	Threshold int64  `yaml:"threshold"`
+	Threshold int64  `yaml:"thresholdBytes"`
 	Fallback  bool   `yaml:"fallback"`
 	Device    string `yaml:"device,omitempty"`
 	LocalIP   string `yaml:"localIp,omitempty"`
