@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/spf13/cobra"
 )
 
@@ -89,16 +90,69 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// RDMA opt-in: --use-rdma flag or SPT_RDMA env var
+	if f := cmd.Flags().Lookup("use-rdma"); f != nil && !cmd.Flags().Changed("use-rdma") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaEnabled)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("use-rdma", strconv.FormatBool(b))
+			}
+		}
+	}
+
+	// RDMA string settings
+	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
+	_ = setIf("rdma-device", constants.EnvRdmaDevice)
+	_ = setIf("rdma-log-level", constants.EnvRdmaLogLevel)
+
+	// RDMA threshold (accepts humanized sizes like "1MB" or plain bytes "1048576")
+	if f := cmd.Flags().Lookup("rdma-threshold"); f != nil && !cmd.Flags().Changed("rdma-threshold") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaThreshold)); v != "" {
+			if _, err := sizeparse.Parse(v); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaThreshold, v, err)
+			}
+			_ = cmd.Flags().Set("rdma-threshold", v)
+		}
+	}
+	// RDMA timeout (milliseconds, integer only)
+	if f := cmd.Flags().Lookup("rdma-timeout-ms"); f != nil && !cmd.Flags().Changed("rdma-timeout-ms") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaTimeout)); v != "" {
+			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaTimeout, v, err)
+			}
+			_ = cmd.Flags().Set("rdma-timeout-ms", v)
+		}
+	}
+
+	// RDMA bool setting
+	if f := cmd.Flags().Lookup("rdma-fallback"); f != nil && !cmd.Flags().Changed("rdma-fallback") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaFallback)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("rdma-fallback", strconv.FormatBool(b))
+			}
+		}
+	}
+
 	return nil
 }
 
 // applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided.
 func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
-	if cmd.Flags().Changed("test-hosts") {
-		return nil
+	if !cmd.Flags().Changed("test-hosts") {
+		if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
+			if err := cmd.Flags().Set("test-hosts", v); err != nil {
+				return err
+			}
+		}
 	}
-	if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
-		return cmd.Flags().Set("test-hosts", v)
+
+	// RDMA opt-in for verify
+	if f := cmd.Flags().Lookup("use-rdma"); f != nil && !cmd.Flags().Changed("use-rdma") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaEnabled)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				_ = cmd.Flags().Set("use-rdma", strconv.FormatBool(b))
+			}
+		}
 	}
+
 	return nil
 }

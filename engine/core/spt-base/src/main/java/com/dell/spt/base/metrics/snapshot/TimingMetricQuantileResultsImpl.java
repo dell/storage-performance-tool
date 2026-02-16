@@ -90,7 +90,8 @@ public class TimingMetricQuantileResultsImpl implements Closeable {
 
 	private File[] findAllWorkersMetricsFiles() {
 		final File dir = new File(metricsFilesDirPath);
-		return dir.listFiles((ignored, name) -> name.startsWith(metricsFilePattern));
+		final File[] files = dir.listFiles((ignored, name) -> name.startsWith(metricsFilePattern));
+		return files != null ? files : new File[0];
 	}
 
 	// FileManagerImpl already has a method to get raw bytes but converting that to List<long> can be cumbersome and wasteful

@@ -49,6 +49,7 @@ task assembleDist {
 	dependsOn ':extensions:storage-drivers:implementations:atmos:shadowJar'
 	dependsOn ':extensions:storage-drivers:implementations:s3:shadowJar'
 	dependsOn ':extensions:storage-drivers:implementations:swift:shadowJar'
+	dependsOn ':extensions:storage-drivers:implementations:s3-rdma:shadowJar'
 	
 	finalizedBy copyScenarios
 	
@@ -64,7 +65,8 @@ task assembleDist {
 		':extensions:storage-drivers:protocols:fs': project(':extensions:storage-drivers:protocols:fs'),
 		':extensions:storage-drivers:implementations:atmos': project(':extensions:storage-drivers:implementations:atmos'),
 		':extensions:storage-drivers:implementations:s3': project(':extensions:storage-drivers:implementations:s3'),
-		':extensions:storage-drivers:implementations:swift': project(':extensions:storage-drivers:implementations:swift')
+		':extensions:storage-drivers:implementations:swift': project(':extensions:storage-drivers:implementations:swift'),
+		':extensions:storage-drivers:implementations:s3-rdma': project(':extensions:storage-drivers:implementations:s3-rdma')
 	]
 	
 	doLast {

@@ -229,7 +229,8 @@ func (d *DockerOperationsImpl) GetContainerLogsSince(ctx context.Context, contai
 
 // ListContainers returns list of containers (optionally filtered)
 func (d *DockerOperationsImpl) ListContainers(ctx context.Context, filters map[string]string) ([]ContainerInfo, error) {
-	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat, constants.DockerContainerFormat}
+	dockerCmd := make([]string, 0, 5+2*len(filters))
+	dockerCmd = append(dockerCmd, constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat, constants.DockerContainerFormat)
 
 	// Add filters
 	for key, value := range filters {

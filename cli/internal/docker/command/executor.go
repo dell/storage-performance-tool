@@ -47,11 +47,12 @@ func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 	} else {
 		// Remote execution via SSH
 		sshTarget := host.GetSSHTarget()
-		sshArgs := []string{
+		sshArgs := make([]string, 0, 5+len(command))
+		sshArgs = append(sshArgs,
 			"-o", constants.SSHConnectTimeout,
 			"-o", constants.SSHBatchMode,
 			sshTarget,
-		}
+		)
 		sshArgs = append(sshArgs, command...)
 		// #nosec G204: SSH used intentionally with constructed args
 		cmd = exec.CommandContext(ctx, constants.SSHCommand, sshArgs...)

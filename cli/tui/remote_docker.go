@@ -166,6 +166,13 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 		Command: []string{"--run-node=true", "--run-port=9999", "--load-step-node-port=1099"},
 	}
 
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		cfg.Devices = []string{constants.RdmaDevicePath}
+		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
+		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
+	}
+
 	// Echo exact JAVA_OPTS for triage
 	logging.LogInfo("remote-docker", "JAVA_OPTS configured", "host", m.host.Original, "JAVA_OPTS", cfg.Environment[constants.JavaOptsEnvVar])
 
@@ -208,6 +215,13 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleEntry),
 		Command:     cmd,
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		cfg.Devices = []string{constants.RdmaDevicePath}
+		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
+		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)

@@ -21,11 +21,13 @@ type Config struct {
 	MinHosts     int    // Minimum hosts that must pass
 	ForceCleanup bool   // Automatically clean up conflicts without prompting
 	ShowProgress bool   // Show detailed step-by-step progress messages
+	UseRdma      bool   // Include RDMA hardware/config verification
 }
 
 // Check represents the result of a single verification check
 type Check struct {
 	Passed        bool
+	Warning       bool // Soft failure: doesn't block overall readiness but needs attention
 	Message       string
 	Duration      time.Duration
 	Error         error
@@ -40,6 +42,10 @@ type NodeResult struct {
 	DockerAvailable  Check
 	DockerImagePull  Check
 	ContainerStart   Check
+	ClockSkew        Check // Clock skew relative to entry node (multi-host)
+	RdmaDevice       Check // /dev/infiniband/ accessible (RDMA only)
+	RdmaDriver       Check // libibverbs loadable in container (RDMA only)
+	RdmaReadiness    Check // RDMA port active inside container (RDMA only)
 	PortsAccessible  Check
 	MetricsEndpoint  Check
 	ControlEndpoint  Check

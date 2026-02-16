@@ -1155,3 +1155,275 @@ func TestNoOpLimitInGeneratedScenarios(t *testing.T) {
 		})
 	}
 }
+
+// TestStorageDriverType verifies the correct storage driver type (s3 vs s3-rdma)
+// is generated in the JavaScript scenario based on UseRdma flag.
+func TestStorageDriverType(t *testing.T) {
+	tests := []struct {
+		name           string
+		params         Params
+		wantDriverType string // expected "type": "..." in output
+		notDriverType  string // must NOT appear
+	}{
+		{
+			name: "write count - default s3 driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  100,
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write count - RDMA driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  100,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write duration - default s3 driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				Duration:     "30s",
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write duration - RDMA driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				Duration:     "30s",
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write default (no count/duration) - s3 driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      2,
+				ObjectSize:   "1MB",
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write default (no count/duration) - RDMA driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      2,
+				ObjectSize:   "1MB",
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write with cleanup count - s3 driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  50,
+				Cleanup:      true,
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write with cleanup count - RDMA driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  50,
+				Cleanup:      true,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write with cleanup duration - s3 driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write with cleanup duration - RDMA driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateWriteScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateWriteScenario() error = %v", err)
+			}
+
+			if !strings.Contains(got, tt.wantDriverType) {
+				t.Errorf("expected scenario to contain %q\nGot:\n%s", tt.wantDriverType, got)
+			}
+
+			if tt.notDriverType != "" && strings.Contains(got, tt.notDriverType) {
+				t.Errorf("expected scenario to NOT contain %q\nGot:\n%s", tt.notDriverType, got)
+			}
+		})
+	}
+}
+
+func TestRdmaDoesNotAffectListScenario(t *testing.T) {
+	// List scenarios always use "s3" driver regardless of UseRdma
+	params := Params{
+		WorkloadType: "list",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectCount:  100,
+		UseRdma:      true, // should be ignored for list workloads
+	}
+
+	got, err := GenerateListScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateListScenario() error = %v", err)
+	}
+
+	if !strings.Contains(got, `"type": "s3"`) {
+		t.Error("List scenario should always use s3 driver type")
+	}
+	if strings.Contains(got, `"type": "s3-rdma"`) {
+		t.Error("List scenario should never use s3-rdma driver type")
+	}
+}
+
+func TestRdmaDoesNotAffectMockScenario(t *testing.T) {
+	// Mock scenarios always use "dummy-mock" driver regardless of UseRdma
+	params := Params{
+		WorkloadType: "mock",
+		Threads:      2,
+		ObjectSize:   "1KB",
+		ObjectCount:  50,
+		UseRdma:      true, // should be ignored for mock workloads
+	}
+
+	got, err := GenerateMockScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateMockScenario() error = %v", err)
+	}
+
+	if !strings.Contains(got, `"type": "dummy-mock"`) {
+		t.Error("Mock scenario should always use dummy-mock driver type")
+	}
+	if strings.Contains(got, `"type": "s3-rdma"`) {
+		t.Error("Mock scenario should never use s3-rdma driver type")
+	}
+}
+
+func TestGenerateScenario_RdmaRouting(t *testing.T) {
+	// Verify GenerateScenario routes correctly and UseRdma only affects write
+	tests := []struct {
+		name          string
+		params        Params
+		wantDriver    string
+		notWantDriver string
+	}{
+		{
+			name: "write with RDMA routes to s3-rdma",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "b",
+				Threads:      1,
+				ObjectSize:   "1MB",
+				ObjectCount:  10,
+				UseRdma:      true,
+			},
+			wantDriver: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write without RDMA routes to s3",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "b",
+				Threads:      1,
+				ObjectSize:   "1MB",
+				ObjectCount:  10,
+			},
+			wantDriver:    `"type": "s3"`,
+			notWantDriver: `"type": "s3-rdma"`,
+		},
+		{
+			name: "list ignores UseRdma",
+			params: Params{
+				WorkloadType: "list",
+				Bucket:       "b",
+				Threads:      1,
+				ObjectCount:  10,
+				UseRdma:      true,
+			},
+			wantDriver:    `"type": "s3"`,
+			notWantDriver: `"type": "s3-rdma"`,
+		},
+		{
+			name: "mock ignores UseRdma",
+			params: Params{
+				WorkloadType: "mock",
+				Threads:      1,
+				ObjectSize:   "1KB",
+				ObjectCount:  10,
+				UseRdma:      true,
+			},
+			wantDriver:    `"type": "dummy-mock"`,
+			notWantDriver: `"type": "s3-rdma"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateScenario() error = %v", err)
+			}
+
+			if !strings.Contains(got, tt.wantDriver) {
+				t.Errorf("expected %q in scenario output", tt.wantDriver)
+			}
+			if tt.notWantDriver != "" && strings.Contains(got, tt.notWantDriver) {
+				t.Errorf("did not expect %q in scenario output", tt.notWantDriver)
+			}
+		})
+	}
+}

@@ -33,6 +33,7 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: true
+          cache-dependency-path: cli/go.sum
 
       - name: Build all targets
         if: ${{ !env.ACT }}

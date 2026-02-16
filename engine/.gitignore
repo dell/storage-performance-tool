@@ -94,3 +94,13 @@ tools/legacy-docker-publish.sh
 
 # Error Prone scan output
 errorprone_scan.txt
+
+# CMake build artifacts (native JNI builds)
+**/src/main/native/build*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.so
+*.o
+*.a

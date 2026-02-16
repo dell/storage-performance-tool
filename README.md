@@ -12,7 +12,7 @@ SPT packages two tightly integrated components:
 - **SPT CLI/TUI** – a Go-based command-line and terminal UI experience for configuring, launching, and monitoring workloads.
 - **SPT Engine** – a Java-based benchmarking engine that executes those workloads inside managed containers.
 
-The CLI orchestrates the engine for you: it prepares configurations, builds or pulls Docker images, starts benchmark runs, and streams live metrics in both interactive and headless modes.
+The CLI orchestrates the engine for you: it prepares configurations, pulls Docker images, starts benchmark runs, and streams live metrics in both interactive and headless modes.
 
 ---
 
@@ -28,54 +28,68 @@ The top-level repository represents the SPT product. The `cli` and `engine` dire
 
 ---
 
-## Quick Start (from source)
+## Quick Start
 
-Prerequisites:
+### Download a pre-built binary
 
-- Go 1.25+
+Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [GitHub Release](https://github.com/dell/storage-performance-tool/releases). Download the archive for your platform, extract, and run:
+
+```bash
+# Example: Linux amd64
+curl -LO https://github.com/dell/storage-performance-tool/releases/latest/download/spt-linux-amd64.gz
+gunzip spt-linux-amd64.gz
+chmod +x spt-linux-amd64
+mv spt-linux-amd64 spt
+```
+
+### Prerequisites
+
 - Docker (daemon running)
-- Java 21 (JDK) for building the engine bundle
-- Gradle tooling (wrapper provided via `./gradlew`)
-- GNU Make
+
+### Environment setup (optional but recommended)
+
+SPT automatically reads `.env` files from the current directory — no manual sourcing required. Copy the example and fill in your defaults:
 
 ```bash
-# Clone the SPT source
-git clone https://github.com/dell/storage-performance-tool.git
-cd storage-performance-tool
-
-# Build the Go CLI (produces ./spt)
-make build-cli
-
-# Copy and edit the sample environment file (optional but recommended)
-cp cli/.env.example cli/.env
-# Edit cli/.env with your endpoints, credentials, and defaults
-$EDITOR cli/.env
-
-# Load the environment variables when running from the repo root
-set -a
-source cli/.env
-set +a
+cp cli/.env.example .env
+$EDITOR .env
 ```
-Validate your environment before running your first test:
+
+Key variables:
 
 ```bash
-./cli/spt verify 
+S3_ENDPOINT=https://s3.example.com
+S3_ACCESS_KEY=your-access-key
+S3_SECRET_KEY=your-secret-key
+S3_BUCKET=test-bucket
+
+# For distributed runs, SPT uses SSH to launch and manage engine
+# containers on remote hosts. List them as comma-separated user@host pairs:
+HOSTS=root@node1,root@node2,root@node3
 ```
 
-Point `--test-hosts` at remote nodes (comma-separated) to confirm SSH, Docker, and port availability across the cluster. Use `--force-cleanup` if you want SPT to remove conflicting containers automatically.
+### Verify your environment
 
+```bash
+./spt verify
+```
 
+This checks localhost by default. When `HOSTS` is set, it verifies SSH connectivity, Docker availability, and port accessibility on each remote node.
+
+---
+
+## Running Your First Test
 
 Run a local mock workload (no S3 endpoint required):
 
 ```bash
-./cli/spt run mock --duration 30s --threads 4 --auto-terminate-seconds 60
+./spt run mock --duration 30s --threads 4 --auto-terminate-seconds 60
 ```
 
 Run an S3 write workload:
 
 ```bash
-./cli/spt run write \
+./spt run write \
   --endpoints https://s3.example.com \
   --access-key "$S3_ACCESS_KEY" \
   --secret-key "$S3_SECRET_KEY" \
@@ -108,7 +122,42 @@ Headless mode activates automatically when no TTY is available; use `--headless`
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
+- **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see below).
 - **Logging & Trace Capture** – configurable logs plus optional trace files for deeper troubleshooting.
+
+---
+
+## S3-RDMA Acceleration
+
+SPT supports an optional RDMA (Remote Direct Memory Access) data path for S3 workloads. When enabled, object transfers bypass the kernel networking stack for significantly lower latency and higher throughput on supported hardware.
+
+Add `--use-rdma` to any S3 workload command to activate the RDMA driver:
+
+```bash
+./spt run write \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket test-bucket \
+  --duration 2m \
+  --threads 16 \
+  --object-size 1MB \
+  --use-rdma \
+  --rdma-threshold 0 \
+  --auto-terminate-seconds 180
+```
+
+Key flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--use-rdma` | `false` | Enable the RDMA-accelerated S3 driver |
+| `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g. `0`, `256KB`, `4MB`) |
+| `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
+| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
+| `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
+
+**Requirements:** Linux only. RDMA-capable NICs (e.g. Mellanox ConnectX), an RDMA-capable storage target, `rdma-core` system packages, and Docker device passthrough (`--device /dev/infiniband`). If RDMA hardware is not available, the driver will fail by default. Set `--rdma-fallback` to fall back to HTTP instead.
 
 ---
 
@@ -117,6 +166,16 @@ Headless mode activates automatically when no TTY is available; use `--headless`
 - The **MIT License** applies to the entire project (see [`LICENSE`](LICENSE)).
 - Contributions and bug reports are welcome via GitHub issues and pull requests.
 - Support follows standard open-source conventions; there is no dedicated escalation path.
+
+### Building from Source
+
+Prerequisites: Go 1.25+, Java 21 (JDK), Docker, GNU Make.
+
+```bash
+git clone https://github.com/dell/storage-performance-tool.git
+cd storage-performance-tool
+make build-cli        # produces ./cli/spt
+```
 
 ### CLI (Go) Tooling Highlights
 
@@ -131,14 +190,12 @@ Headless mode activates automatically when no TTY is available; use `--headless`
 - `./gradlew :bundle:build` – produces the Docker-ready bundle consumed by the CLI.
 - See `engine/README.md` for detailed module structure and advanced usage.
 
-> 🚧 Planned Update: once GitHub Actions is in place, official release bundles (CLI binary, Docker image, engine JAR) will be published automatically to GitHub Releases and GHCR/Docker Hub. This README will be updated with download links when that workflow is live.
-
 ---
 
 ## Roadmap Snapshot
 
 - Expand workload catalog beyond write/list/mock, including read/mixed/delete templates.
-- Automate release publishing: build pipeline uploads `spt` binaries and pushes versioned Docker images (`ghcr.io/dell/storage-performance-tool`).
+- Continue expanding CI/CD pipeline: automated release publishing of `spt` binaries and versioned Docker images to GitHub Releases and GHCR.
 - Streamline documentation so contributors and users find SPT-first concepts across CLI and engine guides.
 
 For detailed engineering notes and planning documents, browse the `docs/` directories inside `cli/` and `engine/`.
@@ -147,9 +204,9 @@ For detailed engineering notes and planning documents, browse the `docs/` direct
 
 ## Getting Help / Providing Feedback
 
-- File bugs or feature requests via GitHub Issues (future public repo: `github.com/dell/storage-performance-tool`).
-- Join discussions via GitHub Discussions once the repository is public.
-- Contributions should follow standard fork-and-PR workflow.
+- File bugs or feature requests via [GitHub Issues](https://github.com/dell/storage-performance-tool/issues).
+- Join the conversation via [GitHub Discussions](https://github.com/dell/storage-performance-tool/discussions).
+- Contributions should follow the standard fork-and-PR workflow.
 
 ---
 

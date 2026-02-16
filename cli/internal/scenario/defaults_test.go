@@ -302,6 +302,212 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "S3 write with RDMA enabled (Cobra defaults)",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				UseRdma:            true,
+				RdmaFallback:       true,
+				RdmaThresholdBytes: 1048576, // Cobra default
+				RdmaTimeoutMs:      30000,   // Cobra default
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma', got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.Threshold != 1048576 {
+					t.Errorf("Expected default threshold 1048576, got %d", config.Storage.Rdma.Threshold)
+				}
+				if !config.Storage.Rdma.Fallback {
+					t.Error("Expected fallback to be true")
+				}
+				if config.Storage.Rdma.Device != "auto" {
+					t.Errorf("Expected default device 'auto', got %s", config.Storage.Rdma.Device)
+				}
+				if config.Storage.Rdma.LogLevel != "WARN" {
+					t.Errorf("Expected default log level 'WARN', got %s", config.Storage.Rdma.LogLevel)
+				}
+				if config.Storage.Rdma.TimeoutMs != 30000 {
+					t.Errorf("Expected default timeout 30000, got %d", config.Storage.Rdma.TimeoutMs)
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA threshold zero",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				UseRdma:            true,
+				RdmaFallback:       true,
+				RdmaThresholdBytes: 0,     // explicit zero — force RDMA for all sizes
+				RdmaTimeoutMs:      30000, // Cobra default
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.Threshold != 0 {
+					t.Errorf("Expected threshold 0, got %d", config.Storage.Rdma.Threshold)
+				}
+				// Verify "thresholdBytes: 0" appears in raw YAML (not dropped by omitempty)
+				if !strings.Contains(string(data), "thresholdBytes: 0") {
+					t.Error("Expected raw YAML to contain 'thresholdBytes: 0' but it was omitted")
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA custom settings",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            16,
+				UseRdma:            true,
+				RdmaLocalIP:        "10.247.128.125",
+				RdmaThresholdBytes: 4194304,
+				RdmaFallback:       false,
+				RdmaDevice:         "mlx5_0",
+				RdmaLogLevel:       "DEBUG",
+				RdmaTimeoutMs:      60000,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma', got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section to be present")
+				}
+				if config.Storage.Rdma.LocalIP != "10.247.128.125" {
+					t.Errorf("Expected localIp '10.247.128.125', got %s", config.Storage.Rdma.LocalIP)
+				}
+				if config.Storage.Rdma.Threshold != 4194304 {
+					t.Errorf("Expected threshold 4194304, got %d", config.Storage.Rdma.Threshold)
+				}
+				if config.Storage.Rdma.Fallback {
+					t.Error("Expected fallback to be false")
+				}
+				// Verify "fallback: false" is present in raw YAML (not omitted by omitempty)
+				if !strings.Contains(string(data), "fallback: false") {
+					t.Error("Expected raw YAML to contain 'fallback: false' but it was omitted")
+				}
+				if config.Storage.Rdma.Device != "mlx5_0" {
+					t.Errorf("Expected device 'mlx5_0', got %s", config.Storage.Rdma.Device)
+				}
+				if config.Storage.Rdma.LogLevel != "DEBUG" {
+					t.Errorf("Expected log level 'DEBUG', got %s", config.Storage.Rdma.LogLevel)
+				}
+				if config.Storage.Rdma.TimeoutMs != 60000 {
+					t.Errorf("Expected timeout 60000, got %d", config.Storage.Rdma.TimeoutMs)
+				}
+			},
+		},
+		{
+			name: "S3 write without RDMA has no rdma section",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "" {
+					t.Errorf("Expected no driver type for non-RDMA S3, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma != nil {
+					t.Error("Expected no storage.rdma section when RDMA is not enabled")
+				}
+			},
+		},
+		{
+			name: "S3 list workload with RDMA sets s3-rdma driver in defaults",
+			params: Params{
+				WorkloadType: "list",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "listbucket",
+				Threads:      4,
+				UseRdma:      true,
+				RdmaFallback: true,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				// defaults.yaml configures the engine driver; s3-rdma handles all S3 ops
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma' for list+RDMA defaults, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section in defaults when RDMA enabled")
+				}
+			},
+		},
+		{
+			name: "Mock workload ignores UseRdma",
+			params: Params{
+				WorkloadType: "mock",
+				Threads:      4,
+				UseRdma:      true, // should be ignored for mock workloads
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "dummy-mock" {
+					t.Errorf("Mock workload should use dummy-mock driver, got %s", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma != nil {
+					t.Error("Mock workload should not have storage.rdma section")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

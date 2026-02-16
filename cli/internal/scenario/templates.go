@@ -107,7 +107,7 @@ function cleanup(filepath) {
 var sharedConfig = {
     "storage": {
         "driver": {
-            "type": "s3",
+            "type": {{.StorageDriverType}},
             "limit": {
                 "concurrency": concurrency
             }
@@ -221,7 +221,7 @@ function cleanup(filepath) {
 var sharedConfig = {
     "storage": {
         "driver": {
-            "type": "s3",
+            "type": {{.StorageDriverType}},
             "limit": {
                 "concurrency": concurrency
             }
@@ -314,7 +314,7 @@ var outputPath = {{.OutputPath}};
 var config = {
     "storage": {
         "driver": {
-            "type": "s3",
+            "type": {{.StorageDriverType}},
             "limit": {
                 "concurrency": concurrency
             }
@@ -362,7 +362,7 @@ var outputPath = {{.OutputPath}};
 var config = {
     "storage": {
         "driver": {
-            "type": "s3",
+            "type": {{.StorageDriverType}},
             "limit": {
                 "concurrency": concurrency
             }
@@ -410,7 +410,7 @@ var outputPath = {{.OutputPath}};
 var config = {
     "storage": {
         "driver": {
-            "type": "s3",
+            "type": {{.StorageDriverType}},
             "limit": {
                 "concurrency": concurrency
             }

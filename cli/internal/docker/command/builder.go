@@ -73,6 +73,21 @@ func (b *DockerCommandBuilderImpl) BuildRunCommand(config ContainerConfig) []str
 		}
 	}
 
+	// Device passthrough (e.g., RDMA /dev/infiniband/)
+	for _, device := range config.Devices {
+		dockerArgs = append(dockerArgs, "--device", device)
+	}
+
+	// Linux capabilities
+	for _, cap := range config.CapAdd {
+		dockerArgs = append(dockerArgs, "--cap-add", cap)
+	}
+
+	// Resource limits
+	for _, ulimit := range config.Ulimits {
+		dockerArgs = append(dockerArgs, "--ulimit", ulimit)
+	}
+
 	// Add image
 	dockerArgs = append(dockerArgs, config.Image)
 
@@ -99,6 +114,13 @@ func (b *DockerCommandBuilderImpl) BuildWorkerNodeCommand(image, containerName, 
 			fmt.Sprintf("--run-port=%d", constants.DefaultSptAPIPort),
 			fmt.Sprintf("--load-step-node-port=%d", constants.DefaultRMIRegistryPort),
 		},
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		config.Devices = []string{constants.RdmaDevicePath}
+		config.CapAdd = []string{constants.RdmaCapIpcLock}
+		config.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
 	// No port mappings in host network mode.

@@ -95,6 +95,16 @@ const (
 	DefaultSptImage = "ghcr.io/dell/storage-performance-tool"
 )
 
+// RDMA container configuration
+const (
+	// RdmaDevicePath is the host device directory passed to --device for RDMA access
+	RdmaDevicePath = "/dev/infiniband/"
+	// RdmaCapIpcLock is the Linux capability required for ibv_reg_mr memory pinning
+	RdmaCapIpcLock = "IPC_LOCK"
+	// RdmaUlimitMemlock removes the locked-memory limit so RDMA buffers can be pinned
+	RdmaUlimitMemlock = "memlock=-1:-1"
+)
+
 // REST API endpoint constants
 const (
 	SptMetricsEndpoint = "/metrics/json"

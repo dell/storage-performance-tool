@@ -16,11 +16,14 @@ set -eu
 # Use parameter expansion to handle unset JAVA_OPTS safely
 JAVA_OPTS="${JAVA_OPTS:-}"
 if [ -z "$JAVA_OPTS" ]; then
-    # Default Java options for Spt
-    # - Use G1GC for better latency
-    # - Set reasonable heap size
-    # - Enable detailed GC logging for performance analysis
-    export JAVA_OPTS="-XX:+UseG1GC -Xms1g -Xmx4g -XX:MaxGCPauseMillis=100"
+    # Default Java options for Spt (JDK 21+)
+    # - ZGC: sub-millisecond GC pauses; avoids GC jitter in latency measurements
+    # - Xmx 4g: bounded heap for Java objects (GC works best with a defined ceiling)
+    # - MaxDirectMemorySize 64g: separate ceiling for off-heap ByteBuffers (RDMA/NIO);
+    #   allocated on demand so this limit is safe even on smaller machines
+    # - AlwaysPreTouch: pre-fault heap pages at startup to eliminate page faults during runs
+    # - UseNUMA: NUMA-aware allocation for multi-socket servers
+    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA"
 fi
 
 # Additional Java options that can be set via environment variables

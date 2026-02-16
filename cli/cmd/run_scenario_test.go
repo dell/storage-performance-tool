@@ -447,7 +447,10 @@ func TestBuildScenarioParams(t *testing.T) {
 			}
 
 			// Call the function
-			got := buildScenarioParams(tt.workloadType, cmd)
+			got, err := buildScenarioParams(tt.workloadType, cmd)
+			if err != nil {
+				t.Fatalf("buildScenarioParams() unexpected error: %v", err)
+			}
 
 			// Check result
 			if !reflect.DeepEqual(got, tt.expected) {
@@ -541,7 +544,10 @@ func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 			tt.setupFlags(cmd)
 
 			// Call the function
-			params := buildScenarioParams(tt.workloadType, cmd)
+			params, err := buildScenarioParams(tt.workloadType, cmd)
+			if err != nil {
+				t.Fatalf("buildScenarioParams() unexpected error: %v", err)
+			}
 
 			// Validate the result
 			tt.validate(t, params)

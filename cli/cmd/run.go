@@ -20,6 +20,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
@@ -440,7 +441,10 @@ Available workload types:
 		}
 
 		// Build scenario parameters
-		params := buildScenarioParams(workloadType, cmd)
+		params, err := buildScenarioParams(workloadType, cmd)
+		if err != nil {
+			return err
+		}
 
 		// Generate scenario content
 		scenarioContent, err := scenario.GenerateScenario(params)
@@ -495,6 +499,11 @@ Available workload types:
 			fmt.Println("Skipping Docker image pull; using locally cached image.")
 		} else {
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
+		}
+
+		if params.UseRdma {
+			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
+			fmt.Println("RDMA mode enabled: using s3-rdma driver with device passthrough.")
 		}
 
 		// Check for port conflicts before launching Spt
@@ -811,6 +820,15 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 
+	// RDMA Acceleration Options
+	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
+	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
+	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
+	runCmd.Flags().Bool("rdma-fallback", false, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
+	runCmd.Flags().String("rdma-device", "auto", "RDMA device name or 'auto' for auto-detection (env: RDMA_DEVICE)")
+	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
+	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
+
 	// Headless Mode Options
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	runCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
@@ -819,7 +837,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 }
 
 // buildScenarioParams builds scenario parameters from command flags
-func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Params {
+func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Params, error) {
 	params := scenario.Params{
 		WorkloadType: workloadType,
 	}
@@ -907,12 +925,29 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) scenario.Param
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
 
+	// RDMA acceleration
+	useRdma, _ := cmd.Flags().GetBool("use-rdma")
+	params.UseRdma = useRdma
+	if useRdma {
+		params.RdmaLocalIP, _ = cmd.Flags().GetString("rdma-local-ip")
+		thresholdStr, _ := cmd.Flags().GetString("rdma-threshold")
+		thresholdBytes, err := sizeparse.Parse(thresholdStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --rdma-threshold value %q: %w", thresholdStr, err)
+		}
+		params.RdmaThresholdBytes = thresholdBytes
+		params.RdmaFallback, _ = cmd.Flags().GetBool("rdma-fallback")
+		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")
+		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
+		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout-ms")
+	}
+
 	// Set defaults
 	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList {
 		params.ObjectSize = "1MB"
 	}
 
-	return params
+	return params, nil
 }
 
 // ResultsOptions captures Phase 1 results-related CLI settings.

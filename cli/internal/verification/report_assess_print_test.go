@@ -65,6 +65,40 @@ func TestReportAssess_ThresholdMet(t *testing.T) {
 	}
 }
 
+func TestReportPrint_WarningCheck(t *testing.T) {
+	r := &Report{
+		Results: map[string]*NodeResult{
+			"hostA": {
+				SSHConnectivity:  Check{Passed: true, Message: "ok"},
+				ClockSkew:        Check{Passed: false, Warning: true, Message: "Clock skew: 2h behind entry node"},
+				DockerAvailable:  Check{Passed: true, Message: "ok"},
+				DockerImagePull:  Check{Passed: true, Message: "ok"},
+				ContainerStart:   Check{Passed: true, Message: "ok"},
+				PortsAccessible:  Check{Passed: true, Message: "ok"},
+				MetricsEndpoint:  Check{Passed: true, Message: "ok"},
+				ControlEndpoint:  Check{Passed: true, Message: "ok"},
+				ContainerCleanup: Check{Passed: true, Message: "ok"},
+				Overall:          Check{Passed: true, Message: "READY"},
+			},
+		},
+		Config:   Config{MinHosts: 1},
+		Duration: 1 * time.Second,
+	}
+
+	// capOut uses a pipe (not TTY), so no ANSI codes — just check text
+	out := capOut(t, func() { r.Print() })
+	if !strings.Contains(out, "WARN") {
+		t.Fatalf("expected WARN in output for warning check, got: %s", out)
+	}
+	if !strings.Contains(out, "Clock skew") {
+		t.Fatalf("expected clock skew message in output, got: %s", out)
+	}
+	// Warnings should NOT show as FAIL
+	if strings.Contains(out, "Clock Sync:") && strings.Contains(out, "FAIL") {
+		t.Fatalf("warning check should show WARN not FAIL, got: %s", out)
+	}
+}
+
 func TestReportAssess_NotReady_WithFailuresListed(t *testing.T) {
 	r := &Report{
 		Results: map[string]*NodeResult{

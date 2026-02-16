@@ -101,6 +101,8 @@ distclean: clean
 	rm -rf ~/.gradle/caches/modules-2/files-2.1/io.github.dell.spt
 	find . -name "*.class" -delete
 	find . -name "*.jar" -not -path "./gradle/wrapper/*" -delete
+	# RDMA native library (CMake build artifacts)
+	rm -rf extensions/storage-drivers/implementations/s3-rdma/src/main/native/build
 	@echo "Deep clean complete."
 
 # Run all tests

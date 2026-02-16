@@ -54,6 +54,15 @@ func NewVerifierWithDepsAndPreflight(hosts []*hostparse.HostInfo, config Config,
 	}
 }
 
+// printProgressWarning prints a yellow warning line with the message during step-by-step progress.
+func printProgressWarning(message string) {
+	if colorEnabled() {
+		fmt.Printf(" %s⚠ %s%s\n", ansiYellow, message, ansiReset)
+	} else {
+		fmt.Printf(" ⚠ %s\n", message)
+	}
+}
+
 // VerifyAll performs verification on all hosts and returns a report
 func (v *Verifier) VerifyAll() *Report {
 	startTime := v.timeProvider.Now()
@@ -126,6 +135,9 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 	if v.stepSSHConnectivity(host, result) {
 		return result
 	}
+	if !host.IsLocal && len(v.hosts) > 1 {
+		v.stepClockSkew(host, result)
+	}
 	if v.stepDockerDaemon(host, result) {
 		return result
 	}
@@ -137,6 +149,14 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 	}
 	if v.stepStartContainer(host, result) {
 		return result
+	}
+	if v.config.UseRdma {
+		if v.stepRdmaDevice(host, result) {
+			v.stepCleanup(host, result)
+			return result
+		}
+		v.stepRdmaDriver(host, result)
+		v.stepRdmaReadiness(host, result)
 	}
 	v.stepWaitForServices(result)
 	v.stepVerifyPorts(host, result)
@@ -167,6 +187,75 @@ func (v *Verifier) stepSSHConnectivity(host *hostparse.HostInfo, result *NodeRes
 		fmt.Println(" ✅")
 	}
 	return false
+}
+
+func (v *Verifier) stepClockSkew(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking clock synchronization...")
+	}
+	result.ClockSkew = v.checkClockSkew(host)
+	if v.config.ShowProgress {
+		if result.ClockSkew.Passed {
+			fmt.Println(" ✅")
+		} else {
+			printProgressWarning(result.ClockSkew.Message)
+		}
+	}
+}
+
+// checkClockSkew compares the remote host's clock to the local clock.
+// SigV4 authentication requires clocks within ~15 minutes; we warn at 1 minute.
+func (v *Verifier) checkClockSkew(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"date", "-u", "+%s"})
+	if err != nil {
+		return Check{
+			Passed:   true, // Don't fail verification if we can't check
+			Message:  "Could not read remote clock",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	remoteEpoch := strings.TrimSpace(stdout)
+	var remoteTime int64
+	if _, err := fmt.Sscanf(remoteEpoch, "%d", &remoteTime); err != nil {
+		return Check{
+			Passed:   true,
+			Message:  fmt.Sprintf("Could not parse remote clock: %s", remoteEpoch),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	localTime := v.timeProvider.Now().Unix()
+	skew := localTime - remoteTime
+	if skew < 0 {
+		skew = -skew
+	}
+
+	skewDuration := time.Duration(skew) * time.Second
+
+	const warnThreshold = 60 // 1 minute — well before SigV4's 15 min limit
+
+	if skew > warnThreshold {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  fmt.Sprintf("Clock skew: %s behind entry node (S3 SigV4 auth requires <15m)", skewDuration),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("Clock offset: %s", skewDuration),
+		Duration: v.timeProvider.Since(start),
+	}
 }
 
 func (v *Verifier) stepDockerDaemon(host *hostparse.HostInfo, result *NodeResult) bool {
@@ -304,6 +393,207 @@ func (v *Verifier) stepCleanup(host *hostparse.HostInfo, result *NodeResult) {
 	}
 }
 
+func (v *Verifier) stepRdmaDevice(host *hostparse.HostInfo, result *NodeResult) bool {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking RDMA device availability...")
+	}
+	result.RdmaDevice = v.checkRdmaDevice(host)
+	if !result.RdmaDevice.Passed {
+		if v.config.ShowProgress {
+			fmt.Println(" ❌")
+		}
+		result.Overall = Check{Passed: false, Message: "RDMA device not available"}
+		return true
+	}
+	if v.config.ShowProgress {
+		fmt.Println(" ✅")
+	}
+	return false
+}
+
+func (v *Verifier) stepRdmaDriver(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Checking RDMA driver in container...")
+	}
+	result.RdmaDriver = v.checkRdmaDriver(host, result.containerID)
+	if v.config.ShowProgress {
+		if result.RdmaDriver.Passed {
+			fmt.Println(" ✅")
+		} else {
+			printProgressWarning(result.RdmaDriver.Message)
+		}
+	}
+}
+
+func (v *Verifier) stepRdmaReadiness(host *hostparse.HostInfo, result *NodeResult) {
+	if v.config.ShowProgress {
+		fmt.Print("  ⏳ Probing RDMA device readiness in container...")
+	}
+	result.RdmaReadiness = v.checkRdmaReadiness(host, result.containerID)
+	if v.config.ShowProgress {
+		if result.RdmaReadiness.Passed {
+			fmt.Println(" ✅")
+		} else {
+			printProgressWarning(result.RdmaReadiness.Message)
+		}
+	}
+}
+
+// checkRdmaReadiness verifies that the RDMA device is accessible and active
+// from inside the container by reading /sys/class/infiniband/.  This proves
+// the full stack: device mapped in, kernel driver loaded, and port link up.
+func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID string) Check {
+	start := v.timeProvider.Now()
+
+	if containerID == "" {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  "No container to check RDMA readiness",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Discover RDMA devices visible inside the container via sysfs
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "ls", "/sys/class/infiniband/",
+	})
+	if err != nil || strings.TrimSpace(stdout) == "" {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  "No RDMA devices found in container (/sys/class/infiniband/ empty or missing)",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	device := strings.Fields(stdout)[0]
+
+	// Read port state — expect "4: ACTIVE"
+	portState, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/state", device),
+	})
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  fmt.Sprintf("Cannot read port state for %s", device),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+	portState = strings.TrimSpace(portState)
+
+	if !strings.Contains(portState, "ACTIVE") {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  fmt.Sprintf("RDMA port not active: %s (device %s)", portState, device),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	// Read link layer (Ethernet = RoCE, InfiniBand = IB)
+	linkLayer, _, _ := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/link_layer", device),
+	})
+	linkLayer = strings.TrimSpace(linkLayer)
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("%s port 1 %s (%s)", device, portState, linkLayer),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// checkRdmaDevice verifies that RDMA hardware is accessible on the host
+func (v *Verifier) checkRdmaDevice(host *hostparse.HostInfo) Check {
+	start := v.timeProvider.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check for /dev/infiniband/ uverbs devices
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"ls", constants.RdmaDevicePath})
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("RDMA device directory %s not found", constants.RdmaDevicePath),
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+
+	if !strings.Contains(stdout, "uverbs") {
+		return Check{
+			Passed:   false,
+			Message:  fmt.Sprintf("No uverbs devices found in %s", constants.RdmaDevicePath),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("RDMA devices found: %s", strings.TrimSpace(stdout)),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// checkRdmaDriver verifies the container has RDMA runtime libraries
+func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string) Check {
+	start := v.timeProvider.Now()
+
+	if containerID == "" {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  "No container to check RDMA driver",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use ldconfig to check whether libibverbs is loadable inside the container.
+	// This is distro-agnostic — it works regardless of whether the library lives
+	// under /usr/lib64 (RHEL/SUSE), /usr/lib/x86_64-linux-gnu (Debian/Ubuntu),
+	// or any other path the dynamic linker knows about.
+	//
+	// We run ldconfig -p without a shell pipe and check the output in Go to
+	// avoid quoting issues between local exec and remote SSH execution.
+	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
+		"docker", "exec", containerID, "ldconfig", "-p",
+	})
+	if err != nil {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  "RDMA runtime library (libibverbs) not found in container",
+			Duration: v.timeProvider.Since(start),
+			Error:    err,
+		}
+	}
+	if !strings.Contains(stdout, "libibverbs") {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  "RDMA runtime library (libibverbs) not found in container",
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+
+	return Check{
+		Passed:   true,
+		Message:  "RDMA runtime libraries present in container",
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
 // checkSSHDocker verifies SSH connectivity and Docker access
 func (v *Verifier) checkSSHDocker(host *hostparse.HostInfo) Check {
 	start := v.timeProvider.Now()
@@ -403,14 +693,15 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	// Build port mappings for bridge mode
 	var portMappings []command.PortMapping
 	if networkMode == command.NetworkModeBridge {
+		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
+		portMappings = make([]command.PortMapping, 0, 2+len(rmiMappings))
 		// Standard ports
-		portMappings = []command.PortMapping{
-			{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
-			{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
-		}
+		portMappings = append(portMappings,
+			command.PortMapping{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
+			command.PortMapping{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
+		)
 
 		// Add RMI object port range
-		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
 		portMappings = append(portMappings, rmiMappings...)
 	}
 
@@ -431,6 +722,13 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		},
 		Command:  []string{constants.SptNodeCommand},
 		Detached: true,
+	}
+
+	// Add RDMA device passthrough when verifying RDMA support
+	if v.config.UseRdma {
+		config.Devices = []string{constants.RdmaDevicePath}
+		config.CapAdd = []string{constants.RdmaCapIpcLock}
+		config.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
 	// Start the container

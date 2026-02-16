@@ -33,14 +33,22 @@ func GenerateWriteScenario(params Params) (string, error) {
 	// Prepare template data
 	// Use a single run-level timestamp for natural sorting across steps
 	ts := baseTimestamp()
+
+	// Determine storage driver type
+	driverType := storageDriverTypeS3
+	if params.UseRdma {
+		driverType = "s3-rdma"
+	}
+
 	// Format strings as quoted JavaScript literals
 	data := map[string]interface{}{
-		templateKeyConcurrency: params.Threads,
-		templateKeyItemSize:    fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
-		templateKeyItemCount:   params.ObjectCount,
-		templateKeyOutputPath:  fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
-		templateKeyDuration:    fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
-		templateKeyTimestamp:   time.Now().Unix(),
+		templateKeyConcurrency:       params.Threads,
+		templateKeyItemSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
+		templateKeyItemCount:         params.ObjectCount,
+		templateKeyOutputPath:        fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
+		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
+		templateKeyTimestamp:         time.Now().Unix(),
+		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		// Step IDs using shared timestamp and ordered numbers
 		templateKeyStepID:       formatStepID(1, ts, stepOpCreate),
 		templateKeyStepIDCreate: formatStepID(1, ts, stepOpCreate),

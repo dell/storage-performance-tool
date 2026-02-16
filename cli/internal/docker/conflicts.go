@@ -252,7 +252,7 @@ func (info *ConflictInfo) GetSptContainers() []*ContainerInfo {
 
 // GenerateSSHStopCommands creates copy-pasteable SSH commands to stop conflicting containers
 func (info *ConflictInfo) GenerateSSHStopCommands() []string {
-	commands := []string{}
+	commands := make([]string, 0, len(info.Containers))
 
 	for _, container := range info.Containers {
 		containerIDShort := container.ID

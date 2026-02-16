@@ -824,3 +824,428 @@ func TestEdgeCases_SingleHost(t *testing.T) {
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestClockSkew_Synchronized(t *testing.T) {
+	now := time.Now()
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: fmt.Sprintf("%d\n", now.Unix()),
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(now)
+	mockTime.TimeAdvance = 0 // Don't advance time between calls
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	if !result.Passed {
+		t.Errorf("Expected clock skew check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "Clock offset") {
+		t.Errorf("Expected message to contain 'Clock offset', got: %s", result.Message)
+	}
+}
+
+func TestClockSkew_LargeSkew(t *testing.T) {
+	now := time.Now()
+	fiveHoursAgo := now.Add(-5 * time.Hour)
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: fmt.Sprintf("%d\n", fiveHoursAgo.Unix()),
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(now)
+	mockTime.TimeAdvance = 0
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	if result.Passed {
+		t.Error("Expected clock skew check to fail for 5-hour skew")
+	}
+	if !strings.Contains(result.Message, "Clock skew") {
+		t.Errorf("Expected warning about clock skew, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "SigV4") {
+		t.Errorf("Expected message to mention SigV4, got: %s", result.Message)
+	}
+}
+
+func TestClockSkew_CommandFailure(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"date -u +%s": {
+				Stdout: "",
+				Error:  fmt.Errorf("command not found"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "10.0.0.2", Original: "user@10.0.0.2"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkClockSkew(host)
+
+	// Should still pass (graceful degradation)
+	if !result.Passed {
+		t.Error("Expected clock skew check to pass (graceful) on command failure")
+	}
+}
+
+func TestRdmaDeviceCheck_DevicePresent(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "uverbs0\nuverbs1\n",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if !result.Passed {
+		t.Errorf("Expected RDMA device check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "uverbs") {
+		t.Errorf("Expected message to mention uverbs devices, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDeviceCheck_NoDevice(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "",
+				Stderr: "ls: cannot access '/dev/infiniband/': No such file or directory",
+				Error:  fmt.Errorf("exit status 2"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if result.Passed {
+		t.Error("Expected RDMA device check to fail when directory is missing")
+	}
+	if !strings.Contains(result.Message, "not found") {
+		t.Errorf("Expected 'not found' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDeviceCheck_EmptyDirectory(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"ls /dev/infiniband/": {
+				Stdout: "",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDevice(host)
+
+	if result.Passed {
+		t.Error("Expected RDMA device check to fail when no uverbs devices found")
+	}
+	if !strings.Contains(result.Message, "No uverbs") {
+		t.Errorf("Expected 'No uverbs' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDriverCheck_LibPresent(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ldconfig -p": {
+				Stdout: "\tlibibverbs.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libibverbs.so.1\n",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDriver(host, "abc123")
+
+	if !result.Passed {
+		t.Errorf("Expected RDMA driver check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "present") {
+		t.Errorf("Expected 'present' in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDriverCheck_LibMissing(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ldconfig -p": {
+				Stdout: "\tlibc.so.6 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libc.so.6\n",
+				Stderr: "",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDriver(host, "abc123")
+
+	if result.Passed {
+		t.Error("Expected RDMA driver check to fail when library is missing")
+	}
+	if !strings.Contains(result.Message, "not found") {
+		t.Errorf("Expected 'not found' in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaDriverCheck_EmptyContainerID(t *testing.T) {
+	mockCmd := &MockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaDriver(host, "")
+
+	if result.Passed {
+		t.Error("Expected RDMA driver check to fail with empty container ID")
+	}
+	if !strings.Contains(result.Message, "No container") {
+		t.Errorf("Expected 'No container' in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_Active(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "mlx5_bond_0\n",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_bond_0/ports/1/state": {
+				Stdout: "4: ACTIVE",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_bond_0/ports/1/link_layer": {
+				Stdout: "Ethernet",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if !result.Passed {
+		t.Errorf("Expected RDMA readiness check to pass, but it failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "mlx5_bond_0") {
+		t.Errorf("Expected device name in message, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "ACTIVE") {
+		t.Errorf("Expected ACTIVE in message, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "Ethernet") {
+		t.Errorf("Expected link layer in message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_PortDown(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "mlx5_0\n",
+				Error:  nil,
+			},
+			"docker exec abc123 cat /sys/class/infiniband/mlx5_0/ports/1/state": {
+				Stdout: "1: DOWN",
+				Error:  nil,
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail when port is DOWN")
+	}
+	if !strings.Contains(result.Message, "not active") || !strings.Contains(result.Message, "DOWN") {
+		t.Errorf("Expected port-down message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_NoSysfs(t *testing.T) {
+	mockCmd := &MockCommandExecutor{
+		Commands: map[string]MockCommandResponse{
+			"docker exec abc123 ls /sys/class/infiniband/": {
+				Stdout: "",
+				Stderr: "No such file or directory",
+				Error:  fmt.Errorf("exit status 2"),
+			},
+		},
+	}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "abc123")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail when sysfs is missing")
+	}
+	if !strings.Contains(result.Message, "No RDMA devices") {
+		t.Errorf("Expected 'No RDMA devices' message, got: %s", result.Message)
+	}
+}
+
+func TestRdmaReadiness_EmptyContainerID(t *testing.T) {
+	mockCmd := &MockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{UseRdma: true}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.checkRdmaReadiness(host, "")
+
+	if result.Passed {
+		t.Error("Expected RDMA readiness check to fail with empty container ID")
+	}
+	if !strings.Contains(result.Message, "No container") {
+		t.Errorf("Expected 'No container' in message, got: %s", result.Message)
+	}
+}
+
+func TestStartNodeContainer_RdmaPassthrough(t *testing.T) {
+	mockCmd := &FlexibleMockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	config := Config{
+		NetworkMode:  "host",
+		RMIPortStart: 40000,
+		RMIPortCount: 2,
+		UseRdma:      true,
+	}
+
+	host := &hostparse.HostInfo{Host: "test.example.com", IsLocal: false, Original: "test.example.com"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, config, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := &NodeResult{}
+	check := verifier.startNodeContainer(host, result)
+
+	if !check.Passed {
+		t.Fatalf("Expected container start to succeed, got: %s", check.Message)
+	}
+
+	// Find the docker run command and verify RDMA flags
+	foundRdma := false
+	for _, exec := range mockCmd.ExecutedCommands {
+		cmdStr := strings.Join(exec.Command, " ")
+		if strings.HasPrefix(cmdStr, "docker run") {
+			if strings.Contains(cmdStr, "--device") &&
+				strings.Contains(cmdStr, constants.RdmaDevicePath) &&
+				strings.Contains(cmdStr, "--cap-add") &&
+				strings.Contains(cmdStr, constants.RdmaCapIpcLock) &&
+				strings.Contains(cmdStr, "--ulimit") &&
+				strings.Contains(cmdStr, constants.RdmaUlimitMemlock) {
+				foundRdma = true
+			}
+			break
+		}
+	}
+	if !foundRdma {
+		t.Error("Expected RDMA device passthrough flags in docker run command")
+		for _, exec := range mockCmd.ExecutedCommands {
+			t.Logf("  cmd: %v", exec.Command)
+		}
+	}
+}
+
+func TestStartNodeContainer_NoRdmaByDefault(t *testing.T) {
+	mockCmd := &FlexibleMockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	config := Config{
+		NetworkMode:  "host",
+		RMIPortStart: 40000,
+		RMIPortCount: 2,
+		UseRdma:      false, // explicitly disabled
+	}
+
+	host := &hostparse.HostInfo{Host: "test.example.com", IsLocal: false, Original: "test.example.com"}
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, config, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := &NodeResult{}
+	check := verifier.startNodeContainer(host, result)
+
+	if !check.Passed {
+		t.Fatalf("Expected container start to succeed, got: %s", check.Message)
+	}
+
+	// Verify NO RDMA flags in docker run command
+	for _, exec := range mockCmd.ExecutedCommands {
+		cmdStr := strings.Join(exec.Command, " ")
+		if strings.HasPrefix(cmdStr, "docker run") {
+			if strings.Contains(cmdStr, "--device") || strings.Contains(cmdStr, "--cap-add") {
+				t.Errorf("Expected NO RDMA flags when UseRdma=false, got: %v", exec.Command)
+			}
+			break
+		}
+	}
+}
+
+func TestRdmaChecksSkippedWhenDisabled(t *testing.T) {
+	mockCmd := &FlexibleMockCommandExecutor{}
+	mockTime := NewMockTimeProvider(time.Now())
+
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"}
+	// UseRdma is false (default)
+	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, mockCmd, &MockNetworkChecker{}, mockTime)
+
+	result := verifier.verifyNode(host)
+
+	// RDMA checks should not have been populated
+	if result.RdmaDevice.Message != "" {
+		t.Errorf("Expected empty RDMA device check when RDMA disabled, got: %s", result.RdmaDevice.Message)
+	}
+	if result.RdmaDriver.Message != "" {
+		t.Errorf("Expected empty RDMA driver check when RDMA disabled, got: %s", result.RdmaDriver.Message)
+	}
+}

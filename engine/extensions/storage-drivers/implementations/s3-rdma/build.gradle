@@ -1,0 +1,143 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "0.3.0"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.netty.http.s3.rdma"
+	nativeDir = "${projectDir}/src/main/native"
+	nativeBuildDir = "${nativeDir}/build"
+}
+
+// Helper to check if cmake is available
+def cmakeAvailable = {
+	try {
+		def proc = ['which', 'cmake'].execute()
+		proc.waitFor()
+		return proc.exitValue() == 0
+	} catch (Exception e) {
+		return false
+	}
+}
+
+// Helper to check if native build prerequisites are met (libibverbs, libmlx5, librdmacm)
+def canBuildNative = {
+	if (!cmakeAvailable()) return false
+	if (!file("${nativeDir}/CMakeLists.txt").exists()) return false
+
+	// Check for libibverbs headers (from rdma-core-devel)
+	def hasVerbs = file("/usr/include/infiniband/verbs.h").exists() ||
+				file("/usr/local/include/infiniband/verbs.h").exists()
+	def hasMlx5dv = file("/usr/include/infiniband/mlx5dv.h").exists() ||
+					file("/usr/local/include/infiniband/mlx5dv.h").exists()
+	def hasRdmaCm = file("/usr/include/rdma/rdma_cma.h").exists() ||
+					file("/usr/local/include/rdma/rdma_cma.h").exists()
+
+	return hasVerbs && hasMlx5dv && hasRdmaCm
+}
+
+// Task to configure CMake build
+task cmakeConfigure(type: Exec) {
+	description = 'Configure native build with CMake'
+	group = 'native'
+
+	workingDir nativeDir
+
+	// Simple cmake configuration - no external dependencies beyond rdma-core
+	def cmakeArgs = ['cmake', '-B', 'build', '.']
+	commandLine cmakeArgs
+
+	// Only run if all prerequisites are met
+	onlyIf { canBuildNative() }
+
+	doFirst {
+		mkdir nativeBuildDir
+		logger.lifecycle("Configuring native RDMA build (libibverbs/libmlx5/librdmacm)")
+	}
+}
+
+// Task to build native library
+task buildNative(type: Exec) {
+	description = 'Build native RDMA JNI library'
+	group = 'native'
+	dependsOn cmakeConfigure
+
+	workingDir nativeDir
+	commandLine 'cmake', '--build', 'build', '--parallel'
+
+	// Only run if CMake was configured successfully
+	onlyIf {
+		canBuildNative() &&
+		(file("${nativeBuildDir}/Makefile").exists() || file("${nativeBuildDir}/build.ninja").exists())
+	}
+}
+
+// Task to clean native build
+task cleanNative(type: Delete) {
+	description = 'Clean native build directory'
+	group = 'native'
+	delete nativeBuildDir
+}
+
+dependencies {
+	// S3 driver dependency (compileOnly - loaded from parent classloader)
+	compileOnly(
+		project(':extensions:storage-drivers:implementations:s3'),
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:netty'),
+		project(':extensions:storage-drivers:protocols:http'),
+	)
+
+	// API dependencies from parent classloader
+	compileOnly(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// Netty dependencies from parent classloader (not bundled)
+	compileOnly(
+		libs.netty.handler,
+		libs.netty.codec.http,
+	)
+
+	testImplementation(libs.mockito.core)
+
+	testRuntimeOnly(
+		libs.commons.codec,
+		libs.confuse.io.yaml,
+		libs.fiber4j,
+		libs.disruptor,
+		libs.netty.transport.native.epoll,
+	)
+}
+
+// Configure shadowJar to include native library if built
+shadowJar {
+	// Include native library from build directory into the correct platform directory
+	from("${nativeBuildDir}") {
+		include 'libspt_rdma.so'
+		into 'native/linux-amd64'
+	}
+}
+
+// Make shadowJar depend on buildNative only if all prerequisites are met
+tasks.named('shadowJar') {
+	if (canBuildNative()) {
+		dependsOn buildNative
+	}
+}
+
+// Configure existing integrationTest task for RDMA tests
+tasks.named('integrationTest', Test) {
+	useJUnitPlatform {
+		includeTags 'integration'
+	}
+
+	// Integration tests may need longer timeout
+	systemProperty 'junit.jupiter.execution.timeout.default', '5m'
+}

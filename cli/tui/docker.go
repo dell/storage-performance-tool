@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	units "github.com/docker/go-units"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -200,7 +201,8 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	}
 
 	// Build command with scenario file and additional CLI arguments
-	cmd := []string{"--run-scenario=/tmp/scenario.js"}
+	cmd := make([]string, 0, 1+len(additionalArgs))
+	cmd = append(cmd, "--run-scenario=/tmp/scenario.js")
 	cmd = append(cmd, additionalArgs...)
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "scenario", "cmd", cmd)
 
@@ -273,6 +275,27 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
 
+	hostConfig := &container.HostConfig{
+		PortBindings: portBinding,
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for node mode",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
+	}
+
 	// Create container with port mapping
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
 		Image:        image,
@@ -282,9 +305,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 		AttachStderr: true,
 		Env:          envVars,
 		Labels:       labels,
-	}, &container.HostConfig{
-		PortBindings: portBinding,
-	}, nil, nil, "")
+	}, hostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)
@@ -382,6 +403,23 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 		PortBindings: portBindings,
 	}
 
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for worker node",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
+	}
+
 	// Create container
 	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
@@ -423,11 +461,12 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	}
 
 	// Build command for entry node (API server mode with RMI coordination)
-	cmd := []string{
-		"--load-step-node-addrs=" + strings.Join(workerAddresses, ","),
+	cmd := make([]string, 0, 3+len(additionalArgs))
+	cmd = append(cmd,
+		"--load-step-node-addrs="+strings.Join(workerAddresses, ","),
 		"--run-node=true",
-		"--run-port=" + constants.SptAPIPort,
-	}
+		"--run-port="+constants.SptAPIPort,
+	)
 
 	// Add additional arguments (e.g., S3 endpoint parameters)
 	cmd = append(cmd, additionalArgs...)
@@ -456,6 +495,23 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 				HostPort: constants.SptAPIPort,
 			}},
 		},
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        constants.RdmaDevicePath,
+			PathInContainer:   constants.RdmaDevicePath,
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
+		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
+			Name: "memlock",
+			Soft: -1,
+			Hard: -1,
+		})
+		logging.LogInfo("docker", "RDMA device passthrough enabled for entry node",
+			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
 	}
 
 	// Create container
