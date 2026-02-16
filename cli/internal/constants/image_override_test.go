@@ -35,7 +35,7 @@ func TestIsRdmaEnabled(t *testing.T) {
 		{name: "garbage string", envValue: "garbage", want: false},
 		{name: "no", envValue: "no", want: false},
 		{name: "NO", envValue: "NO", want: false},
-		{name: "2", envValue: "2", want: false},          // strconv.ParseBool rejects "2"
+		{name: "2", envValue: "2", want: false},             // strconv.ParseBool rejects "2"
 		{name: "enabled", envValue: "enabled", want: false}, // only "yes" is special-cased
 	}
 

@@ -27,7 +27,7 @@ type Config struct {
 // Check represents the result of a single verification check
 type Check struct {
 	Passed        bool
-	Warning       bool                  // Soft failure: doesn't block overall readiness but needs attention
+	Warning       bool // Soft failure: doesn't block overall readiness but needs attention
 	Message       string
 	Duration      time.Duration
 	Error         error
