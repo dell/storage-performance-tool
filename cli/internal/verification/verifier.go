@@ -54,6 +54,15 @@ func NewVerifierWithDepsAndPreflight(hosts []*hostparse.HostInfo, config Config,
 	}
 }
 
+// printProgressWarning prints a yellow warning line with the message during step-by-step progress.
+func printProgressWarning(message string) {
+	if colorEnabled() {
+		fmt.Printf(" %s⚠ %s%s\n", ansiYellow, message, ansiReset)
+	} else {
+		fmt.Printf(" ⚠ %s\n", message)
+	}
+}
+
 // VerifyAll performs verification on all hosts and returns a report
 func (v *Verifier) VerifyAll() *Report {
 	startTime := v.timeProvider.Now()
@@ -189,7 +198,7 @@ func (v *Verifier) stepClockSkew(host *hostparse.HostInfo, result *NodeResult) {
 		if result.ClockSkew.Passed {
 			fmt.Println(" ✅")
 		} else {
-			fmt.Println(" ⚠️")
+			printProgressWarning(result.ClockSkew.Message)
 		}
 	}
 }
@@ -236,6 +245,7 @@ func (v *Verifier) checkClockSkew(host *hostparse.HostInfo) Check {
 	if skew > warnThreshold {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  fmt.Sprintf("Clock skew: %s behind entry node (S3 SigV4 auth requires <15m)", skewDuration),
 			Duration: v.timeProvider.Since(start),
 		}
@@ -410,7 +420,7 @@ func (v *Verifier) stepRdmaDriver(host *hostparse.HostInfo, result *NodeResult) 
 		if result.RdmaDriver.Passed {
 			fmt.Println(" ✅")
 		} else {
-			fmt.Println(" ⚠️")
+			printProgressWarning(result.RdmaDriver.Message)
 		}
 	}
 }
@@ -424,7 +434,7 @@ func (v *Verifier) stepRdmaReadiness(host *hostparse.HostInfo, result *NodeResul
 		if result.RdmaReadiness.Passed {
 			fmt.Println(" ✅")
 		} else {
-			fmt.Println(" ⚠️")
+			printProgressWarning(result.RdmaReadiness.Message)
 		}
 	}
 }
@@ -438,6 +448,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 	if containerID == "" {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  "No container to check RDMA readiness",
 			Duration: v.timeProvider.Since(start),
 		}
@@ -453,6 +464,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  "No RDMA devices found in container (/sys/class/infiniband/ empty or missing)",
 			Duration: v.timeProvider.Since(start),
 			Error:    err,
@@ -468,6 +480,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 	if err != nil {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  fmt.Sprintf("Cannot read port state for %s", device),
 			Duration: v.timeProvider.Since(start),
 			Error:    err,
@@ -478,6 +491,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 	if !strings.Contains(portState, "ACTIVE") {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  fmt.Sprintf("RDMA port not active: %s (device %s)", portState, device),
 			Duration: v.timeProvider.Since(start),
 		}
@@ -536,6 +550,7 @@ func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string)
 	if containerID == "" {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  "No container to check RDMA driver",
 			Duration: v.timeProvider.Since(start),
 		}
@@ -557,6 +572,7 @@ func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string)
 	if err != nil {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  "RDMA runtime library (libibverbs) not found in container",
 			Duration: v.timeProvider.Since(start),
 			Error:    err,
@@ -565,6 +581,7 @@ func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string)
 	if !strings.Contains(stdout, "libibverbs") {
 		return Check{
 			Passed:   false,
+			Warning:  true,
 			Message:  "RDMA runtime library (libibverbs) not found in container",
 			Duration: v.timeProvider.Since(start),
 		}
