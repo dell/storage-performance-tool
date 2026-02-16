@@ -446,6 +446,11 @@ Available workload types:
 			return err
 		}
 
+		// Seed size warning for read workloads
+		if workloadType == WorkloadTypeRead {
+			warnSeedSize(params)
+		}
+
 		// Generate scenario content
 		scenarioContent, err := scenario.GenerateScenario(params)
 		if err != nil {
@@ -771,6 +776,7 @@ func init() {
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 
 	// Test Behavior Options
+	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
 	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
 	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
 	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
@@ -922,6 +928,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	params.Cleanup = cleanup
 
+	seedObjects, _ := cmd.Flags().GetInt("seed-objects")
+	params.SeedCount = seedObjects
+
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
 
@@ -1052,9 +1061,18 @@ func formatScenarioParams(params scenario.Params) string {
 		lines = append(lines, "Duration: (not set)")
 	}
 
+	// Show seed count for read workloads
+	if params.WorkloadType == WorkloadTypeRead {
+		seedCount := params.SeedCount
+		if seedCount <= 0 {
+			seedCount = 2500
+		}
+		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
+	}
+
 	// Always show cleanup status
 	if params.Cleanup {
-		lines = append(lines, "Cleanup: Yes (delete objects after creation)")
+		lines = append(lines, "Cleanup: Yes (delete objects after test)")
 	} else {
 		lines = append(lines, "Cleanup: No")
 	}
@@ -1067,6 +1085,31 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// seedSizeWarnBytes is 50 GB — warn if the total seed footprint exceeds this.
+const seedSizeWarnBytes = 50 * 1024 * 1024 * 1024
+
+// warnSeedSize emits a warning if seed phase will write more than 50 GB.
+func warnSeedSize(params scenario.Params) {
+	if params.ObjectSize == "" {
+		return
+	}
+	objBytes, err := sizeparse.Parse(params.ObjectSize)
+	if err != nil || objBytes <= 0 {
+		return // skip warning if we can't parse
+	}
+	seedCount := params.SeedCount
+	if seedCount <= 0 {
+		seedCount = 2500
+	}
+	totalBytes := objBytes * int64(seedCount)
+	if totalBytes > seedSizeWarnBytes {
+		totalGB := float64(totalBytes) / float64(1024*1024*1024)
+		fmt.Printf("Warning: seed phase will write ~%.0fGB (%d x %s).\n", totalGB, seedCount, params.ObjectSize)
+		fmt.Println("This may take significant time before the read benchmark begins.")
+		fmt.Println("Consider reducing --seed-objects or --object-size for faster test startup.")
+	}
 }
 
 // appendS3DisplayLines appends S3-related display lines for non-mock workloads.

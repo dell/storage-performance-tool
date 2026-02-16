@@ -2,6 +2,7 @@ package scenario
 
 const (
 	workloadTypeWrite = "write"
+	workloadTypeRead  = "read"
 	workloadTypeMock  = "mock"
 	workloadTypeList  = "list"
 
@@ -29,7 +30,10 @@ const (
 	templateKeyTimestamp            = "Timestamp"
 	templateKeyStepID               = "StepID"
 	templateKeyStepIDCreate         = "StepIDCreate"
+	templateKeyStepIDSeed           = "StepIDSeed"
+	templateKeyStepIDRead           = "StepIDRead"
 	templateKeyStepIDDelete         = "StepIDDelete"
+	templateKeySeedCount            = "SeedCount"
 	templateKeyBucketPath           = "BucketPath"
 	templateKeyBatchSize            = "BatchSize"
 	templateKeyOpLimitCount         = "OpLimitCount"
@@ -50,6 +54,8 @@ const (
 	templateKeyMaxKeys              = "MaxKeys"
 
 	stepOpCreate = "create"
+	stepOpRead   = "read"
+	stepOpSeed   = "seed"
 	stepOpDelete = "delete"
 )
 
@@ -57,4 +63,5 @@ const (
 // without duplicating literal strings.
 const (
 	WorkloadTypeList = workloadTypeList
+	WorkloadTypeRead = workloadTypeRead
 )

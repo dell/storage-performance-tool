@@ -40,7 +40,7 @@ func TestFormatScenarioParams(t *testing.T) {
 				"Object Size: 10MB",
 				"Object Count: 1000",
 				"Duration: 5m",
-				"Cleanup: Yes (delete objects after creation)",
+				"Cleanup: Yes (delete objects after test)",
 				"Keep Scenario: Yes",
 			},
 		},
@@ -183,7 +183,7 @@ func TestFormatScenarioParams(t *testing.T) {
 				"Object Size: 100MB",
 				"Object Count: (not set)",
 				"Duration: 1h",
-				"Cleanup: Yes (delete objects after creation)",
+				"Cleanup: Yes (delete objects after test)",
 				"Keep Scenario: No",
 			},
 		},
@@ -214,6 +214,7 @@ func TestFormatScenarioParams(t *testing.T) {
 				"Object Size: 64KB",
 				"Object Count: 10000",
 				"Duration: (not set)",
+				"Seed Objects: 2500",
 				"Cleanup: No",
 				"Keep Scenario: Yes",
 			},
@@ -280,6 +281,9 @@ func TestFormatScenarioParams(t *testing.T) {
 				expectedLineCount := 12 // Baseline for non-mock workloads (includes auth version)
 				if tt.params.WorkloadType == WorkloadTypeList {
 					expectedLineCount++ // Prefix line for list workloads
+				}
+				if tt.params.WorkloadType == WorkloadTypeRead {
+					expectedLineCount++ // Seed Objects line for read workloads
 				}
 				if len(lines) != expectedLineCount {
 					t.Errorf("Expected %d lines for non-mock workload, got %d\nOutput:\n%s", expectedLineCount, len(lines), output)

@@ -26,4 +26,5 @@ const (
 	ResultsArtifactSuffixMetricsThreshold = "metrics.threshold.total.csv"
 	ResultsArtifactSuffixOpTrace          = "op.trace.csv"
 	ResultsArtifactSuffixMultipart        = "multipart.csv"
+	ResultsArtifactSuffixItems            = "items.csv"
 )

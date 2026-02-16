@@ -40,7 +40,7 @@ const (
 	ErrMissingBucket          = "--bucket flag is required for %s workload"
 	ErrDurationOrCount        = "cannot specify both --object-count and --duration"
 	ErrInvalidWorkloadType    = "invalid workload type: %s. Must be one of: write, read, mixed, delete, list, mock"
-	ErrWorkloadNotImplemented = "workload type '%s' is not yet implemented. Currently only 'write', 'list', and 'mock' are supported"
+	ErrWorkloadNotImplemented = "workload type '%s' is not yet implemented. Currently only 'write', 'read', 'list', and 'mock' are supported"
 	ErrInvalidEndpointURL     = "invalid endpoint URL: %w"
 	ErrMissingHostname        = "endpoint URL must include a hostname"
 	ErrFlagNotSupported       = "%s flag is not supported for %s workload"

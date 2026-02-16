@@ -118,6 +118,12 @@ Configuration:
         PatternLayout:
           header: "ItemPath,UploadId,RespLatency[us]%n"
           pattern: "%m%n"
+      - name: itemsFile
+        append: "false"
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}items.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
   Loggers:
     root:
       Level: INFO
@@ -191,6 +197,11 @@ Configuration:
         level: DEBUG
         AppenderRef:
           ref: partsUploadFile
+        additivity: false
+      - name: com.dell.spt.base.logging.Items
+        level: INFO
+        AppenderRef:
+          ref: itemsFile
         additivity: false
       - name: com.dell.spt.base.logging.Scenario
         level: INFO
