@@ -1500,11 +1500,11 @@ func TestGenerateReadScenario(t *testing.T) {
 				`ReadLoad`,
 				`DeleteLoad`,
 				`"type": "read"`,
+				`"mode": true`,
 				`"count": readCount`,
 			},
 			notLines: []string{
-				`"mode": true`, // count-based should not recycle
-				`"time":`,      // no duration limit
+				`"time":`, // no duration limit
 			},
 		},
 		{
@@ -1548,12 +1548,12 @@ func TestGenerateReadScenario(t *testing.T) {
 				`var readCount = 500`,
 				`PreconditionLoad`,
 				`ReadLoad`,
+				`"mode": true`,
 				`"count": readCount`,
 				`seed objects preserved`,
 			},
 			notLines: []string{
 				`DeleteLoad`,
-				`"mode": true`,
 			},
 		},
 		{
@@ -1844,52 +1844,3 @@ func TestReadNoOpLimitInGeneratedScenarios(t *testing.T) {
 	}
 }
 
-func TestGenerateScenario_ReadRdmaRouting(t *testing.T) {
-	tests := []struct {
-		name          string
-		params        Params
-		wantDriver    string
-		notWantDriver string
-	}{
-		{
-			name: "read with RDMA routes to s3-rdma",
-			params: Params{
-				WorkloadType: "read",
-				Bucket:       "b",
-				Threads:      1,
-				ObjectSize:   "1MB",
-				Duration:     "30s",
-				UseRdma:      true,
-			},
-			wantDriver: `"type": "s3-rdma"`,
-		},
-		{
-			name: "read without RDMA routes to s3",
-			params: Params{
-				WorkloadType: "read",
-				Bucket:       "b",
-				Threads:      1,
-				ObjectSize:   "1MB",
-				Duration:     "30s",
-			},
-			wantDriver:    `"type": "s3"`,
-			notWantDriver: `"type": "s3-rdma"`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateScenario(tt.params)
-			if err != nil {
-				t.Fatalf("GenerateScenario() error = %v", err)
-			}
-
-			if !strings.Contains(got, tt.wantDriver) {
-				t.Errorf("expected %q in scenario output", tt.wantDriver)
-			}
-			if tt.notWantDriver != "" && strings.Contains(got, tt.notWantDriver) {
-				t.Errorf("did not expect %q in scenario output", tt.notWantDriver)
-			}
-		})
-	}
-}

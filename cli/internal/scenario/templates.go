@@ -482,7 +482,7 @@ function cleanup(filepath) {
         .waitFor();
 }
 
-// Shared storage config
+// Shared configuration
 var sharedConfig = {
     "storage": {
         "driver": {
@@ -618,7 +618,7 @@ function cleanup(filepath) {
         .waitFor();
 }
 
-// Shared storage config
+// Shared configuration
 var sharedConfig = {
     "storage": {
         "driver": {
@@ -678,6 +678,9 @@ ReadLoad
         "load": {
             "op": {
                 "type": "read",
+                "recycle": {
+                    "mode": true
+                },
                 "limit": {
                     "count": readCount
                 }
@@ -744,7 +747,7 @@ function pause(seconds, message) {
         .waitFor();
 }
 
-// Shared storage config
+// Shared configuration
 var sharedConfig = {
     "storage": {
         "driver": {
@@ -850,7 +853,7 @@ function pause(seconds, message) {
         .waitFor();
 }
 
-// Shared storage config
+// Shared configuration
 var sharedConfig = {
     "storage": {
         "driver": {
@@ -910,6 +913,9 @@ ReadLoad
         "load": {
             "op": {
                 "type": "read",
+                "recycle": {
+                    "mode": true
+                },
                 "limit": {
                     "count": readCount
                 }
@@ -960,7 +966,7 @@ function cleanup(filepath) {
         .waitFor();
 }
 
-// Shared storage config
+// Shared configuration
 var sharedConfig = {
     "storage": {
         "driver": {

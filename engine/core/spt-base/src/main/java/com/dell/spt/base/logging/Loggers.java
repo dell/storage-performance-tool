@@ -21,7 +21,6 @@ public interface Loggers {
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
-	Logger ITEMS = LogManager.getLogger(BASE + "Items");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
 
@@ -35,7 +34,6 @@ public interface Loggers {
 					Map.entry(
 									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
 									"Threshold Metrics Total"),
-					Map.entry(ITEMS.getName().substring(BASE.length()), "Item Inventory"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"));
 }

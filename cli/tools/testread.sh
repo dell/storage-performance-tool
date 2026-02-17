@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
     --s3-bucket) S3_BUCKET="${2:-}"; shift 2 ;;
     --threads) THREADS="${2:-}"; shift 2 ;;
     --object-size) OBJECT_SIZE="${2:-}"; shift 2 ;;
-    --object-count) OBJECT_COUNT="${2:-}"; shift 2 ;;
+    --object-count) OBJECT_COUNT="${2:-}"; DURATION=""; shift 2 ;;
     --duration) DURATION="${2:-}"; shift 2 ;;
     --seed-objects) SEED_OBJECTS="${2:-}"; shift 2 ;;
     --min-hosts) MIN_HOSTS="${2:-}"; shift 2 ;;

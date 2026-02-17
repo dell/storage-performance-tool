@@ -38,8 +38,6 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
 	// Multipart per-part timings (name standardized to multipart.csv); try common loggers
 	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
-	// Item inventory CSV from seed phases (read workloads)
-	{Loggers: []string{"Items"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
 }
 
 // FileStatus records outcome for a single artifact.
