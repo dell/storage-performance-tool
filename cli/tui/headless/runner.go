@@ -421,7 +421,7 @@ func (r *HeadlessRunner) output(category, format string, args ...interface{}) {
 
 	// Write to trace file if available
 	if r.traceFile != nil {
-		if _, err := fmt.Fprintln(r.traceFile, line); err != nil {
+		if _, err := fmt.Fprintln(r.traceFile, line); err != nil { // #nosec G705 -- writing to local trace file, not HTTP response
 			fmt.Fprintf(os.Stderr, "Failed to write to trace file: %v\n", err)
 		}
 	}
