@@ -121,8 +121,8 @@ func InitialModel() Model {
 	m := Model{
 		processOutput:        make([]string, 0, maxScrollback),
 		processScroll:        0,
-		processOutputHidden:  true, // Start with process output hidden
-		chartsHidden:         true, // Start with charts hidden
+		processOutputHidden:  false, // Start with all panels visible
+		chartsHidden:         false, // Start with all panels visible
 		containerStatus:      "Not Started",
 		startTime:            time.Now(),
 		metricsCollector:     NewMetricsCollector(),
@@ -874,6 +874,10 @@ func StartTUIWithScenario(image string, scenarioPath string) error {
 // StartTUIWithScenarioAndParams starts the TUI with a scenario file and scenario parameters
 func StartTUIWithScenarioAndParams(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string))) error {
 	model := InitialModel()
+	if params.MinimalTUI {
+		model.processOutputHidden = true
+		model.chartsHidden = true
+	}
 	model.scenarioFile = scenarioPath        // Store for cleanup
 	model.keepScenario = params.KeepScenario // Get from params
 	model.scenarioParams = &params           // Store scenario params for live view
@@ -985,6 +989,10 @@ func StartTUIWithScenarioAndParams(image string, scenarioPath string, params sce
 // StartTUIWithMultiHostOrchestrator starts the TUI with a pre-configured multi-host orchestrator
 func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string))) error {
 	model := InitialModel()
+	if params.MinimalTUI {
+		model.processOutputHidden = true
+		model.chartsHidden = true
+	}
 	model.scenarioFile = scenarioPath        // Store for cleanup
 	model.keepScenario = params.KeepScenario // Get from params
 	model.scenarioParams = &params           // Store scenario params for live view
@@ -1120,6 +1128,10 @@ func StartTUIWithScenarioAndParamsTimeout(image string, scenarioPath string, par
 		return StartTUIWithScenarioAndParams(image, scenarioPath, params, apiPort, setSummarySink)
 	}
 	model := InitialModel()
+	if params.MinimalTUI {
+		model.processOutputHidden = true
+		model.chartsHidden = true
+	}
 	model.scenarioFile = scenarioPath
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params
@@ -1208,6 +1220,10 @@ func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrato
 		return StartTUIWithMultiHostOrchestrator(orchestrator, image, scenarioPath, params, setSummarySink)
 	}
 	model := InitialModel()
+	if params.MinimalTUI {
+		model.processOutputHidden = true
+		model.chartsHidden = true
+	}
 	model.scenarioFile = scenarioPath
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params

@@ -30,6 +30,9 @@ type Params struct {
 	RdmaDevice         string // RDMA device name (default: "auto")
 	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
+
+	// TUI layout
+	MinimalTUI bool // Start TUI with graphs and messages panels collapsed
 }
 
 // ScenarioParams is a temporary alias for Params kept for backward

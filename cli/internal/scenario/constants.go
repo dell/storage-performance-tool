@@ -6,12 +6,13 @@ const (
 	workloadTypeMock  = "mock"
 	workloadTypeList  = "list"
 
-	storageDriverTypeS3  = "s3"
-	itemTypeData         = "data"
-	itemTypePath         = "path"
-	itemNamingTypeRandom = "random"
-	loadOpTypeNoop       = "noop"
-	loadOpTypeList       = "list"
+	storageDriverTypeS3     = "s3"
+	storageDriverTypeS3Rdma = "s3-rdma"
+	itemTypeData            = "data"
+	itemTypePath            = "path"
+	itemNamingTypeRandom    = "random"
+	loadOpTypeNoop          = "noop"
+	loadOpTypeList          = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 
