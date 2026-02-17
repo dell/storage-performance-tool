@@ -1843,4 +1843,3 @@ func TestReadNoOpLimitInGeneratedScenarios(t *testing.T) {
 		})
 	}
 }
-
