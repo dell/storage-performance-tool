@@ -836,6 +836,10 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
 
 	// Headless Mode Options
+	// TUI Layout Options
+	runCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible (graphs and messages collapsed)")
+
+	// Headless Mode Options
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	runCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	runCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")
@@ -950,6 +954,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
 		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout-ms")
 	}
+
+	// TUI layout
+	minimalTUI, _ := cmd.Flags().GetBool("minimal")
+	params.MinimalTUI = minimalTUI
 
 	// Set defaults
 	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList {

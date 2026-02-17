@@ -236,7 +236,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 
 		// RDMA acceleration: override driver type and populate rdma config section
 		if params.UseRdma {
-			config.Storage.Driver.Type = "s3-rdma"
+			config.Storage.Driver.Type = storageDriverTypeS3Rdma
 
 			threshold := params.RdmaThresholdBytes
 			device := params.RdmaDevice

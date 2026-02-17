@@ -31,6 +31,31 @@ func TestInitialModel(t *testing.T) {
 	}
 }
 
+func TestInitialModel_DefaultPanelsVisible(t *testing.T) {
+	m := InitialModel()
+
+	if m.processOutputHidden {
+		t.Error("Expected process output to be visible by default")
+	}
+	if m.chartsHidden {
+		t.Error("Expected charts to be visible by default")
+	}
+}
+
+func TestMinimalLayout(t *testing.T) {
+	// Simulate what the StartTUI* functions do when MinimalTUI is set
+	m := InitialModel()
+	m.processOutputHidden = true
+	m.chartsHidden = true
+
+	if !m.processOutputHidden {
+		t.Error("Expected process output to be hidden in minimal mode")
+	}
+	if !m.chartsHidden {
+		t.Error("Expected charts to be hidden in minimal mode")
+	}
+}
+
 func TestModelInit(t *testing.T) {
 	m := InitialModel()
 	cmd := m.Init()
@@ -198,25 +223,25 @@ func TestModelUpdate_ToggleProcessOutput(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	// Initially process output should be hidden (new default)
-	if !m.processOutputHidden {
-		t.Error("Expected process output to be hidden initially")
+	// Initially process output should be visible (default: all panels open)
+	if m.processOutputHidden {
+		t.Error("Expected process output to be visible initially")
 	}
 
-	// Test toggling with 'm' key - should make it visible
+	// Test toggling with 'm' key - should hide it
 	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
 	m = updatedModel.(Model)
 
-	if m.processOutputHidden {
-		t.Error("Expected process output to be visible after pressing 'm'")
+	if !m.processOutputHidden {
+		t.Error("Expected process output to be hidden after pressing 'm'")
 	}
 
-	// Test toggling back - should hide it again
+	// Test toggling back - should make it visible again
 	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
 	m = updatedModel.(Model)
 
-	if !m.processOutputHidden {
-		t.Error("Expected process output to be hidden after pressing 'm' again")
+	if m.processOutputHidden {
+		t.Error("Expected process output to be visible after pressing 'm' again")
 	}
 
 	// Test that scrolling is disabled when hidden
@@ -265,25 +290,25 @@ func TestModelUpdate_ToggleCharts(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	// Initially charts should be hidden (new default)
-	if !m.chartsHidden {
-		t.Error("Expected charts to be hidden initially")
+	// Initially charts should be visible (default: all panels open)
+	if m.chartsHidden {
+		t.Error("Expected charts to be visible initially")
 	}
 
-	// Test toggling with 'g' key - should make them visible
+	// Test toggling with 'g' key - should hide them
 	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
 	m = updatedModel.(Model)
 
-	if m.chartsHidden {
-		t.Error("Expected charts to be visible after pressing 'g'")
+	if !m.chartsHidden {
+		t.Error("Expected charts to be hidden after pressing 'g'")
 	}
 
-	// Test toggling back - should hide them again
+	// Test toggling back - should make them visible again
 	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
 	m = updatedModel.(Model)
 
-	if !m.chartsHidden {
-		t.Error("Expected charts to be hidden after pressing 'g' again")
+	if m.chartsHidden {
+		t.Error("Expected charts to be visible after pressing 'g' again")
 	}
 }
 
@@ -343,36 +368,33 @@ func TestChartsHidden_HistoricalReset(t *testing.T) {
 		t.Error("Expected to be in historical mode")
 	}
 
-	// Charts start hidden by default, verify this
-	if !m.chartsHidden {
-		t.Error("Expected charts to be hidden initially")
-	}
-
-	// Unhide charts with 'g' key (first press makes them visible)
-	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
-	m = updatedModel.(Model)
-
-	// Charts should be visible and historical index reset to live mode
+	// Charts start visible by default, hide them first
 	if m.chartsHidden {
-		t.Error("Expected charts to be visible after first 'g' press")
-	}
-	if m.historicalIndex != 0 {
-		t.Error("Expected historical index to be reset to live mode (0) when unhiding charts")
+		t.Error("Expected charts to be visible initially")
 	}
 
-	// Set historical mode again for second test
-	m.historicalIndex = -2
-
-	// Hide charts again with 'g' key (second press hides them)
-	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	// Hide charts with 'g' key (first press hides them)
+	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
 	m = updatedModel.(Model)
 
 	// Charts should be hidden and historical index unchanged (hiding doesn't reset)
 	if !m.chartsHidden {
-		t.Error("Expected charts to be hidden after second 'g' press")
+		t.Error("Expected charts to be hidden after first 'g' press")
 	}
 	if m.historicalIndex != -2 {
 		t.Error("Expected historical index to remain unchanged when hiding charts")
+	}
+
+	// Unhide charts with 'g' key (second press makes them visible)
+	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m = updatedModel.(Model)
+
+	// Charts should be visible and historical index reset to live mode
+	if m.chartsHidden {
+		t.Error("Expected charts to be visible after second 'g' press")
+	}
+	if m.historicalIndex != 0 {
+		t.Error("Expected historical index to be reset to live mode (0) when unhiding charts")
 	}
 }
 

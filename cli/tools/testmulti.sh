@@ -21,6 +21,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 #   FORCE          - true|false (stop conflicting containers)
 #   CLEANUP        - true|false (delete created objects)
 #   KEEP_SCENARIO  - true|false
+#   MIN_HOSTS      - minimum hosts required (0 = all)
 
 HOSTS=${HOSTS:-${HOSTS:-"127.0.0.1"}}
 S3_ENDPOINT=${S3_ENDPOINT:-""}
@@ -39,6 +40,7 @@ KEEP_SCENARIO=${KEEP_SCENARIO:-true}
 MOCK=${MOCK:-false}
 AUTO_TERMINATE_SECONDS=${AUTO_TERMINATE_SECONDS:-0}
 ATTACH_EXISTING=${ATTACH_EXISTING:-false}
+MIN_HOSTS=${MIN_HOSTS:-0}
 
 # Simple arg parsing (overrides env)
 while [ $# -gt 0 ]; do
@@ -63,6 +65,7 @@ while [ $# -gt 0 ]; do
     --keep-scenario) KEEP_SCENARIO=true; shift 1 ;;
     --no-keep-scenario) KEEP_SCENARIO=false; shift 1 ;;
     --auto-terminate-seconds) AUTO_TERMINATE_SECONDS="${2:-0}"; shift 2 ;;
+    --min-hosts) MIN_HOSTS="${2:-0}"; shift 2 ;;
     --attach-existing) ATTACH_EXISTING=true; shift 1 ;;
     --no-attach-existing) ATTACH_EXISTING=false; shift 1 ;;
     -h|--help)
@@ -81,6 +84,7 @@ Usage: $(basename "$0") [options]
   --duration DUR           e.g. 5m; overrides object-count
   --[no-]verbose           enable/disable verbose flag (default: $VERBOSE)
   --auto-terminate-seconds N  Auto-terminate after N seconds (0=unlimited)
+  --min-hosts N            Minimum hosts required to proceed (env: MIN_HOSTS, default: all)
   --[no-]force             stop conflicting containers (default: $FORCE)
   --[no-]cleanup           delete created objects (default: $CLEANUP)
   --[no-]keep-scenario     keep generated scenario (default: $KEEP_SCENARIO)
@@ -154,6 +158,11 @@ $ATTACH_EXISTING && cmd+=(--attach-existing) || true
 # Pass through auto-terminate if set (>0)
 if [[ "$AUTO_TERMINATE_SECONDS" =~ ^[0-9]+$ ]] && [ "$AUTO_TERMINATE_SECONDS" -gt 0 ]; then
   cmd+=(--auto-terminate-seconds "$AUTO_TERMINATE_SECONDS")
+fi
+
+# Pass through min-hosts if set (>0)
+if [[ "$MIN_HOSTS" =~ ^[0-9]+$ ]] && [ "$MIN_HOSTS" -gt 0 ]; then
+  cmd+=(--min-hosts "$MIN_HOSTS")
 fi
 
 "${cmd[@]}"

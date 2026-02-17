@@ -39,7 +39,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 	// Determine storage driver type
 	driverType := storageDriverTypeS3
 	if params.UseRdma {
-		driverType = "s3-rdma"
+		driverType = storageDriverTypeS3Rdma
 	}
 
 	// Format strings as quoted JavaScript literals
@@ -105,7 +105,7 @@ func GenerateReadScenario(params Params) (string, error) {
 
 	driverType := storageDriverTypeS3
 	if params.UseRdma {
-		driverType = "s3-rdma"
+		driverType = storageDriverTypeS3Rdma
 	}
 
 	seedCount := params.SeedCount
