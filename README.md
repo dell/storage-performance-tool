@@ -117,7 +117,7 @@ Headless mode activates automatically when no TTY is available; use `--headless`
 ## Features
 
 - **Unified Experience** – SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** – write, list, mock today; additional operations land iteratively in upcoming releases.
+- **Multi-Workload Support** – write, read, delete, list, and mock workloads out of the box.
 - **Interactive & Headless** – flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
@@ -194,7 +194,7 @@ make build-cli        # produces ./cli/spt
 
 ## Roadmap Snapshot
 
-- Expand workload catalog beyond write/list/mock, including read/mixed/delete templates.
+- Add mixed workload templates combining read/write/delete in configurable ratios.
 - Continue expanding CI/CD pipeline: automated release publishing of `spt` binaries and versioned Docker images to GitHub Releases and GHCR.
 - Streamline documentation so contributors and users find SPT-first concepts across CLI and engine guides.
 

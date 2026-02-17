@@ -16,6 +16,8 @@ func GenerateScenario(params Params) (string, error) {
 	switch params.WorkloadType {
 	case workloadTypeWrite:
 		return GenerateWriteScenario(params)
+	case workloadTypeRead:
+		return GenerateReadScenario(params)
 	case workloadTypeMock:
 		return GenerateMockScenario(params)
 	case workloadTypeList:
@@ -90,6 +92,71 @@ func GenerateWriteScenario(params Params) (string, error) {
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// GenerateReadScenario creates a read benchmark scenario with seed, read, and optional cleanup phases.
+func GenerateReadScenario(params Params) (string, error) {
+	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
+
+	ts := baseTimestamp()
+
+	driverType := storageDriverTypeS3
+	if params.UseRdma {
+		driverType = "s3-rdma"
+	}
+
+	seedCount := params.SeedCount
+	if seedCount <= 0 {
+		seedCount = 2500
+	}
+
+	data := map[string]interface{}{
+		templateKeyConcurrency:       params.Threads,
+		templateKeyItemSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
+		templateKeyItemCount:         params.ObjectCount,
+		templateKeyOutputPath:        fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
+		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
+		templateKeyTimestamp:         time.Now().Unix(),
+		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
+		templateKeySeedCount:         seedCount,
+		// Step IDs: seed=1, read=2, delete=3
+		templateKeyStepIDSeed:   formatStepID(1, ts, stepOpSeed),
+		templateKeyStepIDRead:   formatStepID(2, ts, stepOpRead),
+		templateKeyStepIDDelete: formatStepID(3, ts, stepOpDelete),
+	}
+
+	var tmplStr string
+
+	if params.Cleanup {
+		if params.ObjectCount > 0 {
+			tmplStr = readWithCleanupCountTemplate
+		} else if params.Duration != "" {
+			tmplStr = readWithCleanupDurationTemplate
+		} else {
+			tmplStr = readDefaultTemplate
+		}
+	} else {
+		if params.ObjectCount > 0 {
+			tmplStr = readNoCleanupCountTemplate
+		} else if params.Duration != "" {
+			tmplStr = readNoCleanupDurationTemplate
+		} else {
+			// Default: cleanup=true with defaults
+			tmplStr = readDefaultTemplate
+		}
+	}
+
+	tmpl, err := template.New("readScenario").Parse(tmplStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse read template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("failed to execute read template: %w", err)
 	}
 
 	return buf.String(), nil

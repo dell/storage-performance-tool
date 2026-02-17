@@ -19,6 +19,9 @@ type Params struct {
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
+	// Read workload
+	SeedCount int // Number of seed objects for read benchmark (default: 2500)
+
 	// RDMA acceleration
 	UseRdma            bool   // Use s3-rdma driver instead of s3
 	RdmaLocalIP        string // Local RDMA interface IP (required for RDMA)

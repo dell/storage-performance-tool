@@ -481,12 +481,25 @@ func TestGenerateScenario(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "unsupported workload",
+			name: "read workload",
 			params: ScenarioParams{
 				WorkloadType: "read",
+				Endpoint:     "http://test:9000",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      1,
+				ObjectSize:   "1MB",
+			},
+			wantErr: false,
+		},
+		{
+			name: "unsupported workload",
+			params: ScenarioParams{
+				WorkloadType: "delete",
 			},
 			wantErr: true,
-			errMsg:  "unsupported workload type: read",
+			errMsg:  "unsupported workload type: delete",
 		},
 	}
 
@@ -1423,6 +1436,409 @@ func TestGenerateScenario_RdmaRouting(t *testing.T) {
 			}
 			if tt.notWantDriver != "" && strings.Contains(got, tt.notWantDriver) {
 				t.Errorf("did not expect %q in scenario output", tt.notWantDriver)
+			}
+		})
+	}
+}
+
+func TestGenerateReadScenario(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     Params
+		wantErr    bool
+		checkLines []string // lines that should be present
+		notLines   []string // lines that should NOT be present
+	}{
+		{
+			name: "read with cleanup and duration",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				Duration:     "2m",
+				Cleanup:      true,
+				SeedCount:    500,
+			},
+			checkLines: []string{
+				`var concurrency = 8`,
+				`var itemSize = "1MB"`,
+				`var seedCount = 500`,
+				`var duration = "2m"`,
+				`var outputPath = "/testbucket"`,
+				`"type": "s3"`,
+				`"type": "create"`,
+				`"type": "read"`,
+				`"type": "delete"`,
+				`"mode": true`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`DeleteLoad`,
+				`itemsFile`,
+				`"count": seedCount`,
+				`"time": duration`,
+				`function pause`,
+			},
+		},
+		{
+			name: "read with cleanup and count",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "512KB",
+				ObjectCount:  10000,
+				Cleanup:      true,
+				SeedCount:    1000,
+			},
+			checkLines: []string{
+				`var concurrency = 4`,
+				`var itemSize = "512KB"`,
+				`var seedCount = 1000`,
+				`var readCount = 10000`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`DeleteLoad`,
+				`"type": "read"`,
+				`"mode": true`,
+				`"count": readCount`,
+			},
+			notLines: []string{
+				`"time":`, // no duration limit
+			},
+		},
+		{
+			name: "read without cleanup and duration",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      16,
+				ObjectSize:   "4MB",
+				Duration:     "5m",
+				Cleanup:      false,
+				SeedCount:    2000,
+			},
+			checkLines: []string{
+				`var concurrency = 16`,
+				`var seedCount = 2000`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`"mode": true`,
+				`"time": duration`,
+				`seed objects preserved`,
+			},
+			notLines: []string{
+				`DeleteLoad`, // no cleanup
+			},
+		},
+		{
+			name: "read without cleanup and count",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      2,
+				ObjectSize:   "256KB",
+				ObjectCount:  500,
+				Cleanup:      false,
+				SeedCount:    100,
+			},
+			checkLines: []string{
+				`var concurrency = 2`,
+				`var seedCount = 100`,
+				`var readCount = 500`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`"mode": true`,
+				`"count": readCount`,
+				`seed objects preserved`,
+			},
+			notLines: []string{
+				`DeleteLoad`,
+			},
+		},
+		{
+			name: "read with defaults (no duration, no count, no cleanup flag)",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "default-bucket",
+				Threads:      1,
+				ObjectSize:   "1MB",
+			},
+			checkLines: []string{
+				`var seedCount = 2500`,
+				`var duration = "60s"`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`DeleteLoad`,
+				`"mode": true`,
+			},
+		},
+		{
+			name: "read with default seed count",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+				// SeedCount = 0 should default to 2500
+			},
+			checkLines: []string{
+				`var seedCount = 2500`,
+				`PreconditionLoad`,
+				`ReadLoad`,
+				`DeleteLoad`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateReadScenario(tt.params)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GenerateReadScenario() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+
+			for _, line := range tt.checkLines {
+				if !strings.Contains(got, line) {
+					t.Errorf("GenerateReadScenario() missing expected line: %s\nGot:\n%s", line, got)
+				}
+			}
+
+			for _, line := range tt.notLines {
+				if strings.Contains(got, line) {
+					t.Errorf("GenerateReadScenario() should NOT contain: %s\nGot:\n%s", line, got)
+				}
+			}
+
+			// All read scenarios must have PreconditionLoad and ReadLoad
+			if !strings.Contains(got, "PreconditionLoad") {
+				t.Error("Read scenario must contain PreconditionLoad")
+			}
+			if !strings.Contains(got, "ReadLoad") {
+				t.Error("Read scenario must contain ReadLoad")
+			}
+		})
+	}
+}
+
+func TestGenerateReadScenario_RDMA(t *testing.T) {
+	tests := []struct {
+		name           string
+		params         Params
+		wantDriverType string
+		notDriverType  string
+	}{
+		{
+			name: "read with s3 driver",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+			},
+			wantDriverType: `"type": "s3"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "read with RDMA driver",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "read count with RDMA driver",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "bucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				ObjectCount:  5000,
+				Cleanup:      true,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "read no cleanup with RDMA",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "bucket",
+				Threads:      2,
+				ObjectSize:   "4MB",
+				Duration:     "30s",
+				Cleanup:      false,
+				UseRdma:      true,
+			},
+			wantDriverType: `"type": "s3-rdma"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateReadScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateReadScenario() error = %v", err)
+			}
+
+			if !strings.Contains(got, tt.wantDriverType) {
+				t.Errorf("expected scenario to contain %q\nGot:\n%s", tt.wantDriverType, got)
+			}
+
+			if tt.notDriverType != "" && strings.Contains(got, tt.notDriverType) {
+				t.Errorf("expected scenario to NOT contain %q\nGot:\n%s", tt.notDriverType, got)
+			}
+		})
+	}
+}
+
+func TestGenerateReadScenario_StepIDs(t *testing.T) {
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "2m",
+		Cleanup:      true,
+		SeedCount:    100,
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	// Read scenarios must have 3 step IDs: seed, read, delete
+	seedIDPattern := regexp.MustCompile(`mt-001-\d{8}\.\d{6}\.\d{3}-seed`)
+	readIDPattern := regexp.MustCompile(`mt-002-\d{8}\.\d{6}\.\d{3}-read`)
+	deleteIDPattern := regexp.MustCompile(`mt-003-\d{8}\.\d{6}\.\d{3}-delete`)
+
+	if !seedIDPattern.MatchString(got) {
+		t.Errorf("Read scenario missing seed step ID (mt-001-...-seed)")
+	}
+	if !readIDPattern.MatchString(got) {
+		t.Errorf("Read scenario missing read step ID (mt-002-...-read)")
+	}
+	if !deleteIDPattern.MatchString(got) {
+		t.Errorf("Read scenario missing delete step ID (mt-003-...-delete)")
+	}
+}
+
+func TestGenerateReadScenario_NoCleanupStepIDs(t *testing.T) {
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "2m",
+		Cleanup:      false,
+		SeedCount:    100,
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	seedIDPattern := regexp.MustCompile(`mt-001-\d{8}\.\d{6}\.\d{3}-seed`)
+	readIDPattern := regexp.MustCompile(`mt-002-\d{8}\.\d{6}\.\d{3}-read`)
+	deleteIDPattern := regexp.MustCompile(`mt-003-\d{8}\.\d{6}\.\d{3}-delete`)
+
+	if !seedIDPattern.MatchString(got) {
+		t.Errorf("Read scenario missing seed step ID")
+	}
+	if !readIDPattern.MatchString(got) {
+		t.Errorf("Read scenario missing read step ID")
+	}
+	// Delete step ID is generated but not used in no-cleanup template
+	if deleteIDPattern.MatchString(got) {
+		t.Errorf("No-cleanup read scenario should NOT contain delete step ID")
+	}
+}
+
+func TestReadNoOpLimitInGeneratedScenarios(t *testing.T) {
+	reStepCount := regexp.MustCompile(`"step"\s*:\s*\{[^}]*"limit"\s*:\s*\{[^}]*"count"`)
+
+	cases := []struct {
+		name string
+		gen  func() (string, error)
+	}{
+		{
+			name: "read_cleanup_duration",
+			gen: func() (string, error) {
+				return GenerateReadScenario(Params{
+					WorkloadType: "read",
+					Bucket:       "b",
+					Threads:      2,
+					ObjectSize:   "1MB",
+					Duration:     "30s",
+					Cleanup:      true,
+					SeedCount:    100,
+				})
+			},
+		},
+		{
+			name: "read_cleanup_count",
+			gen: func() (string, error) {
+				return GenerateReadScenario(Params{
+					WorkloadType: "read",
+					Bucket:       "b",
+					Threads:      2,
+					ObjectSize:   "1MB",
+					ObjectCount:  500,
+					Cleanup:      true,
+					SeedCount:    100,
+				})
+			},
+		},
+		{
+			name: "read_nocleanup_duration",
+			gen: func() (string, error) {
+				return GenerateReadScenario(Params{
+					WorkloadType: "read",
+					Bucket:       "b",
+					Threads:      2,
+					ObjectSize:   "1MB",
+					Duration:     "1m",
+					Cleanup:      false,
+					SeedCount:    50,
+				})
+			},
+		},
+		{
+			name: "read_default",
+			gen: func() (string, error) {
+				return GenerateReadScenario(Params{
+					WorkloadType: "read",
+					Bucket:       "b",
+					Threads:      2,
+					ObjectSize:   "1MB",
+				})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.gen()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if reStepCount.MatchString(got) {
+				t.Errorf("scenario contains invalid step.limit.count:\n%s", got)
 			}
 		})
 	}
