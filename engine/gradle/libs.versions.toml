@@ -39,6 +39,10 @@ commonsMath3 = "3.6.1"
 guava = "33.3.1-jre"  # Updated from 25.1-jre
 mockito = "5.14.2"  # Updated from 2.23.0
 
+# Parquet / Avro (S3 Tables data plane)
+parquet = "1.14.4"
+avro = "1.12.0"
+
 # Build tools
 dockerJava = "3.1.5"
 shadow = "8.1.1"
@@ -113,6 +117,10 @@ commons-csv = { module = "org.apache.commons:commons-csv", version.ref = "common
 commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commonsMath3" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+
+# Parquet / Avro
+parquet-avro = { module = "org.apache.parquet:parquet-avro", version.ref = "parquet" }
+avro = { module = "org.apache.avro:avro", version.ref = "avro" }
 
 # Docker
 docker-java = { module = "com.github.docker-java:docker-java", version.ref = "dockerJava" }

@@ -1,0 +1,64 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "0.1.0"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.netty.http.s3.tables"
+}
+
+dependencies {
+	// S3 driver dependency (compileOnly - loaded from parent classloader)
+	compileOnly(
+		project(':extensions:storage-drivers:implementations:s3'),
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:netty'),
+		project(':extensions:storage-drivers:protocols:http'),
+	)
+
+	// API dependencies from parent classloader
+	compileOnly(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// Netty dependencies from parent classloader (not bundled)
+	compileOnly(
+		libs.netty.handler,
+		libs.netty.codec.http,
+	)
+
+	// Jackson from parent classloader (already in spt-base)
+	compileOnly(
+		libs.jackson.databind,
+		libs.jackson.core,
+	)
+
+	// Parquet / Avro bundled into shadow JAR (new dependencies)
+	implementation(
+		libs.parquet.avro,
+		libs.avro,
+	)
+
+	testImplementation(libs.mockito.core)
+
+	testRuntimeOnly(
+		libs.commons.codec,
+		libs.confuse.io.yaml,
+		libs.fiber4j,
+		libs.disruptor,
+		libs.netty.transport.native.epoll,
+	)
+}
+
+tasks.named('integrationTest', Test) {
+	useJUnitPlatform {
+		includeTags 'integration'
+	}
+	systemProperty 'junit.jupiter.execution.timeout.default', '5m'
+}
