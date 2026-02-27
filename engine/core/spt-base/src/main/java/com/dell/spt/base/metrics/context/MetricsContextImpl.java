@@ -128,9 +128,11 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	private void updateTimings(final long latencyMicros, final long durationMicros) {
-		if (latencyMicros > 0 && durationMicros > latencyMicros) {
+		if (durationMicros > 0) {
 			reqDuration.update(durationMicros);
-			respLatency.update(latencyMicros);
+			if (latencyMicros > 0) {
+				respLatency.update(latencyMicros);
+			}
 		}
 	}
 

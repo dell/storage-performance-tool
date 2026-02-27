@@ -554,7 +554,7 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 			bytesRateLast:     52428800.0, // 50MB/s in bytes
 			expectedMBPerSec:  52,         // int64(52428800.0 / 1_000_000)
 			opsRateLast:       150.5,
-			expectedOpsPerSec: 150, // int64(150.5)
+			expectedOpsPerSec: 151, // math.Round(150.5) = 151
 			latencyMeanUs:     2500.0,
 			expectedLatencyUs: 2500, // Already in microseconds
 		},
@@ -568,13 +568,13 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 			expectedLatencyUs: 0,
 		},
 		{
-			name:              "fractional values truncated",
+			name:              "fractional values rounded",
 			bytesRateLast:     1500000.9, // 1.5MB/s + fraction
-			expectedMBPerSec:  1,         // int64(1500000.9 / 1_000_000) = 1
+			expectedMBPerSec:  1,         // int64(1500000.9 / 1_000_000) = 1 (MB truncation unchanged)
 			opsRateLast:       99.9,
-			expectedOpsPerSec: 99, // int64(99.9)
+			expectedOpsPerSec: 100, // math.Round(99.9) = 100
 			latencyMeanUs:     1234.7,
-			expectedLatencyUs: 1234, // int64(1234.7)
+			expectedLatencyUs: 1235, // math.Round(1234.7) = 1235
 		},
 		{
 			name:              "large values",
@@ -672,7 +672,7 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 		"SuccessCount":             int64(2000),
 		"FailedCount":              int64(10),
 		"StepTime":                 45.2,
-		"OpsPerSec":                int64(250), // Converted from 250.7
+		"OpsPerSec":                int64(251), // math.Round(250.7) = 251
 		"MBPerSec":                 int64(104), // Converted from 104857600.0 / 1_000_000
 		"MeanLatency":              int64(1850),
 		"MeanDuration":             int64(2250),

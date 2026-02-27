@@ -94,9 +94,10 @@ cmd=("$ROOT_DIR"/spt --debug run tables --headless \
   --total-ingest "$TOTAL_INGEST" \
   --auto-terminate-seconds "$AUTO_TERMINATE")
 
-$GENERATE_ONLY && cmd+=(--generate-only) || true
-$VERBOSE       && cmd+=(--verbose)       || true
-$FORCE         && cmd+=(--force)         || true
+$GENERATE_ONLY && cmd+=(--generate-only)   || true
+$VERBOSE       && cmd+=(--verbose)         || true
+$FORCE         && cmd+=(--force)           || true
+cmd+=(--skip-image-pull)
 
 "${cmd[@]}"
 

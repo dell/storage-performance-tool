@@ -302,13 +302,13 @@ func (info *VerificationConflictInfo) GetConflictDescription() string {
 	}
 
 	var description strings.Builder
-	description.WriteString(fmt.Sprintf("Port conflicts on %s:", info.Host.Host))
+	fmt.Fprintf(&description, "Port conflicts on %s:", info.Host.Host)
 
 	for _, port := range info.ConflictPorts {
-		description.WriteString(fmt.Sprintf(" %d", port))
+		fmt.Fprintf(&description, " %d", port)
 	}
 
-	description.WriteString(fmt.Sprintf(" (%d containers found)", len(info.Containers)))
+	fmt.Fprintf(&description, " (%d containers found)", len(info.Containers))
 
 	return description.String()
 }

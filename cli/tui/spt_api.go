@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -531,10 +532,10 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error)
 		SuccessCount:             step.Operations.SuccessCount,
 		FailedCount:              step.Operations.FailedCount,
 		StepTime:                 step.ElapsedTimeSeconds,
-		OpsPerSec:                int64(step.Operations.SuccessRateLast),
+		OpsPerSec:                int64(math.Round(step.Operations.SuccessRateLast)),
 		MBPerSec:                 int64(step.Bandwidth.BytesRateLast / 1_000_000), // Convert bytes to MB
-		MeanLatency:              int64(step.Timing.LatencyMeanUs),                // Already in microseconds
-		MeanDuration:             int64(step.Timing.DurationMeanUs),               // Already in microseconds
+		MeanLatency:              int64(math.Round(step.Timing.LatencyMeanUs)),    // Already in microseconds
+		MeanDuration:             int64(math.Round(step.Timing.DurationMeanUs)),   // Already in microseconds
 		CompletionPercent:        float64(step.CompletionPercent),
 		OverallCompletionPercent: float64(step.OverallCompletion),
 		Unbounded:                step.Unbounded,

@@ -3,7 +3,6 @@ package scenario
 import (
 	"bytes"
 	"fmt"
-	"net/url"
 	"text/template"
 	"time"
 )
@@ -11,33 +10,6 @@ import (
 // GenerateTablesScenario generates a JS scenario for an S3 Tables workload.
 func GenerateTablesScenario(params Params) (string, error) {
 	tp := params.Tables
-
-	// Parse endpoint for host/port/ssl
-	ep := params.Endpoint
-	if ep == "" && len(params.Endpoints) > 0 {
-		ep = params.Endpoints[0]
-	}
-	if ep == "" {
-		return "", fmt.Errorf("--endpoint is required for tables workload")
-	}
-	u, err := url.Parse(ep)
-	if err != nil {
-		return "", fmt.Errorf("invalid endpoint %q: %w", ep, err)
-	}
-	host := u.Hostname()
-	portStr := u.Port()
-	if portStr == "" {
-		if u.Scheme == "https" {
-			portStr = "443"
-		} else {
-			portStr = "80"
-		}
-	}
-	port := 0
-	if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr != nil {
-		return "", fmt.Errorf("invalid port in endpoint %q", ep)
-	}
-	ssl := u.Scheme == "https"
 
 	duration := params.Duration
 	if duration == "" {
@@ -47,7 +19,6 @@ func GenerateTablesScenario(params Params) (string, error) {
 	ts := baseTimestamp()
 
 	data := map[string]interface{}{
-		templateKeyTablesEndpoint:         host,
 		templateKeyTablesAccessKey:        params.AccessKey,
 		templateKeyTablesSecretKey:        params.SecretKey,
 		templateKeyTablesBucket:           tp.TableBucket,
@@ -63,9 +34,13 @@ func GenerateTablesScenario(params Params) (string, error) {
 		templateKeyTablesReadConcurrency:  tp.ReadConcurrency,
 		templateKeyTablesCompactionToutMs: tp.CompactionTimeoutMs,
 		templateKeyTablesDuration:         duration,
-		templateKeyTablesPort:             port,
-		templateKeyTablesSSL:              ssl,
 		"NoProvision":                     tp.NoProvision,
+		// opMode values
+		"OpModeProvision":      tablesOpModeProvision,
+		"OpModeTableWrite":     tablesOpModeTableWrite,
+		"OpModeCatalogSeed":    tablesOpModeCatalogSeed,
+		"OpModeTableCatalog":   tablesOpModeTableCatalog,
+		"OpModeCompactionPoll": tablesOpModeCompactionPoll,
 		// Step IDs
 		templateKeyTablesStepIDProvision:  formatStepID(1, ts, "provision"),
 		templateKeyTablesStepIDWrite:      formatStepID(2, ts, "write"),

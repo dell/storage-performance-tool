@@ -24,7 +24,23 @@ import io.netty.handler.codec.http.HttpVersion;
 
 import java.io.IOException;
 import java.net.ConnectException;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import com.dell.spt.base.env.DateUtil;
+import com.dell.spt.storage.driver.coop.netty.http.s3.S3Api;
 
 public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 				extends S3StorageDriver<I, O> {
@@ -36,8 +52,24 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 	static final String OP_MODE_CATALOG_SEED = "catalogSeed";
 	static final String OP_MODE_TABLE_COMPACTION_POLL = "tableCompactionPoll";
 
+	/** Data-plane SigV4 service name for S3 object PUT requests. */
+	private static final String S3_SERVICE = "s3";
+
 	protected final String opMode;
 	protected final S3TablesControlPlane controlPlane;
+	private final long targetFileSizeBytes;
+
+	/** Initialized lazily after provision completes (needs warehouseLocation). */
+	private final AtomicReference<IcebergCommitter> committer = new AtomicReference<>(null);
+
+	/** Counts HTTP 409 version-conflict retries across all threads. */
+	private final AtomicLong commitRetryCount = new AtomicLong(0);
+
+	/** Shared writer for generating Parquet bytes; thread-safe (stateless per call). */
+	private final ParquetRowGroupWriter parquetWriter;
+
+	/** Monotonically increasing base row ID shared across all writes this step. */
+	private final AtomicLong baseRowId = new AtomicLong(0);
 
 	public S3TablesStorageDriver(
 					final String stepId,
@@ -49,6 +81,8 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		super(stepId, dataInput, storageConfig, verifyFlag, batchSize, "s3tables");
 		final Config s3tablesConfig = storageConfig.configVal("s3tables");
 		this.opMode = s3tablesConfig.stringVal("opMode");
+		this.targetFileSizeBytes = s3tablesConfig.intVal("targetFileSizeBytes");
+		this.parquetWriter = new ParquetRowGroupWriter(targetFileSizeBytes);
 		final String controlPlaneEndpoint = s3tablesConfig.stringVal("controlPlaneEndpoint");
 		final String effectiveEndpoint = controlPlaneEndpoint.isEmpty()
 						? storageNodeAddrs[0]
@@ -59,30 +93,98 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 						s3tablesConfig.stringVal("namespace"),
 						s3tablesConfig.stringVal("tableName"),
 						this);
+		// Disable per-op path resolution for all opModes: the s3-tables driver
+		// manages its own paths (Iceberg warehouse). requestNewPath is never called
+		// for NOOP ops (no dstPath), so provision() is invoked directly from submit().
+		this.requestNewPathFunc = null;
 	}
 
 	@Override
 	protected String requestNewPath(final String path) {
-		if (OP_MODE_PROVISION.equals(opMode)) {
-			try {
-				controlPlane.provision();
-			} catch (final Exception e) {
-				Loggers.ERR.error("{}: provision failed: {}", stepId, e.getMessage());
-				return null;
-			}
-		}
 		return path;
+	}
+
+	/**
+	 * Initializes the IcebergCommitter lazily on first tableWrite submit.
+	 * Thread-safe via compareAndSet on the AtomicReference.
+	 */
+	private IcebergCommitter ensureCommitter() {
+		IcebergCommitter c = committer.get();
+		if (c != null) {
+			return c;
+		}
+		try {
+			final IcebergCommitter.MetadataLocationResult loc = controlPlane.getTableMetadataLocation();
+			c = new IcebergCommitter(
+							this, deriveWarehouseLocation(loc.metadataLocation), loc.versionToken);
+			committer.compareAndSet(null, c);
+			return committer.get();
+		} catch (final Exception e) {
+			Loggers.ERR.error("{}: failed to init IcebergCommitter: {}", stepId, e.getMessage());
+			return null;
+		}
 	}
 
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
 		switch (opMode) {
 		case OP_MODE_PROVISION:
-			op.status(Operation.Status.SUCC);
+			try {
+				controlPlane.provision();
+				op.status(Operation.Status.SUCC);
+			} catch (final Exception e) {
+				Loggers.ERR.error("{}: provision failed: {}", stepId, e.getMessage());
+				op.status(Operation.Status.FAIL_IO);
+			}
+			handleCompleted(op);
 			return true;
+		case OP_MODE_TABLE_WRITE:
+			return submitTableWrite(op);
 		default:
-			throw new IllegalStateException("Unsupported opMode for Phase 1: " + opMode);
+			throw new IllegalStateException("Unsupported opMode: " + opMode);
 		}
+	}
+
+	private boolean submitTableWrite(final O op) throws IllegalStateException {
+		final IcebergCommitter c = ensureCommitter();
+		if (c == null) {
+			op.startRequest();
+			op.finishRequest();
+			op.startResponse();
+			op.finishResponse();
+			op.status(Operation.Status.FAIL_IO);
+			handleCompleted(op);
+			return true;
+		}
+		concurrencyThrottle.acquireUninterruptibly();
+		try {
+			op.startRequest();
+			final long rowId = baseRowId.getAndAdd(targetFileSizeBytes / 44 + 1);
+			final byte[] parquetBytes = parquetWriter.write(rowId);
+			// data written to S3 — request phase done, response (metadata commit) begins
+			final IcebergCommitter.DataPlaneResult dp = c.commitDataPlane(parquetBytes, parquetBytes.length);
+			op.finishRequest();
+			op.startResponse();
+			c.commitMetadata(dp);
+			op.finishResponse();
+			op.status(Operation.Status.SUCC);
+		} catch (final Exception e) {
+			Loggers.ERR.warn("{}: tableWrite failed: {}", stepId, e.getMessage());
+			if (op.reqTimeStart() > 0 && op.reqTimeDone() == 0) {
+				op.finishRequest();
+			}
+			if (op.reqTimeDone() > 0 && op.respTimeStart() == 0) {
+				op.startResponse();
+			}
+			if (op.respTimeStart() > 0 && op.respTimeDone() == 0) {
+				op.finishResponse();
+			}
+			op.status(Operation.Status.FAIL_IO);
+		} finally {
+			concurrencyThrottle.release();
+		}
+		handleCompleted(op);
+		return true;
 	}
 
 	@Override
@@ -102,6 +204,22 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		return stepId;
 	}
 
+	S3TablesControlPlane getControlPlane() {
+		return controlPlane;
+	}
+
+	void recordCommitRetry() {
+		commitRetryCount.incrementAndGet();
+	}
+
+	long getCommitRetryCount() {
+		return commitRetryCount.get();
+	}
+
+	/**
+	 * Executes a control-plane request signed with service="s3tables".
+	 * Uses the inherited applyAuthHeaders (which uses this.sigV4ServiceName = "s3tables").
+	 */
 	FullHttpResponse executeControlPlaneRequest(
 					final HttpMethod method,
 					final String uri,
@@ -126,6 +244,188 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		} catch (final ConnectException e) {
 			throw new Exception("Connection failure calling " + method + " " + uri + ": " + e.getMessage(), e);
 		}
+	}
+
+	/**
+	 * Executes a data-plane S3 PUT signed with service="s3".
+	 * Cannot use applyAuthHeaders (which is locked to "s3tables"), so signs inline.
+	 */
+	void executeDataPlaneRequest(
+					final String s3Path,
+					final byte[] bodyBytes,
+					final String contentType) throws Exception {
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		final String host = storageNodeAddrs[0];
+		headers.set(HttpHeaderNames.HOST, host);
+		headers.set(HttpHeaderNames.CONTENT_TYPE, contentType);
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, bodyBytes.length);
+		applyDynamicHeaders(headers);
+		applySharedHeaders(headers);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.PUT, s3Path);
+
+		final FullHttpRequest req = new DefaultFullHttpRequest(
+						HttpVersion.HTTP_1_1,
+						HttpMethod.PUT,
+						s3Path,
+						Unpooled.wrappedBuffer(bodyBytes),
+						headers,
+						EmptyHttpHeaders.INSTANCE);
+		final FullHttpResponse resp;
+		try {
+			resp = executeHttpRequest(req);
+		} catch (final ConnectException e) {
+			throw new Exception("Data-plane PUT failed for " + s3Path + ": " + e.getMessage(), e);
+		}
+		if (resp == null) {
+			throw new Exception("Data-plane PUT timeout for " + s3Path);
+		}
+		final int status = resp.status().code();
+		if (status < 200 || status >= 300) {
+			final String body = resp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("Data-plane PUT " + s3Path + " returned HTTP " + status + ": " + body);
+		}
+	}
+
+	/**
+	 * Applies SigV4 auth headers with service="s3" for data-plane requests.
+	 * Mirrors the v4 branch of S3StorageDriver.applyAuthHeaders, substituting S3_SERVICE.
+	 */
+	private void applyDataPlaneAuthHeaders(
+					final HttpHeaders headers,
+					final HttpMethod method,
+					final String uri) {
+		if (credential == null) {
+			return;
+		}
+		final String uid = credential.getUid();
+		final String secret = credential.getSecret();
+		if (uid == null || secret == null) {
+			return;
+		}
+		try {
+			final Instant now = Instant.now();
+			headers.remove(HttpHeaderNames.DATE);
+			headers.set(S3Api.AMZ_DATE_HEADER, DateUtil.formatAmazon(now));
+
+			final String contentLengthStr = headers.get(HttpHeaderNames.CONTENT_LENGTH);
+			final int contentLength = contentLengthStr == null ? 0 : Integer.parseInt(contentLengthStr);
+			if (contentLength > 0) {
+				headers.set(S3Api.AMZ_PAYLOAD_HEADER, S3Api.AMZ_UNSIGNED_PAYLOAD);
+			} else {
+				headers.set(S3Api.AMZ_PAYLOAD_HEADER, S3Api.AMZ_EMPTY_BODY_SHA256);
+			}
+
+			final String datetime = headers.get(S3Api.AMZ_DATE_HEADER);
+			final String date = datetime.substring(0, 8);
+
+			// Normalize host for signing (strip default ports)
+			final String hostHeader = headers.get(HttpHeaderNames.HOST);
+			if (hostHeader != null) {
+				final int colonIdx = hostHeader.indexOf(':');
+				if (colonIdx > 0) {
+					final String portPart = hostHeader.substring(colonIdx + 1);
+					if ("80".equals(portPart) || "443".equals(portPart)) {
+						headers.set(HttpHeaderNames.HOST, hostHeader.substring(0, colonIdx));
+					}
+				}
+			}
+
+			final byte[] signingKey = buildDataPlaneSigningKey(secret, date);
+			final Map<String, String> sortedHeaders = getDataPlaneSortedHeaders(headers);
+			final String canonicalForm = buildCanonicalRequest(headers, sortedHeaders, method, uri);
+			final byte[] encodedHash = MessageDigest.getInstance("SHA-256")
+							.digest(canonicalForm.getBytes(StandardCharsets.UTF_8));
+			final String stringToSign = "AWS4-HMAC-SHA256\n"
+							+ datetime + "\n"
+							+ date + "/" + awsRegion + "/" + S3_SERVICE + "/aws4_request\n"
+							+ bytesToHexStr(encodedHash);
+
+			final byte[] sigData = hmacSHA256(stringToSign.getBytes(StandardCharsets.UTF_8), signingKey);
+			final StringBuilder sb = new StringBuilder(240);
+			sb.append(S3Api.AUTH_V4_PREFIX)
+							.append("Credential=").append(uid).append('/').append(date)
+							.append('/').append(awsRegion).append('/').append(S3_SERVICE).append("/aws4_request, ")
+							.append("SignedHeaders=").append(String.join(";", sortedHeaders.keySet()))
+							.append(", Signature=").append(bytesToHexStr(sigData));
+			headers.set(HttpHeaderNames.AUTHORIZATION, sb.toString());
+		} catch (final NoSuchAlgorithmException | InvalidKeyException e) {
+			Loggers.ERR.warn("{}: data-plane SigV4 signing failed: {}", stepId, e.getMessage());
+		}
+	}
+
+	private byte[] buildDataPlaneSigningKey(final String secret, final String date)
+					throws NoSuchAlgorithmException, InvalidKeyException {
+		final byte[] kSecret = ("AWS4" + secret).getBytes(StandardCharsets.UTF_8);
+		final byte[] kDate = hmacSHA256(date.getBytes(StandardCharsets.UTF_8), kSecret);
+		final byte[] kRegion = hmacSHA256(awsRegion.getBytes(StandardCharsets.UTF_8), kDate);
+		final byte[] kService = hmacSHA256(S3_SERVICE.getBytes(StandardCharsets.UTF_8), kRegion);
+		return hmacSHA256("aws4_request".getBytes(StandardCharsets.UTF_8), kService);
+	}
+
+	private static byte[] hmacSHA256(final byte[] data, final byte[] key)
+					throws NoSuchAlgorithmException, InvalidKeyException {
+		final Mac mac = Mac.getInstance("HmacSHA256");
+		mac.init(new SecretKeySpec(key, "RawBytes"));
+		return mac.doFinal(data);
+	}
+
+	private static Map<String, String> getDataPlaneSortedHeaders(final HttpHeaders headers) {
+		final Map<String, String> sorted = new TreeMap<>();
+		for (final Map.Entry<String, String> h : headers) {
+			final String name = h.getKey().toLowerCase(Locale.ROOT);
+			if (name.equals("host") || name.startsWith("x-amz-")) {
+				sorted.put(name, h.getValue());
+			}
+		}
+		return sorted;
+	}
+
+	private static String buildCanonicalRequest(
+					final HttpHeaders headers,
+					final Map<String, String> sortedHeaders,
+					final HttpMethod method,
+					final String uri) {
+		final StringBuilder sb = new StringBuilder();
+		sb.append(method.name()).append('\n');
+		// canonical URI (path only, no query)
+		final int qIdx = uri.indexOf('?');
+		sb.append(qIdx < 0 ? uri : uri.substring(0, qIdx)).append('\n');
+		// canonical query string
+		sb.append(qIdx < 0 ? "" : uri.substring(qIdx + 1)).append('\n');
+		// canonical headers
+		for (final Map.Entry<String, String> h : sortedHeaders.entrySet()) {
+			sb.append(h.getKey()).append(':').append(h.getValue().trim()).append('\n');
+		}
+		sb.append('\n');
+		// signed headers list
+		sb.append(String.join(";", sortedHeaders.keySet())).append('\n');
+		// payload hash
+		final String payloadHeader = headers.get(S3Api.AMZ_PAYLOAD_HEADER);
+		sb.append(payloadHeader != null ? payloadHeader : S3Api.AMZ_EMPTY_BODY_SHA256);
+		return sb.toString();
+	}
+
+	private static String bytesToHexStr(final byte[] bytes) {
+		final StringBuilder sb = new StringBuilder(bytes.length * 2);
+		for (final byte b : bytes) {
+			sb.append(String.format("%02x", b & 0xFF));
+		}
+		return sb.toString();
+	}
+
+	/**
+	 * Derives the warehouse location (s3://...) from a metadata file S3 URI.
+	 * e.g. s3://bucket/prefix/metadata/v1.metadata.json → s3://bucket/prefix
+	 */
+	private static String deriveWarehouseLocation(final String metadataLocation) {
+		if (metadataLocation == null || metadataLocation.isEmpty()) {
+			return "";
+		}
+		final int metaIdx = metadataLocation.lastIndexOf("/metadata/");
+		if (metaIdx > 0) {
+			return metadataLocation.substring(0, metaIdx);
+		}
+		return metadataLocation;
 	}
 
 	@Override

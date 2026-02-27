@@ -35,20 +35,20 @@ func (d *DebugLayoutRenderer) RenderLayoutToString(withSampleData bool) string {
 	model := d.createSampleModel(withSampleData)
 
 	result.WriteString("=== TUI LAYOUT DEBUG ===\n")
-	result.WriteString(fmt.Sprintf("Terminal Size: %dx%d\n", d.width, d.height))
+	fmt.Fprintf(&result, "Terminal Size: %dx%d\n", d.width, d.height)
 	result.WriteString("=========================\n\n")
 
 	// Show viewport calculations
 	result.WriteString("--- VIEWPORT CALCULATIONS ---\n")
-	result.WriteString(fmt.Sprintf("Live View Height: %d\n", model.getLiveViewHeight()))
-	result.WriteString(fmt.Sprintf("Process Output Height: %d\n", model.getProcessViewportHeight()))
-	result.WriteString(fmt.Sprintf("Charts Height: %d (fixed)\n", 8))
-	result.WriteString(fmt.Sprintf("Status Height: %d (fixed)\n", 1))
+	fmt.Fprintf(&result, "Live View Height: %d\n", model.getLiveViewHeight())
+	fmt.Fprintf(&result, "Process Output Height: %d\n", model.getProcessViewportHeight())
+	fmt.Fprintf(&result, "Charts Height: %d (fixed)\n", 8)
+	fmt.Fprintf(&result, "Status Height: %d (fixed)\n", 1)
 
 	totalUsed := model.getLiveViewHeight() + model.getProcessViewportHeight() + 8 + 1 + 6 // +6 for borders
-	result.WriteString(fmt.Sprintf("Total Used: %d\n", totalUsed))
-	result.WriteString(fmt.Sprintf("Available: %d\n", d.height))
-	result.WriteString(fmt.Sprintf("Overflow: %d\n", totalUsed-d.height))
+	fmt.Fprintf(&result, "Total Used: %d\n", totalUsed)
+	fmt.Fprintf(&result, "Available: %d\n", d.height)
+	fmt.Fprintf(&result, "Overflow: %d\n", totalUsed-d.height)
 	result.WriteString("------------------------------\n\n")
 
 	// Render the actual TUI
@@ -59,11 +59,11 @@ func (d *DebugLayoutRenderer) RenderLayoutToString(withSampleData bool) string {
 
 	// Show line count analysis
 	lines := strings.Split(tuiOutput, "\n")
-	result.WriteString(fmt.Sprintf("Rendered Lines: %d\n", len(lines)))
+	fmt.Fprintf(&result, "Rendered Lines: %d\n", len(lines))
 	result.WriteString("Line breakdown:\n")
 	for i, line := range lines {
 		if i < 5 || i >= len(lines)-5 {
-			result.WriteString(fmt.Sprintf("  %3d: %s\n", i+1, truncateString(line, 60)))
+			fmt.Fprintf(&result, "  %3d: %s\n", i+1, truncateString(line, 60))
 		} else if i == 5 {
 			result.WriteString("  ... (middle lines omitted) ...\n")
 		}

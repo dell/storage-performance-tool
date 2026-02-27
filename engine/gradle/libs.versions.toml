@@ -124,6 +124,7 @@ parquet-avro = { module = "org.apache.parquet:parquet-avro", version.ref = "parq
 avro = { module = "org.apache.avro:avro", version.ref = "avro" }
 hadoop-common = { module = "org.apache.hadoop:hadoop-common", version.ref = "hadoop" }
 hadoop-mapreduce-client-core = { module = "org.apache.hadoop:hadoop-mapreduce-client-core", version.ref = "hadoop" }
+hadoop-thirdparty = { module = "org.apache.hadoop.thirdparty:hadoop-shaded-guava", version = "1.1.1" }
 woodstox-core = { module = "com.fasterxml.woodstox:woodstox-core", version = "5.4.0" }
 stax2-api = { module = "org.codehaus.woodstox:stax2-api", version = "4.2.1" }
 commons-collections = { module = "commons-collections:commons-collections", version = "3.2.2" }

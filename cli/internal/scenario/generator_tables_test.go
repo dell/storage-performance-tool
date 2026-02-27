@@ -44,9 +44,6 @@ func TestGenerateTablesScenario_TPS(t *testing.T) {
 	checks := []string{
 		`"type": "s3-tables"`,
 		`"concurrency": concurrency`,
-		`"addrs": ["172.17.0.2"]`,
-		`"port": 4566`,
-		`"enabled": false`,
 		`"uid": "testkey"`,
 		`"secret": "testsecret"`,
 		`"bucket": bucket`,
@@ -159,19 +156,22 @@ func TestGenerateTablesScenario_Catalog(t *testing.T) {
 }
 
 func TestGenerateTablesScenario_HTTPS(t *testing.T) {
+	// Net/ssl config is no longer embedded in the JS template — it is passed via
+	// CLI defaults config so that the confuse library can handle list values correctly.
+	// The generator should succeed with an HTTPS endpoint without error.
 	params := baseTablesParams()
 	params.Endpoint = "https://s3tables.us-east-1.amazonaws.com"
 
 	out, err := GenerateTablesScenario(params)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error for HTTPS endpoint: %v", err)
 	}
-
-	if !strings.Contains(out, `"enabled": true`) {
-		t.Errorf("HTTPS endpoint should set ssl.enabled=true\nFull output:\n%s", out)
+	if !strings.Contains(out, `"type": "s3-tables"`) {
+		t.Errorf("HTTPS scenario should still produce valid s3-tables config\nFull output:\n%s", out)
 	}
-	if !strings.Contains(out, `"port": 443`) {
-		t.Errorf("HTTPS without explicit port should use 443\nFull output:\n%s", out)
+	// Net/ssl must NOT be embedded in the JS (would cause InvalidValuePathException)
+	if strings.Contains(out, `"addrs"`) {
+		t.Errorf("net.addrs must not be embedded in tables JS template\nFull output:\n%s", out)
 	}
 }
 
@@ -185,16 +185,6 @@ func TestGenerateTablesScenario_InvalidVector(t *testing.T) {
 	}
 }
 
-func TestGenerateTablesScenario_MissingEndpoint(t *testing.T) {
-	params := baseTablesParams()
-	params.Endpoint = ""
-	params.Endpoints = nil
-
-	_, err := GenerateTablesScenario(params)
-	if err == nil {
-		t.Fatal("expected error for missing endpoint, got nil")
-	}
-}
 
 func TestGenerateScenario_TablesDispatch(t *testing.T) {
 	params := baseTablesParams()

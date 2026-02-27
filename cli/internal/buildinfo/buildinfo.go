@@ -1,5 +1,5 @@
 // Package buildinfo exposes build-time metadata injected via ldflags.
-package buildinfo
+package buildinfo //nolint:revive // 'buildinfo' does not shadow a top-level stdlib package
 
 // Version, Commit, and BuildDate are injected at build time via ldflags.
 // Defaults keep local builds informative without extra wiring.

@@ -60,7 +60,17 @@ dependencies {
 		libs.fiber4j,
 		libs.disruptor,
 		libs.netty.transport.native.epoll,
+		libs.hadoop.thirdparty,
 	)
+}
+
+shadowJar {
+	// SLF4J is bundled transitively by Avro/Parquet but is already provided by the
+	// engine's parent classloader. Including it in the shadow JAR causes a
+	// LinkageError (loader constraint violation) when the extension is loaded via
+	// ParentLastURLClassLoader. Exclude it so the parent's SLF4J is used.
+	exclude 'org/slf4j/**'
+	exclude 'org/slf4j/'
 }
 
 tasks.named('integrationTest', Test) {
