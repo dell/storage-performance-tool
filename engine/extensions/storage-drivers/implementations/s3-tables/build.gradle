@@ -40,10 +40,17 @@ dependencies {
 	)
 
 	// Parquet / Avro bundled into shadow JAR (new dependencies)
-	implementation(
-		libs.parquet.avro,
-		libs.avro,
-	)
+	implementation(libs.parquet.avro)
+	implementation(libs.avro)
+
+	// Hadoop stubs: parquet-hadoop imports Hadoop classes at class-load time even when
+	// no Hadoop FileSystem I/O is performed. Bring in the minimum jars needed to satisfy
+	// the import graph, excluding all transitive Hadoop dependencies.
+	implementation(libs.hadoop.common) { transitive = false }
+	implementation(libs.hadoop.mapreduce.client.core) { transitive = false }
+	implementation(libs.woodstox.core) { transitive = false }
+	implementation(libs.stax2.api) { transitive = false }
+	implementation(libs.commons.collections) { transitive = false }
 
 	testImplementation(libs.mockito.core)
 
