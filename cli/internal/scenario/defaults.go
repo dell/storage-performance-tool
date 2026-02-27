@@ -113,6 +113,56 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 		}
 
+	case "tables":
+		// For tables workloads, endpoint/auth are configured identically to S3 workloads.
+		// The s3-tables driver extends S3StorageDriver and uses the same net config.
+		authVersion := params.AuthVersion
+		if authVersion == 0 {
+			authVersion = 4
+		}
+		eps := make([]string, 0, len(params.Endpoints))
+		for _, e := range params.Endpoints {
+			if s := strings.TrimSpace(e); s != "" {
+				eps = append(eps, s)
+			}
+		}
+		if len(eps) == 0 && strings.TrimSpace(params.Endpoint) != "" {
+			eps = []string{strings.TrimSpace(params.Endpoint)}
+		}
+		if len(eps) == 0 {
+			return nil, fmt.Errorf("endpoint is required for tables workload")
+		}
+		u, err := url.Parse(eps[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid endpoint URL: %w", err)
+		}
+		portStr := u.Port()
+		if portStr == "" {
+			if u.Scheme == schemeHTTPS {
+				portStr = constants.DefaultHTTPSPort
+			} else {
+				portStr = constants.DefaultHTTPPort
+			}
+		}
+		var portInt int
+		if _, scanErr := fmt.Sscanf(portStr, "%d", &portInt); scanErr != nil {
+			return nil, fmt.Errorf("invalid port in endpoint %q", eps[0])
+		}
+		config.Storage = StorageConfig{
+			Driver: DriverConfig{
+				Type:  storageDriverTypeS3Tables,
+				Limit: DriverLimits{Concurrency: params.Tables.ConcurrentWriters},
+			},
+			Net: NetConfig{
+				Node: NodeConfig{
+					Addrs: []string{u.Hostname()},
+					Port:  portInt,
+				},
+				SSL: SSLConfig{Enabled: u.Scheme == schemeHTTPS},
+			},
+			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
+		}
+
 	case "write", "read", "mixed", "delete", "list":
 		// For S3 workloads, parse one or more endpoints and configure accordingly
 		authVersion := params.AuthVersion

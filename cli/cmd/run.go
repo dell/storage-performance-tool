@@ -835,6 +835,22 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
 	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
 
+	// S3 Tables Options
+	runCmd.Flags().String("test-vector", "tps", "Tables test vector: tps | compaction | catalog")
+	runCmd.Flags().String("table-bucket", "spt-tables", "S3 Table bucket name")
+	runCmd.Flags().String("namespace", "default", "Namespace within the table bucket")
+	runCmd.Flags().String("table-name", "spt-bench", "Table name (auto-suffixed with timestamp if default)")
+	runCmd.Flags().Int("concurrent-writers", 10, "Concurrent Iceberg commit threads")
+	runCmd.Flags().Int("commit-freq-ms", 500, "Target ms between commits per writer")
+	runCmd.Flags().String("target-file-size", "64MB", "Target Parquet file size (e.g. 64MB)")
+	runCmd.Flags().String("ingest-file-size", "100KB", "Small Parquet file size for compaction seed")
+	runCmd.Flags().String("total-ingest", "1GB", "Total data volume to ingest for compaction seed")
+	runCmd.Flags().Int("namespace-count", 100, "Namespaces to create for catalog test")
+	runCmd.Flags().Int("tables-per-ns", 100, "Tables per namespace for catalog test")
+	runCmd.Flags().Int("read-concurrency", 10, "Concurrent catalog readers for catalog test")
+	runCmd.Flags().String("compaction-timeout", "4h", "Max wait for compaction to complete")
+	runCmd.Flags().Bool("no-provision", false, "Skip table bucket/namespace/table creation (reuse existing)")
+
 	// Headless Mode Options
 	// TUI Layout Options
 	runCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible (graphs and messages collapsed)")
@@ -938,6 +954,61 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
 
+	// S3 Tables parameters
+	if workloadType == WorkloadTypeTables {
+		testVector, _ := cmd.Flags().GetString("test-vector")
+		tableBucket, _ := cmd.Flags().GetString("table-bucket")
+		ns, _ := cmd.Flags().GetString("namespace")
+		tableName, _ := cmd.Flags().GetString("table-name")
+		concurrentWriters, _ := cmd.Flags().GetInt("concurrent-writers")
+		commitFreqMs, _ := cmd.Flags().GetInt("commit-freq-ms")
+		namespaceCount, _ := cmd.Flags().GetInt("namespace-count")
+		tablesPerNs, _ := cmd.Flags().GetInt("tables-per-ns")
+		readConcurrency, _ := cmd.Flags().GetInt("read-concurrency")
+		noProvision, _ := cmd.Flags().GetBool("no-provision")
+
+		targetFileSizeStr, _ := cmd.Flags().GetString("target-file-size")
+		targetFileSizeBytes, err := sizeparse.Parse(targetFileSizeStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --target-file-size %q: %w", targetFileSizeStr, err)
+		}
+
+		ingestFileSizeStr, _ := cmd.Flags().GetString("ingest-file-size")
+		ingestFileSizeBytes, err := sizeparse.Parse(ingestFileSizeStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --ingest-file-size %q: %w", ingestFileSizeStr, err)
+		}
+
+		totalIngestStr, _ := cmd.Flags().GetString("total-ingest")
+		totalIngestBytes, err := sizeparse.Parse(totalIngestStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --total-ingest %q: %w", totalIngestStr, err)
+		}
+
+		compactionTimeoutStr, _ := cmd.Flags().GetString("compaction-timeout")
+		compactionTimeoutMs, err := parseTablesTimeoutMs(compactionTimeoutStr)
+		if err != nil {
+			return params, fmt.Errorf("invalid --compaction-timeout %q: %w", compactionTimeoutStr, err)
+		}
+
+		params.Tables = scenario.TablesParams{
+			TestVector:          testVector,
+			TableBucket:         tableBucket,
+			Namespace:           ns,
+			TableName:           tableName,
+			ConcurrentWriters:   concurrentWriters,
+			CommitFreqMs:        commitFreqMs,
+			TargetFileSizeBytes: targetFileSizeBytes,
+			IngestFileSizeBytes: ingestFileSizeBytes,
+			TotalIngestBytes:    totalIngestBytes,
+			NamespaceCount:      namespaceCount,
+			TablesPerNs:         tablesPerNs,
+			ReadConcurrency:     readConcurrency,
+			CompactionTimeoutMs: compactionTimeoutMs,
+			NoProvision:         noProvision,
+		}
+	}
+
 	// RDMA acceleration
 	useRdma, _ := cmd.Flags().GetBool("use-rdma")
 	params.UseRdma = useRdma
@@ -959,12 +1030,24 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")
 	params.MinimalTUI = minimalTUI
 
-	// Set defaults
-	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList {
+	// Set defaults (tables workload has no object size concept)
+	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
 	}
 
 	return params, nil
+}
+
+// parseTablesTimeoutMs parses a Go duration string to milliseconds for the tables compaction timeout.
+func parseTablesTimeoutMs(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	return d.Milliseconds(), nil
 }
 
 // ResultsOptions captures Phase 1 results-related CLI settings.
