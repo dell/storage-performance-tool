@@ -510,6 +510,94 @@ func TestGenerateDefaults(t *testing.T) {
 		},
 	}
 
+	// S3 Tables cases
+	tablesCases := []struct {
+		name        string
+		params      Params
+		wantErr     bool
+		checkOutput func(t *testing.T, data []byte)
+	}{
+		{
+			name: "tables workload HTTP",
+			params: Params{
+				WorkloadType: "tables",
+				Endpoint:     "http://172.17.0.2:4566",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Tables: TablesParams{
+					ConcurrentWriters: 8,
+				},
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-tables" {
+					t.Errorf("Expected driver type 's3-tables', got %q", config.Storage.Driver.Type)
+				}
+				if config.Storage.Driver.Limit.Concurrency != 8 {
+					t.Errorf("Expected concurrency 8, got %d", config.Storage.Driver.Limit.Concurrency)
+				}
+				if config.Storage.Net.SSL.Enabled {
+					t.Error("HTTP endpoint should have SSL disabled")
+				}
+				if config.Storage.Net.Node.Port != 4566 {
+					t.Errorf("Expected port 4566, got %d", config.Storage.Net.Node.Port)
+				}
+				if len(config.Storage.Net.Node.Addrs) != 1 || config.Storage.Net.Node.Addrs[0] != "172.17.0.2" {
+					t.Errorf("Expected addr '172.17.0.2', got %v", config.Storage.Net.Node.Addrs)
+				}
+				if config.Storage.Auth.UID != "testkey" {
+					t.Errorf("Expected uid 'testkey', got %q", config.Storage.Auth.UID)
+				}
+				if config.Storage.Auth.Version != 4 {
+					t.Errorf("Expected auth version 4, got %d", config.Storage.Auth.Version)
+				}
+			},
+		},
+		{
+			name: "tables workload HTTPS",
+			params: Params{
+				WorkloadType: "tables",
+				Endpoint:     "https://s3tables.us-east-1.amazonaws.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Tables: TablesParams{
+					ConcurrentWriters: 4,
+				},
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if !config.Storage.Net.SSL.Enabled {
+					t.Error("HTTPS endpoint should have SSL enabled")
+				}
+				if config.Storage.Net.Node.Port != 443 {
+					t.Errorf("Expected port 443, got %d", config.Storage.Net.Node.Port)
+				}
+			},
+		},
+		{
+			name: "tables workload missing endpoint",
+			params: Params{
+				WorkloadType: "tables",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tablesCases {
+		tests = append(tests, tt)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := GenerateDefaults(tt.params)
