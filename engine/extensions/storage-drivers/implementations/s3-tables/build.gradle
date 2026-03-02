@@ -73,6 +73,10 @@ shadowJar {
 	exclude 'org/slf4j/'
 }
 
+tasks.named('test', Test) {
+	systemProperty 'junit.jupiter.execution.timeout.default', '30s'
+}
+
 tasks.named('integrationTest', Test) {
 	useJUnitPlatform {
 		includeTags 'integration'

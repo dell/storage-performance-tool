@@ -57,7 +57,7 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 
 	protected final String opMode;
 	protected final S3TablesControlPlane controlPlane;
-	private final long targetFileSizeBytes;
+	final long targetFileSizeBytes;
 
 	/** Initialized lazily after provision completes (needs warehouseLocation). */
 	private final AtomicReference<IcebergCommitter> committer = new AtomicReference<>(null);
@@ -77,6 +77,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 	/** Monotonically increasing base row ID shared across all writes this step. */
 	private final AtomicLong baseRowId = new AtomicLong(0);
 
+	/** Compaction poller config — only meaningful when opMode=tableCompactionPoll. */
+	private final long totalIngestBytes;
+	private final double compactionToleranceFactor;
+	private final int compactionStabilizationPolls;
+	private final long compactionPollIntervalMs;
+	private final long compactionPollTimeoutMs;
+
 	public S3TablesStorageDriver(
 					final String stepId,
 					final DataInput dataInput,
@@ -88,6 +95,11 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		final Config s3tablesConfig = storageConfig.configVal("s3tables");
 		this.opMode = s3tablesConfig.stringVal("opMode");
 		this.targetFileSizeBytes = s3tablesConfig.intVal("targetFileSizeBytes");
+		this.totalIngestBytes = s3tablesConfig.intVal("totalIngestBytes");
+		this.compactionToleranceFactor = s3tablesConfig.doubleVal("compactionToleranceFactor");
+		this.compactionStabilizationPolls = s3tablesConfig.intVal("compactionStabilizationPolls");
+		this.compactionPollIntervalMs = s3tablesConfig.intVal("compactionPollIntervalMs");
+		this.compactionPollTimeoutMs = s3tablesConfig.intVal("compactionPollTimeoutMs");
 		this.parquetWriter = new ParquetRowGroupWriter(targetFileSizeBytes);
 		final String controlPlaneEndpoint = s3tablesConfig.stringVal("controlPlaneEndpoint");
 		final String effectiveEndpoint = controlPlaneEndpoint.isEmpty()
@@ -146,9 +158,36 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 			return true;
 		case OP_MODE_TABLE_WRITE:
 			return submitTableWrite(op);
+		case OP_MODE_TABLE_COMPACTION_POLL:
+			return submitCompactionPoll(op);
 		default:
 			throw new IllegalStateException("Unsupported opMode: " + opMode);
 		}
+	}
+
+	private boolean submitCompactionPoll(final O op) {
+		final CompactionPoller poller = new CompactionPoller(
+						this,
+						totalIngestBytes,
+						targetFileSizeBytes,
+						compactionToleranceFactor,
+						compactionStabilizationPolls,
+						compactionPollIntervalMs,
+						compactionPollTimeoutMs);
+		op.startRequest();
+		op.finishRequest();
+		op.startResponse();
+		try {
+			poller.poll();
+			op.status(Operation.Status.SUCC);
+		} catch (final Exception e) {
+			Loggers.ERR.error("{}: tableCompactionPoll failed: {}", stepId, e.getMessage());
+			op.status(Operation.Status.FAIL_IO);
+		} finally {
+			op.finishResponse();
+		}
+		handleCompleted(op);
+		return true;
 	}
 
 	private boolean submitTableWrite(final O op) throws IllegalStateException {
@@ -304,6 +343,45 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 			final String body = resp.content().toString(StandardCharsets.UTF_8);
 			throw new Exception("Data-plane PUT " + s3Path + " returned HTTP " + status + ": " + body);
 		}
+	}
+
+	/**
+	 * Executes a data-plane S3 GET signed with service="s3".
+	 * Returns the response body bytes, or throws on timeout/non-2xx.
+	 */
+	byte[] executeDataPlaneGet(final String s3Path) throws Exception {
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		final String host = storageNodeAddrs[0];
+		headers.set(HttpHeaderNames.HOST, host);
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		applyDynamicHeaders(headers);
+		applySharedHeaders(headers);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.GET, s3Path);
+
+		final FullHttpRequest req = new DefaultFullHttpRequest(
+						HttpVersion.HTTP_1_1,
+						HttpMethod.GET,
+						s3Path,
+						Unpooled.EMPTY_BUFFER,
+						headers,
+						EmptyHttpHeaders.INSTANCE);
+		final FullHttpResponse resp;
+		try {
+			resp = executeHttpRequest(req);
+		} catch (final ConnectException e) {
+			throw new Exception("Data-plane GET failed for " + s3Path + ": " + e.getMessage(), e);
+		}
+		if (resp == null) {
+			throw new Exception("Data-plane GET timeout for " + s3Path);
+		}
+		final int status = resp.status().code();
+		if (status < 200 || status >= 300) {
+			final String body = resp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("Data-plane GET " + s3Path + " returned HTTP " + status + ": " + body);
+		}
+		final byte[] bytes = new byte[resp.content().readableBytes()];
+		resp.content().readBytes(bytes);
+		return bytes;
 	}
 
 	/**

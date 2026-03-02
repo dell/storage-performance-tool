@@ -581,8 +581,71 @@ public class S3TablesStorageDriverTest {
 	}
 
 	@Test
-	void unsupportedOpMode_submit_throwsIllegalState() throws Exception {
+	void compactionPoll_submit_converges_marksOpSucc() throws Exception {
 		final Config cfg = baseConfig("tableCompactionPoll", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// effectiveArn() lazy ListTableBuckets on first control-plane call
+		drv.enqueueResponse(okJson(
+						"{\"tableBuckets\":[{\"name\":\"test-bucket\","
+										+ "\"arn\":\"arn:aws:s3tables:us-east-1:123456789:bucket/test-bucket\"}]}"));
+		// PutTableMaintenanceConfiguration → 200
+		drv.enqueueResponse(okJson("{}"));
+		// poll 1: GetTableMetadataLocation → metadataLocation JSON
+		drv.enqueueResponse(okJson("{\"metadataLocation\":\"s3://test-bucket/meta/v1.json\","
+						+ "\"versionToken\":\"tok\"}"));
+		// poll 1: data-plane GET metadata JSON → 5 files (≤ target=10, stable=1)
+		drv.enqueueResponse(okJson("{\"current-snapshot-id\":1,\"snapshots\":[{\"snapshot-id\":1,"
+						+ "\"summary\":{\"total-data-files\":\"5\"}}]}"));
+		// poll 2: GetTableMetadataLocation
+		drv.enqueueResponse(okJson("{\"metadataLocation\":\"s3://test-bucket/meta/v2.json\","
+						+ "\"versionToken\":\"tok2\"}"));
+		// poll 2: data-plane GET → 5 files (stable=2 → converge)
+		drv.enqueueResponse(okJson("{\"current-snapshot-id\":1,\"snapshots\":[{\"snapshot-id\":1,"
+						+ "\"summary\":{\"total-data-files\":\"5\"}}]}"));
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.SUCC, op.status(),
+						"op should be SUCC when compaction converges");
+	}
+
+	@Test
+	void compactionPoll_submit_maintenanceFails_marksOpFailIo() throws Exception {
+		final Config cfg = baseConfig("tableCompactionPoll", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// effectiveArn() lazy ListTableBuckets
+		drv.enqueueResponse(okJson(
+						"{\"tableBuckets\":[{\"name\":\"test-bucket\","
+										+ "\"arn\":\"arn:aws:s3tables:us-east-1:123456789:bucket/test-bucket\"}]}"));
+		// PutTableMaintenanceConfiguration → 500
+		drv.enqueueResponse(new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR,
+						Unpooled.copiedBuffer("{}", java.nio.charset.StandardCharsets.UTF_8)));
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.FAIL_IO, op.status(),
+						"op should be FAIL_IO when PutTableMaintenanceConfiguration fails");
+	}
+
+	private static FullHttpResponse okJson(final String body) {
+		return new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1,
+						HttpResponseStatus.OK,
+						Unpooled.copiedBuffer(body, StandardCharsets.UTF_8));
+	}
+
+	@Test
+	void unsupportedOpMode_submit_throwsIllegalState() throws Exception {
+		final Config cfg = baseConfig("unknownMode", "127.0.0.1");
 		final TestDriver drv = new TestDriver(cfg);
 
 		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(

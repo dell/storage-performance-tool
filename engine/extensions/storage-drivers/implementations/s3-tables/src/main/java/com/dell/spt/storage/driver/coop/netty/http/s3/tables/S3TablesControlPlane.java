@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpMethod;
 
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -30,6 +31,9 @@ final class S3TablesControlPlane {
 	/** Set during provision; used to build control-plane URIs after provisioning. */
 	private volatile String bucketArn;
 
+	/** URL-encoded form of bucketArn, cached alongside it. */
+	private volatile String bucketArnEncoded;
+
 	/** True once fetchBucketArn() has been attempted at least once. */
 	private volatile boolean arnFetched = false;
 
@@ -44,6 +48,7 @@ final class S3TablesControlPlane {
 		this.tableName = tableName;
 		this.driver = driver;
 		this.bucketArn = null;
+		this.bucketArnEncoded = null;
 	}
 
 	/**
@@ -80,7 +85,7 @@ final class S3TablesControlPlane {
 		try {
 			final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
 			if (node.has("arn")) {
-				this.bucketArn = node.get("arn").asText();
+				setBucketArn(node.get("arn").asText());
 				Loggers.MSG.debug("{}: CreateTableBucket: parsed ARN={}", driver.getStepId(), this.bucketArn);
 			}
 		} catch (final Exception e) {
@@ -89,7 +94,17 @@ final class S3TablesControlPlane {
 		if (this.bucketArn == null) {
 			fetchBucketArn();
 		}
-		Loggers.MSG.info("{}: CreateTableBucket: created bucket={} arn={}", driver.getStepId(), bucket, bucketArn);
+		Loggers.MSG.info("{}: CreateTableBucket: created bucket={} arn={}",
+						driver.getStepId(), bucket, bucketArn);
+	}
+
+	private void setBucketArn(final String arn) {
+		this.bucketArn = arn;
+		try {
+			this.bucketArnEncoded = URLEncoder.encode(arn, StandardCharsets.UTF_8.name());
+		} catch (final Exception e) {
+			this.bucketArnEncoded = arn;
+		}
 	}
 
 	private void fetchBucketArn() throws Exception {
@@ -109,7 +124,7 @@ final class S3TablesControlPlane {
 			if (arr != null) {
 				for (final var b : arr) {
 					if (bucket.equals(b.path("name").asText())) {
-						this.bucketArn = b.path("arn").asText();
+						setBucketArn(b.path("arn").asText());
 						Loggers.MSG.debug("{}: resolved bucket ARN={}", driver.getStepId(), this.bucketArn);
 						break;
 					}
@@ -213,12 +228,40 @@ final class S3TablesControlPlane {
 	}
 
 	/**
+	 * PutTableMaintenanceConfiguration — triggers compaction on the table.
+	 * REST: PUT /tables/{tableBucketARN}/{namespace}/{name}/maintenance/{type}
+	 */
+	void putTableMaintenanceConfiguration() throws Exception {
+		final String arn = effectiveArn();
+		final String uri = "/tables/" + arn + "/" + namespace + "/" + tableName + "/maintenance/icebergCompaction";
+		final ObjectNode body = MAPPER.createObjectNode();
+		final ObjectNode value = body.putObject("value");
+		value.put("status", "enabled");
+		final ObjectNode settings = value.putObject("settings");
+		final ObjectNode icebergCompaction = settings.putObject("icebergCompaction");
+		icebergCompaction.put("targetFileSizeMB",
+						(int) Math.max(1, driver.targetFileSizeBytes / (1024 * 1024)));
+		final byte[] bodyBytes = MAPPER.writeValueAsBytes(body);
+		final FullHttpResponse resp = driver.executeControlPlaneRequest(HttpMethod.PUT, uri, bodyBytes);
+		if (resp == null) {
+			throw new Exception("PutTableMaintenanceConfiguration: no response (timeout)");
+		}
+		final int status = resp.status().code();
+		if (status < 200 || status >= 300) {
+			final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("PutTableMaintenanceConfiguration failed: HTTP " + status + " — " + bodyStr);
+		}
+		Loggers.MSG.info("{}: PutTableMaintenanceConfiguration: compaction triggered on table={}",
+						driver.getStepId(), tableName);
+	}
+
+	/**
 	 * Returns the URL-encoded bucket ARN if known, otherwise the bucket name.
 	 * Attempts a lazy fetch via ListTableBuckets once if ARN has not been set yet.
 	 */
 	private String effectiveArn() {
-		if (bucketArn != null) {
-			return java.net.URLEncoder.encode(bucketArn, StandardCharsets.UTF_8);
+		if (bucketArnEncoded != null) {
+			return bucketArnEncoded;
 		}
 		if (!arnFetched) {
 			try {
@@ -227,7 +270,7 @@ final class S3TablesControlPlane {
 				Loggers.MSG.debug("{}: effectiveArn lazy-fetch failed, falling back to bucket name: {}", driver.getStepId(), e.getMessage());
 			}
 		}
-		return bucketArn != null ? java.net.URLEncoder.encode(bucketArn, StandardCharsets.UTF_8) : bucket;
+		return bucketArnEncoded != null ? bucketArnEncoded : bucket;
 	}
 
 }
