@@ -65,6 +65,12 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 	/** Counts HTTP 409 version-conflict retries across all threads. */
 	private final AtomicLong commitRetryCount = new AtomicLong(0);
 
+	/** Compaction stats — populated by CompactionPoller when tableCompactionPoll completes. */
+	private volatile long compactionStartMs = 0;
+	private volatile long compactionCompleteMs = 0;
+	private volatile long compactionFilesBefore = 0;
+	private volatile long compactionFilesAfter = 0;
+
 	/** Shared writer for generating Parquet bytes; thread-safe (stateless per call). */
 	private final ParquetRowGroupWriter parquetWriter;
 
@@ -214,6 +220,20 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 
 	long getCommitRetryCount() {
 		return commitRetryCount.get();
+	}
+
+	/**
+	 * Called by CompactionPoller on convergence or timeout to record compaction outcome.
+	 */
+	void recordCompactionStats(
+					final long startMs,
+					final long completeMs,
+					final long filesBefore,
+					final long filesAfter) {
+		this.compactionStartMs = startMs;
+		this.compactionCompleteMs = completeMs;
+		this.compactionFilesBefore = filesBefore;
+		this.compactionFilesAfter = filesAfter;
 	}
 
 	/**
@@ -426,6 +446,23 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 			return metadataLocation.substring(0, metaIdx);
 		}
 		return metadataLocation;
+	}
+
+	@Override
+	protected void doClose() throws IOException {
+		final long durationMs = compactionCompleteMs > 0
+						? compactionCompleteMs - compactionStartMs
+						: 0;
+		Loggers.TABLES_METRICS.info(
+						"snapshot_commit_retries={},compaction_start_ms={},compaction_complete_ms={}"
+										+ ",compaction_duration_ms={},compaction_files_before={},compaction_files_after={}",
+						commitRetryCount.get(),
+						compactionStartMs,
+						compactionCompleteMs,
+						durationMs,
+						compactionFilesBefore,
+						compactionFilesAfter);
+		super.doClose();
 	}
 
 	@Override
