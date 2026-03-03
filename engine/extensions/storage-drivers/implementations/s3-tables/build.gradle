@@ -1,0 +1,85 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "0.1.0"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.netty.http.s3.tables"
+}
+
+dependencies {
+	// S3 driver dependency (compileOnly - loaded from parent classloader)
+	compileOnly(
+		project(':extensions:storage-drivers:implementations:s3'),
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:netty'),
+		project(':extensions:storage-drivers:protocols:http'),
+	)
+
+	// API dependencies from parent classloader
+	compileOnly(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// Netty dependencies from parent classloader (not bundled)
+	compileOnly(
+		libs.netty.handler,
+		libs.netty.codec.http,
+	)
+
+	// Jackson from parent classloader (already in spt-base)
+	compileOnly(
+		libs.jackson.databind,
+		libs.jackson.core,
+	)
+
+	// Parquet / Avro bundled into shadow JAR (new dependencies)
+	implementation(libs.parquet.avro)
+	implementation(libs.avro)
+
+	// Hadoop stubs: parquet-hadoop imports Hadoop classes at class-load time even when
+	// no Hadoop FileSystem I/O is performed. Bring in the minimum jars needed to satisfy
+	// the import graph, excluding all transitive Hadoop dependencies.
+	implementation(libs.hadoop.common) { transitive = false }
+	implementation(libs.hadoop.mapreduce.client.core) { transitive = false }
+	implementation(libs.woodstox.core) { transitive = false }
+	implementation(libs.stax2.api) { transitive = false }
+	implementation(libs.commons.collections) { transitive = false }
+
+	testImplementation(libs.mockito.core)
+
+	testRuntimeOnly(
+		libs.commons.codec,
+		libs.confuse.io.yaml,
+		libs.fiber4j,
+		libs.disruptor,
+		libs.netty.transport.native.epoll,
+		libs.hadoop.thirdparty,
+	)
+}
+
+shadowJar {
+	// SLF4J is bundled transitively by Avro/Parquet but is already provided by the
+	// engine's parent classloader. Including it in the shadow JAR causes a
+	// LinkageError (loader constraint violation) when the extension is loaded via
+	// ParentLastURLClassLoader. Exclude it so the parent's SLF4J is used.
+	exclude 'org/slf4j/**'
+	exclude 'org/slf4j/'
+}
+
+tasks.named('test', Test) {
+	systemProperty 'junit.jupiter.execution.timeout.default', '30s'
+}
+
+tasks.named('integrationTest', Test) {
+	useJUnitPlatform {
+		includeTags 'integration'
+	}
+	systemProperty 'junit.jupiter.execution.timeout.default', '5m'
+}

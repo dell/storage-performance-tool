@@ -31,8 +31,8 @@ run_tests_with_coverage() {
   echo "Running tests with coverage..."
   # Exclude 'tools' packages from coverage to avoid diluting app coverage
   PKGS=$(go list ./... | grep -v "/tools")
-  go test -mod=mod -coverprofile=coverage.out $PKGS
-  GOFLAGS=-mod=mod go tool cover -html=coverage.out -o coverage.html
+  go test -coverprofile=coverage.out $PKGS
+  go tool cover -html=coverage.out -o coverage.html
   echo "Coverage report generated: coverage.html"
 }
 

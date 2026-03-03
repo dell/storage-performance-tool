@@ -22,6 +22,7 @@ func ValidateWorkloadType(workloadType string) error {
 		WorkloadTypeDelete: true,
 		WorkloadTypeList:   true,
 		WorkloadTypeMock:   true,
+		WorkloadTypeTables: true,
 	}
 
 	if !validTypes[workloadType] {
@@ -52,9 +53,12 @@ func ValidateS3Flags(cmd *cobra.Command, workloadType string) error {
 		return fmt.Errorf(ErrMissingSecretKey, workloadType)
 	}
 
-	bucket, _ := cmd.Flags().GetString("bucket")
-	if bucket == "" {
-		return fmt.Errorf(ErrMissingBucket, workloadType)
+	// Tables workload uses --table-bucket instead of --bucket
+	if workloadType != WorkloadTypeTables {
+		bucket, _ := cmd.Flags().GetString("bucket")
+		if bucket == "" {
+			return fmt.Errorf(ErrMissingBucket, workloadType)
+		}
 	}
 
 	return nil

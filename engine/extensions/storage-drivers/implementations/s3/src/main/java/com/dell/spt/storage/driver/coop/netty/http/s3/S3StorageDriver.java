@@ -193,6 +193,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final boolean versioning;
 	protected final String awsRegion;
 	protected final String checksumAlgorithm;
+	protected final String sigV4ServiceName;
 
 	public S3StorageDriver(
 					final String stepId,
@@ -201,7 +202,19 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final boolean verifyFlag,
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
+		this(stepId, itemDataInput, storageConfig, verifyFlag, batchSize, "s3");
+	}
+
+	protected S3StorageDriver(
+					final String stepId,
+					final DataInput itemDataInput,
+					final Config storageConfig,
+					final boolean verifyFlag,
+					final int batchSize,
+					final String sigV4ServiceName)
+					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
+		this.sigV4ServiceName = sigV4ServiceName;
 		sharedHeaders.remove(HttpHeaderNames.CONNECTION);
 		sharedHeaders.remove(HttpHeaderNames.DATE);
 		final var objectConfig = storageConfig.configVal("object");
@@ -300,7 +313,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			byte[] kSecret = ("AWS4" + key).getBytes(UTF_8);
 			byte[] kDate = HmacSHA256(dateStamp, kSecret);
 			byte[] kRegion = HmacSHA256(awsRegion, kDate);
-			byte[] kService = HmacSHA256("s3", kRegion);
+			byte[] kService = HmacSHA256(sigV4ServiceName, kRegion);
 			kSigning = HmacSHA256("aws4_request", kService);
 			int[] m = new int[100];
 			for (int i = 0; i < kSigning.length; i++) {
@@ -1277,7 +1290,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				byte[] encodedhash = THREAD_LOCAL_SHA256.get().digest(
 								canonicalForm.getBytes(StandardCharsets.UTF_8));
 				String stringToSign = "AWS4-HMAC-SHA256\n" + datetime + "\n" + date
-								+ "/" + awsRegion + "/s3/aws4_request\n" + bytesToHex(encodedhash);
+								+ "/" + awsRegion + "/" + sigV4ServiceName + "/aws4_request\n" + bytesToHex(encodedhash);
 				if (Loggers.MSG.isTraceEnabled()) {
 					Loggers.MSG.trace("SigV4 stringToSign={}", stringToSign);
 				}
@@ -1292,7 +1305,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								.append("/")
 								.append(awsRegion)
 								.append("/")
-								.append("s3/aws4_request, ")
+								.append(sigV4ServiceName).append("/aws4_request, ")
 								.append("SignedHeaders=")
 								.append(String.join(";", sortedHeaders.keySet()))
 								.append(", Signature=")

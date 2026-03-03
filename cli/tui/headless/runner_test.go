@@ -6,8 +6,12 @@ package headless
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -443,6 +447,109 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 				t.Error("Trace should contain dry run indicators")
 			}
 		})
+	}
+}
+
+// TestHeadlessRunner_ReturnsPromptlyOnEngineCompletion reproduces the bug where RunWithParams
+// blocks at <-ctx.Done() indefinitely after the engine container finishes all scenario steps
+// and the /status endpoint reports COMPLETED. The runner should detect completion via the
+// status callback and return without waiting for the auto-terminate timeout.
+//
+// Failure mode: runBenchmarkWithParams calls <-ctx.Done() with no other select branch, so it
+// can only exit when the auto-terminate context fires (up to 600s for the compaction smoketest).
+// Even though monitorStatus detects COMPLETED and returns, it never cancels the context or
+// signals the runner — so RunWithParams hangs for the full auto-terminate duration.
+func TestHeadlessRunner_ReturnsPromptlyOnEngineCompletion(t *testing.T) {
+	// Bind a listener on a random port so we can tell the runner which port to use.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate listener: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+
+	// Fake engine API: ready immediately, starts the run, reports COMPLETED on /status.
+	// After the first COMPLETED the engine would normally shut down, so /status keeps
+	// returning COMPLETED (as WaitForLinger expects).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"node-0"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"runId":"test-run-001"}`))
+	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"state":"COMPLETED","message":"all steps done"}`))
+	})
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		// Return 404 — metrics errors are tolerated, this keeps the metrics poller busy
+		// without affecting the completion-detection path under test.
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+
+	mockDocker := tui.NewMockDockerManager()
+
+	// Use a generous auto-terminate (30s) — the test deadline is much tighter (5s).
+	// If the bug is present, RunWithParams will block for the full 30s.
+	options := HeadlessOptions{
+		APIPort:              port,
+		AutoTerminateSeconds: 30,
+	}
+	runner, err := NewHeadlessRunner(mockDocker, options)
+	if err != nil {
+		t.Fatalf("NewHeadlessRunner: %v", err)
+	}
+	defer runner.Close()
+
+	params := scenario.ScenarioParams{
+		WorkloadType: "mock",
+		Threads:      1,
+	}
+
+	// Write a minimal scenario file — the content does not matter for this test.
+	tmpDir := t.TempDir()
+	scenarioPath := filepath.Join(tmpDir, "scenario.js")
+	if err := os.WriteFile(scenarioPath, []byte(`Load.config({}).start().await();`), 0600); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		ctx := context.Background() // no external timeout; auto-terminate drives it
+		done <- runner.RunWithParams(ctx, "test-image", scenarioPath, params)
+	}()
+
+	// The engine immediately reports COMPLETED. RunWithParams should detect this via
+	// monitorStatus and return well within 10 seconds (2s status poll + 5s WaitForLinger
+	// + cleanup overhead). With the bug present it would block for the full 30s
+	// auto-terminate timeout.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunWithParams returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunWithParams did not return after engine reported COMPLETED " +
+			"(blocks at <-ctx.Done() waiting for auto-terminate instead of exiting on completion)")
 	}
 }
 

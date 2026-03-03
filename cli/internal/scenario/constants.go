@@ -1,18 +1,20 @@
 package scenario
 
 const (
-	workloadTypeWrite = "write"
-	workloadTypeRead  = "read"
-	workloadTypeMock  = "mock"
-	workloadTypeList  = "list"
+	workloadTypeWrite  = "write"
+	workloadTypeRead   = "read"
+	workloadTypeMock   = "mock"
+	workloadTypeList   = "list"
+	workloadTypeTables = "tables"
 
-	storageDriverTypeS3     = "s3"
-	storageDriverTypeS3Rdma = "s3-rdma"
-	itemTypeData            = "data"
-	itemTypePath            = "path"
-	itemNamingTypeRandom    = "random"
-	loadOpTypeNoop          = "noop"
-	loadOpTypeList          = "list"
+	storageDriverTypeS3       = "s3"
+	storageDriverTypeS3Rdma   = "s3-rdma"
+	storageDriverTypeS3Tables = "s3-tables"
+	itemTypeData              = "data"
+	itemTypePath              = "path"
+	itemNamingTypeRandom      = "random"
+	loadOpTypeNoop            = "noop"
+	loadOpTypeList            = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 
@@ -60,9 +62,53 @@ const (
 	stepOpDelete = "delete"
 )
 
+// Tables opMode constants
+const (
+	tablesOpModeProvision      = "provision"
+	tablesOpModeTableWrite     = "tableWrite"
+	tablesOpModeCatalogSeed    = "catalogSeed"
+	tablesOpModeTableCatalog   = "tableCatalog"
+	tablesOpModeCompactionPoll = "tableCompactionPoll"
+)
+
+// Tables test vector constants
+const (
+	tablesTestVectorTPS        = "tps"
+	tablesTestVectorCompaction = "compaction"
+	tablesTestVectorCatalog    = "catalog"
+)
+
+// Template keys for tables scenarios
+const (
+	templateKeyTablesEndpoint         = "TablesEndpoint"
+	templateKeyTablesAccessKey        = "TablesAccessKey"
+	templateKeyTablesSecretKey        = "TablesSecretKey"
+	templateKeyTablesBucket           = "TablesBucket"
+	templateKeyTablesNamespace        = "TablesNamespace"
+	templateKeyTablesTableName        = "TablesTableName"
+	templateKeyTablesConcurrency      = "TablesConcurrency"
+	templateKeyTablesCommitFreqMs     = "TablesCommitFreqMs"
+	templateKeyTablesTargetFileSizeB  = "TablesTargetFileSizeBytes"
+	templateKeyTablesIngestFileSizeB  = "TablesIngestFileSizeBytes"
+	templateKeyTablesTotalIngestB     = "TablesTotalIngestBytes"
+	templateKeyTablesNamespaceCount   = "TablesNamespaceCount"
+	templateKeyTablesTablesPerNs      = "TablesTablesPerNs"
+	templateKeyTablesReadConcurrency  = "TablesReadConcurrency"
+	templateKeyTablesCompactionToutMs = "TablesCompactionTimeoutMs"
+	templateKeyTablesDuration         = "TablesDuration"
+	templateKeyTablesStepIDProvision  = "TablesStepIDProvision"
+	templateKeyTablesStepIDWrite      = "TablesStepIDWrite"
+	templateKeyTablesStepIDCompaction = "TablesStepIDCompaction"
+	templateKeyTablesStepIDSeed       = "TablesStepIDSeed"
+	templateKeyTablesStepIDCatalog    = "TablesStepIDCatalog"
+	templateKeyTablesPort             = "TablesPort"
+	templateKeyTablesSSL              = "TablesSSL"
+)
+
 // Exported workload identifiers for packages that need to branch on scenario type
 // without duplicating literal strings.
 const (
-	WorkloadTypeList = workloadTypeList
-	WorkloadTypeRead = workloadTypeRead
+	WorkloadTypeList   = workloadTypeList
+	WorkloadTypeRead   = workloadTypeRead
+	WorkloadTypeTables = workloadTypeTables
 )

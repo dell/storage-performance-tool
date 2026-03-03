@@ -20,6 +20,7 @@ const (
 	WorkloadTypeDelete = "delete"
 	WorkloadTypeList   = "list"
 	WorkloadTypeMock   = "mock"
+	WorkloadTypeTables = "tables"
 )
 
 // ValidWorkloadTypes contains all valid workload types
@@ -30,6 +31,7 @@ var ValidWorkloadTypes = []string{
 	WorkloadTypeDelete,
 	WorkloadTypeList,
 	WorkloadTypeMock,
+	WorkloadTypeTables,
 }
 
 // Error message constants

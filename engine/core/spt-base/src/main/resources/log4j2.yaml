@@ -118,6 +118,13 @@ Configuration:
         PatternLayout:
           header: "ItemPath,UploadId,RespLatency[us]%n"
           pattern: "%m%n"
+      - name: tablesMetricsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}tables.metrics.log"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
   Loggers:
     root:
       Level: INFO
@@ -196,6 +203,11 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: scenarioFile
+        additivity: false
+      - name: com.dell.spt.base.logging.TablesMetrics
+        level: INFO
+        AppenderRef:
+          ref: tablesMetricsFile
         additivity: false
       - name: com.github.akurilov
         level: WARN

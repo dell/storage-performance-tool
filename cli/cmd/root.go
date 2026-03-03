@@ -37,7 +37,7 @@ var rootCmd = &cobra.Command{
 	Short: "A CLI wrapper for the Spt benchmarking tool for S3-compatible storage.",
 	Long: `spt is a command-line interface (CLI) wrapper designed to simplify the use of the Spt benchmarking tool for S3-compatible storage.
 
-It provides a user-friendly interface to execute various benchmark tests (e.g., write, read, mixed, delete) against S3 endpoints, manage Spt Docker images, and inspect test results.`,
+It provides a user-friendly interface to execute various benchmark tests (e.g., write, read, mixed, delete, list, tables) against S3 endpoints, manage Spt Docker images, and inspect test results.`,
 	SilenceUsage: true, // Don't auto-print usage on runtime errors
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		// Load .env files before logger so flags/env fallbacks can read them.

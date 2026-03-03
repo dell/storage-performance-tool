@@ -21,6 +21,7 @@ public interface Loggers {
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
+	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
 
@@ -35,5 +36,6 @@ public interface Loggers {
 									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
 									"Threshold Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
-					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"));
+					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),
+					Map.entry(TABLES_METRICS.getName().substring(BASE.length()), "S3 Tables Metrics"));
 }

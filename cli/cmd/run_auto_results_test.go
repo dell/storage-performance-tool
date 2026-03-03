@@ -60,7 +60,100 @@ func (f *fakeFetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []stri
 	return &results.Manifest{}, nil
 }
 
-func TestStartAutoResultsMergesDiscoveredSteps(t *testing.T) {
+// TestStartAutoResults_StaleDiscoveredIDsFromPriorRun reproduces the bug where the background
+// discoverStepIDsFunc poller accumulates step IDs from a previous run's lingering engine container
+// (which keeps its /metrics/json endpoint alive during the API linger window). Those stale IDs must
+// NOT be forwarded to FetchArtifactsForSteps; only IDs that belong to the current scenario should
+// be fetched.
+//
+// Failure mode: the poller fires during WaitForCompletion's sleep and picks up stale IDs from a
+// prior run. uniqueStepIDs merges expectedStepIDs + cachedDiscovered without filtering out IDs
+// that don't belong to the current run, so FetchArtifactsForSteps is called with 6 IDs instead of 3,
+// then hangs trying to retrieve log artifacts from a dead container.
+func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	tracker := &fakeRunTracker{}
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
+
+	// Stale IDs from a prior aborted run (timestamp .367), current run has timestamp .368.
+	staleIDs := []string{
+		"mt-001-20260303.154534.367-provision",
+		"mt-002-20260303.154534.367-write",
+		"mt-003-20260303.154534.367-compaction",
+	}
+	currentIDs := []string{
+		"mt-001-20260303.154534.368-provision",
+		"mt-002-20260303.154534.368-write",
+		"mt-003-20260303.154534.368-compaction",
+	}
+
+	// The mock simulates the lingering prior container: early calls return stale IDs, later calls
+	// return both sets (as the prior container's /metrics/json keeps accumulating).
+	var discoverCallCount int
+	var discoverMu sync.Mutex
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+		discoverMu.Lock()
+		discoverCallCount++
+		n := discoverCallCount
+		discoverMu.Unlock()
+		if n <= 2 {
+			// First two polls hit the still-lingering prior container.
+			return staleIDs, nil
+		}
+		// Later polls see both runs while the current container is active.
+		return append(append([]string(nil), staleIDs...), currentIDs...), nil
+	}
+
+	fetcher := &fakeFetcher{}
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		fetcher.baseURL = baseURL
+		fetcher.output = outputDir
+		return fetcher
+	}
+
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+
+	tmpDir := t.TempDir()
+	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time (possible hang due to stale step IDs)")
+	}
+
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	// Only the 3 current-run IDs should be fetched; stale IDs from the prior run must be excluded.
+	if len(fetcher.stepIDs) != len(currentIDs) {
+		t.Fatalf("FetchArtifactsForSteps called with %d IDs %v, want only the %d current-run IDs %v",
+			len(fetcher.stepIDs), fetcher.stepIDs, len(currentIDs), currentIDs)
+	}
+	for _, id := range fetcher.stepIDs {
+		for _, stale := range staleIDs {
+			if id == stale {
+				t.Fatalf("stale ID %q from prior run leaked into FetchArtifactsForSteps call; got %v", id, fetcher.stepIDs)
+			}
+		}
+	}
+}
+
+// TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet verifies that when expectedStepIDs is
+// provided, the fetcher receives only those IDs — even if the background discovery poller returns
+// additional IDs (e.g. from a different run) alongside the expected ones. Discovered IDs that are
+// also in the expected set are kept; foreign IDs are excluded.
+func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	t.Parallel()
 
 	origRunTracker := newRunTrackerFunc
@@ -82,10 +175,11 @@ func TestStartAutoResultsMergesDiscoveredSteps(t *testing.T) {
 		return tracker
 	}
 
+	// Discovery returns the expected ID mixed in with a foreign one from another run.
 	discoverCalls := 0
 	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
 		discoverCalls++
-		return []string{"step-002-delete", "step-001-create"}, nil
+		return []string{"foreign-step-other-run", "expected-create"}, nil
 	}
 
 	fetcher := &fakeFetcher{}
@@ -126,14 +220,9 @@ func TestStartAutoResultsMergesDiscoveredSteps(t *testing.T) {
 
 	fetcher.mu.Lock()
 	defer fetcher.mu.Unlock()
-	expectedOrder := []string{"expected-create", "step-002-delete", "step-001-create"}
-	if len(fetcher.stepIDs) != len(expectedOrder) {
-		t.Fatalf("unexpected stepIDs %v", fetcher.stepIDs)
-	}
-	for i, want := range expectedOrder {
-		if fetcher.stepIDs[i] != want {
-			t.Fatalf("step order mismatch at %d: got %q want %q", i, fetcher.stepIDs[i], want)
-		}
+	// Only the expected ID should reach the fetcher; the foreign discovered ID must be excluded.
+	if len(fetcher.stepIDs) != 1 || fetcher.stepIDs[0] != "expected-create" {
+		t.Fatalf("unexpected stepIDs %v, want [expected-create]", fetcher.stepIDs)
 	}
 
 	if fetcher.baseURL != "http://example" {

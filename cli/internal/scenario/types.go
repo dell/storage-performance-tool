@@ -33,6 +33,27 @@ type Params struct {
 
 	// TUI layout
 	MinimalTUI bool // Start TUI with graphs and messages panels collapsed
+
+	// S3 Tables workload
+	Tables TablesParams
+}
+
+// TablesParams holds parameters specific to the S3 Tables workload.
+type TablesParams struct {
+	TestVector          string // tps | compaction | catalog
+	TableBucket         string // table bucket name
+	Namespace           string // namespace within the bucket
+	TableName           string // target table name
+	ConcurrentWriters   int    // concurrent Iceberg commit threads
+	CommitFreqMs        int    // target ms between commits per writer
+	TargetFileSizeBytes int64  // target Parquet file size in bytes
+	IngestFileSizeBytes int64  // small file size for compaction seed in bytes
+	TotalIngestBytes    int64  // total data volume for compaction seed in bytes
+	NamespaceCount      int    // namespaces to seed for catalog test
+	TablesPerNs         int    // tables per namespace for catalog test
+	ReadConcurrency     int    // concurrent catalog readers
+	CompactionTimeoutMs int64  // max wait for compaction in milliseconds
+	NoProvision         bool   // skip provision phase (reuse existing resources)
 }
 
 // ScenarioParams is a temporary alias for Params kept for backward

@@ -39,6 +39,11 @@ commonsMath3 = "3.6.1"
 guava = "33.3.1-jre"  # Updated from 25.1-jre
 mockito = "5.14.2"  # Updated from 2.23.0
 
+# Parquet / Avro (S3 Tables data plane)
+parquet = "1.14.4"
+avro = "1.11.4"
+hadoop = "3.3.6"
+
 # Build tools
 dockerJava = "3.1.5"
 shadow = "8.1.1"
@@ -113,6 +118,16 @@ commons-csv = { module = "org.apache.commons:commons-csv", version.ref = "common
 commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commonsMath3" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+
+# Parquet / Avro
+parquet-avro = { module = "org.apache.parquet:parquet-avro", version.ref = "parquet" }
+avro = { module = "org.apache.avro:avro", version.ref = "avro" }
+hadoop-common = { module = "org.apache.hadoop:hadoop-common", version.ref = "hadoop" }
+hadoop-mapreduce-client-core = { module = "org.apache.hadoop:hadoop-mapreduce-client-core", version.ref = "hadoop" }
+hadoop-thirdparty = { module = "org.apache.hadoop.thirdparty:hadoop-shaded-guava", version = "1.1.1" }
+woodstox-core = { module = "com.fasterxml.woodstox:woodstox-core", version = "5.4.0" }
+stax2-api = { module = "org.codehaus.woodstox:stax2-api", version = "4.2.1" }
+commons-collections = { module = "commons-collections:commons-collections", version = "3.2.2" }
 
 # Docker
 docker-java = { module = "com.github.docker-java:docker-java", version.ref = "dockerJava" }

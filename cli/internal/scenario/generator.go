@@ -22,6 +22,8 @@ func GenerateScenario(params Params) (string, error) {
 		return GenerateMockScenario(params)
 	case workloadTypeList:
 		return GenerateListScenario(params)
+	case workloadTypeTables:
+		return GenerateTablesScenario(params)
 	default:
 		return "", fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
 	}
