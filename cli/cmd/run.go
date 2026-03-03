@@ -419,7 +419,8 @@ Available workload types:
   read: Perform a read-only test on pre-existing objects.
   mixed: Perform a test with a specified mix of read and write operations.
   delete: Perform a test to measure object deletion performance.
-  mock: Run a mock test using the dummy-mock driver (no S3 endpoint required).`,
+  mock: Run a mock test using the dummy-mock driver (no S3 endpoint required).
+  tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.`,
 	Args:         cobra.ExactArgs(1), // Enforce that exactly one argument (workload type) is provided
 	SilenceUsage: true,               // Suppress usage on runtime errors; validation will re-enable
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {

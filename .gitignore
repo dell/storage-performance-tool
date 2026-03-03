@@ -59,6 +59,7 @@ cli/entry-metrics.json
 # Generated scenarios and scratch space
 cli/*.zst
 cli/tools/work/
+cli/tools/results/
 cli/_tmp/
 cli/results/
 /results/
@@ -133,11 +134,9 @@ engine/target/
 # CLI runtime captures
 cli/entry-metrics.json
 
-<<<<<<< Updated upstream
 # Release test dir
 /release/
-=======
+
 # CLI codehealth artifacts
 cli/tools/codehealth/deadfinder/deadfinder
 cli/tools/codehealth/deadfinder/report.json
->>>>>>> Stashed changes
