@@ -161,7 +161,7 @@ jobs:
 
       - name: Upload CLI artifacts
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cli-${{ needs.prepare-version.outputs.version }}
           path: release/cli/**
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload bundle artifact
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: engine-bundle-${{ needs.prepare-version.outputs.version }}
           path: release/engine/**
@@ -248,14 +248,14 @@ jobs:
 
       - name: Download CLI artifacts
         if: ${{ !env.ACT }}
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: cli-${{ needs.prepare-version.outputs.version }}
           path: release/cli
 
       - name: Download Engine bundle
         if: ${{ !env.ACT }}
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: engine-bundle-${{ needs.prepare-version.outputs.version }}
           path: release/engine

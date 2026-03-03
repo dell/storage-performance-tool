@@ -100,7 +100,7 @@ jobs:
 
       - name: Upload coverage artifacts
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cli-coverage-${{ github.sha }}
           path: |
@@ -193,7 +193,7 @@ jobs:
 
       - name: Upload engine dist bundle
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: engine-dist-${{ github.sha }}
           path: engine/bundle/build/dist
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload CLI binary
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cli-linux-amd64-${{ github.sha }}
           path: dist/cli
