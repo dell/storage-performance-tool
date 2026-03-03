@@ -20,8 +20,8 @@ func baseTablesParams() Params {
 			TableName:           "spt-bench",
 			ConcurrentWriters:   4,
 			CommitFreqMs:        500,
-			TargetFileSizeBytes: 1048576, // 1MB
-			IngestFileSizeBytes: 102400,  // 100KB
+			TargetFileSizeBytes: 1048576,  // 1MB
+			IngestFileSizeBytes: 102400,   // 100KB
 			TotalIngestBytes:    10485760, // 10MB
 			NamespaceCount:      10,
 			TablesPerNs:         10,
@@ -136,7 +136,7 @@ func TestGenerateTablesScenario_Catalog(t *testing.T) {
 		`opMode = "tableCatalog"`,
 		`"namespaceCount": 10`,
 		`"tablesPerNamespace": 10`,
-		`"concurrency": 4`,   // read concurrency
+		`"concurrency": 4`, // read concurrency
 		`"type": "create"`,
 		`"time": "30s"`,
 		`-provision"`,
@@ -185,7 +185,6 @@ func TestGenerateTablesScenario_InvalidVector(t *testing.T) {
 	}
 }
 
-
 // TestTablesTemplates_UseRunNotStartAwait verifies that all tables templates use
 // .run() instead of .start()/.await()/.close(), which is required for the engine
 // to enforce configured step time limits.
@@ -232,11 +231,11 @@ func TestIngestFileCount(t *testing.T) {
 		want     int64
 	}{
 		{10 * 1024 * 1024, 100 * 1024, 103}, // 10MB / 100KB = 102.4 → 103
-		{1024 * 1024, 1024 * 1024, 1},        // exact division
-		{0, 100 * 1024, 1},                   // zero total → 1
-		{100 * 1024, 0, 1},                   // zero file size → 1
-		{100, 10, 10},                         // exact
-		{101, 10, 11},                         // ceil
+		{1024 * 1024, 1024 * 1024, 1},       // exact division
+		{0, 100 * 1024, 1},                  // zero total → 1
+		{100 * 1024, 0, 1},                  // zero file size → 1
+		{100, 10, 10},                       // exact
+		{101, 10, 11},                       // ceil
 	}
 	for _, c := range cases {
 		got := ingestFileCount(c.total, c.fileSize)

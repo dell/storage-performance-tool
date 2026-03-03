@@ -10,11 +10,11 @@ const (
 	storageDriverTypeS3       = "s3"
 	storageDriverTypeS3Rdma   = "s3-rdma"
 	storageDriverTypeS3Tables = "s3-tables"
-	itemTypeData            = "data"
-	itemTypePath            = "path"
-	itemNamingTypeRandom    = "random"
-	loadOpTypeNoop          = "noop"
-	loadOpTypeList          = "list"
+	itemTypeData              = "data"
+	itemTypePath              = "path"
+	itemNamingTypeRandom      = "random"
+	loadOpTypeNoop            = "noop"
+	loadOpTypeList            = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 
@@ -64,11 +64,11 @@ const (
 
 // Tables opMode constants
 const (
-	tablesOpModeProvision       = "provision"
-	tablesOpModeTableWrite      = "tableWrite"
-	tablesOpModeCatalogSeed     = "catalogSeed"
-	tablesOpModeTableCatalog    = "tableCatalog"
-	tablesOpModeCompactionPoll  = "tableCompactionPoll"
+	tablesOpModeProvision      = "provision"
+	tablesOpModeTableWrite     = "tableWrite"
+	tablesOpModeCatalogSeed    = "catalogSeed"
+	tablesOpModeTableCatalog   = "tableCatalog"
+	tablesOpModeCompactionPoll = "tableCompactionPoll"
 )
 
 // Tables test vector constants
