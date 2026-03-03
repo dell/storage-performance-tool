@@ -49,7 +49,7 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithTimeout(ctx, d)
+	return context.WithTimeout(ctx, d) // #nosec G118 -- cancel is called by all callers
 }
 
 // CheckDocker runs `docker version --format '{{.Server.Version}}'`
