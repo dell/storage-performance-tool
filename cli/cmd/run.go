@@ -195,10 +195,27 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		close(stopCh)
 		writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
 
-		// Discover step IDs from JSON metrics
+		// Discover step IDs from JSON metrics.
+		// When we have expectedStepIDs (parsed from the scenario), only keep discovered IDs that
+		// belong to this run. The discovery poller may have accumulated IDs from a prior run's
+		// lingering container (which keeps /metrics/json alive during its API linger window), so
+		// we intersect rather than union to prevent stale IDs from reaching FetchArtifactsForSteps.
 		mu.Lock()
 		cachedDiscovered := append([]string(nil), discovered...)
 		mu.Unlock()
+		if len(expectedStepIDs) > 0 {
+			expectedSet := make(map[string]struct{}, len(expectedStepIDs))
+			for _, id := range expectedStepIDs {
+				expectedSet[id] = struct{}{}
+			}
+			filtered := cachedDiscovered[:0:0]
+			for _, id := range cachedDiscovered {
+				if _, ok := expectedSet[id]; ok {
+					filtered = append(filtered, id)
+				}
+			}
+			cachedDiscovered = filtered
+		}
 		stepIDs := uniqueStepIDs(expectedStepIDs, cachedDiscovered)
 		var discoverErr error
 		if len(stepIDs) == 0 {

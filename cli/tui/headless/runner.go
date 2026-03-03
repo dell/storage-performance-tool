@@ -383,8 +383,14 @@ func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image strin
 
 	r.output("API", "Test started successfully via API")
 
-	// Wait for context cancellation or test completion
-	<-ctx.Done()
+	// Wait for context cancellation or natural test completion (whichever comes first).
+	// Previously this was a bare <-ctx.Done(), which meant RunWithParams blocked for the
+	// full auto-terminate duration even after the engine finished all scenario steps and
+	// monitorStatus detected COMPLETED/FAILED.
+	select {
+	case <-ctx.Done():
+	case <-r.orchestrator.CompletionCh():
+	}
 
 	// Stop the test gracefully
 	r.output("CLEANUP", "Stopping test via API...")

@@ -44,8 +44,9 @@ type TestOrchestrator struct {
 	onError        func(err string)
 
 	// Control channels
-	stopCh    chan struct{}
-	stoppedCh chan struct{}
+	stopCh       chan struct{}
+	stoppedCh    chan struct{}
+	completionCh chan struct{} // closed when the run reaches a terminal state
 
 	// Performance optimization
 	lastSuccessfulMetrics time.Time // Track last successful metrics retrieval for health monitoring
@@ -67,6 +68,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 		apiPort:               apiPort,
 		stopCh:                make(chan struct{}),
 		stoppedCh:             make(chan struct{}),
+		completionCh:          make(chan struct{}),
 		lastSuccessfulMetrics: time.Now(),
 		metricsState:          newNodePollState(),
 		metricsBackoffCfg:     singleNodeBackoff,
@@ -207,6 +209,7 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 				if o.onOutput != nil {
 					o.onOutput(fmt.Sprintf("Test %s", status.State))
 				}
+				o.signalCompletion()
 				return
 			}
 		}
@@ -389,6 +392,21 @@ func (o *TestOrchestrator) streamContainerOutput(_ context.Context) {
 				o.onError(line)
 			}
 		})
+}
+
+// signalCompletion closes completionCh exactly once.
+func (o *TestOrchestrator) signalCompletion() {
+	select {
+	case <-o.completionCh:
+		// already closed
+	default:
+		close(o.completionCh)
+	}
+}
+
+// CompletionCh returns a channel that is closed when the run reaches a terminal state.
+func (o *TestOrchestrator) CompletionCh() <-chan struct{} {
+	return o.completionCh
 }
 
 // StopTest gracefully stops the test and cleans up
