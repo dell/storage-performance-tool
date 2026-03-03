@@ -137,7 +137,7 @@ func TestGenerateTablesScenario_Catalog(t *testing.T) {
 		`"namespaceCount": 10`,
 		`"tablesPerNamespace": 10`,
 		`"concurrency": 4`,   // read concurrency
-		`"type": "read"`,
+		`"type": "create"`,
 		`"time": "30s"`,
 		`-provision"`,
 		`-seed"`,
@@ -185,6 +185,33 @@ func TestGenerateTablesScenario_InvalidVector(t *testing.T) {
 	}
 }
 
+
+// TestTablesTemplates_UseRunNotStartAwait verifies that all tables templates use
+// .run() instead of .start()/.await()/.close(), which is required for the engine
+// to enforce configured step time limits.
+func TestTablesTemplates_UseRunNotStartAwait(t *testing.T) {
+	vectors := []string{tablesTestVectorTPS, tablesTestVectorCompaction, tablesTestVectorCatalog}
+	for _, v := range vectors {
+		params := baseTablesParams()
+		params.Tables.TestVector = v
+		out, err := GenerateTablesScenario(params)
+		if err != nil {
+			t.Fatalf("[%s] unexpected error: %v", v, err)
+		}
+		if strings.Contains(out, ".start()") {
+			t.Errorf("[%s] template uses .start(); must use .run() for time-limit enforcement", v)
+		}
+		if strings.Contains(out, ".await()") {
+			t.Errorf("[%s] template uses .await(); must use .run() for time-limit enforcement", v)
+		}
+		if strings.Contains(out, ".close()") {
+			t.Errorf("[%s] template uses .close(); must use .run() for time-limit enforcement", v)
+		}
+		if !strings.Contains(out, ".run()") {
+			t.Errorf("[%s] template missing .run() call", v)
+		}
+	}
+}
 
 func TestGenerateScenario_TablesDispatch(t *testing.T) {
 	params := baseTablesParams()

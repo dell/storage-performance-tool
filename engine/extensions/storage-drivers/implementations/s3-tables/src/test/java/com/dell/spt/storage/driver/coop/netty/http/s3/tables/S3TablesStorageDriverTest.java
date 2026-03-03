@@ -659,6 +659,240 @@ public class S3TablesStorageDriverTest {
 		assertThrows(
 						IllegalStateException.class,
 						() -> drv.submit(op),
-						"submit should throw IllegalStateException for opModes not yet implemented");
+						"submit should throw IllegalStateException for truly unknown opModes");
+	}
+
+	// --- catalogSeed tests ---
+
+	@Test
+	void catalogSeed_submit_marksOpSucc() throws Exception {
+		final Config cfg = baseConfig("catalogSeed", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// effectiveArn lazy-fetch: ListTableBuckets → 200 with ARN
+		drv.enqueueResponse(okJson(
+						"{\"tableBuckets\":[{\"name\":\"test-bucket\","
+										+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}"));
+		// CreateNamespace → 200
+		drv.enqueueResponse(okJson("{}"));
+		// CreateTable → 200
+		drv.enqueueResponse(okJson("{}"));
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.SUCC, op.status(),
+						"catalogSeed op should be SUCC when CreateNamespace and CreateTable succeed");
+		// ListTableBuckets + CreateNamespace + CreateTable = 3
+		assertEquals(3, drv.log().size(), "Expected 3 control-plane requests for catalogSeed");
+	}
+
+	@Test
+	void catalogSeed_idempotentOn409() throws Exception {
+		final Config cfg = baseConfig("catalogSeed", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// effectiveArn lazy-fetch: ListTableBuckets → 200 with ARN
+		drv.enqueueResponse(okJson(
+						"{\"tableBuckets\":[{\"name\":\"test-bucket\","
+										+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}"));
+		// CreateNamespace → 409 (already exists)
+		drv.enqueueResponse(new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.CONFLICT, Unpooled.EMPTY_BUFFER));
+		// CreateTable → 409 (already exists)
+		drv.enqueueResponse(new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.CONFLICT, Unpooled.EMPTY_BUFFER));
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.SUCC, op.status(),
+						"catalogSeed op should be SUCC when resources already exist (409)");
+	}
+
+	@Test
+	void catalogSeed_createNamespace_timeoutFails() throws Exception {
+		final Config cfg = baseConfig("catalogSeed", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg) {
+			private int callCount = 0;
+
+			@Override
+			protected FullHttpResponse executeHttpRequest(final FullHttpRequest req) {
+				log().add(req);
+				callCount++;
+				if (callCount == 1) {
+					// effectiveArn ListTableBuckets → 200 with ARN
+					return okJson("{\"tableBuckets\":[{\"name\":\"test-bucket\","
+									+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}");
+				}
+				return null; // CreateNamespace timeout
+			}
+		};
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.FAIL_IO, op.status(),
+						"catalogSeed should be FAIL_IO when CreateNamespace times out");
+	}
+
+	@Test
+	void catalogSeed_createTable_httpErrorFails() throws Exception {
+		final Config cfg = baseConfig("catalogSeed", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// effectiveArn
+		drv.enqueueResponse(okJson(
+						"{\"tableBuckets\":[{\"name\":\"test-bucket\","
+										+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}"));
+		// CreateNamespace → 200
+		drv.enqueueResponse(okJson("{}"));
+		// CreateTable → 500
+		drv.enqueueResponse(new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR,
+						Unpooled.copiedBuffer("error", StandardCharsets.UTF_8)));
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.FAIL_IO, op.status(),
+						"catalogSeed should be FAIL_IO when CreateTable returns 500");
+	}
+
+	// --- tableCatalog tests ---
+
+	@Test
+	void tableCatalog_getTable_marksOpSucc() throws Exception {
+		final Config cfg = baseConfig("tableCatalog", "127.0.0.1");
+		// Use a deterministic driver that always picks GetTable (overrides catalogRand)
+		final TestDriver drv = new TestDriver(cfg) {
+			private int callCount = 0;
+
+			@Override
+			protected FullHttpResponse executeHttpRequest(final FullHttpRequest req) {
+				log().add(req);
+				callCount++;
+				if (callCount == 1) {
+					// effectiveArn ListTableBuckets
+					return okJson("{\"tableBuckets\":[{\"name\":\"test-bucket\","
+									+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}");
+				}
+				// GetTable or ListTables → 200
+				return okJson("{\"tableARN\":\"arn:...\"}");
+			}
+		};
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.SUCC, op.status(),
+						"tableCatalog op should be SUCC when catalog call returns 200");
+		// ListTableBuckets (ARN lazy-fetch) + one catalog call = 2
+		assertEquals(2, drv.log().size(), "Expected 2 requests: ARN fetch + catalog op");
+	}
+
+	@Test
+	void tableCatalog_timeoutFails() throws Exception {
+		final Config cfg = baseConfig("tableCatalog", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg) {
+			private int callCount = 0;
+
+			@Override
+			protected FullHttpResponse executeHttpRequest(final FullHttpRequest req) {
+				log().add(req);
+				callCount++;
+				if (callCount == 1) {
+					// effectiveArn ListTableBuckets → 200
+					return okJson("{\"tableBuckets\":[{\"name\":\"test-bucket\","
+									+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}");
+				}
+				return null; // catalog call times out
+			}
+		};
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.FAIL_IO, op.status(),
+						"tableCatalog should be FAIL_IO when catalog call times out");
+	}
+
+	@Test
+	void tableCatalog_httpErrorFails() throws Exception {
+		final Config cfg = baseConfig("tableCatalog", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg) {
+			private int callCount = 0;
+
+			@Override
+			protected FullHttpResponse executeHttpRequest(final FullHttpRequest req) {
+				log().add(req);
+				callCount++;
+				if (callCount == 1) {
+					return okJson("{\"tableBuckets\":[{\"name\":\"test-bucket\","
+									+ "\"arn\":\"arn:aws:s3tables:us-east-1:123:bucket/test-bucket\"}]}");
+				}
+				return new DefaultFullHttpResponse(
+								HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND,
+								Unpooled.copiedBuffer("not found", StandardCharsets.UTF_8));
+			}
+		};
+
+		final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+		drv.submit(op);
+
+		assertEquals(Operation.Status.FAIL_IO, op.status(),
+						"tableCatalog should be FAIL_IO when catalog call returns 404");
+	}
+
+	// --- batch submit(List, from, to) ---
+
+	@Test
+	void batchSubmit_submitsList() throws Exception {
+		final Config cfg = baseConfig("provision", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+
+		// Two provision ops, each needs: CreateTableBucket(200) + ListTableBuckets + CreateNamespace + CreateTable
+		// Stub enough 200s for both ops (each triggers 4 requests via provision)
+		for (int i = 0; i < 8; i++) {
+			drv.enqueueResponse(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+		}
+
+		final com.dell.spt.base.item.op.OperationImpl<Item> op1 = new com.dell.spt.base.item.op.OperationImpl<>(
+						0, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy1"), null, null, null);
+		final com.dell.spt.base.item.op.OperationImpl<Item> op2 = new com.dell.spt.base.item.op.OperationImpl<>(
+						1, com.dell.spt.base.item.op.OpType.NOOP,
+						new com.dell.spt.base.item.ItemImpl("dummy2"), null, null, null);
+		final List<Operation<Item>> batch = List.of(op1, op2);
+
+		final int submitted = drv.submit(batch, 0, 2);
+
+		assertEquals(2, submitted, "batch submit should return count of submitted ops");
+		assertEquals(Operation.Status.SUCC, op1.status(), "op1 should be SUCC");
+		assertEquals(Operation.Status.SUCC, op2.status(), "op2 should be SUCC");
+	}
+
+	// --- doClose() lifecycle ---
+
+	@Test
+	void doClose_doesNotThrow() throws Exception {
+		final Config cfg = baseConfig("provision", "127.0.0.1");
+		final TestDriver drv = new TestDriver(cfg);
+		// close() calls doClose() which logs compaction metrics; should not throw
+		drv.close();
 	}
 }

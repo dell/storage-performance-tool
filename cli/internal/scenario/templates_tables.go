@@ -46,9 +46,7 @@ provisionConfig.load = {
   }
 };
 
-var provisionStep = Load.config(provisionConfig).start();
-provisionStep.await();
-provisionStep.close();
+Load.config(provisionConfig).run();
 {{end}}
 var writeConfig = JSON.parse(JSON.stringify(sharedStorage));
 writeConfig.storage.s3tables.opMode = "{{.OpModeTableWrite}}";
@@ -64,9 +62,7 @@ writeConfig.load = {
   }
 };
 
-var writeStep = Load.config(writeConfig).start();
-writeStep.await();
-writeStep.close();
+Load.config(writeConfig).run();
 `
 
 // tablesCompactionTemplate generates a three-phase compaction scenario:
@@ -116,9 +112,7 @@ provisionConfig.load = {
   }
 };
 
-var provisionStep = Load.config(provisionConfig).start();
-provisionStep.await();
-provisionStep.close();
+Load.config(provisionConfig).run();
 {{end}}
 var writeConfig = JSON.parse(JSON.stringify(sharedStorage));
 writeConfig.storage.s3tables.opMode = "{{.OpModeTableWrite}}";
@@ -140,9 +134,7 @@ writeConfig.load = {
   }
 };
 
-var writeStep = Load.config(writeConfig).start();
-writeStep.await();
-writeStep.close();
+Load.config(writeConfig).run();
 
 var compactionConfig = JSON.parse(JSON.stringify(sharedStorage));
 compactionConfig.storage.s3tables.opMode = "{{.OpModeCompactionPoll}}";
@@ -165,9 +157,7 @@ compactionConfig.load = {
   }
 };
 
-var compactionStep = Load.config(compactionConfig).start();
-compactionStep.await();
-compactionStep.close();
+Load.config(compactionConfig).run();
 `
 
 // tablesCatalogTemplate generates a three-phase catalog latency scenario:
@@ -214,9 +204,7 @@ provisionConfig.load = {
   }
 };
 
-var provisionStep = Load.config(provisionConfig).start();
-provisionStep.await();
-provisionStep.close();
+Load.config(provisionConfig).run();
 {{end}}
 var seedConfig = JSON.parse(JSON.stringify(sharedStorage));
 seedConfig.storage.s3tables.opMode = "{{.OpModeCatalogSeed}}";
@@ -232,9 +220,7 @@ seedConfig.load = {
   }
 };
 
-var seedStep = Load.config(seedConfig).start();
-seedStep.await();
-seedStep.close();
+Load.config(seedConfig).run();
 
 var catalogConfig = JSON.parse(JSON.stringify(sharedStorage));
 catalogConfig.storage.s3tables.opMode = "{{.OpModeTableCatalog}}";
@@ -246,7 +232,7 @@ catalogConfig.storage.driver = {
 };
 catalogConfig.load = {
   "op": {
-    "type": "read"
+    "type": "create"
   },
   "step": {
     "id": "{{.TablesStepIDCatalog}}",
@@ -256,7 +242,5 @@ catalogConfig.load = {
   }
 };
 
-var catalogStep = Load.config(catalogConfig).start();
-catalogStep.await();
-catalogStep.close();
+Load.config(catalogConfig).run();
 `

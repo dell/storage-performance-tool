@@ -112,52 +112,31 @@ Run an S3 write workload:
 
 Headless mode activates automatically when no TTY is available; use `--headless` to force it manually.
 
+For the full CLI reference (all flags, workload types, distributed options, RDMA, S3 Tables), see [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md).
+
 ---
 
 ## Features
 
 - **Unified Experience** – SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** – write, read, delete, list, and mock workloads out of the box.
+- **Multi-Workload Support** – write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
 - **Interactive & Headless** – flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
-- **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see below).
+- **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
+- **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
 - **Logging & Trace Capture** – configurable logs plus optional trace files for deeper troubleshooting.
 
 ---
 
 ## S3-RDMA Acceleration
 
-SPT supports an optional RDMA (Remote Direct Memory Access) data path for S3 workloads. When enabled, object transfers bypass the kernel networking stack for significantly lower latency and higher throughput on supported hardware.
+SPT supports an optional RDMA (Remote Direct Memory Access) data path for S3 workloads. When enabled, object transfers bypass the kernel networking stack for significantly lower latency and higher throughput on supported hardware. Add `--use-rdma` to any S3 write or read command to activate the RDMA driver.
 
-Add `--use-rdma` to any S3 workload command to activate the RDMA driver:
+**Requirements:** Linux, RDMA-capable NICs (Mellanox ConnectX-4+), an RDMA-capable storage target (e.g., Dell ECS), and `rdma-core` system packages.
 
-```bash
-./spt run write \
-  --endpoints https://s3.example.com \
-  --access-key "$S3_ACCESS_KEY" \
-  --secret-key "$S3_SECRET_KEY" \
-  --bucket test-bucket \
-  --duration 2m \
-  --threads 16 \
-  --object-size 1MB \
-  --use-rdma \
-  --rdma-threshold 0 \
-  --auto-terminate-seconds 180
-```
-
-Key flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--use-rdma` | `false` | Enable the RDMA-accelerated S3 driver |
-| `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g. `0`, `256KB`, `4MB`) |
-| `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
-| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
-| `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
-
-**Requirements:** Linux only. RDMA-capable NICs (e.g. Mellanox ConnectX), an RDMA-capable storage target, `rdma-core` system packages, and Docker device passthrough (`--device /dev/infiniband`). If RDMA hardware is not available, the driver will fail by default. Set `--rdma-fallback` to fall back to HTTP instead.
+See [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) for CLI flags, threshold tuning, architecture details, and troubleshooting.
 
 ---
 
@@ -199,6 +178,10 @@ make build-cli        # produces ./cli/spt
 - Streamline documentation so contributors and users find SPT-first concepts across CLI and engine guides.
 
 For detailed engineering notes and planning documents, browse the `docs/` directories inside `cli/` and `engine/`.
+
+- [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) — Full CLI syntax reference (all commands, flags, and examples)
+- [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) — S3-RDMA acceleration setup, tuning, and architecture
+- [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md) — S3 Tables (Iceberg) test vectors and usage guide
 
 ---
 

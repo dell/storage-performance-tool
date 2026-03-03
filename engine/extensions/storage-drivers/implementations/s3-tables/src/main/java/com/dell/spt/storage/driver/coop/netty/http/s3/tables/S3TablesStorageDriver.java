@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -84,6 +85,14 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 	private final long compactionPollIntervalMs;
 	private final long compactionPollTimeoutMs;
 
+	/** Catalog test vector config — only meaningful when opMode=catalogSeed or tableCatalog. */
+	private final int namespaceCount;
+	private final int tablesPerNs;
+	/** Global counter for assigning unique (nsIdx, tblIdx) pairs to catalogSeed ops. */
+	private final AtomicLong seedIndex = new AtomicLong(0);
+	/** Per-driver random source for tableCatalog op selection (not crypto, jitter only). */
+	private final Random catalogRand = new Random(); // NOSONAR — non-crypto use
+
 	public S3TablesStorageDriver(
 					final String stepId,
 					final DataInput dataInput,
@@ -100,6 +109,8 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		this.compactionStabilizationPolls = s3tablesConfig.intVal("compactionStabilizationPolls");
 		this.compactionPollIntervalMs = s3tablesConfig.intVal("compactionPollIntervalMs");
 		this.compactionPollTimeoutMs = s3tablesConfig.intVal("compactionPollTimeoutMs");
+		this.namespaceCount = s3tablesConfig.intVal("namespaceCount");
+		this.tablesPerNs = s3tablesConfig.intVal("tablesPerNamespace");
 		this.parquetWriter = new ParquetRowGroupWriter(targetFileSizeBytes);
 		final String controlPlaneEndpoint = s3tablesConfig.stringVal("controlPlaneEndpoint");
 		final String effectiveEndpoint = controlPlaneEndpoint.isEmpty()
@@ -160,6 +171,10 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 			return submitTableWrite(op);
 		case OP_MODE_TABLE_COMPACTION_POLL:
 			return submitCompactionPoll(op);
+		case OP_MODE_CATALOG_SEED:
+			return submitCatalogSeed(op);
+		case OP_MODE_TABLE_CATALOG:
+			return submitTableCatalog(op);
 		default:
 			throw new IllegalStateException("Unsupported opMode: " + opMode);
 		}
@@ -182,6 +197,70 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 			op.status(Operation.Status.SUCC);
 		} catch (final Exception e) {
 			Loggers.ERR.error("{}: tableCompactionPoll failed: {}", stepId, e.getMessage());
+			op.status(Operation.Status.FAIL_IO);
+		} finally {
+			op.finishResponse();
+		}
+		handleCompleted(op);
+		return true;
+	}
+
+	/**
+	 * catalogSeed: each op creates one (namespace, table) pair from the matrix
+	 * ns-0..ns-(namespaceCount-1) × tbl-0..tbl-(tablesPerNs-1).
+	 * The global seedIndex counter assigns a unique flat index per op; workers start
+	 * at a random offset (modulo total) to avoid lockstep ns-0 creation.
+	 */
+	private boolean submitCatalogSeed(final O op) {
+		final int total = namespaceCount * tablesPerNs;
+		final long idx = seedIndex.getAndIncrement() % total;
+		final int nsIdx = (int) (idx / tablesPerNs);
+		final int tblIdx = (int) (idx % tablesPerNs);
+		op.startRequest();
+		op.finishRequest();
+		op.startResponse();
+		try {
+			controlPlane.catalogSeedOne(nsIdx, tblIdx);
+			op.status(Operation.Status.SUCC);
+		} catch (final Exception e) {
+			Loggers.ERR.warn("{}: catalogSeed ns-{}/tbl-{} failed: {}", stepId, nsIdx, tblIdx, e.getMessage());
+			op.status(Operation.Status.FAIL_IO);
+		} finally {
+			op.finishResponse();
+		}
+		handleCompleted(op);
+		return true;
+	}
+
+	/**
+	 * tableCatalog: each op performs either a GetTable or ListTables call,
+	 * chosen randomly with 50/50 probability (Rand() % 2 == 0).
+	 * The target namespace and table are chosen uniformly at random from the seeded matrix.
+	 */
+	private boolean submitTableCatalog(final O op) {
+		final int nsIdx;
+		final int tblIdx;
+		final boolean doGetTable;
+		synchronized (catalogRand) {
+			nsIdx = catalogRand.nextInt(namespaceCount);
+			tblIdx = catalogRand.nextInt(tablesPerNs);
+			doGetTable = (catalogRand.nextInt(2) == 0);
+		}
+		final String ns = "ns-" + nsIdx;
+		final String tbl = "tbl-" + tblIdx;
+		op.startRequest();
+		op.finishRequest();
+		op.startResponse();
+		try {
+			if (doGetTable) {
+				controlPlane.getTable(ns, tbl);
+			} else {
+				controlPlane.listTables(ns);
+			}
+			op.status(Operation.Status.SUCC);
+		} catch (final Exception e) {
+			Loggers.ERR.warn("{}: tableCatalog {} {}/{} failed: {}",
+							stepId, doGetTable ? "GetTable" : "ListTables", ns, tbl, e.getMessage());
 			op.status(Operation.Status.FAIL_IO);
 		} finally {
 			op.finishResponse();

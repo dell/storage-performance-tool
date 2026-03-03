@@ -228,6 +228,84 @@ final class S3TablesControlPlane {
 	}
 
 	/**
+	 * catalogSeedOne — creates namespace ns-{nsIdx} and table tbl-{tblIdx} within it.
+	 * HTTP 409 on either create is treated as success (already exists).
+	 * Workers call this with randomized (nsIdx, tblIdx) pairs to avoid lockstep creation.
+	 */
+	void catalogSeedOne(final int nsIdx, final int tblIdx) throws Exception {
+		final String arn = effectiveArn();
+		final String ns = "ns-" + nsIdx;
+		final String tbl = "tbl-" + tblIdx;
+
+		final String nsUri = "/namespaces/" + arn;
+		final ObjectNode nsBody = MAPPER.createObjectNode();
+		nsBody.putArray("namespace").add(ns);
+		final byte[] nsBytes = MAPPER.writeValueAsBytes(nsBody);
+		final FullHttpResponse nsResp = driver.executeControlPlaneRequest(HttpMethod.PUT, nsUri, nsBytes);
+		if (nsResp == null) {
+			throw new Exception("catalogSeed CreateNamespace ns-" + nsIdx + ": no response (timeout)");
+		}
+		final int nsStatus = nsResp.status().code();
+		if (nsStatus != HTTP_CONFLICT && (nsStatus < 200 || nsStatus >= 300)) {
+			final String body = nsResp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("catalogSeed CreateNamespace ns-" + nsIdx + ": HTTP " + nsStatus + " — " + body);
+		}
+
+		final String tblUri = "/tables/" + arn + "/" + ns;
+		final ObjectNode tblBody = MAPPER.createObjectNode();
+		tblBody.put("name", tbl);
+		tblBody.put("format", "ICEBERG");
+		final byte[] tblBytes = MAPPER.writeValueAsBytes(tblBody);
+		final FullHttpResponse tblResp = driver.executeControlPlaneRequest(HttpMethod.PUT, tblUri, tblBytes);
+		if (tblResp == null) {
+			throw new Exception("catalogSeed CreateTable ns-" + nsIdx + "/tbl-" + tblIdx + ": no response (timeout)");
+		}
+		final int tblStatus = tblResp.status().code();
+		if (tblStatus != HTTP_CONFLICT && (tblStatus < 200 || tblStatus >= 300)) {
+			final String body = tblResp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("catalogSeed CreateTable ns-" + nsIdx + "/tbl-" + tblIdx + ": HTTP " + tblStatus + " — " + body);
+		}
+	}
+
+	/**
+	 * GetTable — returns table metadata for a given namespace/table name.
+	 * REST: GET /get-table?tableBucketARN={arn}&namespace={ns}&name={tbl}
+	 * (botocore requestUri=/get-table; all inputs are query parameters)
+	 */
+	void getTable(final String ns, final String tbl) throws Exception {
+		final String arn = effectiveArn();
+		final String uri = "/get-table?tableBucketARN=" + arn + "&namespace=" + ns + "&name=" + tbl;
+		final FullHttpResponse resp = driver.executeControlPlaneRequest(HttpMethod.GET, uri, new byte[0]);
+		if (resp == null) {
+			throw new Exception("GetTable " + ns + "/" + tbl + ": no response (timeout)");
+		}
+		final int status = resp.status().code();
+		if (status < 200 || status >= 300) {
+			final String body = resp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("GetTable " + ns + "/" + tbl + ": HTTP " + status + " — " + body);
+		}
+	}
+
+	/**
+	 * ListTables — lists tables within a given namespace.
+	 * REST: GET /tables/{tableBucketARN}?namespace={ns}
+	 * (botocore requestUri=/tables/{tableBucketARN}; namespace is a query parameter)
+	 */
+	void listTables(final String ns) throws Exception {
+		final String arn = effectiveArn();
+		final String uri = "/tables/" + arn + "?namespace=" + ns;
+		final FullHttpResponse resp = driver.executeControlPlaneRequest(HttpMethod.GET, uri, new byte[0]);
+		if (resp == null) {
+			throw new Exception("ListTables " + ns + ": no response (timeout)");
+		}
+		final int status = resp.status().code();
+		if (status < 200 || status >= 300) {
+			final String body = resp.content().toString(StandardCharsets.UTF_8);
+			throw new Exception("ListTables " + ns + ": HTTP " + status + " — " + body);
+		}
+	}
+
+	/**
 	 * PutTableMaintenanceConfiguration — triggers compaction on the table.
 	 * REST: PUT /tables/{tableBucketARN}/{namespace}/{name}/maintenance/{type}
 	 */
