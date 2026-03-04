@@ -46,32 +46,42 @@ jobs:
         with:
           script: |
             const sha = context.sha;
+            const ciCheckNames = ['Engine Build & Tests', 'Go Quality Suite'];
+            const maxAttempts = 10;
+            const intervalMs = 30000;
+
             console.log(`Checking CI status for commit ${sha}`);
+            console.log(`Will poll up to ${maxAttempts} times (${maxAttempts * intervalMs / 1000}s) for: ${ciCheckNames.join(', ')}`);
 
-            // Get check runs for this commit
-            const { data: checkRuns } = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: sha,
-            });
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              const { data: checkRuns } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: sha,
+              });
 
-            // Look for the CI workflow
-            const ciCheck = checkRuns.check_runs.find(
-              run => run.name === 'Engine Build & Tests' || run.name === 'Go Quality Suite'
-            );
+              const ciCheck = checkRuns.check_runs.find(
+                run => ciCheckNames.includes(run.name)
+              );
 
-            if (!ciCheck) {
-              console.log('Warning: CI check not found. Ensure CI has run for this commit.');
-              console.log('Available checks:', checkRuns.check_runs.map(r => r.name).join(', '));
-              // Don't fail - CI may use different check names or may not have run yet
-              return;
+              if (!ciCheck) {
+                console.log(`Attempt ${attempt}/${maxAttempts}: CI check not found yet. Available: ${checkRuns.check_runs.map(r => r.name).join(', ') || '(none)'}`);
+              } else if (ciCheck.conclusion === 'success') {
+                console.log(`CI check "${ciCheck.name}" passed.`);
+                return;
+              } else if (ciCheck.conclusion) {
+                core.setFailed(`CI check "${ciCheck.name}" failed (conclusion: ${ciCheck.conclusion}). Cannot publish image.`);
+                return;
+              } else {
+                console.log(`Attempt ${attempt}/${maxAttempts}: CI check "${ciCheck.name}" still in progress...`);
+              }
+
+              if (attempt < maxAttempts) {
+                await new Promise(r => setTimeout(r, intervalMs));
+              }
             }
 
-            if (ciCheck.conclusion !== 'success') {
-              core.setFailed(`CI check "${ciCheck.name}" has not passed (status: ${ciCheck.conclusion}). Cannot publish image.`);
-            } else {
-              console.log(`CI check "${ciCheck.name}" passed.`);
-            }
+            core.setFailed(`CI checks did not complete within ${maxAttempts * intervalMs / 1000}s. Re-run this workflow after CI passes.`);
 
   prepare:
     name: Prepare Version
