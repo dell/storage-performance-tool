@@ -206,6 +206,12 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	cmd = append(cmd, additionalArgs...)
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "scenario", "cmd", cmd)
 
+	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
+	var envVars []string
+	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
+		envVars = append(envVars, "SPT_JAVA_OPTS="+v)
+	}
+
 	// Create container with volume mount
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
 		Image:        image,
@@ -213,6 +219,7 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 		Tty:          false,
 		AttachStdout: true,
 		AttachStderr: true,
+		Env:          envVars,
 	}, &container.HostConfig{
 		Binds: []string{
 			fmt.Sprintf("%s:/tmp/scenario.js:ro", absScenarioPath),
@@ -271,6 +278,11 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 			"JAVA_OPTS=-Djava.rmi.server.hostname=127.0.0.1",
 			"JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=127.0.0.1",
 		)
+	}
+
+	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
+	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
+		envVars = append(envVars, "SPT_JAVA_OPTS="+v)
 	}
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
@@ -385,18 +397,23 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 
 	// Create container configuration
 	labels := dm.baseLabels(constants.DockerRoleWorker)
+	workerEnv := []string{
+		// Critical: Tell RMI what hostname to advertise
+		fmt.Sprintf("JAVA_OPTS=-Djava.rmi.server.hostname=%s", rmiHostname),
+		fmt.Sprintf("JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=%s", rmiHostname),
+	}
+	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
+	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
+		workerEnv = append(workerEnv, "SPT_JAVA_OPTS="+v)
+	}
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
 		ExposedPorts: exposedPorts,
 		AttachStdout: true,
 		AttachStderr: true,
-		Env: []string{
-			// Critical: Tell RMI what hostname to advertise
-			fmt.Sprintf("JAVA_OPTS=-Djava.rmi.server.hostname=%s", rmiHostname),
-			fmt.Sprintf("JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=%s", rmiHostname),
-		},
-		Labels: labels,
+		Env:          workerEnv,
+		Labels:       labels,
 	}
 
 	hostConfig := &container.HostConfig{
