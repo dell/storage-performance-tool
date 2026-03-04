@@ -72,30 +72,34 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("CreateTableBucket: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status == HTTP_CONFLICT) {
-			Loggers.MSG.debug("{}: CreateTableBucket: already exists (409), continuing", driver.getStepId());
-			fetchBucketArn();
-			return;
-		}
-		if (status < 200 || status >= 300) {
-			final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("CreateTableBucket failed: HTTP " + status + " — " + bodyStr);
-		}
 		try {
-			final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
-			if (node.has("arn")) {
-				setBucketArn(node.get("arn").asText());
-				Loggers.MSG.debug("{}: CreateTableBucket: parsed ARN={}", driver.getStepId(), this.bucketArn);
+			final int status = resp.status().code();
+			if (status == HTTP_CONFLICT) {
+				Loggers.MSG.debug("{}: CreateTableBucket: already exists (409), continuing", driver.getStepId());
+				fetchBucketArn();
+				return;
 			}
-		} catch (final Exception e) {
-			Loggers.MSG.debug("{}: could not parse bucket ARN from CreateTableBucket response: {}", driver.getStepId(), e.getMessage());
+			if (status < 200 || status >= 300) {
+				final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("CreateTableBucket failed: HTTP " + status + " — " + bodyStr);
+			}
+			try {
+				final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
+				if (node.has("arn")) {
+					setBucketArn(node.get("arn").asText());
+					Loggers.MSG.debug("{}: CreateTableBucket: parsed ARN={}", driver.getStepId(), this.bucketArn);
+				}
+			} catch (final Exception e) {
+				Loggers.MSG.debug("{}: could not parse bucket ARN from CreateTableBucket response: {}", driver.getStepId(), e.getMessage());
+			}
+			if (this.bucketArn == null) {
+				fetchBucketArn();
+			}
+			Loggers.MSG.info("{}: CreateTableBucket: created bucket={} arn={}",
+							driver.getStepId(), bucket, bucketArn);
+		} finally {
+			resp.release();
 		}
-		if (this.bucketArn == null) {
-			fetchBucketArn();
-		}
-		Loggers.MSG.info("{}: CreateTableBucket: created bucket={} arn={}",
-						driver.getStepId(), bucket, bucketArn);
 	}
 
 	private void setBucketArn(final String arn) {
@@ -114,24 +118,28 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("ListTableBuckets: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			throw new Exception("ListTableBuckets failed: HTTP " + status);
-		}
 		try {
-			final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
-			final var arr = node.has("tableBuckets") ? node.get("tableBuckets") : node.get("buckets");
-			if (arr != null) {
-				for (final var b : arr) {
-					if (bucket.equals(b.path("name").asText())) {
-						setBucketArn(b.path("arn").asText());
-						Loggers.MSG.debug("{}: resolved bucket ARN={}", driver.getStepId(), this.bucketArn);
-						break;
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				throw new Exception("ListTableBuckets failed: HTTP " + status);
+			}
+			try {
+				final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
+				final var arr = node.has("tableBuckets") ? node.get("tableBuckets") : node.get("buckets");
+				if (arr != null) {
+					for (final var b : arr) {
+						if (bucket.equals(b.path("name").asText())) {
+							setBucketArn(b.path("arn").asText());
+							Loggers.MSG.debug("{}: resolved bucket ARN={}", driver.getStepId(), this.bucketArn);
+							break;
+						}
 					}
 				}
+			} catch (final Exception e) {
+				Loggers.MSG.warn("{}: could not parse ARN from ListTableBuckets: {}", driver.getStepId(), e.getMessage());
 			}
-		} catch (final Exception e) {
-			Loggers.MSG.warn("{}: could not parse ARN from ListTableBuckets: {}", driver.getStepId(), e.getMessage());
+		} finally {
+			resp.release();
 		}
 	}
 
@@ -145,16 +153,20 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("CreateNamespace: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status == HTTP_CONFLICT) {
-			Loggers.MSG.debug("{}: CreateNamespace: already exists (409), continuing", driver.getStepId());
-			return;
+		try {
+			final int status = resp.status().code();
+			if (status == HTTP_CONFLICT) {
+				Loggers.MSG.debug("{}: CreateNamespace: already exists (409), continuing", driver.getStepId());
+				return;
+			}
+			if (status < 200 || status >= 300) {
+				final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("CreateNamespace failed: HTTP " + status + " — " + bodyStr);
+			}
+			Loggers.MSG.info("{}: CreateNamespace: created namespace={}", driver.getStepId(), namespace);
+		} finally {
+			resp.release();
 		}
-		if (status < 200 || status >= 300) {
-			final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("CreateNamespace failed: HTTP " + status + " — " + bodyStr);
-		}
-		Loggers.MSG.info("{}: CreateNamespace: created namespace={}", driver.getStepId(), namespace);
 	}
 
 	private void createTable() throws Exception {
@@ -168,16 +180,20 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("CreateTable: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status == HTTP_CONFLICT) {
-			Loggers.MSG.debug("{}: CreateTable: already exists (409), continuing", driver.getStepId());
-			return;
+		try {
+			final int status = resp.status().code();
+			if (status == HTTP_CONFLICT) {
+				Loggers.MSG.debug("{}: CreateTable: already exists (409), continuing", driver.getStepId());
+				return;
+			}
+			if (status < 200 || status >= 300) {
+				final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("CreateTable failed: HTTP " + status + " — " + bodyStr);
+			}
+			Loggers.MSG.info("{}: CreateTable: created table={}", driver.getStepId(), tableName);
+		} finally {
+			resp.release();
 		}
-		if (status < 200 || status >= 300) {
-			final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("CreateTable failed: HTTP " + status + " — " + bodyStr);
-		}
-		Loggers.MSG.info("{}: CreateTable: created table={}", driver.getStepId(), tableName);
 	}
 
 	/**
@@ -192,14 +208,18 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("GetTableMetadataLocation: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			throw new Exception("GetTableMetadataLocation failed: HTTP " + status);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				throw new Exception("GetTableMetadataLocation failed: HTTP " + status);
+			}
+			final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
+			final String metadataLocation = node.path("metadataLocation").asText();
+			final String versionToken = node.path("versionToken").asText();
+			return new IcebergCommitter.MetadataLocationResult(metadataLocation, versionToken);
+		} finally {
+			resp.release();
 		}
-		final var node = MAPPER.readTree(resp.content().toString(StandardCharsets.UTF_8));
-		final String metadataLocation = node.path("metadataLocation").asText();
-		final String versionToken = node.path("versionToken").asText();
-		return new IcebergCommitter.MetadataLocationResult(metadataLocation, versionToken);
 	}
 
 	/**
@@ -224,7 +244,11 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("UpdateTableMetadataLocation: no response (timeout)");
 		}
-		return resp.status().code();
+		try {
+			return resp.status().code();
+		} finally {
+			resp.release();
+		}
 	}
 
 	/**
@@ -245,10 +269,14 @@ final class S3TablesControlPlane {
 		if (nsResp == null) {
 			throw new Exception("catalogSeed CreateNamespace ns-" + nsIdx + ": no response (timeout)");
 		}
-		final int nsStatus = nsResp.status().code();
-		if (nsStatus != HTTP_CONFLICT && (nsStatus < 200 || nsStatus >= 300)) {
-			final String body = nsResp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("catalogSeed CreateNamespace ns-" + nsIdx + ": HTTP " + nsStatus + " — " + body);
+		try {
+			final int nsStatus = nsResp.status().code();
+			if (nsStatus != HTTP_CONFLICT && (nsStatus < 200 || nsStatus >= 300)) {
+				final String body = nsResp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("catalogSeed CreateNamespace ns-" + nsIdx + ": HTTP " + nsStatus + " — " + body);
+			}
+		} finally {
+			nsResp.release();
 		}
 
 		final String tblUri = "/tables/" + arn + "/" + ns;
@@ -260,10 +288,14 @@ final class S3TablesControlPlane {
 		if (tblResp == null) {
 			throw new Exception("catalogSeed CreateTable ns-" + nsIdx + "/tbl-" + tblIdx + ": no response (timeout)");
 		}
-		final int tblStatus = tblResp.status().code();
-		if (tblStatus != HTTP_CONFLICT && (tblStatus < 200 || tblStatus >= 300)) {
-			final String body = tblResp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("catalogSeed CreateTable ns-" + nsIdx + "/tbl-" + tblIdx + ": HTTP " + tblStatus + " — " + body);
+		try {
+			final int tblStatus = tblResp.status().code();
+			if (tblStatus != HTTP_CONFLICT && (tblStatus < 200 || tblStatus >= 300)) {
+				final String body = tblResp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("catalogSeed CreateTable ns-" + nsIdx + "/tbl-" + tblIdx + ": HTTP " + tblStatus + " — " + body);
+			}
+		} finally {
+			tblResp.release();
 		}
 	}
 
@@ -279,10 +311,14 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("GetTable " + ns + "/" + tbl + ": no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			final String body = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("GetTable " + ns + "/" + tbl + ": HTTP " + status + " — " + body);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				final String body = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("GetTable " + ns + "/" + tbl + ": HTTP " + status + " — " + body);
+			}
+		} finally {
+			resp.release();
 		}
 	}
 
@@ -298,10 +334,14 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("ListTables " + ns + ": no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			final String body = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("ListTables " + ns + ": HTTP " + status + " — " + body);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				final String body = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("ListTables " + ns + ": HTTP " + status + " — " + body);
+			}
+		} finally {
+			resp.release();
 		}
 	}
 
@@ -324,13 +364,17 @@ final class S3TablesControlPlane {
 		if (resp == null) {
 			throw new Exception("PutTableMaintenanceConfiguration: no response (timeout)");
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("PutTableMaintenanceConfiguration failed: HTTP " + status + " — " + bodyStr);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				final String bodyStr = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("PutTableMaintenanceConfiguration failed: HTTP " + status + " — " + bodyStr);
+			}
+			Loggers.MSG.info("{}: PutTableMaintenanceConfiguration: compaction triggered on table={}",
+							driver.getStepId(), tableName);
+		} finally {
+			resp.release();
 		}
-		Loggers.MSG.info("{}: PutTableMaintenanceConfiguration: compaction triggered on table={}",
-						driver.getStepId(), tableName);
 	}
 
 	/**

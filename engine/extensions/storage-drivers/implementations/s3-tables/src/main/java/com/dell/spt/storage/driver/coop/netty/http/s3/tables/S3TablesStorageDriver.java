@@ -417,10 +417,14 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		if (resp == null) {
 			throw new Exception("Data-plane PUT timeout for " + s3Path);
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			final String body = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("Data-plane PUT " + s3Path + " returned HTTP " + status + ": " + body);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				final String body = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("Data-plane PUT " + s3Path + " returned HTTP " + status + ": " + body);
+			}
+		} finally {
+			resp.release();
 		}
 	}
 
@@ -453,14 +457,18 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		if (resp == null) {
 			throw new Exception("Data-plane GET timeout for " + s3Path);
 		}
-		final int status = resp.status().code();
-		if (status < 200 || status >= 300) {
-			final String body = resp.content().toString(StandardCharsets.UTF_8);
-			throw new Exception("Data-plane GET " + s3Path + " returned HTTP " + status + ": " + body);
+		try {
+			final int status = resp.status().code();
+			if (status < 200 || status >= 300) {
+				final String body = resp.content().toString(StandardCharsets.UTF_8);
+				throw new Exception("Data-plane GET " + s3Path + " returned HTTP " + status + ": " + body);
+			}
+			final byte[] bytes = new byte[resp.content().readableBytes()];
+			resp.content().readBytes(bytes);
+			return bytes;
+		} finally {
+			resp.release();
 		}
-		final byte[] bytes = new byte[resp.content().readableBytes()];
-		resp.content().readBytes(bytes);
-		return bytes;
 	}
 
 	/**
