@@ -47,7 +47,7 @@ jobs:
           script: |
             const sha = context.sha;
             const ciCheckNames = ['Engine Build & Tests', 'Go Quality Suite'];
-            const maxAttempts = 10;
+            const maxAttempts = 30;
             const intervalMs = 30000;
 
             console.log(`Checking CI status for commit ${sha}`);
