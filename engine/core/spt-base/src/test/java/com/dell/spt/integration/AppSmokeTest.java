@@ -58,7 +58,7 @@ public class AppSmokeTest {
 	final CoreResourcesToInstall coreResources = new CoreResourcesToInstall();
 	final Path appHomePath = coreResources.appHomePath();
 	final String initialStepId = "none-" + LogUtil.getDateTimeStamp();
-	final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+	final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 	URLClassLoader extClsLoader = null;
 	List<Extension> extensions = null;
 	Config config = TestConfigBuilder.config();

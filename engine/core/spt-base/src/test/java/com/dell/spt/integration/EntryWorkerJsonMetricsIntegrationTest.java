@@ -69,8 +69,8 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 	@BeforeEach
 	public void setUp() throws Exception {
 		om = new ObjectMapper();
-		workerMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
-		entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		workerMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		workerConfig = TestConfigBuilder.config();
 		workerConfig.val("run-comment", "worker-node");
 		workerConfig.val("run-port", WORKER_JSON_PORT);

@@ -52,7 +52,7 @@ import com.dell.spt.testing.tags.IntegrationTest;
 public class RunReadinessIntegrationTest {
 
 	private final CoreResourcesToInstall coreResources = new CoreResourcesToInstall();
-	private final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+	private final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 	private Path appHomePath;
 	private List<Extension> extensions;
 	private ClassLoader extClsLoader;

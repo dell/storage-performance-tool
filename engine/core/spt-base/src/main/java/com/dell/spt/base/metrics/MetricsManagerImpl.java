@@ -10,6 +10,8 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.concurrent.TaskBase;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
@@ -25,9 +27,6 @@ import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
 import com.dell.spt.base.metrics.util.CombinedCompletionCollector;
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
-import com.github.akurilov.fiber4j.Fiber;
-import com.github.akurilov.fiber4j.FibersExecutor;
 import io.prometheus.client.Collector;
 import io.prometheus.client.CollectorRegistry;
 
@@ -49,9 +48,10 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 /** Created by kurila on 18.05.17. */
-public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsManager {
+public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	private static final String CLS_NAME = MetricsManagerImpl.class.getSimpleName();
+	private static final long LOCK_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 	private final Set<MetricsContext> allMetrics = new ConcurrentSkipListSet<>();
 	private final Map<DistributedMetricsContext, PrometheusMetricsExporter> distributedMetrics = new ConcurrentHashMap<>();
 	private final Set<MetricsContext> selectedMetrics = new TreeSet<>();
@@ -62,8 +62,8 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 
-	public MetricsManagerImpl(final FibersExecutor instance) {
-		super(instance);
+	public MetricsManagerImpl(final VirtualThreadExecutor executor) {
+		super(executor);
 		// Register a global collector that emits aggregated step completion percent per step id
 		try {
 			CollectorRegistry.defaultRegistry.register(
@@ -76,73 +76,73 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 	}
 
 	@Override
-	protected final void invokeTimedExclusively(final long startTimeNanos) {
+	protected final void doWork() throws Exception {
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		int actualConcurrency = 0;
 		int nextConcurrencyThreshold;
-		if (outputLock.tryLock()) {
-			try {
-				for (final MetricsContext metricsCtx : allMetrics) {
-					ThreadContext.put(KEY_STEP_ID, metricsCtx.loadStepId());
-					// TODO: as a future improvement consider whether throttling is needed here.
-					metricsCtx.refreshLastSnapshot();
+		outputLock.lock();
+		try {
+			for (final MetricsContext metricsCtx : allMetrics) {
+				ThreadContext.put(KEY_STEP_ID, metricsCtx.loadStepId());
+				// TODO: as a future improvement consider whether throttling is needed here.
+				metricsCtx.refreshLastSnapshot();
 
-					final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
-					if (null != snapshot) {
-						recordProgressSnapshot(metricsCtx, snapshot);
-						final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
-						if (null != concurrencySnapshot) {
-							actualConcurrency = (int) concurrencySnapshot.last();
+				final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
+				if (null != snapshot) {
+					recordProgressSnapshot(metricsCtx, snapshot);
+					final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
+					if (null != concurrencySnapshot) {
+						actualConcurrency = (int) concurrencySnapshot.last();
+					}
+					// threshold load state checks
+					nextConcurrencyThreshold = metricsCtx.concurrencyThreshold();
+					if (nextConcurrencyThreshold > 0 && actualConcurrency >= nextConcurrencyThreshold) {
+						if (!metricsCtx.thresholdStateEntered() && !metricsCtx.thresholdStateExited()) {
+							Loggers.MSG.info(
+											"{}: the threshold of {} active load operations count is reached, "
+															+ "starting the additional metrics accounting",
+											metricsCtx.toString(),
+											metricsCtx.concurrencyThreshold());
+							metricsCtx.enterThresholdState();
 						}
-						// threshold load state checks
-						nextConcurrencyThreshold = metricsCtx.concurrencyThreshold();
-						if (nextConcurrencyThreshold > 0 && actualConcurrency >= nextConcurrencyThreshold) {
-							if (!metricsCtx.thresholdStateEntered() && !metricsCtx.thresholdStateExited()) {
-								Loggers.MSG.info(
-												"{}: the threshold of {} active load operations count is reached, "
-																+ "starting the additional metrics accounting",
-												metricsCtx.toString(),
-												metricsCtx.concurrencyThreshold());
-								metricsCtx.enterThresholdState();
-							}
-						} else if (metricsCtx.thresholdStateEntered() && !metricsCtx.thresholdStateExited()) {
-							exitMetricsThresholdState(metricsCtx);
-						}
-						// periodic output
-						final long outputPeriodMillis = metricsCtx.outputPeriodMillis();
-						final long lastOutputTs = metricsCtx.lastOutputTs();
-						final long nextOutputTs = System.currentTimeMillis();
-						if (outputPeriodMillis > 0 && nextOutputTs - lastOutputTs >= outputPeriodMillis) {
-							metricsCtx.lastOutputTs(nextOutputTs);
-							selectedMetrics.add(metricsCtx);
-							if (metricsCtx.avgPersistEnabled()) {
-								Loggers.METRICS_FILE.info(
-												new MetricsCsvLogMessage(
-																snapshot, metricsCtx.opType(), metricsCtx.concurrencyLimit()));
-							}
+					} else if (metricsCtx.thresholdStateEntered() && !metricsCtx.thresholdStateExited()) {
+						exitMetricsThresholdState(metricsCtx);
+					}
+					// periodic output
+					final long outputPeriodMillis = metricsCtx.outputPeriodMillis();
+					final long lastOutputTs = metricsCtx.lastOutputTs();
+					final long nextOutputTs = System.currentTimeMillis();
+					if (outputPeriodMillis > 0 && nextOutputTs - lastOutputTs >= outputPeriodMillis) {
+						metricsCtx.lastOutputTs(nextOutputTs);
+						selectedMetrics.add(metricsCtx);
+						if (metricsCtx.avgPersistEnabled()) {
+							Loggers.METRICS_FILE.info(
+											new MetricsCsvLogMessage(
+															snapshot, metricsCtx.opType(), metricsCtx.concurrencyLimit()));
 						}
 					}
 				}
-				// console output
-				if (!selectedMetrics.isEmpty()) {
-					Loggers.METRICS_STD_OUT.info(new MetricsAsciiTableLogMessage(selectedMetrics));
-					selectedMetrics.clear();
-				}
-			} catch (final ConcurrentModificationException cme) {
-				Loggers.MSG.debug("Metrics context set modified during sweep; will retry in next cycle");
-			} catch (final Throwable cause) {
-				throwUncheckedIfInterrupted(cause);
-				LogUtil.exception(Level.DEBUG, cause, "Metrics manager failure");
-			} finally {
-				outputLock.unlock();
 			}
+			// console output
+			if (!selectedMetrics.isEmpty()) {
+				Loggers.METRICS_STD_OUT.info(new MetricsAsciiTableLogMessage(selectedMetrics));
+				selectedMetrics.clear();
+			}
+		} catch (final ConcurrentModificationException cme) {
+			Loggers.MSG.debug("Metrics context set modified during sweep; will retry in next cycle");
+		} catch (final Throwable cause) {
+			throwUncheckedIfInterrupted(cause);
+			LogUtil.exception(Level.DEBUG, cause, "Metrics manager failure");
+		} finally {
+			outputLock.unlock();
 		}
+		Thread.sleep(10); // 100 Hz iteration rate
 	}
 
 	private void startIfNotStarted() {
-		if (!isStarted()) {
+		if (!isStarted() && !isStopped()) {
 			super.start();
-			Loggers.MSG.debug("Started the metrics manager fiber");
+			Loggers.MSG.debug("Started the metrics manager task");
 		}
 	}
 
@@ -189,7 +189,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 				TimingMetricQuantileResultsImpl durationQuantiles = null;
 				boolean lockAcquired = false;
 				try {
-					lockAcquired = outputLock.tryLock(Fiber.WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS);
+					lockAcquired = outputLock.tryLock(LOCK_TIMEOUT_NANOS, TimeUnit.NANOSECONDS);
 					if (!lockAcquired) {
 						Loggers.ERR.warn(
 										"Acquire lock timeout while unregistering the metrics context \"{}\"", metricsCtx);
@@ -319,7 +319,7 @@ public class MetricsManagerImpl extends ExclusiveFiberBase implements MetricsMan
 		} finally {
 			if (allMetrics.isEmpty()) {
 				stop();
-				Loggers.MSG.debug("Stopped the metrics manager fiber");
+				Loggers.MSG.debug("Stopped the metrics manager task");
 			}
 		}
 	}

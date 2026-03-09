@@ -84,7 +84,7 @@ public class JsonMetricsIntegrationTest {
 	@BeforeEach
 	public void setUp() throws Exception {
 		objectMapper = new ObjectMapper();
-		metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		jsonConfig = TestConfigBuilder.config();
 		jsonConfig.val("run-comment", "integration-entry");
 		jsonConfig.val("run-port", JSON_PORT);
