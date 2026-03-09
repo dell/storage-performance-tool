@@ -88,6 +88,11 @@ public abstract class TaskBase implements Task, Runnable {
 	}
 
 	@Override
+	public boolean await(final long timeout, final TimeUnit unit) throws InterruptedException {
+		return awaitStop(timeout, unit);
+	}
+
+	@Override
 	public boolean isStarted() {
 		return started && !stopped;
 	}
