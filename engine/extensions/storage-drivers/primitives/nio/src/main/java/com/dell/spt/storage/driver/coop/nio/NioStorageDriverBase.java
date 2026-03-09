@@ -244,8 +244,6 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				} finally {
 					opBuffLock.unlock();
 				}
-			} else {
-				i++;
 			}
 		}
 		return false;
