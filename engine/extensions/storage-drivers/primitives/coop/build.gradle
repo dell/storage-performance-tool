@@ -22,4 +22,7 @@ dependencies {
 	)
 
 	// External dependencies that will be bundled (none for coop)
+
+	// Test-only dependencies
+	testImplementation libs.mockito.core
 }
