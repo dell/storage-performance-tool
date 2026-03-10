@@ -11,6 +11,7 @@ public interface Task extends AutoCloseable {
 
 	void stop();
 
+	@Override
 	void close();
 
 	boolean isStarted();

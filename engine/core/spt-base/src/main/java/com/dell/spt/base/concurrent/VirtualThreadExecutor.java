@@ -15,6 +15,7 @@ public class VirtualThreadExecutor implements AutoCloseable {
 		this.executor = Executors.newVirtualThreadPerTaskExecutor();
 	}
 
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public void submit(final Runnable task) {
 		executor.submit(task);
 	}

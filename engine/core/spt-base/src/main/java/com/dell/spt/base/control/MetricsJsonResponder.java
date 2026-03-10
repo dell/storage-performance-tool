@@ -62,7 +62,7 @@ final class MetricsJsonResponder {
 			activeStepIds.add(ctx.loadStepId());
 		}
 
-		appendTerminalEntries(jsonArray, activeStepIds);
+		appendTerminalEntries(jsonArray, activeStepIds, verbose);
 
 		// Emit a single "idle" sample if nothing is available yet.
 		if (jsonArray.size() == 0) {
@@ -89,7 +89,7 @@ final class MetricsJsonResponder {
 			jsonArray.add(jsonObj);
 			activeStepIds.add(ctx.loadStepId());
 		}
-		appendDistributedTerminalEntries(jsonArray, activeStepIds);
+		appendDistributedTerminalEntries(jsonArray, activeStepIds, verbose);
 		return jsonArray;
 	}
 
@@ -401,7 +401,8 @@ final class MetricsJsonResponder {
 		return jsonObj;
 	}
 
-	private void appendTerminalEntries(final ArrayNode jsonArray, final Set<String> activeStepIds) {
+	private void appendTerminalEntries(
+					final ArrayNode jsonArray, final Set<String> activeStepIds, final boolean verbose) {
 		for (TerminalStepEntry entry : metricsManager.getTerminalSteps()) {
 			if (entry.distributed) {
 				continue;
@@ -470,12 +471,16 @@ final class MetricsJsonResponder {
 			concurrency.put("mean", entry.concurrencyMean);
 			jsonObj.set("concurrency", concurrency);
 
+			if (verbose) {
+				jsonObj.put("diag_cached_progress", true);
+			}
 			jsonObj.put("terminal", true);
 			jsonArray.add(jsonObj);
 		}
 	}
 
-	private void appendDistributedTerminalEntries(final ArrayNode jsonArray, final Set<String> activeStepIds) {
+	private void appendDistributedTerminalEntries(
+					final ArrayNode jsonArray, final Set<String> activeStepIds, final boolean verbose) {
 		for (TerminalStepEntry entry : metricsManager.getTerminalSteps()) {
 			if (!entry.distributed) {
 				continue;
@@ -554,6 +559,9 @@ final class MetricsJsonResponder {
 			jsonObj.set("nodes_present", nodesPresent);
 			final boolean partial = entry.partial && entry.nodeCount > 0;
 			jsonObj.put("partial", partial);
+			if (verbose) {
+				jsonObj.put("diag_cached_progress", true);
+			}
 			jsonObj.put("terminal", true);
 			jsonArray.add(jsonObj);
 		}

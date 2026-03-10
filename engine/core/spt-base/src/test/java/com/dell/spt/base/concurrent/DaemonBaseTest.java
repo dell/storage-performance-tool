@@ -38,6 +38,7 @@ class DaemonBaseTest {
 		d.start();
 		d.close();
 		assertEquals(State.CLOSED, d.state());
+		assertTrue(d.startCalled);
 		assertTrue(d.closeCalled);
 		assertTrue(d.stopCalled);
 		assertTrue(d.shutdownCalled);

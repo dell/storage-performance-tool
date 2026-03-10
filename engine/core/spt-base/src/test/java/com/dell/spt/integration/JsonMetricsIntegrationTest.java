@@ -17,6 +17,8 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.params.ItemSize;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import io.prometheus.client.exporter.MetricsServlet;
@@ -259,8 +261,10 @@ public class JsonMetricsIntegrationTest {
 
 	@Test
 	public void testClusterEndpointMatchesFleet() throws Exception {
-		final JsonNode cluster = objectMapper.readTree(fetchFromUrl(CLUSTER_JSON_URL));
-		final JsonNode fleet = objectMapper.readTree(fetchJsonMetrics());
+		final ArrayNode cluster = (ArrayNode) objectMapper.readTree(fetchFromUrl(CLUSTER_JSON_URL));
+		final ArrayNode fleet = (ArrayNode) objectMapper.readTree(fetchJsonMetrics());
+		stripVolatileFields(cluster);
+		stripVolatileFields(fleet);
 		assertEquals(fleet, cluster, "Cluster endpoint should mirror fleet aggregates");
 	}
 
@@ -445,7 +449,17 @@ public class JsonMetricsIntegrationTest {
 		return metrics;
 	}
 
-	private static Charset resolveCharset(HttpURLConnection connection) {
+	private static void stripVolatileFields(final ArrayNode array) {
+		for (JsonNode node : array) {
+			if (node instanceof ObjectNode obj) {
+				obj.remove("sample_ts");
+				obj.remove("timestamp");
+				obj.remove("elapsed_time_seconds");
+			}
+		}
+	}
+
+	private static Charset resolveCharset(final HttpURLConnection connection) {
 		final String contentType = connection.getContentType();
 		if (contentType != null) {
 			int start = 0;
