@@ -38,6 +38,12 @@ public class AwaitStepSliceTask extends TaskBase {
 				awaitCountDown.countDown();
 				stop();
 			}
+		} catch (final RemoteException e) {
+			LogUtil.exception(
+							Level.WARN,
+							e,
+							"Failed to invoke the remote await method on the step slice \"{}\"",
+							stepSlice);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failure in the await method", loadStepId);
 		}

@@ -18,6 +18,7 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;
+import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
 import java.util.List;
@@ -49,6 +50,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				stepCtx.start();
 				anyStarted = true;
 			} catch (final IllegalStateException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+				iterator.remove();
+			} catch (final RemoteException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
 				iterator.remove();
@@ -136,6 +141,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			try (final Instance ctx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepCtx.shutdown();
 				Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
+			} catch (final RemoteException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the load step context", loadStepId());
+				iterator.remove();
 			}
 		}
 	}
@@ -169,6 +177,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						}
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
+					} catch (final RemoteException e) {
+						stepContextsCopy[i] = null; // exclude failed context
+						stepContexts.remove(stepCtx);
+						countDown--;
+						break;
 					}
 				}
 			}

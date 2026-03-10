@@ -20,16 +20,17 @@ public interface LoadStep extends Daemon {
 	List<? extends AllMetricsSnapshot> metricsSnapshots() throws RemoteException;
 
 	@Override
-	AsyncRunnable start();
+	AsyncRunnable start() throws RemoteException;
 
 	@Override
-	AsyncRunnable await() throws InterruptedException;
+	AsyncRunnable await() throws InterruptedException, RemoteException;
 
 	@Override
-	boolean await(final long timeout, final TimeUnit timeUnit) throws InterruptedException;
+	boolean await(final long timeout, final TimeUnit timeUnit)
+					throws InterruptedException, RemoteException;
 
 	@Override
-	AsyncRunnable stop();
+	AsyncRunnable stop() throws RemoteException;
 
 	@Override
 	void close() throws IOException;

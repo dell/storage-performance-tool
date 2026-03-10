@@ -38,6 +38,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
+import java.rmi.RemoteException;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -554,6 +555,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	protected void doStart() throws IllegalStateException {
 		try {
 			driver.start();
+		} catch (final RemoteException e) {
+			throw new IllegalStateException(
+							String.format("%s: failed to start the storage driver \"%s\"", id, driver),
+							e);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
@@ -618,6 +623,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
 			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
+		} catch (final RemoteException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
 		}
 	}
 

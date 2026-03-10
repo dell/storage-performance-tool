@@ -1,6 +1,7 @@
 package com.dell.spt.base.concurrent;
 
 import java.io.Closeable;
+import java.rmi.RemoteException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -12,6 +13,10 @@ import java.util.concurrent.TimeUnit;
  *                                                                       │
  * ANY (except CLOSED) ─────────────────── close() ──────────────────► CLOSED
  * </pre>
+ *
+ * <p>Methods declare {@code throws RemoteException} for compatibility with {@link java.rmi.Remote}
+ * subinterfaces (e.g. {@link com.dell.spt.base.svc.Service}). Local implementations do not
+ * throw it; the declaration exists solely to satisfy the RMI contract.
  */
 public interface AsyncRunnable extends Closeable {
 
@@ -19,25 +24,25 @@ public interface AsyncRunnable extends Closeable {
 		INITIAL, STARTED, SHUTDOWN, STOPPED, CLOSED
 	}
 
-	State state();
+	State state() throws RemoteException;
 
-	boolean isInitial();
+	boolean isInitial() throws RemoteException;
 
-	boolean isStarted();
+	boolean isStarted() throws RemoteException;
 
-	boolean isShutdown();
+	boolean isShutdown() throws RemoteException;
 
-	boolean isStopped();
+	boolean isStopped() throws RemoteException;
 
-	boolean isClosed();
+	boolean isClosed() throws RemoteException;
 
-	AsyncRunnable start();
+	AsyncRunnable start() throws RemoteException;
 
-	AsyncRunnable shutdown();
+	AsyncRunnable shutdown() throws RemoteException;
 
-	AsyncRunnable stop();
+	AsyncRunnable stop() throws RemoteException;
 
-	AsyncRunnable await() throws InterruptedException;
+	AsyncRunnable await() throws InterruptedException, RemoteException;
 
-	boolean await(long timeout, TimeUnit timeUnit) throws InterruptedException;
+	boolean await(long timeout, TimeUnit timeUnit) throws InterruptedException, RemoteException;
 }

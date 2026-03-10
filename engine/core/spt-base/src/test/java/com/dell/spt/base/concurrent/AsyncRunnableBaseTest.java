@@ -130,6 +130,85 @@ class AsyncRunnableBaseTest {
 	}
 
 	@Test
+	void startFromShutdownIsIgnored() {
+		var r = new TestRunnable();
+		r.start();
+		r.shutdown();
+		r.startCalled = false;
+		r.start(); // silently ignored — SHUTDOWN is not a valid start state
+		assertEquals(State.SHUTDOWN, r.state());
+		assertFalse(r.startCalled);
+	}
+
+	@Test
+	void startFromClosedIsIgnored() throws IOException {
+		var r = new TestRunnable();
+		r.start();
+		r.close();
+		r.startCalled = false;
+		r.start(); // silently ignored — CLOSED is terminal
+		assertEquals(State.CLOSED, r.state());
+		assertFalse(r.startCalled);
+	}
+
+	@Test
+	void shutdownFromClosedIsIgnored() throws IOException {
+		var r = new TestRunnable();
+		r.start();
+		r.close();
+		r.shutdownCalled = false;
+		r.shutdown(); // silently ignored — CLOSED is terminal
+		assertEquals(State.CLOSED, r.state());
+		assertFalse(r.shutdownCalled);
+	}
+
+	@Test
+	void stopFromInitialGoesToStopped() {
+		var r = new TestRunnable();
+		r.stop(); // shutdown from INITIAL → SHUTDOWN, then stop → STOPPED
+		assertEquals(State.STOPPED, r.state());
+		assertTrue(r.shutdownCalled);
+		assertTrue(r.stopCalled);
+	}
+
+	@Test
+	void stopFromClosedIsIgnored() throws IOException {
+		var r = new TestRunnable();
+		r.start();
+		r.close();
+		r.stopCalled = false;
+		r.shutdownCalled = false;
+		r.stop(); // silently ignored — CLOSED is terminal
+		assertEquals(State.CLOSED, r.state());
+		assertFalse(r.stopCalled);
+	}
+
+	@Test
+	void stopFromAlreadyStoppedIsIgnored() {
+		var r = new TestRunnable();
+		r.start();
+		r.stop();
+		r.stopCalled = false;
+		r.stop(); // silently ignored — already STOPPED
+		assertEquals(State.STOPPED, r.state());
+		assertFalse(r.stopCalled);
+	}
+
+	@Test
+	void awaitReturnsImmediatelyWhenInitial() throws Exception {
+		var r = new TestRunnable();
+		assertTrue(r.await(100, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	void awaitReturnsImmediatelyWhenClosed() throws Exception {
+		var r = new TestRunnable();
+		r.start();
+		r.close();
+		assertTrue(r.await(100, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
 	void awaitReturnsImmediatelyWhenStopped() throws Exception {
 		var r = new TestRunnable();
 		r.start();
