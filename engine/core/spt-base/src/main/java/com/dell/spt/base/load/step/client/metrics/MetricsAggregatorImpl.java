@@ -5,7 +5,6 @@ import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.load.step.LoadStep;
-import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.github.akurilov.commons.concurrent.AsyncRunnableBase;
 import java.util.ArrayList;
@@ -14,7 +13,6 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import com.github.akurilov.confuse.Config;
-import org.apache.logging.log4j.Level;
 
 public final class MetricsAggregatorImpl extends AsyncRunnableBase implements MetricsAggregator {
 

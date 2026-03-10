@@ -5,7 +5,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Runs Task instances on Virtual Threads. Replaces fiber4j's FibersExecutor.
+ * Runs Task instances on Virtual Threads.
  */
 public class VirtualThreadExecutor implements AutoCloseable {
 

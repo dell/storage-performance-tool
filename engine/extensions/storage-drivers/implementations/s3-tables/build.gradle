@@ -57,7 +57,6 @@ dependencies {
 	testRuntimeOnly(
 		libs.commons.codec,
 		libs.confuse.io.yaml,
-		libs.fiber4j,
 		libs.disruptor,
 		libs.netty.transport.native.epoll,
 		libs.hadoop.thirdparty,

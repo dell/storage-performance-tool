@@ -8,7 +8,7 @@ This directory contains the engine source, extensions (storage drivers, load pat
 
 ## Key Features
 
-- **High Performance**: Leverages Java fibers to sustain millions of concurrent operations
+- **High Performance**: Leverages Virtual Threads to sustain millions of concurrent operations
 - **Distributed Testing**: P2P architecture enables horizontal scaling across multiple nodes
 - **Extensible Architecture**: Plugin-based design supports custom storage drivers and load patterns
 - **Comprehensive Metrics**: Detailed performance metrics including latency distributions, throughput, and concurrency

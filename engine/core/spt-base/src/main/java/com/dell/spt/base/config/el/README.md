@@ -115,7 +115,7 @@ The expression above will yield different timestamp every time.
 
 ### 4.2.3. Asynchronous
 
-The expression is being evaluated constantly in the background fiber. Requesting the expression value frequently is
+The expression is being evaluated constantly in the background virtual thread. Requesting the expression value frequently is
 expected to yield a sequence of the same value. The asynchronous evaluation is most useful when:
 * The recalculation cost is too high
 * The values consumer doesn't require different value each time

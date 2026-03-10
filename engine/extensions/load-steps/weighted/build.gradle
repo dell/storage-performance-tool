@@ -22,8 +22,6 @@ dependencies {
 	// Testing utilities
 	testImplementation(
 		libs.mockito.core,
-		// Needed because MetricsManager extends com.github.akurilov.fiber4j.Fiber
-		libs.fiber4j,
 	)
 
 	testRuntimeOnly(

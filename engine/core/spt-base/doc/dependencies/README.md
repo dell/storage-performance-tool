@@ -11,7 +11,6 @@
 | com.github.akurilov        | confuse                      | 1.2.1       | Dynamic  | Apache 2.0                       | Dynamically extensible configuration
 | com.github.akurilov        | confuse-io-yaml              | 1.0.0       | Dynamic  | Apache 2.0                       | Configuration \[de]serialization
 | com.github.akurilov        | java-commons                 | 2.3.3       | Dynamic  | Apache 2.0                       | Used everywhere
-| com.github.akurilov        | fiber4j                      | 1.1.0       | Dynamic  | Apache 2.0                       | Cooperative multitasking support
 | org.apache.logging.log4j   | log4j-api                    | 2.8.2       | Dynamic  | Apache 2.0                       | Logging
 | org.apache.logging.log4j   | log4j-core                   | 2.8.2       | Dynamic  | Apache 2.0                       | Logging
 | org.apache.logging.log4j   | log4j-iostreams              | 2.8.2       | Dynamic  | Apache 2.0                       | Logging

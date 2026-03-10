@@ -101,10 +101,9 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doClose() {
 		// Design decision: any operations remaining in the buffer are dropped on shutdown.
-		// This matches the legacy fiber4j behavior where buffered work was lost when the
-		// fiber executor stopped. For a benchmarking tool this is acceptable — metrics have
-		// already captured the completed operations, and attempting a draining flush here
-		// risks hangs if the downstream driver is in a failed or saturated state.
+		// For a benchmarking tool this is acceptable — metrics have already captured the
+		// completed operations, and attempting a draining flush here risks hangs if the
+		// downstream driver is in a failed or saturated state.
 		buff.clear();
 	}
 }

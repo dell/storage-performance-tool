@@ -5,7 +5,6 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Base class for recurring tasks that run on a Virtual Thread.
- * Replaces both FiberBase and ExclusiveFiberBase from fiber4j.
  * <p>
  * Subclasses implement {@link #doWork()} with their work loop body. The VirtualThreadExecutor
  * submits this as a Runnable to a Virtual Thread, which calls doWork() in a loop until stopped.

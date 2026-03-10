@@ -23,7 +23,6 @@ nettyIoUring = "0.0.26.Final"  # Updated to match netty 4.1.131
 # Spt internal libraries
 confuse = "1.2.1"
 confuseIoYaml = "1.0.0"
-fiber4j = "1.1.0"
 javaCommons = "2.3.6"
 
 # Performance and utilities
@@ -98,7 +97,6 @@ netty-incubator-transport-native-io_uring = { module = "io.netty.incubator:netty
 # Spt internal libraries
 confuse = { module = "com.github.akurilov:confuse", version.ref = "confuse" }
 confuse-io-yaml = { module = "com.github.akurilov:confuse-io-yaml", version.ref = "confuseIoYaml" }
-fiber4j = { module = "com.github.akurilov:fiber4j", version.ref = "fiber4j" }
 java-commons = { module = "com.github.akurilov:java-commons", version.ref = "javaCommons" }
 netty-connection-pool = { module = "com.github.akurilov:netty-connection-pool", version.ref = "nettyConnectionPool" }
 
@@ -152,7 +150,7 @@ netty-platform = ["netty-transport-native-epoll", "netty-transport-native-kqueue
 prometheus = ["prometheus-simpleclient", "prometheus-simpleclient-common", "prometheus-simpleclient-httpserver"]
 
 # Spt internal bundle
-spt-internal = ["confuse", "confuse-io-yaml", "fiber4j", "java-commons"]
+spt-internal = ["confuse", "confuse-io-yaml", "java-commons"]
 
 [plugins]
 shadow = { id = "com.github.johnrengelman.shadow", version.ref = "shadow" }

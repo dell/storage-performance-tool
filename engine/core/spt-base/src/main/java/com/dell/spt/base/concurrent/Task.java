@@ -3,7 +3,7 @@ package com.dell.spt.base.concurrent;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Lifecycle contract for a recurring background task. Replaces fiber4j's Fiber interface.
+ * Lifecycle contract for a recurring background task.
  * Implementations run on Virtual Threads via TaskExecutor.
  */
 public interface Task extends AutoCloseable {

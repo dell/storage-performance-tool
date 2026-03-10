@@ -17,7 +17,6 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.fiber4j.Fiber;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
@@ -28,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepLocalBase extends LoadStepBase {
+
+	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
 	protected final List<LoadStepContext> stepContexts = new ArrayList<>();
 
@@ -170,7 +171,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				if (stepCtx != null) {
 					try {
 						if (stepCtx.isDone()
-										|| stepCtx.await(Fiber.SOFT_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
+										|| stepCtx.await(STEP_CONTEXT_POLL_NANOS, TimeUnit.NANOSECONDS)) {
 							stepContextsCopy[i] = null; // exclude
 							countDown--;
 							break;

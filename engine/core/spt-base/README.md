@@ -21,7 +21,7 @@ Spt is a distributed storage performance testing tool. This repo contains the ba
 
 ### 2.1.1. Vertical
 
-Using [fibers](https://github.com/akurilov/fiber4j) allows to sustain millions of concurrent operations easily without
+Using Virtual Threads allows to sustain millions of concurrent operations easily without
 significant performance degradation.
 
 ### 2.1.2. Horizontal

@@ -43,7 +43,8 @@ public class NioStorageDriverBaseTest {
 
 	@AfterEach
 	void tearDown() throws Exception {
-		if (dataInput != null) dataInput.close();
+		if (dataInput != null)
+			dataInput.close();
 	}
 
 	private NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> newDriver() throws Exception {
@@ -232,8 +233,10 @@ public class NioStorageDriverBaseTest {
 		public int put(List<Operation<DataItemImpl>> vals, int from, int to) {
 			int n = 0;
 			for (int i = from; i < to; i++) {
-				if (queue.offer(vals.get(i))) n++;
-				else break;
+				if (queue.offer(vals.get(i)))
+					n++;
+				else
+					break;
 			}
 			return n;
 		}

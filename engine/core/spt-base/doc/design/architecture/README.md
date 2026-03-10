@@ -149,15 +149,15 @@ Spt uses fixed count of threads to execute its tasks.
 
 The count of the tasks which are required to be executed concurrently may be large (for example in a case of distributed
 mode with many additional nodes). The traditional thread-per-task approach is inefficient if the count of the threads is
-much higher than the count of the available CPU cores. The [fibers](https://github.com/akurilov/fiber4j) are used in
-Spt to execute the required work efficiently.
+much higher than the count of the available CPU cores. Virtual Threads are used in Spt to execute the required work
+efficiently.
 
 Spt tasks may be divided into two types: service tasks and load operations. So there are two different fixed thread
 pools for these types of tasks.
 
 ## 3.1. Service Tasks
 
-Each Spt process shares the global service tasks executor (FibersExecutor instance). By default the count of
+Each Spt process shares the global service tasks executor (VirtualThreadExecutor instance). By default the count of
 the service tasks executor's threads is equal to the count of the available CPU cores. A user may set the different
 count of these threads using the configuration option load-service-threads.
 

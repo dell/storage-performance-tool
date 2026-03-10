@@ -41,8 +41,7 @@ public class ParentLastURLClassLoader extends URLClassLoader {
 		// Also delegate API classes to parent to avoid linkage errors
 		if (name.startsWith("org.apache.logging.log4j.") ||
 						name.startsWith("com.github.akurilov.confuse.") ||
-						name.startsWith("com.github.akurilov.commons.") ||
-						name.startsWith("com.github.akurilov.fiber4j.")) {
+						name.startsWith("com.github.akurilov.commons.")) {
 			return super.loadClass(name, resolve);
 		}
 
