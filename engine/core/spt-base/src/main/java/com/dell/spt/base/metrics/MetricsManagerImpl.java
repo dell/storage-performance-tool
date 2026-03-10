@@ -76,8 +76,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	@Override
-	protected final void doWork() throws Exception {
+	protected void doInit() {
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+	}
+
+	@Override
+	protected final void doWork() throws Exception {
 		int actualConcurrency = 0;
 		int nextConcurrencyThreshold;
 		outputLock.lock();

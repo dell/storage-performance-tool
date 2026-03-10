@@ -35,6 +35,7 @@ public abstract class TaskBase implements Task, Runnable {
 	public final void run() {
 		taskThread = Thread.currentThread();
 		try {
+			doInit();
 			while (started && !stopped && !Thread.currentThread().isInterrupted()) {
 				doWork();
 			}
@@ -51,6 +52,14 @@ public abstract class TaskBase implements Task, Runnable {
 			}
 		}
 	}
+
+	/**
+	 * Called once on the Virtual Thread before the work loop begins. Override to set up
+	 * per-VT state such as Log4j ThreadContext (MDC) keys. With Virtual Threads, thread-local
+	 * state persists for the VT's entire lifetime, so initialization done here does not need
+	 * to be repeated in each doWork() iteration.
+	 */
+	protected void doInit() {}
 
 	/**
 	 * Subclasses implement their work loop body here. Called repeatedly until the task is

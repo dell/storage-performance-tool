@@ -47,9 +47,13 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
-	protected final void doWork() throws Exception {
+	protected void doInit() {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+	}
+
+	@Override
+	protected final void doWork() throws Exception {
 		try {
 			// Drain child ops first (partial/composite completions have priority)
 			childOpQueue.drainTo(buff, batchSize - buff.size());
@@ -66,15 +70,24 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			// submit all buffered ops (including retries from prior iterations)
 			final int buffSize = buff.size();
 			if (buffSize > 0) {
+				boolean submitted;
 				if (buffSize == 1) { // non-batch mode
-					if (storageDriver.submit(buff.get(0))) {
+					submitted = storageDriver.submit(buff.get(0));
+					if (submitted) {
 						buff.clear();
 					}
 				} else { // batch mode
 					final int m = storageDriver.submit(buff, 0, buffSize);
-					if (m > 0) {
+					submitted = m > 0;
+					if (submitted) {
 						buff.removeFirst(m);
 					}
+				}
+				// Backpressure relief: if submit made no progress, yield the carrier thread.
+				// Without this sleep the VT would spin-loop at full CPU because the buffer
+				// still has items and the next doWork() iteration would skip the 1ms poll.
+				if (!submitted) {
+					Thread.sleep(1);
 				}
 			}
 		} catch (final IllegalStateException e) {
@@ -87,6 +100,11 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void doClose() {
+		// Design decision: any operations remaining in the buffer are dropped on shutdown.
+		// This matches the legacy fiber4j behavior where buffered work was lost when the
+		// fiber executor stopped. For a benchmarking tool this is acceptable — metrics have
+		// already captured the completed operations, and attempting a draining flush here
+		// risks hangs if the downstream driver is in a failed or saturated state.
 		buff.clear();
 	}
 }

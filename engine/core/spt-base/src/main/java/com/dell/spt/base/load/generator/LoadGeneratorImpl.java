@@ -96,9 +96,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	@Override
+	protected void doInit() {
+		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+	}
+
+	@Override
 	protected final void doWork() throws Exception {
 
-		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final var opBuff = threadLocalOpBuff.get();
 		var pendingOpCount = opBuff.size();
 		var n = batchSize - pendingOpCount;
@@ -189,6 +193,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					}
 
 					// try to output
+					var outputProgress = false;
 					if (n > 0) {
 						if (n == 1) { // single mode branch
 							try {
@@ -200,6 +205,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 									} else {
 										opBuff.remove(0);
 									}
+									outputProgress = true;
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
@@ -214,6 +220,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							try {
 								n = opOutput.put(opBuff, 0, n);
 								outputOpCounter.add(n);
+								if (n > 0) {
+									outputProgress = true;
+								}
 								if (n < pendingOpCount) {
 									opBuff.removeFirst(n);
 								} else {
@@ -229,6 +238,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								}
 							}
 						}
+					}
+					// Backpressure relief: if we had ops to send but made no output progress
+					// (either throttle denied permits or output queue was full), unmount the
+					// VT from its carrier to avoid a CPU-burning spin loop.
+					if (!outputProgress) {
+						Thread.sleep(1);
 					}
 				}
 			} else { // operations count limit is reached
