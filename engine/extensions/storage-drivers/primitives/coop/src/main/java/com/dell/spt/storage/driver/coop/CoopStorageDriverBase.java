@@ -22,6 +22,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
@@ -32,6 +34,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final BlockingQueue<O> inOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
+	private final ReentrantLock dispatchLock = new ReentrantLock();
+	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask opDispatchTask;
 
 	protected CoopStorageDriverBase(
@@ -47,7 +51,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
 		this.opDispatchTask = new OperationDispatchTask<>(
-						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize);
+						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
+						dispatchLock, dispatchReady);
 	}
 
 	@Override
@@ -62,6 +67,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		if (prepare(op) && inOpQueue.offer(op)) {
 			scheduledOpCount.increment();
+			signalDispatch();
 			return true;
 		} else {
 			return false;
@@ -85,6 +91,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		final var n = i - from;
 		scheduledOpCount.add(n);
+		if (n > 0) {
+			signalDispatch();
+		}
 		return n;
 	}
 
@@ -106,6 +115,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			}
 		}
 		scheduledOpCount.add(n);
+		if (n > 0) {
+			signalDispatch();
+		}
 		return n;
 	}
 
@@ -175,9 +187,25 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					}
 				}
 			}
+			signalDispatch();
 			return true;
 		} else {
 			return false;
+		}
+	}
+
+	/**
+	 * Wake the dispatch task. Called when new ops are available (put) or when
+	 * a completion frees capacity (handleCompleted). Uses lock() instead of
+	 * tryLock() to guarantee delivery — the dispatch task only holds the lock
+	 * for nanoseconds (double-check before await), so contention is negligible.
+	 */
+	private void signalDispatch() {
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
 		}
 	}
 

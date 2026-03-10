@@ -11,6 +11,8 @@ import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
@@ -32,11 +34,13 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final BlockingQueue<O> inOpQueue;
 	private final CoopStorageDriverBase<I, O> storageDriver;
 	private final CircularBuffer<O> buff;
+	private final Lock dispatchLock;
+	private final Condition dispatchReady;
 
 	public OperationDispatchTask(
 					final VirtualThreadExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
-					final int batchSize) {
+					final int batchSize, final Lock dispatchLock, final Condition dispatchReady) {
 		super(executor);
 		this.buff = new CircularArrayBuffer<>(batchSize);
 		this.storageDriver = storageDriver;
@@ -44,6 +48,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		this.childOpQueue = childOpQueue;
 		this.stepId = stepId;
 		this.batchSize = batchSize;
+		this.dispatchLock = dispatchLock;
+		this.dispatchReady = dispatchReady;
 	}
 
 	@Override
@@ -57,12 +63,26 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		try {
 			// Drain child ops first (partial/composite completions have priority)
 			childOpQueue.drainTo(buff, batchSize - buff.size());
-			// Then drain incoming ops — block briefly if nothing available
+			// Then drain incoming ops
 			if (buff.size() == 0) {
-				final O op = inOpQueue.poll(1, TimeUnit.MILLISECONDS);
-				if (op != null) {
-					buff.add(op);
-					inOpQueue.drainTo(buff, batchSize - buff.size());
+				inOpQueue.drainTo(buff, batchSize);
+				if (buff.size() == 0) {
+					// Both queues empty — wait for signal from producer or completion callback.
+					// The VT unmounts during await(), freeing the carrier thread.
+					// The 1ms timeout is a safety net; normal wake-up is via signal().
+					dispatchLock.lock();
+					try {
+						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
+							dispatchReady.await(1, TimeUnit.MILLISECONDS);
+						}
+					} finally {
+						dispatchLock.unlock();
+					}
+					// Drain again after waking
+					childOpQueue.drainTo(buff, batchSize);
+					if (buff.size() < batchSize) {
+						inOpQueue.drainTo(buff, batchSize - buff.size());
+					}
 				}
 			} else if (buff.size() < batchSize) {
 				inOpQueue.drainTo(buff, batchSize - buff.size());
@@ -83,11 +103,15 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						buff.removeFirst(m);
 					}
 				}
-				// Backpressure relief: if submit made no progress, yield the carrier thread.
-				// Without this sleep the VT would spin-loop at full CPU because the buffer
-				// still has items and the next doWork() iteration would skip the 1ms poll.
+				// Backpressure: if submit made no progress, wait for a completion signal.
+				// A completion callback releases a semaphore permit and signals us.
 				if (!submitted) {
-					Thread.sleep(1);
+					dispatchLock.lock();
+					try {
+						dispatchReady.await(1, TimeUnit.MILLISECONDS);
+					} finally {
+						dispatchLock.unlock();
+					}
 				}
 			}
 		} catch (final IllegalStateException e) {

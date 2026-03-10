@@ -28,6 +28,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -240,10 +241,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						}
 					}
 					// Backpressure relief: if we had ops to send but made no output progress
-					// (either throttle denied permits or output queue was full), unmount the
-					// VT from its carrier to avoid a CPU-burning spin loop.
+					// (either throttle denied permits or output queue was full), briefly
+					// park the VT to avoid a CPU-burning spin loop. 1μs is 1000x faster
+					// than the previous 1ms sleep; with the dispatch task's Condition-based
+					// signaling the output queue drains within microseconds.
 					if (!outputProgress) {
-						Thread.sleep(1);
+						LockSupport.parkNanos(1_000);
 					}
 				}
 			} else { // operations count limit is reached

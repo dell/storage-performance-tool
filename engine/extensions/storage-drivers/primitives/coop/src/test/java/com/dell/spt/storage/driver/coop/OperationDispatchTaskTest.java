@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,8 @@ class OperationDispatchTaskTest {
 	private CoopStorageDriverBase<Item, Operation<Item>> driverMock;
 	private BlockingQueue<Operation<Item>> inOpQueue;
 	private BlockingQueue<Operation<Item>> childOpQueue;
+	private ReentrantLock dispatchLock;
+	private Condition dispatchReady;
 	private OperationDispatchTask<Item, Operation<Item>> task;
 
 	@BeforeEach
@@ -34,8 +38,11 @@ class OperationDispatchTaskTest {
 		driverMock = mock(CoopStorageDriverBase.class);
 		inOpQueue = new ArrayBlockingQueue<>(16);
 		childOpQueue = new ArrayBlockingQueue<>(16);
+		dispatchLock = new ReentrantLock();
+		dispatchReady = dispatchLock.newCondition();
 		task = new OperationDispatchTask<>(
-						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE);
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady);
 	}
 
 	@AfterEach
@@ -153,5 +160,62 @@ class OperationDispatchTaskTest {
 		verify(driverMock, never()).submit(any(Operation.class));
 		verify(driverMock, never()).submit(anyList(), anyInt(), anyInt());
 		verify(driverMock, never()).submit(anyList());
+	}
+
+	@Test
+	void signalWakesDispatchInstantly() throws Exception {
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+
+		task.start();
+		Thread.sleep(50); // let the task enter Condition.await()
+
+		// Add op and signal — dispatch should wake instantly
+		inOpQueue.add(op);
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+
+		verify(driverMock, timeout(100)).submit(any(Operation.class));
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
+
+	@Test
+	void backpressureRecoveryViaSignal() throws Exception {
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class)))
+						.thenReturn(false)
+						.thenReturn(true);
+
+		task.start();
+
+		// Add op and signal
+		inOpQueue.add(op);
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+
+		// First attempt fails (backpressure). Signal again to simulate completion callback.
+		Thread.sleep(20);
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+
+		// Should eventually succeed on retry
+		verify(driverMock, timeout(500).atLeast(2)).submit(any(Operation.class));
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
 	}
 }
