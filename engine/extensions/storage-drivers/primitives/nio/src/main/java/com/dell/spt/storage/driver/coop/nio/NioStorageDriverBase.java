@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -54,6 +55,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final List<Task> ioWorkers;
 	private final CircularBuffer<O>[] opBuffs;
 	private final Lock[] opBuffLocks;
+	private final Condition[] opAvailableConditions;
 	private final AtomicLong rrc = new AtomicLong(0);
 
 	@SuppressWarnings("unchecked")
@@ -72,11 +74,13 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		ioWorkers = new ArrayList<>(ioWorkerCount);
 		opBuffs = new CircularBuffer[ioWorkerCount];
 		opBuffLocks = new Lock[ioWorkerCount];
+		opAvailableConditions = new Condition[ioWorkerCount];
 		opBuffCapacity = Math.max(MIN_TASK_BUFF_CAPACITY, concurrencyLimit / ioWorkerCount);
 		for (var i = 0; i < ioWorkerCount; i++) {
 			opBuffs[i] = new CircularArrayBuffer<>(opBuffCapacity);
 			opBuffLocks[i] = new ReentrantLock();
-			ioWorkers.add(new NioWorkerTask(IO_EXECUTOR, opBuffs[i], opBuffLocks[i]));
+			opAvailableConditions[i] = opBuffLocks[i].newCondition();
+			ioWorkers.add(new NioWorkerTask(IO_EXECUTOR, opBuffs[i], opBuffLocks[i], opAvailableConditions[i]));
 		}
 	}
 
@@ -90,12 +94,16 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 
 		private final CircularBuffer<O> opBuff;
 		private final Lock opBuffLock;
+		private final Condition opAvailable;
 		private final List<O> opLocalBuff;
 
-		public NioWorkerTask(final VirtualThreadExecutor executor, final CircularBuffer<O> opBuff, final Lock opBuffLock) {
+		public NioWorkerTask(
+						final VirtualThreadExecutor executor, final CircularBuffer<O> opBuff,
+						final Lock opBuffLock, final Condition opAvailable) {
 			super(executor);
 			this.opBuff = opBuff;
 			this.opBuffLock = opBuffLock;
+			this.opAvailable = opAvailable;
 			this.opLocalBuff = new ArrayList<>(opBuffCapacity);
 		}
 
@@ -110,9 +118,15 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 
 			opBuffLock.lock();
 			try {
-				final var opBuffSize = opBuff.size();
+				var opBuffSize = opBuff.size();
 				if (opBuffSize == 0) {
-					return;
+					// Wait for work — VT unmounts during await, freeing the carrier thread.
+					// The 1ms timeout is a safety net; normal wake-up is via signal from submit().
+					opAvailable.await(1, TimeUnit.MILLISECONDS);
+					opBuffSize = opBuff.size();
+					if (opBuffSize == 0) {
+						return;
+					}
 				}
 
 				try {
@@ -161,10 +175,6 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			} finally {
 				opBuffLock.unlock();
 			}
-
-			// Yield briefly if the buffer was empty or all ops were processed,
-			// allowing the VT to unmount and other work to proceed
-			Thread.sleep(1);
 		}
 
 		@Override
@@ -248,7 +258,11 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			opBuffLock = opBuffLocks[j];
 			if (opBuffLock.tryLock()) {
 				try {
-					return opBuff.size() < opBuffCapacity && opBuff.add(op);
+					if (opBuff.size() < opBuffCapacity && opBuff.add(op)) {
+						opAvailableConditions[j].signal();
+						return true;
+					}
+					return false;
 				} finally {
 					opBuffLock.unlock();
 				}
@@ -278,6 +292,9 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					n = Math.min(to - j, opBuffCapacity - opBuff.size());
 					for (k = 0; k < n; k++) {
 						opBuff.add(ops.get(j + k));
+					}
+					if (n > 0) {
+						opAvailableConditions[m].signal();
 					}
 					j += n;
 				} finally {
