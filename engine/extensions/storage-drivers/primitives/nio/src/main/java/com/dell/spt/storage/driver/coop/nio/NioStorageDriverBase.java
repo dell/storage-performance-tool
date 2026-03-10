@@ -2,6 +2,9 @@ package com.dell.spt.storage.driver.coop.nio;
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.concurrent.Task;
+import com.dell.spt.base.concurrent.TaskBase;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.LogUtil;
@@ -20,17 +23,12 @@ import com.github.akurilov.commons.concurrent.ThreadUtil;
 
 import com.github.akurilov.confuse.Config;
 
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
-import com.github.akurilov.fiber4j.Fiber;
-import com.github.akurilov.fiber4j.FibersExecutor;
-
 import org.apache.logging.log4j.CloseableThreadContext;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
-import org.apache.logging.log4j.message.ThreadDumpMessage;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -49,11 +47,11 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				implements NioStorageDriver<I, O> {
 
 	private final static String CLS_NAME = NioStorageDriverBase.class.getSimpleName();
-	private final static FibersExecutor IO_EXECUTOR = new FibersExecutor(false);
+	private final static VirtualThreadExecutor IO_EXECUTOR = new VirtualThreadExecutor();
 
 	private final int ioWorkerCount;
 	private final int opBuffCapacity;
-	private final List<Fiber> ioFibers;
+	private final List<Task> ioWorkers;
 	private final CircularBuffer<O>[] opBuffs;
 	private final Lock[] opBuffLocks;
 	private final AtomicLong rrc = new AtomicLong(0);
@@ -71,17 +69,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		} else {
 			ioWorkerCount = ThreadUtil.getHardwareThreadCount();
 		}
-		if (ioWorkerCount > ThreadUtil.getHardwareThreadCount()) {
-			IO_EXECUTOR.setThreadCount(ioWorkerCount);
-		}
-		ioFibers = new ArrayList<>(ioWorkerCount);
+		ioWorkers = new ArrayList<>(ioWorkerCount);
 		opBuffs = new CircularBuffer[ioWorkerCount];
 		opBuffLocks = new Lock[ioWorkerCount];
 		opBuffCapacity = Math.max(MIN_TASK_BUFF_CAPACITY, concurrencyLimit / ioWorkerCount);
 		for (var i = 0; i < ioWorkerCount; i++) {
 			opBuffs[i] = new CircularArrayBuffer<>(opBuffCapacity);
 			opBuffLocks[i] = new ReentrantLock();
-			ioFibers.add(new NioWorkerTask(IO_EXECUTOR, opBuffs[i], opBuffLocks[i]));
+			ioWorkers.add(new NioWorkerTask(IO_EXECUTOR, opBuffs[i], opBuffLocks[i]));
 		}
 	}
 
@@ -91,35 +86,38 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	So the load operation may be invoked multiple times (in the reentrant manner).
 	*/
 	private final class NioWorkerTask
-					extends ExclusiveFiberBase {
+					extends TaskBase {
 
 		private final CircularBuffer<O> opBuff;
+		private final Lock opBuffLock;
 		private final List<O> opLocalBuff;
 
-		private int opBuffSize;
-		private O op;
-
-		public NioWorkerTask(final FibersExecutor executor, final CircularBuffer<O> opBuff, final Lock opBuffLock) {
-			super(executor, opBuffLock);
+		public NioWorkerTask(final VirtualThreadExecutor executor, final CircularBuffer<O> opBuff, final Lock opBuffLock) {
+			super(executor);
 			this.opBuff = opBuff;
+			this.opBuffLock = opBuffLock;
 			this.opLocalBuff = new ArrayList<>(opBuffCapacity);
 		}
 
 		@Override
-		protected final void invokeTimedExclusively(final long startTimeNanos) {
-
+		protected void doInit() {
 			ThreadContext.put(KEY_STEP_ID, stepId);
+			ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+		}
 
-			opBuffSize = opBuff.size();
-			if (opBuffSize > 0) {
+		@Override
+		protected final void doWork() throws Exception {
+
+			opBuffLock.lock();
+			try {
+				final var opBuffSize = opBuff.size();
+				if (opBuffSize == 0) {
+					return;
+				}
+
 				try {
 					for (var i = 0; i < opBuffSize; i++) {
-						op = opBuff.get(i);
-						// if timeout, put the op into the temporary buffer
-						if (System.nanoTime() - startTimeNanos >= SOFT_DURATION_LIMIT_NANOS) {
-							opLocalBuff.add(op);
-							continue;
-						}
+						final var op = opBuff.get(i);
 						// check if the op is invoked 1st time
 						if (PENDING.equals(op.status())) {
 							// do not start the new op if the state is not more active
@@ -152,35 +150,51 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				} finally {
 					// put the active operations back into the buffer
 					opBuff.clear();
-					opBuffSize = opLocalBuff.size();
-					if (opBuffSize > 0) {
-						for (var i = 0; i < opBuffSize; i++) {
+					final var localSize = opLocalBuff.size();
+					if (localSize > 0) {
+						for (var i = 0; i < localSize; i++) {
 							opBuff.add(opLocalBuff.get(i));
 						}
 						opLocalBuff.clear();
 					}
 				}
+			} finally {
+				opBuffLock.unlock();
 			}
+
+			// Yield briefly if the buffer was empty or all ops were processed,
+			// allowing the VT to unmount and other work to proceed
+			Thread.sleep(1);
 		}
 
 		@Override
-		protected final void doStop() {
-			opBuffSize = opBuff.size();
-			Loggers.MSG.debug("Finish {} remaining active load operations finally", opBuffSize);
-			for (var i = 0; i < opBuffSize; i++) {
-				op = opBuff.get(i);
-				if (ACTIVE.equals(op.status())) {
-					op.status(INTERRUPTED);
-					concurrencyThrottle.release();
-					handleCompleted(op);
+		protected void doStop() {
+			opBuffLock.lock();
+			try {
+				final var opBuffSize = opBuff.size();
+				Loggers.MSG.debug("Finish {} remaining active load operations finally", opBuffSize);
+				for (var i = 0; i < opBuffSize; i++) {
+					final var op = opBuff.get(i);
+					if (ACTIVE.equals(op.status())) {
+						op.status(INTERRUPTED);
+						concurrencyThrottle.release();
+						handleCompleted(op);
+					}
 				}
+				Loggers.MSG.debug("Finish the remaining active load operations done");
+			} finally {
+				opBuffLock.unlock();
 			}
-			Loggers.MSG.debug("Finish the remaining active load operations done");
 		}
 
 		@Override
 		protected final void doClose() {
-			opBuff.clear();
+			opBuffLock.lock();
+			try {
+				opBuff.clear();
+			} finally {
+				opBuffLock.unlock();
+			}
 		}
 	}
 
@@ -196,10 +210,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	protected final void doStart()
 					throws IllegalStateException {
 		super.doStart();
-		for (final var ioFiber : ioFibers) {
-			try {
-				ioFiber.start();
-			} catch (final IOException ignored) {}
+		for (final var ioWorker : ioWorkers) {
+			ioWorker.start();
 		}
 	}
 
@@ -207,10 +219,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	protected final void doShutdown()
 					throws IllegalStateException {
 		super.doShutdown();
-		for (final var ioFiber : ioFibers) {
-			try {
-				ioFiber.shutdown();
-			} catch (final IOException ignored) {}
+		for (final var ioWorker : ioWorkers) {
+			ioWorker.stop();
 		}
 	}
 
@@ -218,10 +228,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	protected final void doStop()
 					throws IllegalStateException {
 		super.doStop();
-		for (final var ioFiber : ioFibers) {
-			try {
-				ioFiber.stop();
-			} catch (final IOException ignored) {}
+		for (final var ioWorker : ioWorkers) {
+			ioWorker.stop();
 		}
 	}
 
@@ -302,26 +310,26 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	protected void doClose()
 					throws IOException {
 
-		ioFibers.forEach(
-						fiber -> {
+		ioWorkers.forEach(
+						worker -> {
 							try {
-								fiber.close();
+								worker.close();
 							} catch (final Exception e) {
-								LogUtil.exception(Level.WARN, e, "Failed to close the I/O fiber: {}", fiber);
+								LogUtil.exception(Level.WARN, e, "Failed to close the I/O worker: {}", worker);
 							}
 						});
-		ioFibers.clear();
+		ioWorkers.clear();
 
 		for (var i = 0; i < ioWorkerCount; i++) {
 			try (final var logCtx = CloseableThreadContext.put(KEY_CLASS_NAME, CLS_NAME)) {
-				if (opBuffLocks[i].tryLock(Fiber.WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
+				if (opBuffLocks[i].tryLock(1, TimeUnit.SECONDS)) {
 					try {
 						opBuffs[i].clear();
 					} finally {
 						opBuffLocks[i].unlock();
 					}
 				} else if (opBuffs[i].size() > 0) {
-					Loggers.ERR.debug(new ThreadDumpMessage("Failed to obtain the load operations buff lock in time"));
+					Loggers.ERR.debug("Failed to obtain the load operations buff lock in time");
 				}
 			} catch (final InterruptedException e) {
 				throwUnchecked(e);

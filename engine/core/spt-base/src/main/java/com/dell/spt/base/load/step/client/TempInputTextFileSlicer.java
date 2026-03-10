@@ -8,12 +8,11 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
@@ -22,7 +21,6 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +28,7 @@ import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.logging.log4j.Level;
 
@@ -120,7 +119,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 			lineQueues.add(new ArrayBlockingQueue<>(batchSize));
 		}
 
-		final List<AsyncRunnable> tasks = new ArrayList<>(sliceCount + 1);
+		final List<TaskBase> tasks = new ArrayList<>(sliceCount + 1);
 		tasks.add(new ReadTask(inputFinishFlag, lineQueues, srcFileName, sliceCount));
 
 		final var writeFinishCountDown = new CountDownLatch(sliceCount);
@@ -143,38 +142,20 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 	}
 
-	static void startTasks(final String loadStepId, final List<AsyncRunnable> tasks, final String srcFileName)
-					throws IOException {
-		IOException failure = null;
-		for (final AsyncRunnable task : tasks) {
-			try {
-				task.start();
-			} catch (final RemoteException e) {
-				if (failure == null) {
-					failure = new IOException("Failed to start async task for input file " + srcFileName, e);
-				} else {
-					failure.addSuppressed(e);
-				}
-				LogUtil.exception(Level.WARN, e, "{}: failed to start async task", loadStepId);
-			}
-		}
-		if (failure != null) {
-			throw failure;
+	static void startTasks(final String loadStepId, final List<TaskBase> tasks, final String srcFileName) {
+		for (final var task : tasks) {
+			task.start();
 		}
 	}
 
-	static void closeTasks(final String loadStepId, final List<AsyncRunnable> tasks, final String srcFileName) {
-		for (final AsyncRunnable task : tasks) {
-			try {
-				task.close();
-			} catch (final IOException e) {
-				LogUtil.exception(Level.WARN, e, "{}: failed to close async task", loadStepId);
-			}
+	static void closeTasks(final String loadStepId, final List<TaskBase> tasks, final String srcFileName) {
+		for (final var task : tasks) {
+			task.close();
 		}
 		tasks.clear();
 	}
 
-	private static final class ReadTask extends ExclusiveFiberBase {
+	private static final class ReadTask extends TaskBase {
 
 		private final AtomicBoolean inputFinishFlag;
 		private final List<BlockingQueue<String>> lineQueues;
@@ -184,7 +165,6 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 
 		private long lineCount = 0;
 		private long lastProgressOutputTimeMillis = System.currentTimeMillis();
-		private volatile String pendingLine = null;
 
 		public ReadTask(
 						final AtomicBoolean inputFinishFlag,
@@ -193,7 +173,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 						final int sliceCount)
 						throws IOException {
 
-			super(ServiceTaskExecutor.INSTANCE);
+			super(ServiceTaskExecutor.VT_EXECUTOR);
 
 			this.inputFinishFlag = inputFinishFlag;
 			this.lineQueues = lineQueues;
@@ -204,52 +184,27 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 
 		@Override
-		protected final void invokeTimedExclusively(final long startTimeNanos) {
-			try {
-				String line;
+		protected final void doWork() throws Exception {
+			if (System.currentTimeMillis() - lastProgressOutputTimeMillis > OUTPUT_PROGRESS_PERIOD_MILLIS) {
+				Loggers.MSG.info(
+								"Read task progress: scattered {} lines from the input file \"{}\"...",
+								lineCount,
+								srcFileName);
+				lastProgressOutputTimeMillis = System.currentTimeMillis();
+			}
 
-				while (System.nanoTime() - startTimeNanos < SOFT_DURATION_LIMIT_NANOS) {
-
-					if (System.currentTimeMillis() - lastProgressOutputTimeMillis > OUTPUT_PROGRESS_PERIOD_MILLIS) {
-						Loggers.MSG.info(
-										"Read task progress: scattered {} lines from the input file \"{}\"...",
-										lineCount,
-										srcFileName);
-						lastProgressOutputTimeMillis = System.currentTimeMillis();
-					}
-
-					if (pendingLine == null) {
-						line = lineReader.readLine();
-					} else {
-						line = pendingLine;
-						pendingLine = null;
-					}
-
-					if (line == null) {
-						stop();
-						break;
-					} else {
-						// shouldn't block because it may be the only available thread for the fibers execution
-						// otherwise it may hang
-						if (lineQueues.get((int) (lineCount % sliceCount)).offer(line)) {
-							lineCount++;
-						} else {
-							pendingLine = line;
-							break;
-						}
-					}
-				}
-
-			} catch (final IOException e) {
-				LogUtil.exception(
-								Level.WARN, e, "Read task failure, source file name: \"{}\"", srcFileName);
+			final var line = lineReader.readLine();
+			if (line == null) {
 				stop();
+			} else {
+				// With VTs, put() blocks (unmounting the VT) if the queue is full
+				lineQueues.get((int) (lineCount % sliceCount)).put(line);
+				lineCount++;
 			}
 		}
 
 		@Override
-		protected final void doStop() {
-			super.doStop();
+		protected void doStop() {
 			inputFinishFlag.set(true);
 			Loggers.MSG.info(
 							"Read task finish: scattered {} lines from the input file \"{}\"",
@@ -258,13 +213,16 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 
 		@Override
-		protected final void doClose() throws IOException {
-			super.doClose();
-			lineReader.close();
+		protected void doClose() {
+			try {
+				lineReader.close();
+			} catch (final IOException e) {
+				LogUtil.exception(Level.WARN, e, "Failed to close line reader for \"{}\"", srcFileName);
+			}
 		}
 	}
 
-	private static final class WriteTask extends ExclusiveFiberBase {
+	private static final class WriteTask extends TaskBase {
 
 		private final AtomicBoolean inputFinishFlag;
 		private final CountDownLatch writeFinishCountDown;
@@ -285,7 +243,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 						final FileManager fileMgr,
 						final String dstFileName,
 						final int batchSize) {
-			super(ServiceTaskExecutor.INSTANCE);
+			super(ServiceTaskExecutor.VT_EXECUTOR);
 
 			this.inputFinishFlag = inputFinishFlag;
 			this.writeFinishCountDown = writeFinishCountDown;
@@ -300,11 +258,17 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 
 		@Override
-		protected final void invokeTimedExclusively(final long startTimeNanos) {
-			final var n = lineQueue.drainTo(lines, batchSize);
+		protected final void doWork() throws Exception {
+			// Block briefly waiting for lines; VT unmounts during poll timeout
+			final var first = lineQueue.poll(10, TimeUnit.MILLISECONDS);
+			if (first != null) {
+				lines.add(first);
+				lineQueue.drainTo(lines, batchSize - 1);
+			}
+			final var n = lines.size();
 			if (n == 0 && inputFinishFlag.get()) {
 				stop();
-			} else {
+			} else if (n > 0) {
 				try {
 					for (var i = 0; i < n; i++) {
 						linesWriter.write(lines.get(i));
@@ -328,7 +292,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 
 		@Override
-		protected final void doStop() {
+		protected void doStop() {
 			writeFinishCountDown.countDown();
 			Loggers.MSG.debug(
 							"Write task finish, written line count: {}, destination file name: \"{}\", file manager: \"{}\"",
@@ -338,11 +302,14 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 		}
 
 		@Override
-		protected final void doClose() throws IOException {
-			super.doClose();
+		protected void doClose() {
 			lines.clear();
-			linesByteBuff.close();
-			linesWriter.close();
+			try {
+				linesByteBuff.close();
+				linesWriter.close();
+			} catch (final IOException e) {
+				LogUtil.exception(Level.WARN, e, "Failed to close write buffers for \"{}\"", dstFileName);
+			}
 		}
 	}
 }

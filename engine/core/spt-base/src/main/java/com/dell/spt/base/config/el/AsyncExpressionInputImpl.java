@@ -2,19 +2,19 @@ package com.dell.spt.base.config.el;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.TaskBase;
 import com.github.akurilov.commons.io.el.ExpressionInput;
 import com.github.akurilov.commons.io.el.SynchronousExpressionInput;
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
 import java.util.List;
 import javax.el.ELException;
 import javax.el.PropertyNotFoundException;
 
-class AsyncExpressionInputImpl<T> extends ExclusiveFiberBase implements AsyncExpressionInput<T> {
+class AsyncExpressionInputImpl<T> extends TaskBase implements AsyncExpressionInput<T> {
 
 	private ExpressionInput<T> input;
 
 	AsyncExpressionInputImpl(final ExpressionInput<T> input) {
-		super(ServiceTaskExecutor.INSTANCE);
+		super(ServiceTaskExecutor.VT_EXECUTOR);
 		if (input instanceof SynchronousExpressionInput) {
 			throw new IllegalArgumentException("An expression input to wrap should not be synchronous");
 		}
@@ -58,14 +58,14 @@ class AsyncExpressionInputImpl<T> extends ExclusiveFiberBase implements AsyncExp
 	}
 
 	@Override
-	protected final void invokeTimedExclusively(final long startTimeNanos) {
+	protected final void doWork() throws Exception {
 		input.call();
+		Thread.sleep(1);
 	}
 
 	@Override
 	protected final void doClose() {
 		try {
-			super.doClose();
 			input.close();
 		} catch (final Exception e) {
 			throwUnchecked(e);
