@@ -47,9 +47,6 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			localLoadStep.start();
 			Loggers.MSG.info("Step service for \"{}\" is started", safeLoadStepId());
-		} catch (final RemoteException e) {
-			Loggers.ERR.warn("Step service start failure for {}", safeLoadStepId(), e);
-			throw new IllegalStateException("Failed to start load step service " + safeLoadStepId(), e);
 		}
 	}
 
@@ -58,9 +55,6 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			localLoadStep.stop();
 			Loggers.MSG.info("Step service for \"{}\" is stopped", safeLoadStepId());
-		} catch (final RemoteException e) {
-			Loggers.ERR.warn("Step service stop failure for {}", safeLoadStepId(), e);
-			throw new IllegalStateException("Failed to stop load step service " + safeLoadStepId(), e);
 		}
 	}
 
@@ -104,9 +98,6 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 					throws IllegalStateException, InterruptedException {
 		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			return localLoadStep.await(timeout, timeUnit);
-		} catch (final RemoteException e) {
-			Loggers.ERR.warn("Await interrupted by remote failure for {}", safeLoadStepId(), e);
-			return false;
 		}
 	}
 

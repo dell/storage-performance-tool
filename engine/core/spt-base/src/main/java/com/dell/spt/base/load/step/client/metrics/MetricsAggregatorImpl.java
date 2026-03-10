@@ -6,7 +6,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import com.github.akurilov.commons.concurrent.AsyncRunnableBase;
+import com.dell.spt.base.concurrent.AsyncRunnableBase;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;

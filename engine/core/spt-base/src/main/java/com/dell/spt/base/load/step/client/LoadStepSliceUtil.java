@@ -80,21 +80,9 @@ public interface LoadStepSliceUtil {
 	static boolean await(final LoadStep stepSlice, final long timeout, final TimeUnit timeUnit) {
 		try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId())
 						.put(KEY_CLASS_NAME, LoadStepClientBase.class.getSimpleName())) {
-			long commFailCount = 0;
 			while (true) {
-				try {
-					if (stepSlice.await(timeout, timeUnit)) {
-						return true;
-					}
-				} catch (final RemoteException e) {
-					LogUtil.exception(
-									Level.DEBUG,
-									e,
-									"Failed to invoke the step slice \"{}\" await method {} times",
-									stepSlice,
-									commFailCount);
-					commFailCount++;
-					Thread.sleep(commFailCount);
+				if (stepSlice.await(timeout, timeUnit)) {
+					return true;
 				}
 			}
 		} catch (final InterruptedException e) {

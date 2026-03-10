@@ -2,7 +2,7 @@ package com.dell.spt.base.load.step;
 
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.List;
@@ -20,17 +20,16 @@ public interface LoadStep extends Daemon {
 	List<? extends AllMetricsSnapshot> metricsSnapshots() throws RemoteException;
 
 	@Override
-	AsyncRunnable start() throws RemoteException;
+	AsyncRunnable start();
 
 	@Override
-	AsyncRunnable await() throws InterruptedException, RemoteException;
+	AsyncRunnable await() throws InterruptedException;
 
 	@Override
-	boolean await(final long timeout, final TimeUnit timeUnit)
-					throws InterruptedException, RemoteException;
+	boolean await(final long timeout, final TimeUnit timeUnit) throws InterruptedException;
 
 	@Override
-	AsyncRunnable stop() throws RemoteException;
+	AsyncRunnable stop();
 
 	@Override
 	void close() throws IOException;

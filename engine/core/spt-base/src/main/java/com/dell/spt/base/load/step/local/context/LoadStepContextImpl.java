@@ -3,8 +3,8 @@ package com.dell.spt.base.load.step.local.context;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.github.akurilov.commons.concurrent.AsyncRunnable.State.SHUTDOWN;
-import static com.github.akurilov.commons.concurrent.AsyncRunnable.State.STARTED;
+import static com.dell.spt.base.concurrent.AsyncRunnable.State.SHUTDOWN;
+import static com.dell.spt.base.concurrent.AsyncRunnable.State.STARTED;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
@@ -38,7 +38,6 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
-import java.rmi.RemoteException;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -555,10 +554,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	protected void doStart() throws IllegalStateException {
 		try {
 			driver.start();
-		} catch (final RemoteException e) {
-			throw new IllegalStateException(
-							String.format("%s: failed to start the storage driver \"%s\"", id, driver),
-							e);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
@@ -623,8 +618,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
 			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
-		} catch (final RemoteException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
 		}
 	}
 

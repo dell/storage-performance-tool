@@ -475,8 +475,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stepSlices.parallelStream().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
-			} catch (final RemoteException e) {
-				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
 			}
 		});
 	}
@@ -509,8 +507,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					return awaitResult;
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
-				} catch (final RemoteException e) {
-					return false;
 				}
 				return false;
 			}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
@@ -534,16 +530,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		});
 		if (null != metricsAggregator) {
-			try {
-				metricsAggregator.stop();
-			} catch (final RemoteException e) {
-				LogUtil.trace(
-								Loggers.ERR,
-								Level.DEBUG,
-								e,
-								"{}: metrics aggregator stop failed; continuing shutdown",
-								loadStepId());
-			}
+			metricsAggregator.stop();
 		}
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {

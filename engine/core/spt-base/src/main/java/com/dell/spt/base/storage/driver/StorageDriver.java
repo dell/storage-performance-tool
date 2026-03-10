@@ -12,7 +12,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;

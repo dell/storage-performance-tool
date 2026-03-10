@@ -1,6 +1,6 @@
 package com.dell.spt.base.svc;
 
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
 
