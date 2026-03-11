@@ -69,11 +69,13 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				if (buff.size() == 0) {
 					// Both queues empty — wait for signal from producer or completion callback.
 					// The VT unmounts during await(), freeing the carrier thread.
-					// The 1ms timeout is a safety net; normal wake-up is via signal().
+					// With completion-driven dispatch handling steady-state reuse, this task
+					// primarily handles initial pipeline fill and burst absorption. The 10ms
+					// timeout is a safety net; normal wake-up is via signal().
 					dispatchLock.lock();
 					try {
 						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
-							dispatchReady.await(1, TimeUnit.MILLISECONDS);
+							dispatchReady.await(10, TimeUnit.MILLISECONDS);
 						}
 					} finally {
 						dispatchLock.unlock();
@@ -108,7 +110,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				if (!submitted) {
 					dispatchLock.lock();
 					try {
-						dispatchReady.await(1, TimeUnit.MILLISECONDS);
+						dispatchReady.await(10, TimeUnit.MILLISECONDS);
 					} finally {
 						dispatchLock.unlock();
 					}

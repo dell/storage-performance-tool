@@ -150,6 +150,20 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	/**
+	 * Poll the next operation to dispatch. Checks childOpQueue first (composite/partial
+	 * completions have priority), then inOpQueue. Non-blocking — returns null if both
+	 * queues are empty. Used by the completion-driven dispatch path to bypass the
+	 * OperationDispatchTask round-trip.
+	 */
+	protected O pollNextOp() {
+		O nextOp = childOpQueue.poll();
+		if (nextOp == null) {
+			nextOp = inOpQueue.poll();
+		}
+		return nextOp;
+	}
+
 	protected abstract boolean submit(final O op) throws IllegalStateException;
 
 	protected abstract int submit(final List<O> ops, final int from, final int to)

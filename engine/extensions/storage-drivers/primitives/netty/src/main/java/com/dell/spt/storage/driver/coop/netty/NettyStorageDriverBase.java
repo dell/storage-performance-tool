@@ -591,14 +591,67 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}
-		if (op.status() != Operation.Status.SUCC) {
+
+		final boolean failed = op.status() != Operation.Status.SUCC;
+		if (failed && channel != null) {
 			channel.close();
 		}
-		if (!channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
+
+		// Try completion-driven dispatch: reuse the channel for the next queued op,
+		// bypassing the OperationDispatchTask signal/wake round-trip. This runs on the
+		// Netty event loop thread where channel.write() executes inline — zero thread hops.
+		if (!failed && channel != null
+						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
+			// Handle the completed op first — delivers result and may enqueue child ops
+			// to childOpQueue, which tryImmediateDispatch checks with priority.
+			handleCompleted(op);
+			if (channel.isActive() && isStarted() && tryImmediateDispatch(channel)) {
+				return;
+			}
+			// No pending ops or channel gone — release normally
 			concurrencyThrottle.release();
 			connPool.release(channel);
+		} else {
+			if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
+				concurrencyThrottle.release();
+				connPool.release(channel);
+			}
+			handleCompleted(op);
 		}
-		handleCompleted(op);
+	}
+
+	/**
+	 * Try to dispatch the next queued operation on the given channel, reusing both the
+	 * channel and the concurrency semaphore permit (neither is released). Called from the
+	 * Netty event loop thread after a successful response, so channel.write() runs inline
+	 * with no thread hop.
+	 *
+	 * @return true if an operation was dispatched (channel stays in use), false if no ops
+	 *         were available (caller must release the channel and permit)
+	 */
+	private boolean tryImmediateDispatch(final Channel channel) {
+		final O nextOp = pollNextOp();
+		if (nextOp == null) {
+			return false;
+		}
+		try {
+			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+			channel.attr(ATTR_KEY_OPERATION).set(nextOp);
+			nextOp.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
+			nextOp.startRequest();
+			sendRequest(channel, nextOp);
+			return true;
+		} catch (final Throwable t) {
+			throwUncheckedIfInterrupted(t);
+			LogUtil.exception(Level.WARN, t, "Immediate dispatch failed");
+			nextOp.status(Operation.Status.FAIL_UNKNOWN);
+			// Release resources and handle the failed op without recursion
+			channel.attr(ATTR_KEY_RELEASED).set(Boolean.TRUE);
+			concurrencyThrottle.release();
+			connPool.release(channel);
+			handleCompleted(nextOp);
+			return true; // resources already released — caller must not release again
+		}
 	}
 
 	@Override
