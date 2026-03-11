@@ -247,11 +247,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		if (!isStarted()) {
 			throw new IllegalStateException();
 		}
-		// Block the caller (LoadGenerator VT) until a concurrency permit is available
-		try {
-			concurrencyThrottle.acquire();
-		} catch (final InterruptedException e) {
-			throwUnchecked(e);
+		if (!concurrencyThrottle.tryAcquire()) {
+			return false;
 		}
 		// Round-robin into a worker buffer
 		final var j = (int) (rrc.getAndIncrement() % ioWorkerCount);
@@ -279,11 +276,15 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		if (!isStarted()) {
 			throw new IllegalStateException();
 		}
-		// Acquire permits for the entire batch — blocks the VT if saturated
-		try {
-			concurrencyThrottle.acquire(numOps);
-		} catch (final InterruptedException e) {
-			throwUnchecked(e);
+		// Grab as many permits as available (non-blocking) — the dispatch task
+		// handles backpressure via Condition signaling when no permits are free.
+		var permits = concurrencyThrottle.drainPermits();
+		if (permits == 0) {
+			return 0;
+		}
+		if (permits > numOps) {
+			concurrencyThrottle.release(permits - numOps);
+			permits = numOps;
 		}
 		CircularBuffer<O> opBuff;
 		Lock opBuffLock;

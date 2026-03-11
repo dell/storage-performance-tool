@@ -321,44 +321,43 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		if (!isStarted()) {
 			throw new IllegalStateException();
 		}
-		try {
-			concurrencyThrottle.acquire();
-		} catch (final InterruptedException e) {
-			throwUnchecked(e);
-		}
-		try {
-			if (OpType.NOOP.equals(op.type())) {
-				op.startRequest();
-				sendRequest(null, op);
-				op.finishRequest();
-				concurrencyThrottle.release();
-				op.status(SUCC);
-				op.startResponse();
-				complete(null, op);
-			} else {
-				conn = connPool.lease();
-				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-				if (!conn.isActive()) {
-					throw new ConnectException("Connection is not active");
+		if (concurrencyThrottle.tryAcquire()) {
+			try {
+				if (OpType.NOOP.equals(op.type())) {
+					op.startRequest();
+					sendRequest(null, op);
+					op.finishRequest();
+					concurrencyThrottle.release();
+					op.status(SUCC);
+					op.startResponse();
+					complete(null, op);
+				} else {
+					conn = connPool.lease();
+					conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+					if (!conn.isActive()) {
+						throw new ConnectException("Connection is not active");
+					}
+					conn.attr(ATTR_KEY_OPERATION).set(op);
+					op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
+					op.startRequest();
+					sendRequest(conn, op);
 				}
-				conn.attr(ATTR_KEY_OPERATION).set(op);
-				op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
-				op.startRequest();
-				sendRequest(conn, op);
+			} catch (final ConnectException e) {
+				LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
+				op.status(Operation.Status.FAIL_IO);
+				complete(conn, op);
+				return false;
+			} catch (final Throwable thrown) {
+				throwUncheckedIfInterrupted(thrown);
+				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
+				op.status(Operation.Status.FAIL_UNKNOWN);
+				complete(conn, op);
+				return false;
 			}
-		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
-			op.status(Operation.Status.FAIL_IO);
-			complete(conn, op);
-			return false;
-		} catch (final Throwable thrown) {
-			throwUncheckedIfInterrupted(thrown);
-			LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
-			op.status(Operation.Status.FAIL_UNKNOWN);
-			complete(conn, op);
+			return true;
+		} else {
 			return false;
 		}
-		return true;
 	}
 
 	@Override

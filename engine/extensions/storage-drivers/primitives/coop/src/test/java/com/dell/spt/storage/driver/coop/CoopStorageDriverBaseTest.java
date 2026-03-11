@@ -3,16 +3,13 @@ package com.dell.spt.storage.driver.coop;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import com.dell.spt.base.item.Item;
-import com.dell.spt.base.item.op.Operation;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.LongAdder;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for the standardized submit() contract in CoopStorageDriverBase.
- * Verifies that put() delegates directly to submit() (no intermediate queue)
- * and that the concurrency throttle / counters work correctly.
+ * Tests for CoopStorageDriverBase concurrency management.
+ * Verifies that the concurrency throttle / counters work correctly.
  */
 @SuppressWarnings("unchecked")
 class CoopStorageDriverBaseTest {

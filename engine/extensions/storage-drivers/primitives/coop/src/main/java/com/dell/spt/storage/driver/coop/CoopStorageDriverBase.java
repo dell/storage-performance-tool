@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
@@ -16,28 +17,26 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
 
-/**
- * Cooperative storage driver base. This layer is a pure lifecycle/metrics wrapper:
- * <ul>
- *   <li>{@link #put} calls {@link #prepare} then {@link #submit} — no intermediate queue.</li>
- *   <li>Backpressure is enforced entirely inside each driver's {@link #submit}: the contract is
- *       "accept this op and begin processing it, blocking the caller if the concurrency limit
- *       is reached."</li>
- *   <li>Child ops (composite/partial) are submitted directly via {@link #submit} from
- *       {@link #handleCompleted}, not queued.</li>
- * </ul>
- */
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
 
 	protected final Semaphore concurrencyThrottle;
+	protected final BlockingQueue<O> childOpQueue;
+	private final BlockingQueue<O> inOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
+	private final ReentrantLock dispatchLock = new ReentrantLock();
+	private final Condition dispatchReady = dispatchLock.newCondition();
+	private final OperationDispatchTask opDispatchTask;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -47,11 +46,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					final int batchSize)
 					throws IllegalConfigurationException {
 		super(testStepId, dataInput, storageConfig, verifyFlag);
+		final var inQueueLimit = storageConfig.intVal("driver-limit-queue-input");
+		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
+		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
+		this.opDispatchTask = new OperationDispatchTask<>(
+						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
+						dispatchLock, dispatchReady);
 	}
 
 	@Override
 	protected void doStart() throws IllegalStateException {
+		opDispatchTask.start();
 	}
 
 	@Override
@@ -59,11 +65,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (!isStarted()) {
 			throwUnchecked(new EOFException());
 		}
-		if (prepare(op) && submit(op)) {
+		if (prepare(op) && inOpQueue.offer(op)) {
 			scheduledOpCount.increment();
+			signalDispatch();
 			return true;
+		} else {
+			return false;
 		}
-		return false;
 	}
 
 	@Override
@@ -75,14 +83,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		O nextOp;
 		while (i < to && isStarted()) {
 			nextOp = ops.get(i);
-			if (prepare(nextOp) && submit(nextOp)) {
-				scheduledOpCount.increment();
+			if (prepare(nextOp) && inOpQueue.offer(ops.get(i))) {
 				i++;
 			} else {
 				break;
 			}
 		}
-		return i - from;
+		final var n = i - from;
+		scheduledOpCount.add(n);
+		if (n > 0) {
+			signalDispatch();
+		}
+		return n;
 	}
 
 	@Override
@@ -93,8 +105,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		var n = 0;
 		for (final var nextOp : ops) {
 			if (isStarted()) {
-				if (prepare(nextOp) && submit(nextOp)) {
-					scheduledOpCount.increment();
+				if (prepare(nextOp) && inOpQueue.offer(nextOp)) {
 					n++;
 				} else {
 					break;
@@ -102,6 +113,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			} else {
 				break;
 			}
+		}
+		scheduledOpCount.add(n);
+		if (n > 0) {
+			signalDispatch();
 		}
 		return n;
 	}
@@ -143,12 +158,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
 
-	/**
-	 * Handle a completed operation. Delivers the result via the output and submits any
-	 * child operations (composite sub-ops or partial parent finalization) directly through
-	 * {@link #submit}. The caller MUST release the concurrency permit BEFORE calling this
-	 * method so that child op submission can re-acquire a permit without deadlocking.
-	 */
 	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op) {
 		if (super.handleCompleted(op)) {
@@ -158,9 +167,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				if (!parentOp.allSubOperationsDone()) {
 					final List<O> subOps = parentOp.subOperations();
 					for (final O nextSubOp : subOps) {
-						if (!submit(nextSubOp)) {
+						if (!childOpQueue.offer(nextSubOp)) {
 							Loggers.ERR.warn(
-											"{}: Failed to submit child operation", toString());
+											"{}: Child operations queue overflow, dropping the operation", toString());
 							return false;
 						}
 					}
@@ -171,21 +180,38 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				if (parentOp.allSubOperationsDone()) {
 					// execute once again to finalize the things if necessary:
 					// complete the multipart upload, for example
-					if (!submit((O) parentOp)) {
+					if (!childOpQueue.offer((O) parentOp)) {
 						Loggers.ERR.warn(
-										"{}: Failed to submit child operation", toString());
+										"{}: Child operations queue overflow, dropping the operation", toString());
 						return false;
 					}
 				}
 			}
+			signalDispatch();
 			return true;
 		} else {
 			return false;
 		}
 	}
 
+	/**
+	 * Wake the dispatch task. Called when new ops are available (put) or when
+	 * a completion frees capacity (handleCompleted). Uses lock() instead of
+	 * tryLock() to guarantee delivery — the dispatch task only holds the lock
+	 * for nanoseconds (double-check before await), so contention is negligible.
+	 */
+	private void signalDispatch() {
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+	}
+
 	@Override
 	protected void doShutdown() {
+		opDispatchTask.stop();
 		Loggers.MSG.debug("{}: shut down", toString());
 	}
 
@@ -199,6 +225,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
 			super.doClose();
+			opDispatchTask.close();
+			childOpQueue.clear();
+			inOpQueue.clear();
 		}
 	}
 }
