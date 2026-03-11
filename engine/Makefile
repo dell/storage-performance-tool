@@ -45,8 +45,8 @@ help:
 	@echo "  make test-coverage - Run unit tests with coverage report"
 	@echo "  make test-coverage-all - Run all tests with combined coverage report"
 	@echo "  make check      - Run spotless checks"
-	@echo "  make lint       - Apply spotless formatting"
-	@echo "  make spotless   - Apply spotless formatting (alias for lint)"
+	@echo "  make lint       - Apply spotless formatting + run Error Prone analysis"
+	@echo "  make spotless   - Apply spotless formatting only"
 	@echo "  make bundle     - Build only the bundle module"
 	@echo "  make dist       - Create ZIP distribution"
 	@echo "  make run        - Run Spt from distribution"
@@ -176,17 +176,15 @@ check:
 	@echo "Running spotless check..."
 	$(GRADLE) spotlessCheck
 
-# Apply spotless formatting
-lint:
-	@echo "Applying spotless formatting..."
-	$(GRADLE) spotlessApply
+# Apply spotless formatting + run Error Prone analysis
+lint: spotless errorprone
 
 # Run Error Prone analysis (compile-only)
 errorprone:
 	@echo "Running Error Prone analysis (compileJava + compileTestJava)..."
 	@bash -c 'set -o pipefail; $(GRADLE) -I tools/errorprone-init.gradle :core:spt-base:compileJava :core:spt-base:compileTestJava --rerun-tasks -x test 2>&1 | tee errorprone_scan.txt'
 
-# Alias for spotless formatting (alternative name)
+# Apply spotless formatting only
 spotless:
 	@echo "Applying spotless formatting..."
 	$(GRADLE) spotlessApply
