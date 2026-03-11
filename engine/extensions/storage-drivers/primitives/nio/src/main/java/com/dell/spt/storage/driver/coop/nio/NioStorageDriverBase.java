@@ -272,6 +272,19 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	@Override
 	protected final int submit(final List<O> ops, final int from, final int to)
 					throws IllegalStateException {
+		final int numOps = to - from;
+		if (numOps <= 0) {
+			return 0;
+		}
+		if (!isStarted()) {
+			throw new IllegalStateException();
+		}
+		// Acquire permits for the entire batch — blocks the VT if saturated
+		try {
+			concurrencyThrottle.acquire(numOps);
+		} catch (final InterruptedException e) {
+			throwUnchecked(e);
+		}
 		CircularBuffer<O> opBuff;
 		Lock opBuffLock;
 		var j = from;
@@ -280,7 +293,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		int m;
 		for (var i = 0; i < ioWorkerCount; i++) {
 			if (!isStarted()) {
-				throw new IllegalStateException();
+				break;
 			}
 			m = (int) (rrc.getAndIncrement() % ioWorkerCount);
 			opBuff = opBuffs[m];
@@ -299,8 +312,16 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					opBuffLock.unlock();
 				}
 			}
+			if (j == to) {
+				break;
+			}
 		}
-		return j - from;
+		// Refund permits for any ops that could not be buffered
+		final int submitted = j - from;
+		if (submitted < numOps) {
+			concurrencyThrottle.release(numOps - submitted);
+		}
+		return submitted;
 	}
 
 	@Override
