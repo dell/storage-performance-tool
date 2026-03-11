@@ -134,16 +134,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 						final var op = opBuff.get(i);
 						// check if the op is invoked 1st time
 						if (PENDING.equals(op.status())) {
-							// do not start the new op if the state is not more active
 							if (!isStarted()) {
+								// Permit already acquired in submit() — release it
+								concurrencyThrottle.release();
+								op.status(INTERRUPTED);
+								handleCompleted(op);
 								continue;
 							}
-							// respect the configured concurrency level
-							if (!concurrencyThrottle.tryAcquire()) {
-								opLocalBuff.add(op);
-								continue;
-							}
-							// mark the op as active
+							// Permit already acquired in submit() — mark active
 							op.startRequest();
 							op.finishRequest();
 						}
@@ -185,7 +183,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				Loggers.MSG.debug("Finish {} remaining active load operations finally", opBuffSize);
 				for (var i = 0; i < opBuffSize; i++) {
 					final var op = opBuff.get(i);
-					if (ACTIVE.equals(op.status())) {
+					if (ACTIVE.equals(op.status()) || PENDING.equals(op.status())) {
 						op.status(INTERRUPTED);
 						concurrencyThrottle.release();
 						handleCompleted(op);
@@ -246,28 +244,28 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	@Override
 	protected final boolean submit(final O op)
 					throws IllegalStateException {
-		CircularBuffer<O> opBuff;
-		Lock opBuffLock;
-		int j;
-		for (var i = 0; i < ioWorkerCount; i++) {
-			if (!isStarted()) {
-				throw new IllegalStateException();
-			}
-			j = (int) (rrc.getAndIncrement() % ioWorkerCount);
-			opBuff = opBuffs[j];
-			opBuffLock = opBuffLocks[j];
-			if (opBuffLock.tryLock()) {
-				try {
-					if (opBuff.size() < opBuffCapacity && opBuff.add(op)) {
-						opAvailableConditions[j].signal();
-						return true;
-					}
-					return false;
-				} finally {
-					opBuffLock.unlock();
-				}
-			}
+		if (!isStarted()) {
+			throw new IllegalStateException();
 		}
+		// Block the caller (LoadGenerator VT) until a concurrency permit is available
+		try {
+			concurrencyThrottle.acquire();
+		} catch (final InterruptedException e) {
+			throwUnchecked(e);
+		}
+		// Round-robin into a worker buffer
+		final var j = (int) (rrc.getAndIncrement() % ioWorkerCount);
+		opBuffLocks[j].lock();
+		try {
+			if (opBuffs[j].size() < opBuffCapacity && opBuffs[j].add(op)) {
+				opAvailableConditions[j].signal();
+				return true;
+			}
+		} finally {
+			opBuffLocks[j].unlock();
+		}
+		// Buffer full — release permit and fail
+		concurrencyThrottle.release();
 		return false;
 	}
 

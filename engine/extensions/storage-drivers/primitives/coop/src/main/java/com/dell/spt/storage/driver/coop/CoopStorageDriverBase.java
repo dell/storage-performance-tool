@@ -16,18 +16,26 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.logging.log4j.CloseableThreadContext;
 
+/**
+ * Cooperative storage driver base. This layer is a pure lifecycle/metrics wrapper:
+ * <ul>
+ *   <li>{@link #put} calls {@link #prepare} then {@link #submit} — no intermediate queue.</li>
+ *   <li>Backpressure is enforced entirely inside each driver's {@link #submit}: the contract is
+ *       "accept this op and begin processing it, blocking the caller if the concurrency limit
+ *       is reached."</li>
+ *   <li>Child ops (composite/partial) are submitted directly via {@link #submit} from
+ *       {@link #handleCompleted}, not queued.</li>
+ * </ul>
+ */
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
 
 	protected final Semaphore concurrencyThrottle;
-	protected final BlockingQueue<O> childOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
 
@@ -39,8 +47,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					final int batchSize)
 					throws IllegalConfigurationException {
 		super(testStepId, dataInput, storageConfig, verifyFlag);
-		final var inQueueLimit = storageConfig.intVal("driver-limit-queue-input");
-		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
 	}
 
@@ -137,6 +143,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
 
+	/**
+	 * Handle a completed operation. Delivers the result via the output and submits any
+	 * child operations (composite sub-ops or partial parent finalization) directly through
+	 * {@link #submit}. The caller MUST release the concurrency permit BEFORE calling this
+	 * method so that child op submission can re-acquire a permit without deadlocking.
+	 */
 	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op) {
 		if (super.handleCompleted(op)) {
@@ -146,9 +158,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				if (!parentOp.allSubOperationsDone()) {
 					final List<O> subOps = parentOp.subOperations();
 					for (final O nextSubOp : subOps) {
-						if (!childOpQueue.offer(nextSubOp)) {
+						if (!submit(nextSubOp)) {
 							Loggers.ERR.warn(
-											"{}: Child operations queue overflow, dropping the operation", toString());
+											"{}: Failed to submit child operation", toString());
 							return false;
 						}
 					}
@@ -159,9 +171,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				if (parentOp.allSubOperationsDone()) {
 					// execute once again to finalize the things if necessary:
 					// complete the multipart upload, for example
-					if (!childOpQueue.offer((O) parentOp)) {
+					if (!submit((O) parentOp)) {
 						Loggers.ERR.warn(
-										"{}: Child operations queue overflow, dropping the operation", toString());
+										"{}: Failed to submit child operation", toString());
 						return false;
 					}
 				}
@@ -187,7 +199,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
 			super.doClose();
-			childOpQueue.clear();
 		}
 	}
 }

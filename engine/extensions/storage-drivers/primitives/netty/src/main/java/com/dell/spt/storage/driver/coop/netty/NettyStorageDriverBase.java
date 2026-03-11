@@ -593,51 +593,17 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}
 
-		final boolean failed = op.status() != Operation.Status.SUCC;
-		if (failed && channel != null) {
+		if (op.status() != Operation.Status.SUCC && channel != null) {
 			channel.close();
 		}
 
-		// Reuse channel+permit for the next pending child op (composite/partial
-		// sub-operations). This runs on the Netty event loop thread where
-		// channel.write() executes inline — zero thread hops.
-		if (!failed && channel != null
-						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
-			// Handle the completed op first — delivers result and may enqueue child ops
-			// to childOpQueue.
-			handleCompleted(op);
-			if (channel.isActive() && isStarted()) {
-				final O childOp = childOpQueue.poll();
-				if (childOp != null) {
-					try {
-						channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-						channel.attr(ATTR_KEY_OPERATION).set(childOp);
-						childOp.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
-						childOp.startRequest();
-						sendRequest(channel, childOp);
-						return; // permit + channel reused for child op
-					} catch (final Throwable t) {
-						throwUncheckedIfInterrupted(t);
-						LogUtil.exception(Level.WARN, t, "Child op dispatch failed");
-						childOp.status(Operation.Status.FAIL_UNKNOWN);
-						channel.attr(ATTR_KEY_RELEASED).set(Boolean.TRUE);
-						concurrencyThrottle.release();
-						connPool.release(channel);
-						handleCompleted(childOp);
-						return; // resources already released
-					}
-				}
-			}
-			// No pending child ops or channel gone — release normally
+		// Release permit + channel BEFORE handleCompleted so that child ops submitted
+		// by handleCompleted can re-acquire a permit without deadlocking.
+		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);
-		} else {
-			if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
-				concurrencyThrottle.release();
-				connPool.release(channel);
-			}
-			handleCompleted(op);
 		}
+		handleCompleted(op);
 	}
 
 	@Override
