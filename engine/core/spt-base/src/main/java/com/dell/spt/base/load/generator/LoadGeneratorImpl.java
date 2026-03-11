@@ -345,8 +345,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		// so the load
 		// generator builder should close it
 		if (itemInput != null) {
+			inputLock.lock();
 			try {
-				inputLock.lock();
 				itemInput.close();
 			} catch (final Exception e) {
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the item input", toString());
