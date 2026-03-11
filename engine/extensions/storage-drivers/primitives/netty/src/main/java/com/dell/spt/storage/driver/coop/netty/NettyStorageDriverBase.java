@@ -142,7 +142,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		final int workerCount;
 		final var confWorkerCount = storageConfig.intVal("driver-threads");
 		if (confWorkerCount < 1) {
-			workerCount = ThreadUtil.getHardwareThreadCount();
+			workerCount = Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
 		} else {
 			workerCount = confWorkerCount;
 		}
