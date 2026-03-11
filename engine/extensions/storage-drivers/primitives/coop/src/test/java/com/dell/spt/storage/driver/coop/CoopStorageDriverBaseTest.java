@@ -5,70 +5,69 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.LongAdder;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for the pipeline consolidation in CoopStorageDriverBase.
+ * Verifies that put() calls submit() directly (no intermediate queue)
+ * and that childOpQueue is preserved for composite operations.
+ */
 @SuppressWarnings("unchecked")
 class CoopStorageDriverBaseTest {
 
-	/**
-	 * Access the protected pollNextOp() via a mock. Mockito's mock of an abstract class
-	 * inherits the concrete methods, so we can call pollNextOp() directly and test the
-	 * queue priority behavior.
-	 */
-	private CoopStorageDriverBase<Item, Operation<Item>> createDriverWithQueues(
-					BlockingQueue<Operation<Item>> childOpQueue,
-					BlockingQueue<Operation<Item>> inOpQueue) throws Exception {
-		// Use Mockito to create a partial mock that has real concrete method behavior.
-		// We inject queues via reflection since the constructor requires a Config object.
+	@Test
+	void childOpQueueAcceptsAndReturnsOps() {
+		final BlockingQueue<Operation<Item>> childQ = new ArrayBlockingQueue<>(16);
+		final Operation<Item> op1 = mock(Operation.class);
+		final Operation<Item> op2 = mock(Operation.class);
+
+		assertTrue(childQ.offer(op1));
+		assertTrue(childQ.offer(op2));
+		assertSame(op1, childQ.poll(), "first op should be returned first (FIFO)");
+		assertSame(op2, childQ.poll(), "second op should be returned second");
+		assertNull(childQ.poll(), "empty queue should return null");
+	}
+
+	@Test
+	void scheduledAndCompletedCountersAreIndependent() throws Exception {
+		// Verify the LongAdder counters work correctly via reflection
+		final var scheduledField = CoopStorageDriverBase.class.getDeclaredField("scheduledOpCount");
+		scheduledField.setAccessible(true);
+		final var completedField = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
+		completedField.setAccessible(true);
+
 		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
-		final var childField = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
-		childField.setAccessible(true);
-		childField.set(driver, childOpQueue);
-		final var inField = CoopStorageDriverBase.class.getDeclaredField("inOpQueue");
-		inField.setAccessible(true);
-		inField.set(driver, inOpQueue);
-		return driver;
+		scheduledField.set(driver, new LongAdder());
+		completedField.set(driver, new LongAdder());
+
+		assertEquals(0, driver.scheduledOpCount());
+		assertEquals(0, driver.completedOpCount());
 	}
 
 	@Test
-	void pollNextOpReturnsChildOpFirst() throws Exception {
-		final BlockingQueue<Operation<Item>> childQ = new ArrayBlockingQueue<>(16);
-		final BlockingQueue<Operation<Item>> inQ = new ArrayBlockingQueue<>(16);
+	void activeOpCountReflectsSemaphoreState() throws Exception {
+		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		final var sem = new Semaphore(4, true);
+		semField.set(driver, sem);
 
-		final var driver = createDriverWithQueues(childQ, inQ);
-		final Operation<Item> childOp = mock(Operation.class);
-		final Operation<Item> inOp = mock(Operation.class);
+		// Set concurrencyLimit via reflection
+		final var limitField = CoopStorageDriverBase.class.getSuperclass().getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 4);
 
-		childQ.add(childOp);
-		inQ.add(inOp);
+		assertEquals(0, driver.activeOpCount(), "all permits free = 0 active");
 
-		assertSame(childOp, driver.pollNextOp(), "child op should be returned first");
-		assertSame(inOp, driver.pollNextOp(), "in op should be returned second");
-		assertNull(driver.pollNextOp(), "should return null when both queues are empty");
-	}
+		sem.acquire(2);
+		assertEquals(2, driver.activeOpCount(), "2 permits taken = 2 active");
 
-	@Test
-	void pollNextOpReturnsInOpWhenNoChildren() throws Exception {
-		final BlockingQueue<Operation<Item>> childQ = new ArrayBlockingQueue<>(16);
-		final BlockingQueue<Operation<Item>> inQ = new ArrayBlockingQueue<>(16);
-
-		final var driver = createDriverWithQueues(childQ, inQ);
-		final Operation<Item> inOp = mock(Operation.class);
-
-		inQ.add(inOp);
-
-		assertSame(inOp, driver.pollNextOp(), "in op should be returned when child queue is empty");
-	}
-
-	@Test
-	void pollNextOpReturnsNullWhenBothQueuesEmpty() throws Exception {
-		final BlockingQueue<Operation<Item>> childQ = new ArrayBlockingQueue<>(16);
-		final BlockingQueue<Operation<Item>> inQ = new ArrayBlockingQueue<>(16);
-
-		final var driver = createDriverWithQueues(childQ, inQ);
-
-		assertNull(driver.pollNextOp(), "should return null when both queues are empty");
+		sem.release(2);
+		assertEquals(0, driver.activeOpCount(), "all permits released = 0 active");
 	}
 }

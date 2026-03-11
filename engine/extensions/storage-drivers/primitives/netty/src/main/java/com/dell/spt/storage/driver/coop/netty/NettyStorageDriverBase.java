@@ -321,43 +321,44 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		if (!isStarted()) {
 			throw new IllegalStateException();
 		}
-		if (concurrencyThrottle.tryAcquire()) {
-			try {
-				if (OpType.NOOP.equals(op.type())) {
-					op.startRequest();
-					sendRequest(null, op);
-					op.finishRequest();
-					concurrencyThrottle.release();
-					op.status(SUCC);
-					op.startResponse();
-					complete(null, op);
-				} else {
-					conn = connPool.lease();
-					conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-					if (!conn.isActive()) {
-						throw new ConnectException("Connection is not active");
-					}
-					conn.attr(ATTR_KEY_OPERATION).set(op);
-					op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
-					op.startRequest();
-					sendRequest(conn, op);
+		try {
+			concurrencyThrottle.acquire();
+		} catch (final InterruptedException e) {
+			throwUnchecked(e);
+		}
+		try {
+			if (OpType.NOOP.equals(op.type())) {
+				op.startRequest();
+				sendRequest(null, op);
+				op.finishRequest();
+				concurrencyThrottle.release();
+				op.status(SUCC);
+				op.startResponse();
+				complete(null, op);
+			} else {
+				conn = connPool.lease();
+				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+				if (!conn.isActive()) {
+					throw new ConnectException("Connection is not active");
 				}
-			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
-				op.status(Operation.Status.FAIL_IO);
-				complete(conn, op);
-				return false;
-			} catch (final Throwable thrown) {
-				throwUncheckedIfInterrupted(thrown);
-				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
-				op.status(Operation.Status.FAIL_UNKNOWN);
-				complete(conn, op);
-				return false;
+				conn.attr(ATTR_KEY_OPERATION).set(op);
+				op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
+				op.startRequest();
+				sendRequest(conn, op);
 			}
-			return true;
-		} else {
+		} catch (final ConnectException e) {
+			LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
+			op.status(Operation.Status.FAIL_IO);
+			complete(conn, op);
+			return false;
+		} catch (final Throwable thrown) {
+			throwUncheckedIfInterrupted(thrown);
+			LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
+			op.status(Operation.Status.FAIL_UNKNOWN);
+			complete(conn, op);
 			return false;
 		}
+		return true;
 	}
 
 	@Override
@@ -597,18 +598,37 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			channel.close();
 		}
 
-		// Try completion-driven dispatch: reuse the channel for the next queued op,
-		// bypassing the OperationDispatchTask signal/wake round-trip. This runs on the
-		// Netty event loop thread where channel.write() executes inline — zero thread hops.
+		// Reuse channel+permit for the next pending child op (composite/partial
+		// sub-operations). This runs on the Netty event loop thread where
+		// channel.write() executes inline — zero thread hops.
 		if (!failed && channel != null
 						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			// Handle the completed op first — delivers result and may enqueue child ops
-			// to childOpQueue, which tryImmediateDispatch checks with priority.
+			// to childOpQueue.
 			handleCompleted(op);
-			if (channel.isActive() && isStarted() && tryImmediateDispatch(channel)) {
-				return;
+			if (channel.isActive() && isStarted()) {
+				final O childOp = childOpQueue.poll();
+				if (childOp != null) {
+					try {
+						channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+						channel.attr(ATTR_KEY_OPERATION).set(childOp);
+						childOp.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
+						childOp.startRequest();
+						sendRequest(channel, childOp);
+						return; // permit + channel reused for child op
+					} catch (final Throwable t) {
+						throwUncheckedIfInterrupted(t);
+						LogUtil.exception(Level.WARN, t, "Child op dispatch failed");
+						childOp.status(Operation.Status.FAIL_UNKNOWN);
+						channel.attr(ATTR_KEY_RELEASED).set(Boolean.TRUE);
+						concurrencyThrottle.release();
+						connPool.release(channel);
+						handleCompleted(childOp);
+						return; // resources already released
+					}
+				}
 			}
-			// No pending ops or channel gone — release normally
+			// No pending child ops or channel gone — release normally
 			concurrencyThrottle.release();
 			connPool.release(channel);
 		} else {
@@ -617,40 +637,6 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				connPool.release(channel);
 			}
 			handleCompleted(op);
-		}
-	}
-
-	/**
-	 * Try to dispatch the next queued operation on the given channel, reusing both the
-	 * channel and the concurrency semaphore permit (neither is released). Called from the
-	 * Netty event loop thread after a successful response, so channel.write() runs inline
-	 * with no thread hop.
-	 *
-	 * @return true if an operation was dispatched (channel stays in use), false if no ops
-	 *         were available (caller must release the channel and permit)
-	 */
-	private boolean tryImmediateDispatch(final Channel channel) {
-		final O nextOp = pollNextOp();
-		if (nextOp == null) {
-			return false;
-		}
-		try {
-			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-			channel.attr(ATTR_KEY_OPERATION).set(nextOp);
-			nextOp.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
-			nextOp.startRequest();
-			sendRequest(channel, nextOp);
-			return true;
-		} catch (final Throwable t) {
-			throwUncheckedIfInterrupted(t);
-			LogUtil.exception(Level.WARN, t, "Immediate dispatch failed");
-			nextOp.status(Operation.Status.FAIL_UNKNOWN);
-			// Release resources and handle the failed op without recursion
-			channel.attr(ATTR_KEY_RELEASED).set(Boolean.TRUE);
-			concurrencyThrottle.release();
-			connPool.release(channel);
-			handleCompleted(nextOp);
-			return true; // resources already released — caller must not release again
 		}
 	}
 

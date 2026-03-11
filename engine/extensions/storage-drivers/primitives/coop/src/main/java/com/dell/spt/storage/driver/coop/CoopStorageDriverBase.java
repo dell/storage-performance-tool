@@ -3,7 +3,6 @@ package com.dell.spt.storage.driver.coop;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
-import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
@@ -22,8 +21,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
@@ -31,12 +28,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	protected final Semaphore concurrencyThrottle;
 	protected final BlockingQueue<O> childOpQueue;
-	private final BlockingQueue<O> inOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
-	private final ReentrantLock dispatchLock = new ReentrantLock();
-	private final Condition dispatchReady = dispatchLock.newCondition();
-	private final OperationDispatchTask opDispatchTask;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -48,16 +41,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		super(testStepId, dataInput, storageConfig, verifyFlag);
 		final var inQueueLimit = storageConfig.intVal("driver-limit-queue-input");
 		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
-		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
-		this.opDispatchTask = new OperationDispatchTask<>(
-						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
-						dispatchLock, dispatchReady);
 	}
 
 	@Override
 	protected void doStart() throws IllegalStateException {
-		opDispatchTask.start();
 	}
 
 	@Override
@@ -65,13 +53,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (!isStarted()) {
 			throwUnchecked(new EOFException());
 		}
-		if (prepare(op) && inOpQueue.offer(op)) {
+		if (prepare(op) && submit(op)) {
 			scheduledOpCount.increment();
-			signalDispatch();
 			return true;
-		} else {
-			return false;
 		}
+		return false;
 	}
 
 	@Override
@@ -83,18 +69,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		O nextOp;
 		while (i < to && isStarted()) {
 			nextOp = ops.get(i);
-			if (prepare(nextOp) && inOpQueue.offer(ops.get(i))) {
+			if (prepare(nextOp) && submit(nextOp)) {
+				scheduledOpCount.increment();
 				i++;
 			} else {
 				break;
 			}
 		}
-		final var n = i - from;
-		scheduledOpCount.add(n);
-		if (n > 0) {
-			signalDispatch();
-		}
-		return n;
+		return i - from;
 	}
 
 	@Override
@@ -105,7 +87,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		var n = 0;
 		for (final var nextOp : ops) {
 			if (isStarted()) {
-				if (prepare(nextOp) && inOpQueue.offer(nextOp)) {
+				if (prepare(nextOp) && submit(nextOp)) {
+					scheduledOpCount.increment();
 					n++;
 				} else {
 					break;
@@ -113,10 +96,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			} else {
 				break;
 			}
-		}
-		scheduledOpCount.add(n);
-		if (n > 0) {
-			signalDispatch();
 		}
 		return n;
 	}
@@ -148,20 +127,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else {
 			return concurrencyThrottle.availablePermits() == Integer.MAX_VALUE;
 		}
-	}
-
-	/**
-	 * Poll the next operation to dispatch. Checks childOpQueue first (composite/partial
-	 * completions have priority), then inOpQueue. Non-blocking — returns null if both
-	 * queues are empty. Used by the completion-driven dispatch path to bypass the
-	 * OperationDispatchTask round-trip.
-	 */
-	protected O pollNextOp() {
-		O nextOp = childOpQueue.poll();
-		if (nextOp == null) {
-			nextOp = inOpQueue.poll();
-		}
-		return nextOp;
 	}
 
 	protected abstract boolean submit(final O op) throws IllegalStateException;
@@ -201,31 +166,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					}
 				}
 			}
-			signalDispatch();
 			return true;
 		} else {
 			return false;
 		}
 	}
 
-	/**
-	 * Wake the dispatch task. Called when new ops are available (put) or when
-	 * a completion frees capacity (handleCompleted). Uses lock() instead of
-	 * tryLock() to guarantee delivery — the dispatch task only holds the lock
-	 * for nanoseconds (double-check before await), so contention is negligible.
-	 */
-	private void signalDispatch() {
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
-	}
-
 	@Override
 	protected void doShutdown() {
-		opDispatchTask.stop();
 		Loggers.MSG.debug("{}: shut down", toString());
 	}
 
@@ -239,9 +187,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
 			super.doClose();
-			opDispatchTask.close();
 			childOpQueue.clear();
-			inOpQueue.clear();
 		}
 	}
 }
