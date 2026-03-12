@@ -65,8 +65,9 @@ var (
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker {
 		return &runTrackerAdapter{portcheck.NewRunTracker(baseURL)}
 	}
-	discoverStepIDsFunc   = results.DiscoverStepIDs
-	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+	discoverStepIDsFunc      = results.DiscoverStepIDs
+	discoverFleetStepIDsFunc = results.DiscoverFleetStepIDs
+	newResultsFetcherFunc    = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
 	generateRunSummaryFunc = generateRunSummary
@@ -157,8 +158,10 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		tracker.SetDebug(debug)
 		// While we wait, continuously discover step IDs so we have exact IDs on completion
 		var discovered []string
+		var fleetDiscovered []string
 		var mu sync.Mutex
 		seen := make(map[string]struct{})
+		fleetSeen := make(map[string]struct{})
 		stopCh := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)
@@ -188,11 +191,47 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 							logging.LogDebug("auto-results", "discover", "steps", strings.Join(snapshot, ","))
 						}
 					}
+					// Also poll fleet endpoint for distributed step IDs
+					if fids, err := discoverFleetStepIDsFunc(baseURL); err == nil && len(fids) > 0 {
+						mu.Lock()
+						updated := false
+						for _, id := range fids {
+							if id == "" {
+								continue
+							}
+							if _, ok := fleetSeen[id]; ok {
+								continue
+							}
+							fleetSeen[id] = struct{}{}
+							fleetDiscovered = append(fleetDiscovered, id)
+							updated = true
+						}
+						snapshot := append([]string(nil), fleetDiscovered...)
+						mu.Unlock()
+						if debug && updated && len(snapshot) > 0 {
+							logging.LogDebug("auto-results", "discover-fleet", "steps", strings.Join(snapshot, ","))
+						}
+					}
 				}
 			}
 		}()
 		_, _ = tracker.WaitForCompletion(ctx, expectedStepIDs)
 		close(stopCh)
+		// One final fleet discovery after completion (may not have been picked up during polling)
+		if fids, err := discoverFleetStepIDsFunc(baseURL); err == nil && len(fids) > 0 {
+			mu.Lock()
+			for _, id := range fids {
+				if id == "" {
+					continue
+				}
+				if _, ok := fleetSeen[id]; ok {
+					continue
+				}
+				fleetSeen[id] = struct{}{}
+				fleetDiscovered = append(fleetDiscovered, id)
+			}
+			mu.Unlock()
+		}
 		writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
 
 		// Discover step IDs from JSON metrics.
@@ -202,6 +241,7 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		// we intersect rather than union to prevent stale IDs from reaching FetchArtifactsForSteps.
 		mu.Lock()
 		cachedDiscovered := append([]string(nil), discovered...)
+		cachedFleet := append([]string(nil), fleetDiscovered...)
 		mu.Unlock()
 		if len(expectedStepIDs) > 0 {
 			expectedSet := make(map[string]struct{}, len(expectedStepIDs))
@@ -216,19 +256,25 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			}
 			cachedDiscovered = filtered
 		}
-		stepIDs := uniqueStepIDs(expectedStepIDs, cachedDiscovered)
+		// Fleet-discovered IDs bypass the stale-ID intersection filter because they
+		// represent the engine's actual runtime step IDs (which may differ from
+		// CLI-generated expected IDs in distributed/multi-host mode due to timestamp
+		// reassignment). Fleet IDs go first so they take precedence when present.
+		stepIDs := uniqueStepIDs(cachedFleet, expectedStepIDs, cachedDiscovered)
 		var discoverErr error
 		if len(stepIDs) == 0 {
 			var fallback []string
 			fallback, discoverErr = discoverStepIDsFunc(baseURL)
-			stepIDs = uniqueStepIDs(stepIDs, fallback)
+			// Also try fleet endpoint as fallback
+			fleetFallback, _ := discoverFleetStepIDsFunc(baseURL)
+			stepIDs = uniqueStepIDs(fleetFallback, stepIDs, fallback)
 		}
 		if len(stepIDs) == 0 {
 			var logErr error
 			if discoverErr != nil {
 				logErr = fmt.Errorf("discover step IDs: %w", discoverErr)
 			} else {
-				logErr = fmt.Errorf("no steps reported by metrics/json")
+				logErr = fmt.Errorf("no steps reported by metrics/json or metrics/fleet/json")
 			}
 			logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
 			return
@@ -237,7 +283,7 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 
 		if metadata != nil {
 			metadata.ActualStepIDs = append([]string(nil), stepIDs...)
-			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, cachedDiscovered, stepIDs)
+			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, cachedFleet, cachedDiscovered, stepIDs)
 			if err := writeRunMetadata(metadata, root); err != nil {
 				logging.LogError("auto-results", "write run metadata", err, "dest", root)
 			}

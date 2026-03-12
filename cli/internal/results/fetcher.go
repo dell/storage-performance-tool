@@ -310,7 +310,28 @@ type stepIndexItem struct {
 }
 
 // fetchStepIndex retrieves /logs/<stepId>/index.json and returns a map logger->item.
+// It retries up to Retries times when the response is empty (engine may still be
+// flushing log files shortly after completion).
 func (f *Fetcher) fetchStepIndex(ctx context.Context, stepID string) (map[string]stepIndexItem, error) {
+	for attempt := 0; attempt < max(1, f.Retries); attempt++ {
+		out, err := f.doFetchStepIndex(ctx, stepID)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+		// Empty index — engine may still be flushing; retry after delay.
+		if attempt < f.Retries-1 && f.RetryDelay > 0 && f.Sleeper != nil {
+			f.Sleeper(f.RetryDelay)
+		}
+	}
+	// All retries exhausted with empty response — return empty map.
+	return make(map[string]stepIndexItem), nil
+}
+
+// doFetchStepIndex performs a single HTTP request for the step index.
+func (f *Fetcher) doFetchStepIndex(ctx context.Context, stepID string) (map[string]stepIndexItem, error) {
 	u, err := url.Parse(f.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse base url: %w", err)

@@ -73,17 +73,22 @@ func (f *fakeFetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []stri
 func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	origRunTracker := newRunTrackerFunc
 	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
 	origFetcher := newResultsFetcherFunc
 	origSummary := generateRunSummaryFunc
 	defer func() {
 		newRunTrackerFunc = origRunTracker
 		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
 		newResultsFetcherFunc = origFetcher
 		generateRunSummaryFunc = origSummary
 	}()
 
 	tracker := &fakeRunTracker{}
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
+
+	// Fleet endpoint unavailable (older engine)
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
 
 	// Stale IDs from a prior aborted run (timestamp .367), current run has timestamp .368.
 	staleIDs := []string{
@@ -158,11 +163,13 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 
 	origRunTracker := newRunTrackerFunc
 	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
 	origFetcher := newResultsFetcherFunc
 	origSummary := generateRunSummaryFunc
 	defer func() {
 		newRunTrackerFunc = origRunTracker
 		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
 		newResultsFetcherFunc = origFetcher
 		generateRunSummaryFunc = origSummary
 	}()
@@ -174,6 +181,9 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 		}
 		return tracker
 	}
+
+	// Fleet endpoint unavailable (older engine)
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
 
 	// Discovery returns the expected ID mixed in with a foreign one from another run.
 	discoverCalls := 0
@@ -236,5 +246,148 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 	if discoverCalls == 0 {
 		t.Fatal("discoverStepIDsFunc was never called")
+	}
+}
+
+// TestStartAutoResults_FleetDiscoveryPreferred verifies that when the fleet endpoint
+// returns step IDs different from expected IDs (the distributed mode step-ID mismatch),
+// the fleet-discovered IDs are used for fetching instead of the CLI-generated expected IDs.
+func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	tracker := &fakeRunTracker{}
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
+
+	// CLI-generated expected IDs (with timestamp .519)
+	expectedIDs := []string{
+		"mt-001-20260312.192453.519-create",
+		"mt-002-20260312.192453.519-delete",
+	}
+
+	// Engine's actual IDs (with timestamp .387) — returned by fleet endpoint
+	fleetIDs := []string{
+		"mt-001-20260312.192454.387-create",
+		"mt-002-20260312.192454.387-delete",
+	}
+
+	// Node-local /metrics/json returns nothing useful in distributed mode
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+
+	// Fleet endpoint returns the engine's actual step IDs
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) {
+		return fleetIDs, nil
+	}
+
+	fetcher := &fakeFetcher{}
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		fetcher.baseURL = baseURL
+		fetcher.output = outputDir
+		return fetcher
+	}
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+
+	tmpDir := t.TempDir()
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	// Fleet IDs should be present in the fetched step IDs
+	fleetSet := make(map[string]bool, len(fleetIDs))
+	for _, id := range fleetIDs {
+		fleetSet[id] = true
+	}
+	foundFleet := 0
+	for _, id := range fetcher.stepIDs {
+		if fleetSet[id] {
+			foundFleet++
+		}
+	}
+	if foundFleet != len(fleetIDs) {
+		t.Fatalf("expected all %d fleet IDs in fetcher.stepIDs, found %d; got %v", len(fleetIDs), foundFleet, fetcher.stepIDs)
+	}
+}
+
+// TestStartAutoResults_FleetUnavailableFallback verifies that when the fleet endpoint
+// is unavailable (404, older engine), the system falls back to expected IDs.
+func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	tracker := &fakeRunTracker{}
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
+
+	expectedIDs := []string{
+		"mt-001-20260312.192453.519-create",
+		"mt-002-20260312.192453.519-delete",
+	}
+
+	// Node-local returns matching IDs (non-distributed mode)
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+		return expectedIDs, nil
+	}
+
+	// Fleet endpoint unavailable (404)
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+
+	fetcher := &fakeFetcher{}
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		fetcher.baseURL = baseURL
+		fetcher.output = outputDir
+		return fetcher
+	}
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+
+	tmpDir := t.TempDir()
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	// Should fall back to expected IDs when fleet is unavailable
+	if len(fetcher.stepIDs) != len(expectedIDs) {
+		t.Fatalf("expected %d step IDs, got %d: %v", len(expectedIDs), len(fetcher.stepIDs), fetcher.stepIDs)
+	}
+	expectedSet := make(map[string]bool, len(expectedIDs))
+	for _, id := range expectedIDs {
+		expectedSet[id] = true
+	}
+	for _, id := range fetcher.stepIDs {
+		if !expectedSet[id] {
+			t.Fatalf("unexpected step ID %q in fetcher.stepIDs; got %v", id, fetcher.stepIDs)
+		}
 	}
 }
