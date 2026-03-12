@@ -142,7 +142,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		final int workerCount;
 		final var confWorkerCount = storageConfig.intVal("driver-threads");
 		if (confWorkerCount < 1) {
-			workerCount = ThreadUtil.getHardwareThreadCount();
+			workerCount = Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
 		} else {
 			workerCount = confWorkerCount;
 		}
@@ -591,10 +591,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}
-		if (op.status() != Operation.Status.SUCC) {
+
+		if (op.status() != Operation.Status.SUCC && channel != null) {
 			channel.close();
 		}
-		if (!channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
+
+		// Release permit + channel BEFORE handleCompleted so that child ops submitted
+		// by handleCompleted can re-acquire a permit without deadlocking.
+		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);
 		}

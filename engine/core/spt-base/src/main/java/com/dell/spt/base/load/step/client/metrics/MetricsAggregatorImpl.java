@@ -5,18 +5,14 @@ import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.load.step.LoadStep;
-import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import com.github.akurilov.commons.concurrent.AsyncRunnableBase;
-import java.io.IOException;
-import java.rmi.RemoteException;
+import com.dell.spt.base.concurrent.AsyncRunnableBase;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import com.github.akurilov.confuse.Config;
-import org.apache.logging.log4j.Level;
 
 public final class MetricsAggregatorImpl extends AsyncRunnableBase implements MetricsAggregator {
 
@@ -62,12 +58,6 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 										snapshotsSupplier -> {
 											try (final var logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 												snapshotsSupplier.start();
-											} catch (final RemoteException e) {
-												LogUtil.exception(
-																Level.ERROR,
-																e,
-																"{}: failed to start the metrics snapshots supplier task",
-																loadStepId);
 											}
 										});
 	}
@@ -80,9 +70,6 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 										snapshotsSupplier -> {
 											try (final var logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 												snapshotsSupplier.stop();
-											} catch (final IOException e) {
-												LogUtil.exception(
-																Level.WARN, e, "{}: failed to stop the metrics snapshot supplier", loadStepId);
 											}
 										});
 	}
@@ -92,9 +79,6 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 		for (var i = 0; i < count; i++) {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				snapshotSuppliers[i].close();
-			} catch (final IOException e) {
-				LogUtil.exception(
-								Level.WARN, e, "{}: failed to close the metrics snapshot supplier", loadStepId);
 			}
 			snapshotSuppliers[i] = null;
 		}

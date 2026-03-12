@@ -1,32 +1,30 @@
 package com.dell.spt.storage.driver.coop;
 
+import com.dell.spt.base.concurrent.TaskBase;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.LogUtil;
-import com.dell.spt.base.logging.Loggers;
+
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
-import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
+
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
 
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
-import com.github.akurilov.fiber4j.FibersExecutor;
-
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-
 /**
-* Created by andrey on 23.08.17.
-*/
+ * Created by andrey on 23.08.17.
+ */
 public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
-				extends ExclusiveFiberBase {
+				extends TaskBase {
 
 	private static final String CLS_NAME = OperationDispatchTask.class.getSimpleName();
 
@@ -36,63 +34,83 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final BlockingQueue<O> inOpQueue;
 	private final CoopStorageDriverBase<I, O> storageDriver;
 	private final CircularBuffer<O> buff;
-	private final Lock buffLock;
+	private final Lock dispatchLock;
+	private final Condition dispatchReady;
 
 	public OperationDispatchTask(
-					final FibersExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
+					final VirtualThreadExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
-					final int batchSize) {
-		this(
-						executor, new CircularArrayBuffer<>(batchSize), new ReentrantLock(), storageDriver, inOpQueue, childOpQueue,
-						stepId, batchSize);
-	}
-
-	private OperationDispatchTask(
-					final FibersExecutor executor, final CircularBuffer<O> buff, final Lock buffLock,
-					final CoopStorageDriverBase<I, O> storageDriver, final BlockingQueue<O> inOpQueue,
-					final BlockingQueue<O> childOpQueue, final String stepId, final int batchSize) {
-		super(executor, buffLock);
-		this.buff = buff;
-		this.buffLock = buffLock;
+					final int batchSize, final Lock dispatchLock, final Condition dispatchReady) {
+		super(executor);
+		this.buff = new CircularArrayBuffer<>(batchSize);
 		this.storageDriver = storageDriver;
 		this.inOpQueue = inOpQueue;
 		this.childOpQueue = childOpQueue;
 		this.stepId = stepId;
 		this.batchSize = batchSize;
+		this.dispatchLock = dispatchLock;
+		this.dispatchReady = dispatchReady;
 	}
 
 	@Override
-	protected final void invokeTimedExclusively(final long startTimeNanos) {
+	protected void doInit() {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
-		var n = buff.size();
+	}
+
+	@Override
+	protected final void doWork() throws Exception {
 		try {
-			// child ops go first
-			if (n < batchSize) {
-				n += childOpQueue.drainTo(buff, batchSize - n);
+			// Drain child ops first (partial/composite completions have priority)
+			childOpQueue.drainTo(buff, batchSize - buff.size());
+			// Then drain incoming ops
+			if (buff.size() == 0) {
+				inOpQueue.drainTo(buff, batchSize);
+				if (buff.size() == 0) {
+					// Both queues empty — wait for signal from producer or completion callback.
+					// The VT unmounts during await(), freeing the carrier thread.
+					// The 1ms timeout is a safety net; normal wake-up is via signal().
+					dispatchLock.lock();
+					try {
+						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
+							dispatchReady.await(1, TimeUnit.MILLISECONDS);
+						}
+					} finally {
+						dispatchLock.unlock();
+					}
+					// Drain again after waking
+					childOpQueue.drainTo(buff, batchSize);
+					if (buff.size() < batchSize) {
+						inOpQueue.drainTo(buff, batchSize - buff.size());
+					}
+				}
+			} else if (buff.size() < batchSize) {
+				inOpQueue.drainTo(buff, batchSize - buff.size());
 			}
-			// check for the fiber invocation timeout
-			if (SOFT_DURATION_LIMIT_NANOS <= System.nanoTime() - startTimeNanos) {
-				return;
-			}
-			// new tasks
-			if (n < batchSize) {
-				n += inOpQueue.drainTo(buff, batchSize - n);
-			}
-			// check for the fiber invocation timeout
-			if (SOFT_DURATION_LIMIT_NANOS <= System.nanoTime() - startTimeNanos) {
-				return;
-			}
-			// submit the tasks if any
-			if (n > 0) {
-				if (n == 1) { // non-batch mode
-					if (storageDriver.submit(buff.get(0))) {
+			// submit all buffered ops (including retries from prior iterations)
+			final int buffSize = buff.size();
+			if (buffSize > 0) {
+				boolean submitted;
+				if (buffSize == 1) { // non-batch mode
+					submitted = storageDriver.submit(buff.get(0));
+					if (submitted) {
 						buff.clear();
 					}
 				} else { // batch mode
-					final int m = storageDriver.submit(buff, 0, n);
-					if (m > 0) {
+					final int m = storageDriver.submit(buff, 0, buffSize);
+					submitted = m > 0;
+					if (submitted) {
 						buff.removeFirst(m);
+					}
+				}
+				// Backpressure: if submit made no progress, wait for a completion signal.
+				// A completion callback releases a semaphore permit and signals us.
+				if (!submitted) {
+					dispatchLock.lock();
+					try {
+						dispatchReady.await(1, TimeUnit.MILLISECONDS);
+					} finally {
+						dispatchLock.unlock();
 					}
 				}
 			}
@@ -106,14 +124,10 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void doClose() {
-		try {
-			if (buffLock.tryLock(WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
-				buff.clear();
-			} else {
-				Loggers.ERR.warn("BufferLock timeout on close");
-			}
-		} catch (final InterruptedException e) {
-			throwUnchecked(e);
-		}
+		// Design decision: any operations remaining in the buffer are dropped on shutdown.
+		// For a benchmarking tool this is acceptable — metrics have already captured the
+		// completed operations, and attempting a draining flush here risks hangs if the
+		// downstream driver is in a failed or saturated state.
+		buff.clear();
 	}
 }

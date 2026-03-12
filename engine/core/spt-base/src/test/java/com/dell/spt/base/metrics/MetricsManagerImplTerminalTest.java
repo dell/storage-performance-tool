@@ -21,7 +21,7 @@ class MetricsManagerImplTerminalTest {
 
 	@Test
 	void cachesTerminalEntryOnUnregisterAndHonorsRetention() {
-		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		mgr.setTerminalRetentionMillis(5_000);
 
 		// Snapshot mocks
@@ -98,7 +98,7 @@ class MetricsManagerImplTerminalTest {
 
 	@Test
 	void retainsLastNonZeroSnapshotWhenRefreshClearsCounts() {
-		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		mgr.setTerminalRetentionMillis(30_000);
 
 		AllMetricsSnapshot nonZero = mock(AllMetricsSnapshot.class, RETURNS_DEEP_STUBS);
@@ -154,7 +154,7 @@ class MetricsManagerImplTerminalTest {
 
 	@Test
 	void cachesTerminalEntriesSeparatelyForNodeAndAggregate() {
-		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		mgr.setTerminalRetentionMillis(30_000);
 
 		AllMetricsSnapshot localSnapshot = mock(AllMetricsSnapshot.class, RETURNS_DEEP_STUBS);

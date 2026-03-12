@@ -2,7 +2,7 @@ package com.dell.spt.base.load.step;
 
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.List;

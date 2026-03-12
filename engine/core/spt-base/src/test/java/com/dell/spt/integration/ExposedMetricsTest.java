@@ -106,7 +106,7 @@ public class ExposedMetricsTest {
 
 	@Test
 	public void test() throws Exception {
-		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		metricsMgr.register(distributedMetricsContext);
 		for (var i = 0; i < ITERATION_COUNT; ++i) {
 			metricsContext.markSucc(ITEM_DATA_SIZE.get(), MARK_DUR, MARK_LAT);

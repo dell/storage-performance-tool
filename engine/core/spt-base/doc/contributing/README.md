@@ -289,7 +289,7 @@ This hook will work automatically with any commit and format the code in the sam
 
 ## 5.2. Exception Handling
 
-The threads are not used in the usual way (*fibers* are used instead for the multitasking purposes). Therefore, having
+The threads are not used in the usual way (*Virtual Threads* are used instead for the multitasking purposes). Therefore, having
 an `InterruptedException` thrown means that the run was interrupted externally. To stop the run, it's necessary to pass
 the exception to the uppermost level of the call stack. However, the `InterruptedException` is a checked
 exception and usually couldn't be passed outward. The utility method 

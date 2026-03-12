@@ -1,6 +1,5 @@
 package com.dell.spt.base.concurrent;
 
-import com.github.akurilov.commons.concurrent.AsyncRunnableBase;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.Queue;

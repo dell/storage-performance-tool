@@ -15,11 +15,13 @@ dependencies {
 	compileOnly(
 		libs.confuse,
 		libs.confuse.io.yaml,
-		libs.fiber4j,
 		libs.java.commons,
 		libs.log4j.api,
 		libs.log4j.core,
 	)
 
 	// External dependencies that will be bundled (none for coop)
+
+	// Test-only dependencies
+	testImplementation libs.mockito.core
 }

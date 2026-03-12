@@ -1,33 +1,34 @@
 package com.dell.spt.base.load.step.client;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
-import java.io.IOException;
-import java.rmi.RemoteException;
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.TaskBase;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class TempInputTextFileSlicerTasksTest {
 
 	@Test
-	void startTasksPropagatesRemoteException() throws RemoteException {
-		final AsyncRunnable failingTask = mock(AsyncRunnable.class);
-		doThrow(new RemoteException("start failed")).when(failingTask).start();
-		final AsyncRunnable okTask = mock(AsyncRunnable.class);
-		final IOException thrown = assertThrows(
-						IOException.class,
-						() -> TempInputTextFileSlicer.startTasks(
-										"step-test",
-										List.of(failingTask, okTask),
-										"source.txt"));
-		assertEquals("Failed to start async task for input file source.txt", thrown.getMessage());
-		assertEquals(0, thrown.getSuppressed().length);
-		verify(failingTask).start();
-		verify(okTask).start();
+	void startTasksStartsAllTasks() throws InterruptedException {
+		final var startedLatch = new CountDownLatch(2);
+		final TaskBase task1 = new TaskBase(ServiceTaskExecutor.VT_EXECUTOR) {
+			@Override
+			protected void doWork() throws Exception {
+				startedLatch.countDown();
+				stop();
+			}
+		};
+		final TaskBase task2 = new TaskBase(ServiceTaskExecutor.VT_EXECUTOR) {
+			@Override
+			protected void doWork() throws Exception {
+				startedLatch.countDown();
+				stop();
+			}
+		};
+		TempInputTextFileSlicer.startTasks("step-test", List.of(task1, task2), "source.txt");
+		assertTrue(startedLatch.await(2, TimeUnit.SECONDS), "Both tasks should have started");
 	}
 }

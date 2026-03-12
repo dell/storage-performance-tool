@@ -42,7 +42,7 @@ public class ServletAPITest {
 	public void setUp() throws Exception {
 		testConfig = TestConfigBuilder.config();
 		final ServletContextHandler context = new ServletContextHandler();
-		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		context.setContextPath("/");
 		server.setHandler(context);
 
@@ -141,7 +141,7 @@ public class ServletAPITest {
 	void fleetEndpointDisabledWhenConfigured() throws Exception {
 		final Config localConfig = TestConfigBuilder.config();
 		localConfig.val("server-metrics-expose_fleet", false);
-		final MetricsManager localMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		final MetricsManager localMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		final Server localServer = new Server(0);
 		try {
 			final var context = new ServletContextHandler();

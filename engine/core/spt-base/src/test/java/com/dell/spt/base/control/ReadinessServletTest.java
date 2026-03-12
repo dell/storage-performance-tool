@@ -31,7 +31,7 @@ public class ReadinessServletTest {
 
 	@BeforeEach
 	public void setUp() throws Exception {
-		metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		config = TestConfigBuilder.config();
 		config.val("run-comment", "ready-node");
 		config.val("run-id", 1L);

@@ -72,7 +72,6 @@ dependencies {
 		libs.jackson.dataformat.yaml,
 		libs.confuse,
 		libs.confuse.io.yaml,
-		"com.github.dlarge:fiber4j:59d6ec1215",
 		"com.github.dlarge:java-commons:f48e91c8ba",
 		libs.disruptor,
 		libs.prometheus.simpleclient,

@@ -7,7 +7,6 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.DaemonBase;
-import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TimeUtil;
@@ -117,7 +116,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			doStartWrapped();
 
 			final var svcThreadCount = config.intVal("load-service-threads");
-			ServiceTaskExecutor.INSTANCE.setThreadCount(svcThreadCount);
+			if (svcThreadCount > 0) {
+				Loggers.MSG.warn(
+								"'load.service.threads' ({}) is no longer used — the legacy thread pool has been replaced "
+												+ "by Virtual Threads. This parameter will be ignored.",
+								svcThreadCount);
+			}
 
 			final long t;
 			final var loadStepLimitTimeRaw = config.val("load-step-limit-time");

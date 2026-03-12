@@ -13,7 +13,7 @@ storage:
     tcpNoDelay: true
     # Default HTTP socket/idle timeout: 300 seconds (5 minutes)
     timeoutMilliSec: 300000
-    ioRatio: 50
+    ioRatio: 80
     transport: epoll
     ssl:
       ciphers: null

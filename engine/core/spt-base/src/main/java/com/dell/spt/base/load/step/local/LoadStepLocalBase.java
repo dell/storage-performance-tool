@@ -17,7 +17,6 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.fiber4j.Fiber;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
@@ -28,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepLocalBase extends LoadStepBase {
+
+	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
 	protected final List<LoadStepContext> stepContexts = new ArrayList<>();
 
@@ -48,11 +49,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			try {
 				stepCtx.start();
 				anyStarted = true;
-			} catch (final RemoteException e) {
+			} catch (final IllegalStateException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
 				iterator.remove();
-			} catch (final IllegalStateException e) {
+			} catch (final RemoteException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
 				iterator.remove();
@@ -141,8 +142,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				stepCtx.shutdown();
 				Loggers.MSG.debug("{}: load step context shutdown", loadStepId());
 			} catch (final RemoteException e) {
-				LogUtil.exception(
-								Level.WARN, e, "{}: failed to shutdown the load step context \"{}\"", loadStepId(), stepCtx);
+				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the load step context", loadStepId());
 				iterator.remove();
 			}
 		}
@@ -170,7 +170,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				if (stepCtx != null) {
 					try {
 						if (stepCtx.isDone()
-										|| stepCtx.await(Fiber.SOFT_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
+										|| stepCtx.await(STEP_CONTEXT_POLL_NANOS, TimeUnit.NANOSECONDS)) {
 							stepContextsCopy[i] = null; // exclude
 							countDown--;
 							break;
@@ -178,9 +178,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
 					} catch (final RemoteException e) {
-						LogUtil.exception(
-										Level.WARN, e, "{}: step context \"{}\" became unreachable during await", loadStepId(), stepCtx);
-						stepContextsCopy[i] = null;
+						stepContextsCopy[i] = null; // exclude failed context
 						stepContexts.remove(stepCtx);
 						countDown--;
 						break;

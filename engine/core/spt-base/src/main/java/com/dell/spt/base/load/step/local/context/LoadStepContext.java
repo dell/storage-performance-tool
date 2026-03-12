@@ -3,7 +3,7 @@ package com.dell.spt.base.load.step.local.context;
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
-import com.github.akurilov.commons.concurrent.AsyncRunnable;
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import java.io.IOException;

@@ -108,7 +108,7 @@ public final class Main {
 					throw e;
 				}
 				// init the metrics manager
-				final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+				final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 				// go on
 				if (configWithArgs.boolVal("run-node")) {
 					runNode(configWithArgs, extClsLoader, extensions, metricsMgr, appHomePath);

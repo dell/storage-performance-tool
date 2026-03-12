@@ -1,13 +1,13 @@
 package com.dell.spt.base.metrics;
 
+import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
-import com.github.akurilov.fiber4j.Fiber;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-public interface MetricsManager extends Fiber {
+public interface MetricsManager extends Task {
 
 	void register(final MetricsContext metricsCtx);
 

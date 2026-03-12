@@ -3,8 +3,8 @@ package com.dell.spt.base.load.step.local.context;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.github.akurilov.commons.concurrent.AsyncRunnable.State.SHUTDOWN;
-import static com.github.akurilov.commons.concurrent.AsyncRunnable.State.STARTED;
+import static com.dell.spt.base.concurrent.AsyncRunnable.State.SHUTDOWN;
+import static com.dell.spt.base.concurrent.AsyncRunnable.State.STARTED;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
@@ -44,7 +44,6 @@ import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.SplittableRandom;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -76,7 +75,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean outputDuplicates;
 	private final boolean updateContents;
 	private final ListShardMetricsRecorder listShardMetricsRecorder;
-	private final AtomicBoolean generatorStopWarned = new AtomicBoolean();
 	// delimiter-first runtime split state (per-shard prefix)
 	private final java.util.concurrent.ConcurrentMap<String, Window> splitWindows = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -238,12 +236,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	private boolean allOperationsCompleted() {
-		try {
-			if (generator.isStopped()) {
-				return counterResults.longValue() >= generator.generatedOpCount();
-			}
-		} catch (final RemoteException e) {
-			logGeneratorStopCheckFailure(e);
+		if (generator.isStopped()) {
+			return counterResults.longValue() >= generator.generatedOpCount();
 		}
 		return false;
 	}
@@ -570,10 +564,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		try {
 			generator.start();
-		} catch (final RemoteException e) {
-			throw new IllegalStateException(
-							String.format("%s: failed to start the load generator \"%s\"", id, generator),
-							e);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(
 							Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
@@ -628,8 +618,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			generator.stop();
 			Loggers.MSG.debug("{}: load generator \"{}\" stopped", id, generator.toString());
-		} catch (final RemoteException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to stop the load generator cleanly", id);
 		}
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
@@ -958,12 +946,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (listShardMetricsRecorder != null) {
 				listShardMetricsRecorder.emitSummary(id);
 			}
-			try {
-				generator.close();
-			} catch (final IOException e) {
-				LogUtil.exception(
-								Level.ERROR, e, "Failed to close the load generator \"{}\"", generator.toString());
-			}
+			generator.close();
 			try {
 				driver.close();
 			} catch (final IOException e) {
@@ -971,14 +954,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								Level.ERROR, e, "Failed to close the storage driver \"{}\"", driver.toString());
 			}
 			Loggers.MSG.debug("{}: closed the load step context", id);
-		}
-	}
-
-	private void logGeneratorStopCheckFailure(final RemoteException e) {
-		if (generatorStopWarned.compareAndSet(false, true)) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to query generator state", id);
-		} else if (Loggers.MSG.isDebugEnabled()) {
-			LogUtil.exception(Level.DEBUG, e, "{}: repeated generator state query failure", id);
 		}
 	}
 }

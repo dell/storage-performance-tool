@@ -2,9 +2,9 @@ package com.dell.spt.base.load.generator;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
@@ -16,8 +16,6 @@ import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
-import com.github.akurilov.fiber4j.Fiber;
-import com.github.akurilov.fiber4j.FiberBase;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -28,15 +26,15 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 /** Created by kurila on 11.07.16. */
-public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends FiberBase
+public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends TaskBase
 				implements LoadGenerator<I, O> {
 
 	private static final String CLS_NAME = LoadGeneratorImpl.class.getSimpleName();
@@ -77,7 +75,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 					final int recycleQueueSize,
 					final boolean recycleFlag,
 					final boolean shuffleFlag) {
-		super(ServiceTaskExecutor.INSTANCE);
+		super(ServiceTaskExecutor.VT_EXECUTOR);
 		this.itemInput = itemInput;
 		this.opsBuilder = opsBuilder;
 		this.originIndex = opsBuilder.originIndex();
@@ -99,9 +97,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 	}
 
 	@Override
-	protected final void invokeTimed(final long startTimeNanos) {
-
+	protected void doInit() {
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+	}
+
+	@Override
+	protected final void doWork() throws Exception {
+
 		final var opBuff = threadLocalOpBuff.get();
 		var pendingOpCount = opBuff.size();
 		var n = batchSize - pendingOpCount;
@@ -120,61 +122,56 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 						}
 					}
 				} else {
-					// try to produce new items from the items input
-					if (inputLock.tryLock()) {
-						try {
-							// find the remaining count of the ops to generate
-							final var remainingOpCount = countLimit - generatedOpCount();
-							if (remainingOpCount > 0) {
-								// make the limit not more than batch size
-								n = (int) Math.min(remainingOpCount, n);
-								if (tempBufferLock.tryLock()) {
-									try {
-										items = getItems(itemInput, n);
-									} catch (final ConcurrentModificationException cme) {
-										Loggers.MSG.debug(
-														"{}: item input changed while fetching operations; retrying",
-														name);
-										items.clear();
-										return;
-									} finally {
-										tempBufferLock.unlock();
-									}
-								}
+					// produce new items from the items input
+					inputLock.lock();
+					try {
+						// find the remaining count of the ops to generate
+						final var remainingOpCount = countLimit - generatedOpCount();
+						if (remainingOpCount > 0) {
+							// make the limit not more than batch size
+							n = (int) Math.min(remainingOpCount, n);
+							tempBufferLock.lock();
+							try {
+								items = getItems(itemInput, n);
+							} catch (final ConcurrentModificationException cme) {
+								Loggers.MSG.debug(
+												"{}: item input changed while fetching operations; retrying",
+												name);
+								items.clear();
+								return;
+							} finally {
+								tempBufferLock.unlock();
+							}
 
-								if (items == null) {
-									itemInputFinishFlag = true;
-									Loggers.MSG.debug(
-													"End of items input \"{}\", generated op count: {}",
-													itemInput.toString(),
-													generatedOpCount());
-								} else {
-									if (tempBufferLock.tryLock()) {
-										try {
-											n = items.size();
-											if (n > 0) {
-												final long newlyBuilt = buildOps(items, opBuff, n);
-												pendingOpCount = (int) (pendingOpCount + newlyBuilt);
-											} else {
-												itemInputFinishFlag = true;
-											}
-										} catch (final ConcurrentModificationException cme) {
-											Loggers.MSG.debug(
-															"{}: items buffer changed while building operations; retrying",
-															name);
-											items.clear();
-											return;
-										} finally {
-											tempBufferLock.unlock();
-										}
-									} else if (items.isEmpty()) {
+							if (items == null) {
+								itemInputFinishFlag = true;
+								Loggers.MSG.debug(
+												"End of items input \"{}\", generated op count: {}",
+												itemInput.toString(),
+												generatedOpCount());
+							} else {
+								tempBufferLock.lock();
+								try {
+									n = items.size();
+									if (n > 0) {
+										final long newlyBuilt = buildOps(items, opBuff, n);
+										pendingOpCount = (int) (pendingOpCount + newlyBuilt);
+									} else {
 										itemInputFinishFlag = true;
 									}
+								} catch (final ConcurrentModificationException cme) {
+									Loggers.MSG.debug(
+													"{}: items buffer changed while building operations; retrying",
+													name);
+									items.clear();
+									return;
+								} finally {
+									tempBufferLock.unlock();
 								}
 							}
-						} finally {
-							inputLock.unlock();
 						}
+					} finally {
+						inputLock.unlock();
 					}
 				}
 			}
@@ -197,6 +194,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 					}
 
 					// try to output
+					var outputProgress = false;
 					if (n > 0) {
 						if (n == 1) { // single mode branch
 							try {
@@ -208,6 +206,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 									} else {
 										opBuff.remove(0);
 									}
+									outputProgress = true;
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
@@ -222,6 +221,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 							try {
 								n = opOutput.put(opBuff, 0, n);
 								outputOpCounter.add(n);
+								if (n > 0) {
+									outputProgress = true;
+								}
 								if (n < pendingOpCount) {
 									opBuff.removeFirst(n);
 								} else {
@@ -237,6 +239,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 								}
 							}
 						}
+					}
+					// Backpressure relief: if we had ops to send but made no output progress
+					// (either throttle denied permits or output queue was full), briefly
+					// park the VT to avoid a CPU-burning spin loop. 1μs is 1000x faster
+					// than the previous 1ms sleep; with the dispatch task's Condition-based
+					// signaling the output queue drains within microseconds.
+					if (!outputProgress) {
+						LockSupport.parkNanos(1_000);
 					}
 				}
 			} else { // operations count limit is reached
@@ -319,8 +329,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 	}
 
 	@Override
-	protected final void doStop() throws IllegalStateException {
-		super.doStop();
+	protected final void doStop() {
 		Loggers.MSG.debug(
 						"{}: generated {}, recycled {}, output {} operations",
 						LoadGeneratorImpl.this.toString(),
@@ -336,13 +345,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends F
 		// so the load
 		// generator builder should close it
 		if (itemInput != null) {
+			inputLock.lock();
 			try {
-				inputLock.tryLock(Fiber.WARN_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS);
 				itemInput.close();
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
 			} catch (final Exception e) {
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the item input", toString());
+			} finally {
+				inputLock.unlock();
 			}
 		}
 		// ops builder is instantiated by the load generator builder which forgets it so the load

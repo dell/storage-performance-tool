@@ -1,25 +1,25 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.fiber4j.ExclusiveFiberBase;
 import java.rmi.RemoteException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 
-import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
+public class AwaitStepSliceTask extends TaskBase {
 
-public class AwaitStepSliceTask extends ExclusiveFiberBase {
+	private static final long POLL_TIMEOUT_MILLIS = 100;
 
 	private final LoadStep stepSlice;
 	private final String loadStepId;
 	private final CountDownLatch awaitCountDown;
 
 	public AwaitStepSliceTask(final LoadStep stepSlice, final CountDownLatch awaitCountDown) {
-		super(ServiceTaskExecutor.INSTANCE);
+		super(ServiceTaskExecutor.VT_EXECUTOR);
 		this.stepSlice = stepSlice;
 		try {
 			this.loadStepId = stepSlice.loadStepId();
@@ -31,10 +31,10 @@ public class AwaitStepSliceTask extends ExclusiveFiberBase {
 	}
 
 	@Override
-	protected final void invokeTimedExclusively(final long startTimeNanos) {
+	protected final void doWork() throws Exception {
 		Loggers.MSG.trace("{}: await for the step slice \"{}\" started", loadStepId, stepSlice);
 		try {
-			if (stepSlice.await(SOFT_DURATION_LIMIT_NANOS, TimeUnit.NANOSECONDS)) {
+			if (stepSlice.await(POLL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
 				awaitCountDown.countDown();
 				stop();
 			}
@@ -44,8 +44,6 @@ public class AwaitStepSliceTask extends ExclusiveFiberBase {
 							e,
 							"Failed to invoke the remote await method on the step slice \"{}\"",
 							stepSlice);
-		} catch (final InterruptedException e) {
-			throwUnchecked(e);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failure in the await method", loadStepId);
 		}

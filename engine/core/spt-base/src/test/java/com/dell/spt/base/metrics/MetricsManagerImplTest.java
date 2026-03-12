@@ -31,7 +31,7 @@ public class MetricsManagerImplTest {
 
 	@BeforeEach
 	void setUp() {
-		mgr = new MetricsManagerImpl(ServiceTaskExecutor.INSTANCE);
+		mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 	}
 
 	@AfterEach
@@ -46,7 +46,7 @@ public class MetricsManagerImplTest {
 		mgr.register(ctx);
 
 		// Manager should have started
-		assertTrue(mgr.isStarted(), "Metrics manager fiber should be started after first register");
+		assertTrue(mgr.isStarted(), "Metrics manager task should be started after first register");
 
 		// Non-distributed contexts must not appear in distributed set
 		assertTrue(mgr.getDistributedContexts().isEmpty(), "No distributed contexts expected");
@@ -86,7 +86,7 @@ public class MetricsManagerImplTest {
 		// Supply a non-null snapshot so periodic output branch executes
 		ctx.snapshot = new FakeAllSnapshot(new FakeConcurrencySnapshot(0));
 
-		// Avoid starting the internal fiber thread to prevent lock races: inject the context directly.
+		// Avoid starting the internal task thread to prevent lock races: inject the context directly.
 		java.lang.reflect.Field allMetricsField = MetricsManagerImpl.class.getDeclaredField("allMetrics");
 		allMetricsField.setAccessible(true);
 		@SuppressWarnings("unchecked")
@@ -94,9 +94,9 @@ public class MetricsManagerImplTest {
 		allMetrics.add(ctx);
 
 		// Invoke the protected tick method reflectively
-		Method tick = MetricsManagerImpl.class.getDeclaredMethod("invokeTimedExclusively", long.class);
+		Method tick = MetricsManagerImpl.class.getDeclaredMethod("doWork");
 		tick.setAccessible(true);
-		tick.invoke(mgr, System.nanoTime());
+		tick.invoke(mgr);
 
 		assertTrue(ctx.lastOutputTs > 0, "Expected lastOutputTs to be updated by tick");
 	}
@@ -182,10 +182,10 @@ public class MetricsManagerImplTest {
 		ThrowingRefreshMetricsContext ctx = new ThrowingRefreshMetricsContext("step-cme");
 		mgr.register(ctx);
 
-		Method tick = MetricsManagerImpl.class.getDeclaredMethod("invokeTimedExclusively", long.class);
+		Method tick = MetricsManagerImpl.class.getDeclaredMethod("doWork");
 		tick.setAccessible(true);
 
-		assertDoesNotThrow(() -> tick.invoke(mgr, System.nanoTime()));
+		assertDoesNotThrow(() -> tick.invoke(mgr));
 	}
 
 	// --- Test fakes ---

@@ -2,7 +2,7 @@ package com.dell.spt.base.svc;
 
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.concurrent.AsyncRunnableBase;
+import com.dell.spt.base.concurrent.AsyncRunnableBase;
 import java.net.MalformedURLException;
 import java.net.SocketException;
 import java.net.URISyntaxException;

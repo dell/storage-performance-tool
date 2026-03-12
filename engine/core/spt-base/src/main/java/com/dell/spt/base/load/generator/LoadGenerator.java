@@ -1,12 +1,11 @@
 package com.dell.spt.base.load.generator;
 
+import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
-import com.github.akurilov.fiber4j.Fiber;
-import java.io.IOException;
 
 /** Created on 11.07.16. */
-public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Fiber, AutoCloseable {
+public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Task, AutoCloseable {
 
 	/** Returns true when the item input has been fully consumed. */
 	boolean isItemInputFinished();
@@ -23,7 +22,4 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends F
 
 	/** Returns true when the recycle queue is currently empty. */
 	boolean isNothingToRecycle();
-
-	@Override
-	void close() throws IOException;
 }
