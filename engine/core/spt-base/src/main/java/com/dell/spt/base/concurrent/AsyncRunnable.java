@@ -1,6 +1,8 @@
 package com.dell.spt.base.concurrent;
 
 import java.io.Closeable;
+import java.io.IOException;
+import java.rmi.Remote;
 import java.rmi.RemoteException;
 import java.util.concurrent.TimeUnit;
 
@@ -14,11 +16,11 @@ import java.util.concurrent.TimeUnit;
  * ANY (except CLOSED) ─────────────────── close() ──────────────────► CLOSED
  * </pre>
  *
- * <p>Methods declare {@code throws RemoteException} for compatibility with {@link java.rmi.Remote}
- * subinterfaces (e.g. {@link com.dell.spt.base.svc.Service}). Local implementations do not
- * throw it; the declaration exists solely to satisfy the RMI contract.
+ * <p>This interface extends {@link Remote} so that all lifecycle methods are eligible for
+ * RMI invocation when a concrete class is exported as a remote object. Local (non-exported)
+ * implementations are unaffected — {@code Remote} is a marker interface with no methods.
  */
-public interface AsyncRunnable extends Closeable {
+public interface AsyncRunnable extends Closeable, Remote {
 
 	enum State {
 		INITIAL, STARTED, SHUTDOWN, STOPPED, CLOSED
@@ -45,4 +47,12 @@ public interface AsyncRunnable extends Closeable {
 	AsyncRunnable await() throws InterruptedException, RemoteException;
 
 	boolean await(long timeout, TimeUnit timeUnit) throws InterruptedException, RemoteException;
+
+	/**
+	 * Redeclared from {@link Closeable} so that RMI considers it a remote method.
+	 * Without this explicit override, RMI traces {@code close()} back to {@code Closeable}
+	 * which does not extend {@link Remote}, causing {@code RemoteException: Method is not Remote}.
+	 */
+	@Override
+	void close() throws IOException;
 }
