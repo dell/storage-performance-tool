@@ -66,6 +66,7 @@ cli/results/
 /engine/results/
 cli/tools/codehealth/deadfinder/report.json
 cli/tools/codehealth/deadfinder/deadfinder
+cli/mike
 spt-scenario-*.js
 
 # Local documentation exports
