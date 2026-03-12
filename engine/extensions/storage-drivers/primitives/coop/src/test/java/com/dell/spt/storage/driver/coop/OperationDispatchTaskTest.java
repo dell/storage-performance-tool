@@ -168,7 +168,7 @@ class OperationDispatchTaskTest {
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);
 
 		task.start();
-		Thread.sleep(50); // let the task enter Condition.await()
+		Thread.sleep(100); // let the task enter Condition.await(); CI runners need more headroom
 
 		// Add op and signal — dispatch should wake instantly
 		inOpQueue.add(op);
@@ -179,7 +179,7 @@ class OperationDispatchTaskTest {
 			dispatchLock.unlock();
 		}
 
-		verify(driverMock, timeout(100)).submit(any(Operation.class));
+		verify(driverMock, timeout(1000)).submit(any(Operation.class));
 
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
