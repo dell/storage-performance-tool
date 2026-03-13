@@ -126,6 +126,7 @@ engine/.mvn/wrapper/maven-wrapper.jar
 # Temporary files
 engine/tmp/
 *.tmp
+engine/tools/log/
 
 # Miscellaneous engine logs
 engine/logs/
