@@ -420,7 +420,16 @@ public final class Main {
 			System.out.println(pad + msg + pad);
 
 			// Load and print extensions
-			final var appHomePath = Paths.get(USER_HOME, "." + APP_NAME, appVersion);
+			final Path appHomePath;
+			final String sptDirEnv = System.getenv("SPT_DIR");
+			final String sptDirProp = System.getProperty("spt.dir");
+			if (sptDirEnv != null && !sptDirEnv.isEmpty()) {
+				appHomePath = Paths.get(sptDirEnv);
+			} else if (sptDirProp != null && !sptDirProp.isEmpty()) {
+				appHomePath = Paths.get(sptDirProp);
+			} else {
+				appHomePath = Paths.get(USER_HOME, "." + APP_NAME, appVersion);
+			}
 			try (final var extClsLoader = Extension.extClassLoader(Paths.get(appHomePath.toString(), DIR_EXT).toFile())) {
 				final var extensions = Extension.load(extClsLoader);
 				if (!extensions.isEmpty()) {

@@ -39,7 +39,16 @@ public final class CoreResourcesToInstall extends InstallableJarResources {
 		final var msg = " " + APP_NAME + " v " + appVersion + " ";
 		final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
 		System.out.println(pad + msg + pad);
-		appHomePath = Paths.get(USER_HOME, "." + APP_NAME, appVersion);
+		
+		final String sptDirEnv = System.getenv("SPT_DIR");
+		final String sptDirProp = System.getProperty("spt.dir");
+		if (sptDirEnv != null && !sptDirEnv.isEmpty()) {
+			appHomePath = Paths.get(sptDirEnv);
+		} else if (sptDirProp != null && !sptDirProp.isEmpty()) {
+			appHomePath = Paths.get(sptDirProp);
+		} else {
+			appHomePath = Paths.get(USER_HOME, "." + APP_NAME, appVersion);
+		}
 	}
 
 	public final Path appHomePath() {
