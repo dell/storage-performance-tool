@@ -38,7 +38,7 @@ class MainTest {
 			assertEquals("/custom/log/path", Main.resolveLogPath(), "spt.log.dir property should override default log path");
 
 			System.clearProperty("spt.log.dir");
-			
+
 			// Testing env var is tricky, but we can verify it falls back to user.dir
 			// if neither the env var nor property are set (assuming env var is not set in test env)
 			if (System.getenv("SPT_LOG_DIR") == null || System.getenv("SPT_LOG_DIR").isEmpty()) {

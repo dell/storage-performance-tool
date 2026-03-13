@@ -97,7 +97,7 @@ public final class Main {
 		final var coreResources = new CoreResourcesToInstall();
 		final var appHomePath = coreResources.appHomePath();
 		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
-		
+
 		LogUtil.init(resolveLogPath(), initialStepId);
 		try {
 			// install the core resources
