@@ -72,6 +72,18 @@ import org.eclipse.jetty.servlet.ServletHolder;
 
 public final class Main {
 
+	static String resolveLogPath() {
+		final String logDirEnv = System.getenv("SPT_LOG_DIR");
+		final String logDirProp = System.getProperty("spt.log.dir");
+		if (logDirEnv != null && !logDirEnv.isEmpty()) {
+			return logDirEnv;
+		} else if (logDirProp != null && !logDirProp.isEmpty()) {
+			return logDirProp;
+		} else {
+			return System.getProperty("user.dir");
+		}
+	}
+
 	public static void main(final String... args) {
 
 		// Check for version flag early
@@ -85,7 +97,8 @@ public final class Main {
 		final var coreResources = new CoreResourcesToInstall();
 		final var appHomePath = coreResources.appHomePath();
 		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
-		LogUtil.init(appHomePath.toString(), initialStepId);
+		
+		LogUtil.init(resolveLogPath(), initialStepId);
 		try {
 			// install the core resources
 			coreResources.install(appHomePath);
