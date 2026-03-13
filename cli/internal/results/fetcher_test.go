@@ -219,6 +219,86 @@ func TestFetcher_RetryOnServerError(t *testing.T) {
 	_ = man
 }
 
+func TestFetcher_IndexRetrySucceeds(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	var indexCalls int32
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			n := atomic.AddInt32(&indexCalls, 1)
+			if n < 3 {
+				// Return empty items array for first two attempts
+				_ = json.NewEncoder(w).Encode(map[string]any{"step_id": step, "items": []map[string]any{}})
+				return
+			}
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cfg")) },
+		"/logs/" + step + "/Cli":               func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages":          func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
+		"/logs/" + step + "/Errors":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("errs")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Retries = 5
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, step+".metrics.total.csv")); err != nil {
+		t.Fatalf("metrics.total.csv not found after index retry: %v", err)
+	}
+	if atomic.LoadInt32(&indexCalls) < 3 {
+		t.Fatalf("expected at least 3 index calls for retry, got %d", atomic.LoadInt32(&indexCalls))
+	}
+	_ = man
+}
+
+func TestFetcher_IndexRetryExhausted(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			// Always return empty items
+			_ = json.NewEncoder(w).Encode(map[string]any{"step_id": step, "items": []map[string]any{}})
+		},
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Retries = 3
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err == nil {
+		t.Fatal("expected error when all retries exhausted with empty index, got nil")
+	}
+	// Manifest should still be returned with missing files
+	if man == nil {
+		t.Fatal("expected non-nil manifest even on error")
+	}
+}
+
 func TestFetcher_UsesIndexJsonForDiscovery(t *testing.T) {
 	step := "mt-001-20250101.000000.000-create"
 	// Provide index.json listing required artifacts; serve those endpoints; omit optionals

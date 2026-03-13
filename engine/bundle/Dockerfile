@@ -50,6 +50,7 @@ RUN apt-get update && \
 # Note: We set the home directory to /home/spt (not /opt/spt)
 RUN useradd --home-dir /home/spt --create-home --shell /bin/bash spt && \
     mkdir -p /opt/spt && \
+    chown spt:spt /opt/spt && \
     mkdir -p /home/spt/.spt
 
 # Copy the pre-built bundle artifacts

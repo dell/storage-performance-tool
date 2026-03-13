@@ -30,6 +30,30 @@ class MainTest {
 	}
 
 	@Test
+	void testResolveLogPath() {
+		// Test that SPT_LOG_DIR property overrides the default
+		final String originalProp = System.getProperty("spt.log.dir");
+		try {
+			System.setProperty("spt.log.dir", "/custom/log/path");
+			assertEquals("/custom/log/path", Main.resolveLogPath(), "spt.log.dir property should override default log path");
+
+			System.clearProperty("spt.log.dir");
+
+			// Testing env var is tricky, but we can verify it falls back to user.dir
+			// if neither the env var nor property are set (assuming env var is not set in test env)
+			if (System.getenv("SPT_LOG_DIR") == null || System.getenv("SPT_LOG_DIR").isEmpty()) {
+				assertEquals(System.getProperty("user.dir"), Main.resolveLogPath(), "Should fallback to user.dir");
+			}
+		} finally {
+			if (originalProp != null) {
+				System.setProperty("spt.log.dir", originalProp);
+			} else {
+				System.clearProperty("spt.log.dir");
+			}
+		}
+	}
+
+	@Test
 	void applyLogLevelHonorsDebugSetting() throws Exception {
 		final var schema = Map.<String, Object> of("log", Map.of("level", String.class));
 		final var values = Map.<String, Object> of("log", Map.of("level", "debug"));

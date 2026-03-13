@@ -114,11 +114,13 @@ task jacocoRootReport(type: JacocoReport) {
     description = 'Generate aggregate JaCoCo coverage report for all subprojects'
     group = 'verification'
     
-    // Depend on all subproject test tasks
+    // Depend on all subproject test tasks and compilation tasks to fix Gradle 8 implicit dependency errors
     def javaProjects = subprojects.findAll { 
         it.name != 'bundle' && it.plugins.hasPlugin('java') 
     }
     dependsOn javaProjects.test
+    dependsOn javaProjects.compileJava
+    dependsOn javaProjects.processResources
     
     // Aggregate source sets
     sourceDirectories.setFrom(files(javaProjects.sourceSets.main.allSource.srcDirs))
