@@ -73,6 +73,49 @@ class MainTest {
 		assertEquals(false, Loggers.MSG.isEnabled(Level.DEBUG));
 	}
 
+	@Test
+	void testApplyVtParallelismSetsSystemProperty() throws Exception {
+		final var schema = Map.<String, Object> of("load", Map.of("service", Map.of("threads", Integer.class)));
+		final var values = Map.<String, Object> of("load", Map.of("service", Map.of("threads", 16)));
+		final var config = new BasicConfig("-", schema, values);
+
+		final String originalProp = System.getProperty("jdk.virtualThreadScheduler.parallelism");
+		try {
+			Main.applyVtParallelism(config);
+			assertEquals("16", System.getProperty("jdk.virtualThreadScheduler.parallelism"));
+		} finally {
+			if (originalProp != null) {
+				System.setProperty("jdk.virtualThreadScheduler.parallelism", originalProp);
+			} else {
+				System.clearProperty("jdk.virtualThreadScheduler.parallelism");
+			}
+		}
+	}
+
+	@Test
+	void testApplyVtParallelismIgnoresZeroOrNegative() throws Exception {
+		final var schema = Map.<String, Object> of("load", Map.of("service", Map.of("threads", Integer.class)));
+		final var values = Map.<String, Object> of("load", Map.of("service", Map.of("threads", 0)));
+		final var config = new BasicConfig("-", schema, values);
+
+		final String originalProp = System.getProperty("jdk.virtualThreadScheduler.parallelism");
+		try {
+			System.clearProperty("jdk.virtualThreadScheduler.parallelism");
+			Main.applyVtParallelism(config);
+			assertEquals(null, System.getProperty("jdk.virtualThreadScheduler.parallelism"));
+
+			final var configNeg = new BasicConfig("-", schema, Map.of("load", Map.of("service", Map.of("threads", -1))));
+			Main.applyVtParallelism(configNeg);
+			assertEquals(null, System.getProperty("jdk.virtualThreadScheduler.parallelism"));
+		} finally {
+			if (originalProp != null) {
+				System.setProperty("jdk.virtualThreadScheduler.parallelism", originalProp);
+			} else {
+				System.clearProperty("jdk.virtualThreadScheduler.parallelism");
+			}
+		}
+	}
+
 	private static void invokeApplyLogLevel(final com.github.akurilov.confuse.Config config)
 					throws Exception {
 		final Method method = Main.class.getDeclaredMethod("applyLogLevel", com.github.akurilov.confuse.Config.class);
