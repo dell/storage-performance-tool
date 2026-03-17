@@ -44,6 +44,10 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		for (var i = 0; i < sliceCount; i++) {
 			try {
 				final var fileMgr = fileMgrs.get(i);
+				if (null == fileMgr) {
+					throw new IllegalStateException(
+									"File manager for slice #" + i + " is null; remote node may not be reachable");
+				}
 				final var itemInputFileName = fileMgr.newTmpFileName();
 				itemInputFileSlices.put(fileMgr, itemInputFileName);
 				final var configSlice = configSlices.get(i);
@@ -97,6 +101,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		Loggers.MSG.info("{}: slice the item input \"{}\"...", loadStepId, itemInput);
 
 		final Map<FileManager, ByteArrayOutputStream> itemsOutByteBuffs = fileMgrs.stream()
+						.filter(fm -> fm != null)
 						.collect(
 										Collectors.toMap(
 														Function.identity(),
@@ -175,7 +180,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 
 				// write the text items data to the remote input files
 				fileMgrs
-								.parallelStream()
+								.stream()
+								.filter(fm -> fm != null)
+								.parallel()
 								.forEach(
 												fileMgr -> {
 													final ByteArrayOutputStream buff = itemsOutByteBuffs.get(fileMgr);
