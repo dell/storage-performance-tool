@@ -11,7 +11,8 @@ import java.util.concurrent.TimeUnit;
  * overhead. SPT runs only a handful of active VTs (LoadGenerator,
  * OperationDispatchTask, MetricsManager, etc.) so the JVM default of
  * availableProcessors() carrier threads is wasteful on large machines.
- * Override with {@code -Djdk.virtualThreadScheduler.parallelism=N} if needed.
+ * Override with {@code -Djdk.virtualThreadScheduler.parallelism=N} or
+ * set {@code load.service.threads} in the SPT config.
  */
 public class VirtualThreadExecutor implements AutoCloseable {
 
@@ -19,7 +20,7 @@ public class VirtualThreadExecutor implements AutoCloseable {
 
 	static {
 		if (System.getProperty(VT_PARALLELISM_PROP) == null) {
-			final int parallelism = Math.min(4, Runtime.getRuntime().availableProcessors());
+			final int parallelism = Math.max(2, Runtime.getRuntime().availableProcessors() / 4);
 			System.setProperty(VT_PARALLELISM_PROP, String.valueOf(parallelism));
 		}
 	}

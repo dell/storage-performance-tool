@@ -38,12 +38,12 @@ class VirtualThreadExecutorTest {
 	@Test
 	void setsCarrierParallelismIfNotConfigured() {
 		// The static initializer sets jdk.virtualThreadScheduler.parallelism
-		// to min(4, availableProcessors) when no explicit value is provided.
+		// to max(2, availableProcessors/4) when no explicit value is provided.
 		final var prop = System.getProperty("jdk.virtualThreadScheduler.parallelism");
 		assertNotNull(prop, "VT parallelism system property should be set");
 		final int value = Integer.parseInt(prop);
-		final int expected = Math.min(4, Runtime.getRuntime().availableProcessors());
-		assertEquals(expected, value, "Parallelism should be min(4, processors)");
+		final int expected = Math.max(2, Runtime.getRuntime().availableProcessors() / 4);
+		assertEquals(expected, value, "Parallelism should be max(2, processors/4)");
 	}
 
 	@Test
