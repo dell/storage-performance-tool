@@ -122,7 +122,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// local file manager
 		fileMgrsDst.add(FileManager.INSTANCE);
 		// remote file managers
-		nodeAddrs.stream().map(nodeAddr -> resolveFileManagerWithRetries(nodeAddr, 10)).forEachOrdered(fileMgrsDst::add);
+		for (final var nodeAddr : nodeAddrs) {
+			final var fileMgr = resolveFileManagerWithRetries(nodeAddr, 10);
+			if (null == fileMgr) {
+				throw new IllegalStateException(
+								"Failed to resolve the file manager service @ " + nodeAddr
+												+ ". Ensure the remote node is running with --run-node");
+			}
+			fileMgrsDst.add(fileMgr);
+		}
 	}
 
 	private static FileManagerService resolveFileManagerWithRetries(final String nodeAddrWithPort, final int maxRetries) {
@@ -132,22 +140,21 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			try {
 				retryCount++;
 				fms = FileManagerClient.resolve(nodeAddrWithPort);
-				final int sleepTime = 1000 * (int) Math.pow(2, retryCount);
-				Thread.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
 			} catch (final ConnectException e) {
 				LogUtil.exception(
 								Level.ERROR, e, "Failed to resolve the file manager service @ {}. Will try to " +
 												"reconnect. {} retry out of {}",
 								nodeAddrWithPort, retryCount, maxRetries);
+				try {
+					final int sleepTime = 1000 * (int) Math.pow(2, retryCount);
+					Thread.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
+				} catch (final InterruptedException ie) {
+					Thread.currentThread().interrupt();
+					break;
+				}
 			} catch (final UnknownHostException e) {
 				LogUtil.exception(
 								Level.ERROR, e, "Failed to resolve the hostname @ {}. Stopping workload",
-								nodeAddrWithPort);
-				break;
-			} catch (final InterruptedException ie) {
-				LogUtil.exception(
-								Level.ERROR, ie, "Failed to resolve the file manager service @ {} due to " +
-												"an interruption. Stopping workload.",
 								nodeAddrWithPort);
 				break;
 			} catch (final Exception e) {
@@ -267,18 +274,21 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				final var nodeAddrWithPort = nodeAddrs.get(i - 1);
 				stepSlice = LoadStepSliceUtil.resolveRemote(
 								configSlice, ctxConfigsSlices.get(i), stepTypeName, nodeAddrWithPort);
+				if (stepSlice == null) {
+					throw new IllegalStateException(
+									"Failed to resolve the load step service @ " + nodeAddrWithPort
+													+ ". Ensure the remote node is running with --run-node");
+				}
 			}
 			stepSlices.add(stepSlice);
-			if (stepSlice != null) {
-				try {
-					stepSlice.start();
-				} catch (final Exception e) {
-					if (e instanceof InterruptedException) {
-						throwUnchecked(e);
-					}
-					LogUtil.exception(
-									Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
+			try {
+				stepSlice.start();
+			} catch (final Exception e) {
+				if (e instanceof InterruptedException) {
+					throwUnchecked(e);
 				}
+				LogUtil.exception(
+								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 			}
 		}
 	}
@@ -472,7 +482,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doShutdown() {
-		stepSlices.parallelStream().forEach(stepSlice -> {
+		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
 			} catch (final RemoteException e) {
@@ -492,7 +502,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.debug(
 							"{}: await for {} step slices for at most {} {}...", loadStepId(), stepSliceCount,
 							timeout, timeUnit.name().toLowerCase(Locale.ROOT));
-			return stepSlices.parallelStream().map(stepSlice -> {
+			return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
 				try {
 					final var invokeTimeMillis = System.currentTimeMillis();
 					final var timeOutMillis = timeUnit.toMillis(timeout);
@@ -522,7 +532,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doStop() {
-		stepSlices.parallelStream().forEach(stepSlice -> {
+		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
 			try (
 							final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
 											KEY_CLASS_NAME, getClass().getSimpleName())) {
@@ -567,7 +577,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				metricsAggregator.close();
 				metricsAggregator = null;
 			}
-			stepSlices.parallelStream().forEach(stepSlice -> {
+			stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
 				try {
 					stepSlice.close();
 					Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
