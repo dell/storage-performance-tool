@@ -115,14 +115,6 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 			doStartWrapped();
 
-			final var svcThreadCount = config.intVal("load-service-threads");
-			if (svcThreadCount > 0) {
-				Loggers.MSG.warn(
-								"'load.service.threads' ({}) is no longer used — the legacy thread pool has been replaced "
-												+ "by Virtual Threads. This parameter will be ignored.",
-								svcThreadCount);
-			}
-
 			final long t;
 			final var loadStepLimitTimeRaw = config.val("load-step-limit-time");
 			if (loadStepLimitTimeRaw instanceof String) {

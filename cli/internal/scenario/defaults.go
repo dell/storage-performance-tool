@@ -19,6 +19,7 @@ const (
 type DefaultsConfig struct {
 	Storage StorageConfig `yaml:"storage"`
 	Output  OutputConfig  `yaml:"output"`
+	Load    *LoadConfig   `yaml:"load,omitempty"` // pointer so omitted when nil
 }
 
 // StorageConfig represents storage configuration
@@ -88,6 +89,16 @@ type MetricsConfig struct {
 // AverageConfig represents average metrics configuration
 type AverageConfig struct {
 	Period string `yaml:"period"`
+}
+
+// LoadConfig represents engine load configuration
+type LoadConfig struct {
+	Service ServiceConfig `yaml:"service"`
+}
+
+// ServiceConfig represents the service thread pool configuration
+type ServiceConfig struct {
+	Threads int `yaml:"threads"`
 }
 
 // GenerateDefaults creates a defaults.yaml configuration from scenario parameters
@@ -311,6 +322,13 @@ func GenerateDefaults(params Params) ([]byte, error) {
 
 	default:
 		return nil, fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
+	}
+
+	// Engine tuning: VT carrier parallelism
+	if params.ServiceThreads > 0 {
+		config.Load = &LoadConfig{
+			Service: ServiceConfig{Threads: params.ServiceThreads},
+		}
 	}
 
 	// Marshal to YAML

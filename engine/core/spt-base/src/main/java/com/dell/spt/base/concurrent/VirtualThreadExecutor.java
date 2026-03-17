@@ -8,10 +8,11 @@ import java.util.concurrent.TimeUnit;
  * Runs Task instances on Virtual Threads.
  * <p>
  * Tunes the VT carrier ForkJoinPool parallelism to avoid excessive work-stealing
- * overhead. SPT runs only a handful of VTs (LoadGenerator, MetricsManager, etc.)
- * that spend most of their time waiting on queues/conditions,
- * so the default carrier count of availableProcessors() is wasteful on large machines.
- * Override with {@code -Djdk.virtualThreadScheduler.parallelism=N} if needed.
+ * overhead. SPT runs only a handful of active VTs (LoadGenerator,
+ * OperationDispatchTask, MetricsManager, etc.) so the JVM default of
+ * availableProcessors() carrier threads is wasteful on large machines.
+ * Override with {@code -Djdk.virtualThreadScheduler.parallelism=N} or
+ * set {@code load.service.threads} in the SPT config.
  */
 public class VirtualThreadExecutor implements AutoCloseable {
 

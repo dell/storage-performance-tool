@@ -431,6 +431,7 @@ func TestBuildScenarioParams(t *testing.T) {
 			cmd.Flags().String("duration", "", "")
 			cmd.Flags().Bool("cleanup", false, "")
 			cmd.Flags().Bool("create-prefix", false, "")
+			cmd.Flags().Int("service-threads", 0, "")
 
 			// Set the flag values from the test case
 			for flagName, value := range tt.flags {
@@ -551,6 +552,45 @@ func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 
 			// Validate the result
 			tt.validate(t, params)
+		})
+	}
+}
+
+func TestBuildScenarioParamsServiceThreads(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    int
+		expected int
+	}{
+		{"zero keeps default", 0, 0},
+		{"positive value passed through", 32, 32},
+		{"small value passed through", 2, 2},
+		{"large value passed through", 256, 256},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().String("endpoint", "", "")
+			cmd.Flags().String("access-key", "", "")
+			cmd.Flags().String("secret-key", "", "")
+			cmd.Flags().String("bucket", "", "")
+			cmd.Flags().Int("auth-version", 4, "")
+			cmd.Flags().Int("threads", 0, "")
+			cmd.Flags().String("object-size", "", "")
+			cmd.Flags().Int("object-count", 0, "")
+			cmd.Flags().String("duration", "", "")
+			cmd.Flags().Int("service-threads", 0, "")
+
+			_ = cmd.Flags().Set("service-threads", fmt.Sprintf("%d", tt.value))
+
+			params, err := buildScenarioParams("mock", cmd)
+			if err != nil {
+				t.Fatalf("buildScenarioParams() unexpected error: %v", err)
+			}
+			if params.ServiceThreads != tt.expected {
+				t.Errorf("ServiceThreads = %d, want %d", params.ServiceThreads, tt.expected)
+			}
 		})
 	}
 }

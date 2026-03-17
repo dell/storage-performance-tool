@@ -849,6 +849,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 
@@ -1017,6 +1018,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
+
+	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
+	params.ServiceThreads = serviceThreads
 
 	// S3 Tables parameters
 	if workloadType == WorkloadTypeTables {

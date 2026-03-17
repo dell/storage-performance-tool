@@ -120,6 +120,9 @@ public final class Main {
 					LogUtil.exception(Level.ERROR, e, "Failed to load the defaults");
 					throw e;
 				}
+
+				applyVtParallelism(configWithArgs);
+
 				// init the metrics manager
 				final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 				// go on
@@ -133,6 +136,18 @@ public final class Main {
 			Loggers.MSG.debug("Interrupted", e);
 		} catch (final Exception e) {
 			LogUtil.trace(Loggers.ERR, Level.FATAL, e, "Unexpected failure");
+		}
+	}
+
+	static void applyVtParallelism(final Config config) {
+		try {
+			final int vtParallelism = config.intVal("load-service-threads");
+			if (vtParallelism > 0) {
+				System.setProperty("jdk.virtualThreadScheduler.parallelism", String.valueOf(vtParallelism));
+				Loggers.MSG.info("Set virtual thread scheduler parallelism to: {}", vtParallelism);
+			}
+		} catch (Exception e) {
+			Loggers.ERR.warn("Failed to set virtual thread parallelism from config", e);
 		}
 	}
 

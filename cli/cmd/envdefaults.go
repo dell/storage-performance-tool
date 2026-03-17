@@ -99,6 +99,18 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// Engine VT parallelism: --service-threads or SPT_SERVICE_THREADS
+	if f := cmd.Flags().Lookup("service-threads"); f != nil && !cmd.Flags().Changed("service-threads") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvServiceThreads)); v != "" {
+			if _, err := strconv.Atoi(v); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvServiceThreads, v, err)
+			}
+			if err := cmd.Flags().Set("service-threads", v); err != nil {
+				return err
+			}
+		}
+	}
+
 	// RDMA string settings
 	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
 	_ = setIf("rdma-device", constants.EnvRdmaDevice)
