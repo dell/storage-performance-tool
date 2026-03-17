@@ -133,6 +133,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # Spt version
 VERSION="''' + sptReleaseVersion + '''"
 
+# Ensure HOME is set (some CI/QA environments leave it unset, which breaks
+# the extensions directory path and can affect JVM class-data-sharing)
+if [ -z "$HOME" ]; then
+    export HOME="$(eval echo ~$(whoami))" 2>/dev/null || export HOME="/tmp"
+fi
+
 # Set up extension directory in user home
 EXT_DIR="$HOME/.spt/$VERSION/ext"
 echo "Setting up extensions in: $EXT_DIR"
@@ -152,8 +158,17 @@ if [ -d "$SCRIPT_DIR/ext" ]; then
     done
 fi
 
+# JVM options
+# -Xshare:off disables Class Data Sharing to avoid SIGBUS crashes when the
+#   JDK or JAR resides on NFS (the JVM memory-maps the CDS archive and a
+#   stale NFS handle turns the page fault into SIGBUS)
+# -XX:UseAVX=2 avoids AVX-512 EVEX encoded instructions which trigger a
+#   known glibc crash (__strncpy_evex SIGBUS) on certain kernel/microcode
+#   combinations
+SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--Xshare:off -XX:UseAVX=2}"
+
 # Run Spt with all arguments passed to this script
-java -jar "$SCRIPT_DIR/spt.jar" "$@"
+java $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"
 '''
 		scriptFile.setExecutable(true)
 		
