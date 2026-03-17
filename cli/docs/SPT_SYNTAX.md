@@ -38,6 +38,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
 - **Workload:** `THREADS` (parallel client threads)
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
+- **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
@@ -104,6 +105,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--api-port` | | `9999` | SPT engine API port |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
+| `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
 
 #### 4. Results Retrieval Options
 

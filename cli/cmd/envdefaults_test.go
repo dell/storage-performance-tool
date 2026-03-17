@@ -27,6 +27,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-device", "auto", "")
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
+	c.Flags().Int("service-threads", 0, "")
 	return c
 }
 
@@ -343,5 +344,53 @@ func TestApplyEnvDefaultsToVerifyFlags_RdmaFromEnv(t *testing.T) {
 
 	if v, _ := cmd.Flags().GetBool("use-rdma"); !v {
 		t.Fatal("use-rdma not applied from SPT_RDMA env for verify")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvServiceThreads, "32")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetInt("service-threads"); v != 32 {
+		t.Errorf("service-threads not applied from env, got %d, want 32", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFlagOverridesEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvServiceThreads, "32")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
+
+	// Simulate explicit flag usage
+	_ = cmd.Flags().Set("service-threads", "16")
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetInt("service-threads"); v != 16 {
+		t.Errorf("explicit flag should override env, got %d, want 16", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_ServiceThreadsInvalidEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvServiceThreads, "not-a-number")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
+
+	err := applyEnvDefaultsToRunFlags(cmd)
+	if err == nil {
+		t.Fatal("expected error for invalid SPT_SERVICE_THREADS value")
+	}
+	if !strings.Contains(err.Error(), constants.EnvServiceThreads) {
+		t.Errorf("error should mention env var name, got: %v", err)
 	}
 }

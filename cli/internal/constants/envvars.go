@@ -10,7 +10,8 @@ const (
 	EnvS3Bucket      = "S3_BUCKET"
 	EnvS3AuthVersion = "S3_AUTH_VERSION"
 	EnvSkipImagePull = "SPT_SKIP_IMAGE_PULL"
-	EnvRdmaEnabled   = "SPT_RDMA"
+	EnvRdmaEnabled      = "SPT_RDMA"
+	EnvServiceThreads   = "SPT_SERVICE_THREADS"
 
 	// RDMA configuration environment variables
 	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"

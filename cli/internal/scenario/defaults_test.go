@@ -508,6 +508,116 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "S3 write with ServiceThreads sets load.service.threads",
+			params: Params{
+				WorkloadType:   "write",
+				Endpoint:       "http://minio:9000",
+				AccessKey:      "testkey",
+				SecretKey:      "testsecret",
+				Bucket:         "testbucket",
+				Threads:        4,
+				ServiceThreads: 32,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Load == nil {
+					t.Fatal("Expected load section to be present when ServiceThreads > 0")
+				}
+				if config.Load.Service.Threads != 32 {
+					t.Errorf("Expected load.service.threads 32, got %d", config.Load.Service.Threads)
+				}
+				// Verify the raw YAML path matches engine schema
+				if !strings.Contains(string(data), "load:") {
+					t.Error("Expected raw YAML to contain 'load:' top-level key")
+				}
+				if !strings.Contains(string(data), "service:") {
+					t.Error("Expected raw YAML to contain 'service:' key under load")
+				}
+				if !strings.Contains(string(data), "threads: 32") {
+					t.Error("Expected raw YAML to contain 'threads: 32'")
+				}
+			},
+		},
+		{
+			name: "ServiceThreads zero omits load section",
+			params: Params{
+				WorkloadType:   "write",
+				Endpoint:       "http://minio:9000",
+				AccessKey:      "testkey",
+				SecretKey:      "testsecret",
+				Bucket:         "testbucket",
+				Threads:        4,
+				ServiceThreads: 0,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Load != nil {
+					t.Error("Expected no load section when ServiceThreads is 0")
+				}
+				if strings.Contains(string(data), "load:") {
+					t.Error("Raw YAML should not contain 'load:' when ServiceThreads is 0")
+				}
+			},
+		},
+		{
+			name: "ServiceThreads negative omits load section",
+			params: Params{
+				WorkloadType:   "write",
+				Endpoint:       "http://minio:9000",
+				AccessKey:      "testkey",
+				SecretKey:      "testsecret",
+				Bucket:         "testbucket",
+				Threads:        4,
+				ServiceThreads: -1,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Load != nil {
+					t.Error("Expected no load section when ServiceThreads is negative")
+				}
+			},
+		},
+		{
+			name: "Mock workload with ServiceThreads still sets load section",
+			params: Params{
+				WorkloadType:   "mock",
+				Threads:        8,
+				ServiceThreads: 16,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "dummy-mock" {
+					t.Errorf("Expected dummy-mock driver, got %s", config.Storage.Driver.Type)
+				}
+				if config.Load == nil {
+					t.Fatal("Expected load section for mock workload when ServiceThreads > 0")
+				}
+				if config.Load.Service.Threads != 16 {
+					t.Errorf("Expected load.service.threads 16, got %d", config.Load.Service.Threads)
+				}
+			},
+		},
 	}
 
 	// S3 Tables cases
