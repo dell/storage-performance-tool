@@ -2,16 +2,16 @@ package constants
 
 // Environment variable keys used by spt
 const (
-	EnvSptImage      = "SPT_IMAGE"
-	EnvHosts         = "HOSTS"
-	EnvS3Endpoint    = "S3_ENDPOINT"
-	EnvS3AccessKey   = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
-	EnvS3SecretKey   = "S3_SECRET_KEY" // #nosec G101 -- env var names only
-	EnvS3Bucket      = "S3_BUCKET"
-	EnvS3AuthVersion = "S3_AUTH_VERSION"
-	EnvSkipImagePull = "SPT_SKIP_IMAGE_PULL"
-	EnvRdmaEnabled      = "SPT_RDMA"
-	EnvServiceThreads   = "SPT_SERVICE_THREADS"
+	EnvSptImage       = "SPT_IMAGE"
+	EnvHosts          = "HOSTS"
+	EnvS3Endpoint     = "S3_ENDPOINT"
+	EnvS3AccessKey    = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
+	EnvS3SecretKey    = "S3_SECRET_KEY" // #nosec G101 -- env var names only
+	EnvS3Bucket       = "S3_BUCKET"
+	EnvS3AuthVersion  = "S3_AUTH_VERSION"
+	EnvSkipImagePull  = "SPT_SKIP_IMAGE_PULL"
+	EnvRdmaEnabled    = "SPT_RDMA"
+	EnvServiceThreads = "SPT_SERVICE_THREADS"
 
 	// RDMA configuration environment variables
 	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"
