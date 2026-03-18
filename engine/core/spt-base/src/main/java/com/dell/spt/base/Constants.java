@@ -7,7 +7,6 @@ import java.util.Locale;
 public interface Constants {
 
 	String APP_NAME = "spt";
-	String USER_HOME = System.getProperty("user.home");
 	String DIR_CONFIG = "config";
 	String DIR_EXAMPLE = "example";
 	String DIR_EXT = "ext";

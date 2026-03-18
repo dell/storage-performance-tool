@@ -130,28 +130,6 @@ task createRunScript {
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Spt version
-VERSION="''' + sptReleaseVersion + '''"
-
-# Set up extension directory in user home
-EXT_DIR="$HOME/.spt/$VERSION/ext"
-echo "Setting up extensions in: $EXT_DIR"
-mkdir -p "$EXT_DIR"
-
-# Link or copy extensions from local ext/ to expected location
-if [ -d "$SCRIPT_DIR/ext" ]; then
-    for ext in "$SCRIPT_DIR/ext"/*.jar; do
-        if [ -f "$ext" ]; then
-            ext_name=$(basename "$ext")
-            # Create symlink if it doesn't exist
-            if [ ! -e "$EXT_DIR/$ext_name" ]; then
-                echo "Linking extension: $ext_name"
-                ln -sf "$ext" "$EXT_DIR/$ext_name" 2>/dev/null || cp "$ext" "$EXT_DIR/$ext_name"
-            fi
-        fi
-    done
-fi
-
 # Run Spt with all arguments passed to this script
 java -jar "$SCRIPT_DIR/spt.jar" "$@"
 '''
@@ -164,23 +142,6 @@ rem Spt run script for Windows
 
 rem Get the directory where this script is located
 set SCRIPT_DIR=%~dp0
-
-rem Detect Spt version from JAR (default to ${sptReleaseVersion})
-set VERSION=${sptReleaseVersion}
-for /f "tokens=3" %%i in ('java -jar "%SCRIPT_DIR%spt.jar" --version 2^>^&1 ^| findstr "spt v"') do set VERSION=%%i
-
-rem Set up extension directory in user home
-set EXT_DIR=%USERPROFILE%\\.spt\\%VERSION%\\ext
-if not exist "%EXT_DIR%" mkdir "%EXT_DIR%"
-
-rem Copy extensions from local ext\\ to expected location
-if exist "%SCRIPT_DIR%ext" (
-    for %%f in ("%SCRIPT_DIR%ext\\*.jar") do (
-        if not exist "%EXT_DIR%\\%%~nxf" (
-            copy "%%f" "%EXT_DIR%\\%%~nxf" >nul
-        )
-    )
-)
 
 rem Run Spt with all arguments passed to this script
 java -jar "%SCRIPT_DIR%spt.jar" %*

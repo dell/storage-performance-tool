@@ -33,14 +33,6 @@ if [ -n "$SPT_JAVA_OPTS" ]; then
     export JAVA_OPTS="$JAVA_OPTS $SPT_JAVA_OPTS"
 fi
 
-# Ensure the spt user owns the home directory
-# This helps with scenarios where volumes are mounted
-if [ -w "/home/spt" ]; then
-    # Only try to change ownership if we have write permission
-    # This will fail if running as non-root, which is fine
-    chown -R spt:spt /home/spt/.spt 2>/dev/null || true
-fi
-
 # If no arguments provided, show help
 if [ $# -eq 0 ]; then
     set -- --help

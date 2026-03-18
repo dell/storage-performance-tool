@@ -4,7 +4,6 @@ import static com.dell.spt.base.Constants.APP_NAME;
 import static com.dell.spt.base.Constants.DIR_EXT;
 import static com.dell.spt.base.Constants.MIB;
 import static com.dell.spt.base.Constants.PATH_DEFAULTS;
-import static com.dell.spt.base.Constants.USER_HOME;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.config.CliArgUtil.ARG_PATH_SEP;
 import static com.dell.spt.base.config.CliArgUtil.allCliArgs;
@@ -104,8 +103,10 @@ public final class Main {
 			coreResources.install(appHomePath);
 			// load the defaults
 			final var defaultConfig = loadDefaultConfig(appHomePath);
-			// extensions
-			try (final var extClsLoader = Extension.extClassLoader(Paths.get(appHomePath.toString(), DIR_EXT).toFile())) {
+			// extensions: prefer ext/ next to the JAR, fall back to appHomePath/ext (IDE/dev)
+			final var extDir = Extension.resolveExtDir();
+			final var extDirFile = extDir != null ? extDir : Paths.get(appHomePath.toString(), DIR_EXT).toFile();
+			try (final var extClsLoader = Extension.extClassLoader(extDirFile)) {
 				final var extensions = Extension.load(extClsLoader);
 				// install the extensions
 				installExtensions(extensions, appHomePath);
@@ -447,19 +448,23 @@ public final class Main {
 			final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
 			System.out.println(pad + msg + pad);
 
-			// Load and print extensions
-			final var appHomePath = Paths.get(USER_HOME, "." + APP_NAME, appVersion);
-			try (final var extClsLoader = Extension.extClassLoader(Paths.get(appHomePath.toString(), DIR_EXT).toFile())) {
-				final var extensions = Extension.load(extClsLoader);
-				if (!extensions.isEmpty()) {
-					System.out.println("\nAvailable extensions:");
-					extensions.forEach(ext -> {
-						final var extId = ext.id();
-						System.out.printf("\t%-30s %s%n", extId, ext.getClass().getCanonicalName());
-					});
-				} else {
-					System.out.println("\nNo extensions loaded.");
+			// Load and print extensions from ext/ next to the JAR
+			final var extDir = Extension.resolveExtDir();
+			if (extDir != null) {
+				try (final var extClsLoader = Extension.extClassLoader(extDir)) {
+					final var extensions = Extension.load(extClsLoader);
+					if (!extensions.isEmpty()) {
+						System.out.println("\nAvailable extensions:");
+						extensions.forEach(ext -> {
+							final var extId = ext.id();
+							System.out.printf("\t%-30s %s%n", extId, ext.getClass().getCanonicalName());
+						});
+					} else {
+						System.out.println("\nNo extensions loaded.");
+					}
 				}
+			} else {
+				System.out.println("\nNo extensions loaded (ext/ directory not found next to JAR).");
 			}
 
 			// Print additional info

@@ -61,7 +61,9 @@ public class RunReadinessIntegrationTest {
 	void setUp() {
 		appHomePath = coreResources.appHomePath();
 		coreResources.install(appHomePath);
-		extClsLoader = Extension.extClassLoader(Paths.get(appHomePath.toString(), DIR_EXT).toFile());
+		final var extDir = Extension.resolveExtDir();
+		final var extDirFile = extDir != null ? extDir : Paths.get(appHomePath.toString(), DIR_EXT).toFile();
+		extClsLoader = Extension.extClassLoader(extDirFile);
 		extensions = Extension.load(extClsLoader);
 	}
 
