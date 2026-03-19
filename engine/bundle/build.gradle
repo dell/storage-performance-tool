@@ -130,8 +130,14 @@ task createRunScript {
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# JVM options for NFS and hardware compatibility:
+# -Xshare:off   disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
+# -XX:UseAVX=2  avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
+# Override: SPT_JAVA_OPTS="" ./run.sh ...
+SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--Xshare:off -XX:UseAVX=2}"
+
 # Run Spt with all arguments passed to this script
-java -jar "$SCRIPT_DIR/spt.jar" "$@"
+java $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"
 '''
 		scriptFile.setExecutable(true)
 		

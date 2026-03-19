@@ -23,7 +23,9 @@ if [ -z "$JAVA_OPTS" ]; then
     #   allocated on demand so this limit is safe even on smaller machines
     # - AlwaysPreTouch: pre-fault heap pages at startup to eliminate page faults during runs
     # - UseNUMA: NUMA-aware allocation for multi-socket servers
-    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA"
+    # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
+    # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
+    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2"
 fi
 
 # Additional Java options that can be set via environment variables
