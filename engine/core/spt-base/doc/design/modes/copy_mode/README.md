@@ -68,4 +68,4 @@ In order to perform a copy load step it's necessary:
 * Specify `--item-output-path` (the target container/bucket/directory) to a proper value.
 
 For details, see the example scenario located at:
-`<USER_HOME_DIR>/.spt/<VERSION>/example/scenario/js/types/additional/copy_load_using_env_vars.js`.
+`example/scenario/js/types/additional/copy_load_using_env_vars.js` in the Spt home directory.

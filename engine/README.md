@@ -89,7 +89,7 @@ run.bat --version     # Windows
   --load-op-limit-count=1000
 ```
 
-Note: The run scripts automatically handle setting up the extensions in the correct location (`~/.spt/<version>/ext/`).
+Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 
 ### Common Command-Line Options
 
@@ -114,9 +114,8 @@ After building, the distribution contains:
 - **run.sh/run.bat** - Platform-specific launcher scripts that properly configure the classpath
 
 The launcher scripts handle:
-- Setting up the correct extension directory structure
-- Linking/copying extensions to `~/.spt/<version>/ext/`
-- Launching SPT with the proper classpath configuration
+- Setting up the correct classpath configuration
+- Launching SPT with extensions loaded from the adjacent `ext/` directory
 
 ### IDE Integration
 

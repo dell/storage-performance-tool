@@ -59,7 +59,7 @@ Generally, to define a scenario a user should:
 Javascript scenarios are supported out-of-the-box (the corresponding
 engine is included in the JVM by default). So the examples below are in
 Javascript. It's necessary to put the custom JSR-223 implementation jar
-to the `<USER_HOME_DIR>/.spt/<VERSION>/ext` directory to use other scripting languages for
+in the `ext/` directory next to `spt.jar` to use other scripting languages for
 scenarios.
 
 ### 2.1. Load Step
@@ -78,7 +78,7 @@ steps.
 
     Configure the load step. Merge the specified configuration parameters dictionary with already existing step's
     configuration. An argument should be a dictionary with a structure equivalent to the configuration structure (see
-    `<USER_HOME_DIR>/.spt/<VERSION>/config/defaults.yaml` file for the reference). Returns the copied instance with
+    the `config/defaults.yaml` file in the Spt home directory for the reference). Returns the copied instance with
     the new configuration.
 
 2. ```append(config)```
@@ -517,7 +517,7 @@ should be set externally.
 The ```config``` method appends the configuration structure element to
 the step. An argument should be a dictionary/map with a structure
 equivalent to the configuration structure (see
-`<USER_HOME_DIR>/.spt/<VERSION>/config/defaults.yaml` file for the
+the `config/defaults.yaml` file in the Spt home directory for the
 reference). Subsequent calls on the same step appends the configuration
 structure to the list. **Returns** the new step instance of the same
 type so the call may be included into the call chain.

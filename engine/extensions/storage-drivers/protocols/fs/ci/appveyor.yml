@@ -40,9 +40,9 @@ build_script:
 before_test:
   - cmd: set EXT_DIR=%HOME_DIR%\ext\
   - cmd: mkdir %EXT_DIR%
-  # copy coop, nio drivers to .spt/ext
+  # copy coop, nio drivers to ext dir
   - cmd: for /R %MAVEN_HOME% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
-  # copy fs driver to .spt/ext
+  # copy fs driver to ext dir
   - cmd: for /R %DRIVER_DIR% %%f in (spt-storage-driver-*.jar) do COPY %%f %EXT_DIR%
   # copy spt-base.jar to home dir
   - cmd: for /R %MAVEN_HOME% %%f in (spt-base-*.jar) do COPY %%f %HOME_DIR%
