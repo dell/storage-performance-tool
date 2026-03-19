@@ -334,6 +334,9 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 
 	@Override
 	public final long dataLatency() {
+		if (reqTimeDone == 0 || respDataTimeStart == 0) {
+			return 0;
+		}
 		return respDataTimeStart - reqTimeDone;
 	}
 }

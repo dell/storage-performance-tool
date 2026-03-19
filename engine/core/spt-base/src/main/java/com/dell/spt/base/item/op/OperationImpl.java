@@ -224,6 +224,9 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 
 	@Override
 	public final long latency() {
+		if (reqTimeDone == 0 || respTimeStart == 0) {
+			return 0;
+		}
 		return respTimeStart - reqTimeDone;
 	}
 
