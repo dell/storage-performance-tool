@@ -2,14 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUN_SCRIPT="$REPO_ROOT/bundle/build/dist/run.sh"
+ENGINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+GIT_ROOT="$(cd "$ENGINE_ROOT/.." && pwd)"
+RUN_SCRIPT="$ENGINE_ROOT/bundle/build/dist/run.sh"
 
 # Load repo-local environment defaults if present so users can keep
 # credentials and tuning knobs out of the script itself.
-if [[ -f "$REPO_ROOT/.env" ]]; then
+# Check the git repo root first (canonical location), then engine root.
+if [[ -f "$GIT_ROOT/.env" ]]; then
   # shellcheck disable=SC1091
-  source "$REPO_ROOT/.env"
+  source "$GIT_ROOT/.env"
+elif [[ -f "$ENGINE_ROOT/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$ENGINE_ROOT/.env"
 fi
 
 # Allow overrides via environment variables. Keep variable names aligned with
@@ -29,7 +34,7 @@ NODE_ADDRS="${NODE_ADDRS//https:\/\/}"
 
 if [[ ! -x "$RUN_SCRIPT" ]]; then
   echo "Run script not found at $RUN_SCRIPT; building distribution..." >&2
-  (cd "$REPO_ROOT" && ./gradlew -q :bundle:build)
+  (cd "$ENGINE_ROOT" && ./gradlew -q :bundle:build)
 fi
 
 exec "$RUN_SCRIPT" \

@@ -12,6 +12,7 @@ Thumbs.db
 
 # Log and coverage artifacts
 *.log
+/log/
 coverage.*
 coverage.html
 coverage.out
@@ -127,6 +128,7 @@ engine/.mvn/wrapper/maven-wrapper.jar
 engine/tmp/
 *.tmp
 engine/tools/log/
+engine/log/
 
 # Miscellaneous engine logs
 engine/logs/
