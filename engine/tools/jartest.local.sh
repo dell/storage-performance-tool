@@ -6,6 +6,14 @@ ENGINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GIT_ROOT="$(cd "$ENGINE_ROOT/.." && pwd)"
 RUN_SCRIPT="$ENGINE_ROOT/bundle/build/dist/run.sh"
 
+# Snapshot any variables the caller already exported so that sourcing the
+# .env file (which uses plain assignments) does not clobber them.
+declare -A _caller_env
+for _v in S3_ENDPOINTS S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_AUTH_VERSION \
+          JARTEST_CONCURRENCY JARTEST_OBJECT_SIZE JARTEST_OP_LIMIT_COUNT; do
+  [[ -n "${!_v+set}" ]] && _caller_env[$_v]="${!_v}"
+done
+
 # Load repo-local environment defaults if present so users can keep
 # credentials and tuning knobs out of the script itself.
 # Check the git repo root first (canonical location), then engine root.
@@ -17,8 +25,13 @@ elif [[ -f "$ENGINE_ROOT/.env" ]]; then
   source "$ENGINE_ROOT/.env"
 fi
 
-# Allow overrides via environment variables. Keep variable names aligned with
-# other helper scripts (e.g., listtest.local.sh) so a single .env works.
+# Restore caller-provided overrides so they take precedence over .env.
+for _v in "${!_caller_env[@]}"; do
+  export "$_v=${_caller_env[$_v]}"
+done
+unset _caller_env _v
+
+# Fall back to built-in defaults for anything still unset.
 : "${S3_ENDPOINTS:=http://127.0.0.1:9000}"
 : "${S3_ACCESS_KEY:=AWS_ACCESS_KEY_ID_EXAMPLE}"
 : "${S3_SECRET_KEY:=AWS_SECRET_ACCESS_KEY_EXAMPLE}"
