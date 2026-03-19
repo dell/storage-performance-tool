@@ -65,7 +65,7 @@ Execute Spt Scenario
     ...  --network host
     ...  ${docker_env_vars}
     ...  --volume ${host_working_dir}/${shared_data_dir}:${SPT_CONTAINER_DATA_DIR}
-    ...  --volume ${host_working_dir}/${LOG_DIR}:/root/.spt/${spt_version}/log
+    ...  --volume ${host_working_dir}/${LOG_DIR}:/opt/spt/log
     ...  ${SPT_IMAGE_NAME}:${image_version}
     ...  ${args}
     ${std_out} =  Run  ${cmd}

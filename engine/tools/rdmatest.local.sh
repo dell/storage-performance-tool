@@ -120,14 +120,6 @@ if [[ ! -f "$SPT_JAR" ]]; then
   (cd "$REPO_ROOT" && ./gradlew -q :bundle:build)
 fi
 
-# Set up extension directory
-USER_EXT_DIR="$HOME/.spt/5.1.1/ext"
-mkdir -p "$USER_EXT_DIR"
-if [[ -d "$EXT_DIR" ]]; then
-  for ext in "$EXT_DIR"/*.jar; do
-    [[ -f "$ext" ]] && ln -sf "$ext" "$USER_EXT_DIR/" 2>/dev/null || true
-  done
-fi
 
 # Build JVM options
 JAVA_OPTS="-XX:MaxDirectMemorySize=4g -Xshare:off"

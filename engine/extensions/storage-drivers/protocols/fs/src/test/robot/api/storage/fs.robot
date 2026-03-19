@@ -29,7 +29,7 @@ Windows Get Log Directory
 	${cmd} =  Catenate  ECHO %HomeDrive%%HomePath%
 	${std_out} =  Run   ${cmd}
 	${std_out} =  Strip String  ${std_out}
-	[Return]  ${std_out}\\.spt\\${version}\\log
+	[Return]  ${EXECDIR}\\log
 
 Windows Start Spt
 	[Arguments]  ${base_version}

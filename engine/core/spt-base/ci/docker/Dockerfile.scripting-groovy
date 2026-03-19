@@ -2,5 +2,5 @@ ARG SPT_VERSION
 
 FROM ghcr.io/dell/storage-performance-tool:${SPT_VERSION}
 
-ADD ["http://central.maven.org/maven2/org/codehaus/groovy/groovy/2.4.15/groovy-2.4.15.jar", "/root/.spt/${SPT_VERSION}/ext/groovy.jar"]
-ADD ["http://central.maven.org/maven2/org/codehaus/groovy/groovy-jsr223/2.4.15/groovy-jsr223-2.4.15.jar", "/root/.spt/${SPT_VERSION}/ext/groovy-jsr223.jar"]
+ADD ["http://central.maven.org/maven2/org/codehaus/groovy/groovy/2.4.15/groovy-2.4.15.jar", "/opt/spt/ext/groovy.jar"]
+ADD ["http://central.maven.org/maven2/org/codehaus/groovy/groovy-jsr223/2.4.15/groovy-jsr223-2.4.15.jar", "/opt/spt/ext/groovy-jsr223.jar"]
