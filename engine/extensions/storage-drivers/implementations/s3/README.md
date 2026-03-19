@@ -67,19 +67,19 @@ and put it to your working directory. Note the particular version, which is refe
 
 2. Get the latest `spt-storage-driver-coop` jar from the
 [maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-coop/)
-and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
+and put it in the `ext/` directory next to the base jar.
 
 3. Get the latest `spt-storage-driver-netty` jar from the
 [maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-netty/)
-and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
+and put it in the `ext/` directory next to the base jar.
 
 4. Get the latest `spt-storage-driver-http` jar from the
 [maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-http/)
-and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
+and put it in the `ext/` directory next to the base jar.
 
 5. Get the latest `spt-storage-driver-s3` jar from the
 [maven repo](https://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-s3/)
-and put it to the `~/.spt/<BASE_VERSION>/ext` directory.
+and put it in the `ext/` directory next to the base jar.
 
 ```bash
 java -jar spt-base-<BASE_VERSION>.jar \

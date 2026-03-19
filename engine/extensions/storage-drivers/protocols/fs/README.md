@@ -31,8 +31,8 @@ additional VFS layer. The measured rates may be:
 
 Get the latest pre-built jar file which is available at:
 http://repo.maven.apache.org/maven2/io/github/dell/spt/spt-storage-driver-fs/
-The jar file may be downloaded manually and placed into the `<USER_HOME_DIR>/.spt/<VERSION>/ext`
-directory of Spt to be automatically loaded into the runtime.
+The jar file may be downloaded manually and placed into the `ext/` directory next to `spt.jar`
+to be automatically loaded into the runtime.
 
 ```bash
 java -jar spt-<VERSION>.jar \

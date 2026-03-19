@@ -138,4 +138,39 @@ class DataOperationImplTest {
 		assertNotNull(result);
 		assertTrue(result.item().name().startsWith("/bucket/"));
 	}
+
+	@Test
+	void dataLatencyReturnsZeroWhenReqTimeDoneNotSet() {
+		final var item = newItem("obj", 1024);
+		final var op = new DataOperationImpl<>(0, OpType.READ, item, "/src", null, null, null, 0);
+		op.startRequest();
+		// Skip finishRequest — simulate the Netty race where the response arrives
+		// before the channel write-complete listener fires
+		assertEquals(0, op.dataLatency(), "dataLatency must be 0 when finishRequest was never called");
+	}
+
+	/**
+	 * Invariant: dataLatency() must never return an epoch-scale timestamp.
+	 * Before the fix, skipping finishRequest() caused dataLatency() to return
+	 * {@code respDataTimeStart - 0}, an absolute wall-clock timestamp (~1.77e15 µs).
+	 */
+	@Test
+	void dataLatencyNeverReturnsEpochTimestamp() {
+		final long MAX_SANE_LATENCY_MICROS = 1_000_000_000L; // 1000 seconds
+
+		// Case 1: no lifecycle methods — both timestamps zero
+		var item = newItem("a", 1024);
+		var op = new DataOperationImpl<>(0, OpType.READ, item, "/src", null, null, null, 0);
+		assertTrue(op.dataLatency() < MAX_SANE_LATENCY_MICROS,
+						"dataLatency must not be epoch-scale when no lifecycle methods called");
+
+		// Case 2: full lifecycle including startDataResponse
+		item = newItem("b", 1024);
+		op = new DataOperationImpl<>(0, OpType.READ, item, "/src", null, null, null, 0);
+		op.startRequest();
+		op.finishRequest();
+		op.startDataResponse();
+		assertTrue(op.dataLatency() < MAX_SANE_LATENCY_MICROS,
+						"dataLatency must not be epoch-scale in normal lifecycle");
+	}
 }

@@ -39,8 +39,6 @@ ADD ci/docker/entrypoint.sh /opt/spt/entrypoint.sh
 
 
 RUN ln -s /opt/spt/spt-*.jar /opt/spt/spt.jar; \
-    mkdir ${HOME}/.spt; \
-    chmod -R ugo+rwx ${HOME}/.spt; \
     chmod -R +x /opt/spt/bin; \
     chmod +x /opt/spt/entrypoint.sh;
 

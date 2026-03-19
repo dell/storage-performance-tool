@@ -4,6 +4,7 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.io.File;
 import java.net.MalformedURLException;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
@@ -54,6 +55,28 @@ public interface Extension extends Installable {
 			}
 		}
 		return extClsLoader;
+	}
+
+	/**
+	 * Resolve the extension directory by looking for {@code ext/} next to the JAR file.
+	 * Returns {@code null} if the JAR location cannot be determined or no {@code ext/}
+	 * directory exists there (e.g. running from an IDE).
+	 */
+	static File resolveExtDir() {
+		try {
+			final var codeSource = Extension.class.getProtectionDomain().getCodeSource();
+			if (codeSource != null) {
+				final var location = codeSource.getLocation();
+				final var jarPath = Path.of(location.toURI());
+				final var extDir = jarPath.getParent().resolve("ext").toFile();
+				if (extDir.isDirectory()) {
+					return extDir;
+				}
+			}
+		} catch (final URISyntaxException | SecurityException e) {
+			LOG.warning("Failed to resolve ext directory from JAR location: " + e);
+		}
+		return null;
 	}
 
 	static boolean isJarFile(final File f) {

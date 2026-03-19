@@ -144,12 +144,12 @@ docker run \
 #### Logs Sharing
 
 The example below mounts the host's directory `./log` to the container's
-`/root/.spt/<VERSION>/log` (where spt holds its log files).
+`/opt/spt/log` (where spt holds its log files).
 
 ```bash
 docker run \
     --network host \
-    --mount type=bind,source="$(pwd)"/log,target=/root/.spt/<VERSION>/log
+    --mount type=bind,source="$(pwd)"/log,target=/opt/spt/log
     ghcr.io/dell/storage-performance-tool \
     [<SPT CLI ARGS>]
 ```

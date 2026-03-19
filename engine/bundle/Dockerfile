@@ -47,11 +47,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create spt user and directories
-# Note: We set the home directory to /home/spt (not /opt/spt)
 RUN useradd --home-dir /home/spt --create-home --shell /bin/bash spt && \
     mkdir -p /opt/spt && \
-    chown spt:spt /opt/spt && \
-    mkdir -p /home/spt/.spt
+    chown spt:spt /opt/spt
 
 # Copy the pre-built bundle artifacts
 # These are created by running './gradlew :bundle:build'
@@ -62,15 +60,6 @@ COPY --chown=spt:spt docker/entrypoint.sh /opt/spt/
 # Copy example scenarios from the distribution
 # These provide ready-to-use test scenarios for common use cases
 COPY --chown=spt:spt build/dist/scenarios /opt/spt/scenarios
-
-# Set up the extensions directory structure
-# Spt expects extensions in ~/.spt/<version>/ext/
-RUN mkdir -p /home/spt/.spt/${SPT_RELEASE_VERSION}/ext && \
-    cd /home/spt/.spt/${SPT_RELEASE_VERSION}/ext && \
-    for ext in /opt/spt/ext/*.jar; do \
-        ln -s "$ext" "$(basename "$ext")"; \
-    done && \
-    chown -R spt:spt /home/spt/.spt
 
 # Make entrypoint executable
 RUN chmod +x /opt/spt/entrypoint.sh
