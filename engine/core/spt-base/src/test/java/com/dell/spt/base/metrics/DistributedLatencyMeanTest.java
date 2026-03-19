@@ -6,7 +6,6 @@ import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
-import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.github.akurilov.commons.system.SizeInBytes;
 import org.junit.jupiter.api.AfterEach;
@@ -76,8 +75,10 @@ public class DistributedLatencyMeanTest {
 
 	@AfterEach
 	void tearDown() {
-		if (entryCtx != null) entryCtx.close();
-		if (workerCtx != null) workerCtx.close();
+		if (entryCtx != null)
+			entryCtx.close();
+		if (workerCtx != null)
+			workerCtx.close();
 	}
 
 	@Test
@@ -88,8 +89,7 @@ public class DistributedLatencyMeanTest {
 		workerCtx.refreshLastSnapshot();
 		entryCtx.refreshLastSnapshot();
 
-		final DistributedAllMetricsSnapshot snap =
-						(DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 		assertNotNull(snap, "snapshot should not be null");
 		assertNotNull(snap.latencySnapshot(), "latency snapshot should not be null");
 
@@ -111,8 +111,7 @@ public class DistributedLatencyMeanTest {
 		workerCtx.refreshLastSnapshot();
 		entryCtx.refreshLastSnapshot();
 
-		final DistributedAllMetricsSnapshot snap =
-						(DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 		assertNotNull(snap, "snapshot should not be null");
 
 		final double latMean = snap.latencySnapshot().mean();
@@ -151,8 +150,7 @@ public class DistributedLatencyMeanTest {
 		workerCtx.refreshLastSnapshot();
 		entryCtx.refreshLastSnapshot();
 
-		final DistributedAllMetricsSnapshot snap =
-						(DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 		assertNotNull(snap, "snapshot should not be null");
 
 		final double latMean = snap.latencySnapshot().mean();
@@ -179,8 +177,7 @@ public class DistributedLatencyMeanTest {
 		workerCtx.refreshLastSnapshot();
 		entryCtx.refreshLastSnapshot();
 
-		final DistributedAllMetricsSnapshot snap =
-						(DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 
 		final double durMean = snap.durationSnapshot().mean();
 		final double latMean = snap.latencySnapshot().mean();
