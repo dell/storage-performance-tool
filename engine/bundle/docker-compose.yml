@@ -26,7 +26,7 @@ services:
       - --item-data-size=1MB
       - --load-op-limit-count=1000
     volumes:
-      - ./logs:/home/spt/log
+      - ./logs:/opt/spt/log
 
   # Spt with custom scenario from local filesystem
   spt-custom:
@@ -39,7 +39,7 @@ services:
       - --storage-auth-secret=${SPT_S3_SECRET_KEY:-your-secret-key}
     volumes:
       - ./scenarios:/workspace:ro  # Mount local scenarios directory as read-only
-      - ./logs:/home/spt/log
+      - ./logs:/opt/spt/log
       - ./data:/data               # For input/output files
 
   # Spt with weighted load scenario
@@ -52,7 +52,7 @@ services:
       - --storage-auth-uid=${SPT_S3_ACCESS_KEY:-your-access-key}
       - --storage-auth-secret=${SPT_S3_SECRET_KEY:-your-secret-key}
     volumes:
-      - ./logs:/home/spt/log
+      - ./logs:/opt/spt/log
       - ./data:/data
     environment:
       - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
@@ -67,7 +67,7 @@ services:
       - --item-data-size=1MB
       - --load-op-limit-count=1000
     volumes:
-      - ./logs:/home/spt/log
+      - ./logs:/opt/spt/log
       - ./data:/data
 
 # Usage examples:
