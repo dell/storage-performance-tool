@@ -223,6 +223,99 @@ public class MetricsManagerImplTest {
 		mgr.unregister(step2Ctx);
 	}
 
+	/**
+	 * Simulates a realistic multi-step scenario (Write → Read → Delete) as executed by the
+	 * CLI's scenario templates.  Each step follows the exact lifecycle driven by
+	 * {@code LoadStepBase}: register metrics contexts, let the doWork loop run (producing
+	 * periodic metrics.csv output), then unregister — which empties allMetrics and stops the
+	 * manager task.  The next step's register must transparently restart the manager.
+	 * <p>
+	 * This is the integration-level complement to
+	 * {@link #metricsManagerRestartsAfterAllContextsUnregistered()}, which proves the restart
+	 * mechanism itself.  Here we additionally verify:
+	 * <ul>
+	 *   <li>Three full stop→restart cycles work (not just one)</li>
+	 *   <li>Each step's periodic output loop actually runs (lastOutputTs updated)</li>
+	 *   <li>Terminal entries are recorded for each step and queryable via getTerminalSteps()</li>
+	 *   <li>Different OpTypes (CREATE, READ, DELETE) are preserved in the terminal entries</li>
+	 * </ul>
+	 */
+	@Test
+	void multiStepScenarioWriteReadDelete() throws Exception {
+		// Keep terminal entries for the duration of the test
+		mgr.setTerminalRetentionMillis(60_000);
+
+		final OpType[] opTypes = {OpType.CREATE, OpType.READ, OpType.DELETE
+		};
+		final String[] stepIds = {"write-step", "read-step", "delete-step"
+		};
+		final long[][] operationData = {
+				// {successCount, bytes, latencyMean, durationMean}
+				{500, 512_000, 120, 80
+				},
+				{1000, 1_024_000, 95, 60
+				},
+				{500, 0, 50, 30
+				}
+		};
+
+		for (int step = 0; step < 3; step++) {
+			final String stepId = stepIds[step];
+			final OpType opType = opTypes[step];
+			final long[] data = operationData[step];
+
+			// --- Replicate LoadStepBase.doStart(): create context, start, register ---
+			FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>(stepId);
+			ctx.opType = opType;
+			ctx.outputPeriodMillis = 1; // due immediately so doWork() updates lastOutputTs
+			ctx.lastOutputTs = 0;
+			ctx.snapshot = new CountingSnapshot(
+							data[0], 0, data[1], data[2], data[3],
+							new FakeConcurrencySnapshot(4), 1000L * (step + 1));
+			ctx.metadata.put(MetricsConstants.METADATA_LIMIT_OP_COUNT, data[0]);
+
+			ctx.start(); // MetricsContext::start (no-op for fake, but mirrors real lifecycle)
+			mgr.register(ctx);
+
+			assertTrue(mgr.isStarted(),
+							"Manager should be running during step " + (step + 1) + " (" + stepId + ")");
+
+			// Let the doWork() loop run a few iterations (10ms per cycle)
+			Thread.sleep(200);
+
+			assertTrue(ctx.lastOutputTs > 0,
+							"doWork() should have produced periodic output for " + stepId);
+
+			// --- Replicate LoadStepBase.doStop(): unregister ---
+			mgr.unregister(ctx);
+
+			// Wait for the virtual thread to finish (allMetrics is now empty → stop())
+			Thread.sleep(200);
+			assertTrue(mgr.isStopped(),
+							"Manager should be stopped after " + stepId + " unregistered");
+		}
+
+		// --- Verify terminal entries captured for all three steps ---
+		final List<TerminalStepEntry> terminal = mgr.getTerminalSteps();
+		assertEquals(3, terminal.size(),
+						"Should have terminal entries for all three steps (Write, Read, Delete)");
+
+		// Verify each step's entry has the correct OpType and step id
+		final Map<String, TerminalStepEntry> byId = new HashMap<>();
+		for (final TerminalStepEntry entry : terminal) {
+			byId.put(entry.stepId, entry);
+		}
+
+		for (int step = 0; step < 3; step++) {
+			final TerminalStepEntry entry = byId.get(stepIds[step]);
+			assertNotNull(entry, "Terminal entry missing for " + stepIds[step]);
+			assertEquals(opTypes[step], entry.opType,
+							"OpType mismatch for " + stepIds[step]);
+			assertEquals(operationData[step][0], entry.successCount,
+							"Success count mismatch for " + stepIds[step]);
+		}
+	}
+
 	@Test
 	void invokeTimedExclusivelyIgnoresConcurrentModification() throws Exception {
 		ThrowingRefreshMetricsContext ctx = new ThrowingRefreshMetricsContext("step-cme");
