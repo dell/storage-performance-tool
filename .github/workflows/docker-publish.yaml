@@ -47,7 +47,7 @@ jobs:
           script: |
             const sha = context.sha;
             const ciCheckNames = ['Engine Build & Tests', 'Go Quality Suite'];
-            const maxAttempts = 30;
+            const maxAttempts = 60;
             const intervalMs = 30000;
 
             console.log(`Checking CI status for commit ${sha}`);
@@ -60,21 +60,30 @@ jobs:
                 ref: sha,
               });
 
-              const ciCheck = checkRuns.check_runs.find(
-                run => ciCheckNames.includes(run.name)
-              );
-
-              if (!ciCheck) {
-                console.log(`Attempt ${attempt}/${maxAttempts}: CI check not found yet. Available: ${checkRuns.check_runs.map(r => r.name).join(', ') || '(none)'}`);
-              } else if (ciCheck.conclusion === 'success') {
-                console.log(`CI check "${ciCheck.name}" passed.`);
-                return;
-              } else if (ciCheck.conclusion) {
-                core.setFailed(`CI check "${ciCheck.name}" failed (conclusion: ${ciCheck.conclusion}). Cannot publish image.`);
-                return;
-              } else {
-                console.log(`Attempt ${attempt}/${maxAttempts}: CI check "${ciCheck.name}" still in progress...`);
+              const passed = new Set();
+              const pending = [];
+              for (const name of ciCheckNames) {
+                const run = checkRuns.check_runs.find(r => r.name === name);
+                if (!run) {
+                  pending.push(name);
+                  console.log(`Attempt ${attempt}/${maxAttempts}: "${name}" not found yet.`);
+                } else if (run.conclusion === 'success') {
+                  passed.add(name);
+                } else if (run.conclusion) {
+                  core.setFailed(`CI check "${name}" failed (conclusion: ${run.conclusion}). Cannot publish image.`);
+                  return;
+                } else {
+                  pending.push(name);
+                  console.log(`Attempt ${attempt}/${maxAttempts}: "${name}" still in progress...`);
+                }
               }
+
+              if (passed.size === ciCheckNames.length) {
+                console.log(`All CI checks passed: ${[...passed].join(', ')}`);
+                return;
+              }
+
+              console.log(`Attempt ${attempt}/${maxAttempts}: ${passed.size}/${ciCheckNames.length} passed, waiting on: ${pending.join(', ')}`);
 
               if (attempt < maxAttempts) {
                 await new Promise(r => setTimeout(r, intervalMs));
