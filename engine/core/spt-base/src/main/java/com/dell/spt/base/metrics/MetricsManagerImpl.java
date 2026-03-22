@@ -144,9 +144,14 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	private void startIfNotStarted() {
-		if (!isStarted() && !isStopped()) {
-			super.start();
-			Loggers.MSG.debug("Started the metrics manager task");
+		if (!isStarted()) {
+			if (isStopped()) {
+				restart();
+				Loggers.MSG.debug("Restarted the metrics manager task for a new load step");
+			} else {
+				super.start();
+				Loggers.MSG.debug("Started the metrics manager task");
+			}
 		}
 	}
 

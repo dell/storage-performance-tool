@@ -15,7 +15,7 @@ public abstract class TaskBase implements Task, Runnable {
 	private volatile boolean stopped = false;
 	private volatile Thread taskThread;
 	private final VirtualThreadExecutor executor;
-	private final CountDownLatch stopLatch = new CountDownLatch(1);
+	private volatile CountDownLatch stopLatch = new CountDownLatch(1);
 
 	protected TaskBase(final VirtualThreadExecutor executor) {
 		this.executor = executor;
@@ -86,6 +86,21 @@ public abstract class TaskBase implements Task, Runnable {
 		if (t != null) {
 			t.interrupt();
 		}
+	}
+
+	/**
+	 * Restart a previously-stopped task. Resets internal state and submits a fresh Virtual
+	 * Thread so the doInit/doWork loop runs again. Throws if the task is still running.
+	 */
+	public void restart() {
+		if (isStarted()) {
+			throw new IllegalStateException("Task is still running");
+		}
+		started = false;
+		stopped = false;
+		taskThread = null;
+		stopLatch = new CountDownLatch(1);
+		start();
 	}
 
 	/**
