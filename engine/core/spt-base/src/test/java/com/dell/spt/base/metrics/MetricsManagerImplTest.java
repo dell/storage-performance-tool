@@ -177,6 +177,52 @@ public class MetricsManagerImplTest {
 		assertFalse(result, "Snapshot throwing should be treated as no progress");
 	}
 
+	/**
+	 * Reproduces a bug where the MetricsManager's doWork() loop cannot restart after all
+	 * contexts from a previous load step have been unregistered. In a multi-step scenario
+	 * (e.g. Write then Read), the first step's unregister empties allMetrics which triggers
+	 * stop(). The second step's register calls startIfNotStarted(), but the task refuses to
+	 * restart because isStopped() is true. This means doWork() never runs for step 2, so
+	 * periodic metrics.csv output is never produced.
+	 *
+	 * Regression introduced in commit e3d72cd when MetricsManagerImpl was migrated from
+	 * ExclusiveFiberBase (fiber4j) to TaskBase (Virtual Threads).
+	 */
+	@Test
+	void metricsManagerRestartsAfterAllContextsUnregistered() throws Exception {
+		// --- Step 1: register and unregister a context (simulates first load step completing) ---
+		FakeMetricsContext<AllMetricsSnapshot> step1Ctx = new FakeMetricsContext<>("WRITE-step");
+		mgr.register(step1Ctx);
+		assertTrue(mgr.isStarted(), "Manager should be started after first register");
+
+		mgr.unregister(step1Ctx);
+		// The unregister empties allMetrics, which calls stop() inside MetricsManagerImpl.
+		// Wait for the task's virtual thread to actually finish.
+		Thread.sleep(200);
+		assertTrue(mgr.isStopped(), "Manager should be stopped after all contexts unregistered");
+
+		// --- Step 2: register a new context (simulates second load step starting) ---
+		FakeMetricsContext<AllMetricsSnapshot> step2Ctx = new FakeMetricsContext<>("READ-step");
+		step2Ctx.outputPeriodMillis = 1; // due immediately
+		step2Ctx.lastOutputTs = 0;
+		step2Ctx.snapshot = new FakeAllSnapshot(new FakeConcurrencySnapshot(0));
+
+		mgr.register(step2Ctx);
+
+		// The manager must restart its doWork() loop for the new context.
+		assertTrue(mgr.isStarted(),
+						"Manager should be re-started after registering a context for a new step");
+
+		// Give the doWork() loop time to run at least one iteration (it sleeps 10ms per cycle)
+		Thread.sleep(200);
+
+		assertTrue(step2Ctx.lastOutputTs > 0,
+						"doWork() should have updated lastOutputTs for the second step's context, "
+										+ "proving the periodic metrics output loop is running");
+
+		mgr.unregister(step2Ctx);
+	}
+
 	@Test
 	void invokeTimedExclusivelyIgnoresConcurrentModification() throws Exception {
 		ThrowingRefreshMetricsContext ctx = new ThrowingRefreshMetricsContext("step-cme");
