@@ -155,7 +155,7 @@ docker run --rm ghcr.io/dell/storage-performance-tool:latest \
 # Run with your custom scenario
 docker run --rm \
   -v $(pwd):/workspace \
-  -v $(pwd)/logs:/home/spt/log \
+  -v $(pwd)/logs:/opt/spt/log \
   ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/workspace/my-scenario.js
 
@@ -166,23 +166,42 @@ make docker-scenarios
 make docker-scenario SCENARIO=example-scenario.js
 ```
 
+#### Docker Image Layout
+
+The SPT Docker image uses `/opt/spt` as its working directory:
+
+```
+/opt/spt/
+├── spt.jar          # Main application JAR
+├── ext/             # Extension JARs (storage drivers, load patterns)
+├── scenarios/       # Built-in example scenarios
+├── entrypoint.sh    # Container entrypoint
+└── log/             # Log output (created at runtime)
+```
+
 #### Docker Volumes
 
 The SPT Docker image supports several volume mount points:
 
-- `/home/spt/log` - Log files output directory
+- `/opt/spt/log` - Log files output directory
 - `/workspace` - Custom scenarios and data files
-- `/data` - Input/output data files
 
-Example with all volumes:
+Example with volumes:
 ```bash
 docker run --rm \
   -v $(pwd)/scenarios:/workspace \
-  -v $(pwd)/logs:/home/spt/log \
-  -v $(pwd)/data:/data \
+  -v $(pwd)/logs:/opt/spt/log \
   ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/workspace/my-test.js
 ```
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPT_HOME` | (ephemeral temp dir) | Override the engine's app-home directory. Set this to a persistent path if you need to preserve extracted config/resources across runs. |
+| `SPT_JAVA_OPTS` | `-Xshare:off -XX:UseAVX=2` | Additional JVM options appended to the default JAVA_OPTS. |
+| `JAVA_OPTS` | (see entrypoint.sh) | Full JVM options override. Default includes ZGC, 4GB heap, NUMA, and NFS compatibility flags. |
 
 #### Docker Compose
 
