@@ -32,14 +32,13 @@ The top-level repository represents the SPT product. The `cli` and `engine` dire
 
 ### Download a pre-built binary
 
-Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [GitHub Release](https://github.com/dell/storage-performance-tool/releases). Download the archive for your platform, extract, and run:
+Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [GitHub Release](https://github.com/dell/storage-performance-tool/releases). Download the latest release for your platform, extract, and run:
 
 ```bash
 # Example: Linux amd64
-curl -LO https://github.com/dell/storage-performance-tool/releases/latest/download/spt-linux-amd64.gz
-gunzip spt-linux-amd64.gz
-chmod +x spt-linux-amd64
-mv spt-linux-amd64 spt
+gunzip spt-*-linux-amd64.gz
+chmod +x spt-*-linux-amd64
+mv spt-*-linux-amd64 spt
 ```
 
 ### Prerequisites
