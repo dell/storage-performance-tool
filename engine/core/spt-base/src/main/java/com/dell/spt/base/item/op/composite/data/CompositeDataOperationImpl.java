@@ -94,6 +94,11 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	}
 
 	@Override
+	public final void undoMarkSubTaskCompleted() {
+		pendingSubTasksCount.incrementAndGet();
+	}
+
+	@Override
 	public final boolean allSubOperationsDone() {
 		return pendingSubTasksCount.get() == 0;
 	}

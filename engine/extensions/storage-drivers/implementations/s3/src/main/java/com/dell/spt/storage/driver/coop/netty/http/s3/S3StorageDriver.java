@@ -990,6 +990,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return httpRequest;
 	}
 
+	@SuppressWarnings("unchecked")
 	HttpRequest partUploadRequest(
 					final PartialDataOperation partialDataOp, final String nodeAddr) {
 		final var item = (I) partialDataOp.item();
@@ -1011,6 +1012,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.ERR.warn("Failed to get part size for {}: {}", item.name(), e.getMessage());
 			partialDataOp.status(Operation.Status.FAIL_IO);
 		}
+		applyChecksum(httpHeaders, (O) partialDataOp);
 		applyMetaDataHeaders(httpHeaders);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);

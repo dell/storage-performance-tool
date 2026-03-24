@@ -550,6 +550,42 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void mpu_part_appliesChecksumWhenEnabled() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc32", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-checksum");
+		final var partItem = base.slice(0, 1024);
+		final var slice = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		HttpRequest req = drv.partUploadRequest(slice, "s3.us-east-1.amazonaws.com");
+		String checksumHeader = req.headers().get(S3Api.AMZ_CHECKSUM_PREFIX + "crc32");
+		assertNotNull(checksumHeader, "Part upload should include checksum header when checksums enabled");
+		assertFalse(checksumHeader.isEmpty(), "Checksum value should not be empty");
+	}
+
+	@Test
+	void mpu_part_noChecksumWhenDisabled() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-nochecksum");
+		final var partItem = base.slice(0, 1024);
+		final var slice = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		HttpRequest req = drv.partUploadRequest(slice, "s3.us-east-1.amazonaws.com");
+		// No x-amz-checksum-* header should be present
+		boolean hasChecksumHeader = req.headers().names().stream().anyMatch(
+						name -> name.toString().toLowerCase().startsWith("x-amz-checksum-"));
+		assertFalse(hasChecksumHeader, "Part upload should not include checksum header when checksums disabled");
+		assertNull(req.headers().get(HttpHeaderNames.CONTENT_MD5), "No Content-MD5 when checksums disabled");
+	}
+
+	@Test
 	void mpu_abort_sendsDeleteWithUploadId() throws Exception {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);

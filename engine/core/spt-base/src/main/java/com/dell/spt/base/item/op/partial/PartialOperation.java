@@ -10,4 +10,12 @@ public interface PartialOperation<I extends Item> extends Operation<I> {
 	int partNumber();
 
 	CompositeOperation<I> parent();
+
+	/** Number of times this part has been retried after failure. */
+	default int retryCount() {
+		return 0;
+	}
+
+	/** Increment the retry counter for this part. */
+	default void incrementRetryCount() {}
 }

@@ -22,5 +22,8 @@ public interface CompositeOperation<I extends Item> extends Operation<I> {
 	/** Should be invoked only after subOperations() * */
 	void markSubTaskCompleted();
 
+	/** Re-increment the pending count to undo a markSubTaskCompleted() call (used for part retry). */
+	default void undoMarkSubTaskCompleted() {}
+
 	boolean allSubOperationsDone();
 }
