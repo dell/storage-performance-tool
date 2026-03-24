@@ -460,6 +460,8 @@ func TestValidateRunCommand(t *testing.T) {
 			cmd.Flags().String("duration", tt.duration, "")
 			cmd.Flags().Bool("cleanup", false, "")
 			cmd.Flags().Bool("create-prefix", false, "")
+			cmd.Flags().String("part-size", "", "")
+			cmd.Flags().String("object-size", "", "")
 			if tt.authVersion != 0 {
 				if err := cmd.Flags().Set("auth-version", strconv.Itoa(tt.authVersion)); err != nil {
 					t.Fatalf("failed to set auth-version flag: %v", err)
@@ -486,6 +488,93 @@ func TestValidateRunCommand(t *testing.T) {
 			if err != nil && tt.errContains != "" {
 				if !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("ValidateRunCommand() error = %v, want error containing %v", err.Error(), tt.errContains)
+				}
+			}
+		})
+	}
+}
+
+func TestValidatePartSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		partSize    string
+		objectSize  string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:     "empty part size is allowed",
+			partSize: "",
+			wantErr:  false,
+		},
+		{
+			name:     "valid part size 5MB",
+			partSize: "5MB",
+			wantErr:  false,
+		},
+		{
+			name:     "valid part size 64MB",
+			partSize: "64MB",
+			wantErr:  false,
+		},
+		{
+			name:     "valid part size 1GB",
+			partSize: "1GB",
+			wantErr:  false,
+		},
+		{
+			name:        "invalid part size string",
+			partSize:    "notasize",
+			wantErr:     true,
+			errContains: "invalid --part-size",
+		},
+		{
+			name:        "part size must be positive",
+			partSize:    "0",
+			wantErr:     true,
+			errContains: "positive size",
+		},
+		{
+			name:        "part size >= object size rejected",
+			partSize:    "64MB",
+			objectSize:  "10MB",
+			wantErr:     true,
+			errContains: "must be smaller than --object-size",
+		},
+		{
+			name:        "part size equal to object size rejected",
+			partSize:    "10MB",
+			objectSize:  "10MB",
+			wantErr:     true,
+			errContains: "must be smaller than --object-size",
+		},
+		{
+			name:       "part size smaller than object size is valid",
+			partSize:   "64MB",
+			objectSize: "1GB",
+			wantErr:    false,
+		},
+		{
+			name:     "part size with no object size is valid",
+			partSize: "64MB",
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().String("part-size", tt.partSize, "")
+			cmd.Flags().String("object-size", tt.objectSize, "")
+
+			err := validatePartSize(cmd)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validatePartSize() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if err != nil && tt.errContains != "" {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("validatePartSize() error = %q, want containing %q", err.Error(), tt.errContains)
 				}
 			}
 		})

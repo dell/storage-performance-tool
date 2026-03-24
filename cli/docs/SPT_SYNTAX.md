@@ -39,6 +39,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Workload:** `THREADS` (parallel client threads)
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
+- **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
@@ -87,6 +88,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MB`, `256KB`, `4GB`). Ignored for `list` |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). When set, `load.batch.size` is automatically forced to `1`. Applies to `write` workloads and `read` seed phases |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
@@ -211,6 +213,44 @@ spt run write \
     --duration 5m \
     --cleanup
 ```
+
+### Multipart Upload Write
+
+Use `--part-size` to enable S3 multipart upload. Objects larger than the part size are automatically split into parts and uploaded in parallel using the engine's concurrency pool.
+
+```bash
+# Write 100 x 1GB objects using 64MB multipart parts
+spt run write \
+    --endpoints http://s3a:9000,http://s3b:9000 \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1GB \
+    --part-size 64MB \
+    --object-count 100
+```
+
+```bash
+# Duration-based multipart write with cleanup
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1GB \
+    --part-size 256MB \
+    --duration 10m \
+    --cleanup
+```
+
+Notes:
+- `--part-size` must be smaller than `--object-size` (multipart with a single part is pointless).
+- No minimum part size is enforced by the CLI -- different S3-compatible storage systems have varying constraints, so the storage system reports errors for invalid sizes at runtime.
+- When `--part-size` is set, the engine's `load.batch.size` is automatically forced to `1` to prevent internal queue overflow (see GAP-4 in the design doc).
+- Part uploads share the `--threads` concurrency pool with regular operations.
+- If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
 
 ### Read Workload
 

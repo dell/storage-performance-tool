@@ -115,7 +115,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -229,7 +232,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -327,7 +333,10 @@ var config = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -384,7 +393,10 @@ var config = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -441,7 +453,10 @@ var config = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -522,7 +537,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -659,7 +677,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -789,7 +810,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -896,7 +920,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath
@@ -1010,7 +1037,10 @@ var sharedConfig = {
     },
     "item": {
         "data": {
-            "size": itemSize
+            "size": itemSize{{if .HasPartSize}},
+            "ranges": {
+                "threshold": {{.PartSize}}
+            }{{end}}
         },
         "output": {
             "path": outputPath

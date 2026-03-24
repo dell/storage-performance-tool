@@ -30,6 +30,8 @@ const (
 	templateKeyItemCount            = "ItemCount"
 	templateKeyOutputPath           = "OutputPath"
 	templateKeyDuration             = "Duration"
+	templateKeyPartSize             = "PartSize"
+	templateKeyHasPartSize          = "HasPartSize"
 	templateKeyTimestamp            = "Timestamp"
 	templateKeyStepID               = "StepID"
 	templateKeyStepIDCreate         = "StepIDCreate"

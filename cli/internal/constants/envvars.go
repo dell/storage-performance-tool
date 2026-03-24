@@ -13,6 +13,9 @@ const (
 	EnvRdmaEnabled    = "SPT_RDMA"
 	EnvServiceThreads = "SPT_SERVICE_THREADS"
 
+	// Multipart upload configuration
+	EnvPartSize = "SPT_PART_SIZE"
+
 	// RDMA configuration environment variables
 	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"
 	EnvRdmaThreshold = "RDMA_THRESHOLD_BYTES"

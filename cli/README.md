@@ -358,6 +358,7 @@ Executes a benchmark test with the specified workload type.
 
 - `--threads, -t`: Number of parallel client threads (default: 1)
 - `--object-size, -o`: Size of each object (e.g., 1MB, 256KB, 4GB)
+- `--part-size`: Enable multipart upload with the given part size (e.g., 5MB, 64MB). When set, `load.batch.size` is forced to `1`. See [`SPT_SYNTAX.md`](docs/SPT_SYNTAX.md) for details
 - `--cleanup`: Delete all created objects after test completion
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports

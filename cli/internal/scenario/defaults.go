@@ -93,7 +93,13 @@ type AverageConfig struct {
 
 // LoadConfig represents engine load configuration
 type LoadConfig struct {
-	Service ServiceConfig `yaml:"service"`
+	Batch   *BatchConfig   `yaml:"batch,omitempty"`
+	Service *ServiceConfig `yaml:"service,omitempty"`
+}
+
+// BatchConfig represents the load batch configuration
+type BatchConfig struct {
+	Size int `yaml:"size"`
 }
 
 // ServiceConfig represents the service thread pool configuration
@@ -324,10 +330,17 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
 	}
 
-	// Engine tuning: VT carrier parallelism
-	if params.ServiceThreads > 0 {
-		config.Load = &LoadConfig{
-			Service: ServiceConfig{Threads: params.ServiceThreads},
+	// Engine tuning: VT carrier parallelism and MPU batch size
+	if params.ServiceThreads > 0 || params.PartSize != "" {
+		if config.Load == nil {
+			config.Load = &LoadConfig{}
+		}
+		if params.ServiceThreads > 0 {
+			config.Load.Service = &ServiceConfig{Threads: params.ServiceThreads}
+		}
+		// Force batch size to 1 for multipart uploads to prevent childOpQueue overflow
+		if params.PartSize != "" {
+			config.Load.Batch = &BatchConfig{Size: 1}
 		}
 	}
 
