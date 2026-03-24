@@ -669,7 +669,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (op instanceof CompositeDataOperation) {
 			if (OpType.CREATE.equals(opType)) {
 				final var mpuOp = (CompositeDataOperation) op;
-				if (mpuOp.allSubOperationsDone()) {
+				if (mpuOp.get(S3Api.KEY_MPU_ABORT) != null) {
+					httpRequest = abortMultipartUploadRequest(mpuOp, nodeAddr);
+				} else if (mpuOp.allSubOperationsDone()) {
 					httpRequest = completeMultipartUploadRequest(mpuOp, nodeAddr);
 				} else { // this is the initial state of the task
 					httpRequest = initMultipartUploadRequest(op, nodeAddr);
@@ -1005,7 +1007,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final HttpRequest httpRequest = new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
 		try {
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, ((DataItem) item).size());
-		} catch (final IOException ignored) {}
+		} catch (final IOException e) {
+			Loggers.ERR.warn("Failed to get part size for {}: {}", item.name(), e.getMessage());
+			partialDataOp.status(Operation.Status.FAIL_IO);
+		}
 		applyMetaDataHeaders(httpHeaders);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
@@ -1054,6 +1059,26 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, uri, mpuTask.credential());
+		return httpRequest;
+	}
+
+	HttpRequest abortMultipartUploadRequest(
+					final CompositeDataOperation mpuTask, final String nodeAddr) {
+		final var item = (I) mpuTask.item();
+		final var uploadId = mpuTask.get(S3Api.KEY_UPLOAD_ID);
+		final var uri = dataUriPath(item, mpuTask.srcPath(), mpuTask.dstPath(), OpType.CREATE)
+						+ "?uploadId=" + uploadId;
+		final var httpHeaders = new DefaultHttpHeaders();
+		if (nodeAddr != null) {
+			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
+		}
+		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		final var httpMethod = HttpMethod.DELETE;
+		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
+		applyDynamicHeaders(httpHeaders);
+		applySharedHeaders(httpHeaders);
+		applyAuthHeaders(httpHeaders, httpMethod, uri, mpuTask.credential());
+		Loggers.MULTIPART.info("abort,{},{}", item.name(), uploadId);
 		return httpRequest;
 	}
 
@@ -1173,7 +1198,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	public void complete(final Channel channel, final O op) {
 		if (channel != null && op instanceof CompositeDataOperation) {
 			final var compositeOp = (CompositeDataOperation) op;
-			if (compositeOp.allSubOperationsDone()) {
+			if (compositeOp.get(S3Api.KEY_MPU_ABORT) != null) {
+				// abort response — nothing more to do
+			} else if (compositeOp.allSubOperationsDone()) {
 				Loggers.MULTIPART.info(
 								"{},{},{}",
 								compositeOp.item().name(),

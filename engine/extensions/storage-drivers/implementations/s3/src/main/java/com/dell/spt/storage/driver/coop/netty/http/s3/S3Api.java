@@ -57,6 +57,8 @@ public interface S3Api {
 
 	String KEY_UPLOAD_ID = "uploadId";
 
+	String KEY_MPU_ABORT = "mpuAbort";
+
 	AttributeKey<String> KEY_ATTR_UPLOAD_ID = AttributeKey.newInstance(KEY_UPLOAD_ID);
 
 	String COMPLETE_MPU_HEADER = "<CompleteMultipartUpload>\n";

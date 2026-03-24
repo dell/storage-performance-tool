@@ -177,6 +177,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			} else if (op instanceof PartialOperation) {
 				final var subOp = (PartialOperation) op;
 				final var parentOp = subOp.parent();
+				// propagate part failure to the parent so the driver can abort instead of complete
+				if (op.status() != Operation.Status.SUCC) {
+					parentOp.put("mpuAbort", "true");
+				}
 				if (parentOp.allSubOperationsDone()) {
 					// execute once again to finalize the things if necessary:
 					// complete the multipart upload, for example

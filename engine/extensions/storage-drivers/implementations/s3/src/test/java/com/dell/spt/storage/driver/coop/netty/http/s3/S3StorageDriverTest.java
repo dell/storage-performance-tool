@@ -548,4 +548,19 @@ public class S3StorageDriverTest {
 		assertTrue(req.uri().contains("?uploadId="));
 		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
 	}
+
+	@Test
+	void mpu_abort_sendsDeleteWithUploadId() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "abort-upload-123");
+		parent.put(S3Api.KEY_MPU_ABORT, "true");
+		HttpRequest req = drv.abortMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+		assertEquals(HttpMethod.DELETE, req.method());
+		assertTrue(req.uri().contains("?uploadId=abort-upload-123"));
+		assertEquals("0", req.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
 }
