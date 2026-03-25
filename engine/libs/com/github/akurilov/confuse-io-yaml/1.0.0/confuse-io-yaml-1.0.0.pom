@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.github.akurilov</groupId>
+    <artifactId>confuse-io-yaml</artifactId>
+    <version>1.0.0</version>
+    <name>confuse-io-yaml</name>
+    <description>Configuration YAML serialization (vendored from JitPack)</description>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+        </license>
+    </licenses>
+    <dependencies>
+        <dependency>
+            <groupId>com.github.akurilov</groupId>
+            <artifactId>confuse</artifactId>
+            <version>1.2.1</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+</project>

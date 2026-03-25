@@ -35,8 +35,9 @@ sourceSets {
 
 repositories {
 	maven { url = "https://maven.google.com" }
-	maven { url = "https://jitpack.io" }
 	mavenCentral()
+	// Vendored akurilov libraries (formerly resolved from JitPack)
+	maven { url = uri("${rootProject.projectDir}/libs") }
 }
 
 description = "Spt is a high-load storage performance testing tool"
