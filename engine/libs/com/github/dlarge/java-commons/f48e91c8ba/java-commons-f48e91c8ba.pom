@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.github.dlarge</groupId>
+    <artifactId>java-commons</artifactId>
+    <version>f48e91c8ba</version>
+    <name>java-commons</name>
+    <description>Java utility library (vendored from JitPack, dlarge fork)</description>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+        </license>
+    </licenses>
+</project>
