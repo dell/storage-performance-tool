@@ -38,7 +38,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
-					"<UploadId>([a-zA-Z\\d\\-_+=/]+)</UploadId>", Pattern.MULTILINE);
+					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
 	private final boolean versioningEnabled;
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,

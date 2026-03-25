@@ -45,6 +45,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import static com.dell.spt.base.Constants.APP_NAME;
 
@@ -598,5 +600,46 @@ public class S3StorageDriverTest {
 		assertTrue(req.uri().contains("?uploadId=abort-upload-123"));
 		assertEquals("0", req.headers().get(HttpHeaderNames.CONTENT_LENGTH));
 		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	// ---------- UploadId regex tests ----------
+
+	/** Read the PATTERN_UPLOAD_ID regex from S3ResponseHandler via reflection. */
+	private static Pattern uploadIdPattern() throws Exception {
+		Field f = S3ResponseHandler.class.getDeclaredField("PATTERN_UPLOAD_ID");
+		f.setAccessible(true);
+		return (Pattern) f.get(null);
+	}
+
+	private static String extractUploadId(String xml) throws Exception {
+		Matcher m = uploadIdPattern().matcher(xml);
+		return m.find() ? m.group(1) : null;
+	}
+
+	@Test
+	void uploadIdRegex_matchesAwsStyle() throws Exception {
+		// AWS: base64-like alphanumeric with +, /, =, -
+		String xml = "<UploadId>VXBsb2FkIElE/abc+def=</UploadId>";
+		assertEquals("VXBsb2FkIElE/abc+def=", extractUploadId(xml));
+	}
+
+	@Test
+	void uploadIdRegex_matchesCephTilde() throws Exception {
+		// Ceph RadosGW: "2~" prefix followed by alphanumeric
+		String xml = "<UploadId>2~abcdef1234567890ABCDEF</UploadId>";
+		assertEquals("2~abcdef1234567890ABCDEF", extractUploadId(xml));
+	}
+
+	@Test
+	void uploadIdRegex_matchesDotsAndColons() throws Exception {
+		// Hypothetical store using dots or colons
+		String xml = "<UploadId>upload.id:with-mixed_chars+2024</UploadId>";
+		assertEquals("upload.id:with-mixed_chars+2024", extractUploadId(xml));
+	}
+
+	@Test
+	void uploadIdRegex_returnsNullForMissingElement() throws Exception {
+		String xml = "<InitiateMultipartUploadResult><Bucket>b</Bucket></InitiateMultipartUploadResult>";
+		assertNull(extractUploadId(xml));
 	}
 }
