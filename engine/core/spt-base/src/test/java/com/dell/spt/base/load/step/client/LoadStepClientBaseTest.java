@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -815,18 +814,14 @@ class LoadStepClientBaseTest {
 
 		@Test
 		void testRunLoadStepClient() throws IOException, IllegalStateException, InterruptedException {
-			// Suppress expected connection-refused retries to nonexistent FileManager during this config smoke
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.OFF);
+			// Local-only config: no remote node addrs to avoid 10-minute retry hang
+			// against a nonexistent FileManager (exponential backoff up to 120s per retry)
 			Config complexConfig = TestConfigBuilder.config();
 			complexConfig.val("load-step-id", "complex-integration-test");
 			complexConfig.val("load-op-type", "create");
 			complexConfig.val("storage-driver-limit-concurrency", 75);
 			complexConfig.val("load-batch-size", 250);
 			complexConfig.val("storage-driver-type", "s3");
-			complexConfig.val("load-step-node-port", 1099);
-
-			final List<String> nodeList = Arrays.asList("127.0.0.1:1099");
-			complexConfig.val("load-step-node-addrs", nodeList);
 
 			TestLoadStepExtension newExt = new TestLoadStepExtension();
 
@@ -844,8 +839,6 @@ class LoadStepClientBaseTest {
 			assertDoesNotThrow(() -> linearClient.doShutdown());
 			assertDoesNotThrow(() -> linearClient.doClose());
 			assertDoesNotThrow(() -> linearClient.doStop());
-			// Restore error logging for other tests
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.ERROR);
 		}
 	}
 }
