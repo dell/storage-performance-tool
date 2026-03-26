@@ -9,6 +9,7 @@
 Thumbs.db
 *.swp
 *.swo
+.idea
 
 # Log and coverage artifacts
 *.log
