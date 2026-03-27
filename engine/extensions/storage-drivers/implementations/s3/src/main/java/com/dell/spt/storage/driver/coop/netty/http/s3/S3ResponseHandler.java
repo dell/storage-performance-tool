@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
@@ -49,7 +50,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders) {
-		if (op instanceof PartialDataOperation) {
+		if (op instanceof PartialDataOperation && OpType.CREATE.equals(op.type())) {
+			// Capture part ETags for MPU write — needed for CompleteMultipartUpload XML body
 			final PartialDataOperation subTask = (PartialDataOperation) op;
 			final String eTag = respHeaders.get(HttpHeaderNames.ETAG);
 			final CompositeDataOperation mpuTask = subTask.parent();

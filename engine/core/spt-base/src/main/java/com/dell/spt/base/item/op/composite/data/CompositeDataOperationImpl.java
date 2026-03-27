@@ -104,6 +104,11 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	}
 
 	@Override
+	public final long sizeThreshold() {
+		return sizeThreshold;
+	}
+
+	@Override
 	@SuppressWarnings("unchecked")
 	public final CompositeDataOperationImpl<I> result() {
 		buildItemPath(item, dstPath == null ? srcPath : dstPath);

@@ -13,7 +13,10 @@ import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.path.PathOperationsBuilderImpl;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.storage.driver.StorageDriverBase;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.collection.TreeUtil;
+import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
@@ -23,6 +26,7 @@ import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.item.PathItemImpl;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpRequest;
@@ -45,6 +49,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.TreeMap;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -641,5 +647,326 @@ public class S3StorageDriverTest {
 	void uploadIdRegex_returnsNullForMissingElement() throws Exception {
 		String xml = "<InitiateMultipartUploadResult><Bucket>b</Bucket></InitiateMultipartUploadResult>";
 		assertNull(extractUploadId(xml));
+	}
+
+	// ---------- Range-read tests ----------
+
+	@Test
+	void rangeReadRequest_setsCorrectRangeHeader() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		// partNumber=2 → rangeStart = 2 * 1024 = 2048, rangeEnd = 2048 + 1024 - 1 = 3071
+		final var partItem = base.slice(2048, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, partItem, "/bucket", null, TEST_CRED, 2, parent);
+		HttpRequest req = drv.rangeReadRequest(partOp, "s3.us-east-1.amazonaws.com");
+		assertEquals(HttpMethod.GET, req.method());
+		assertEquals("bytes=2048-3071", req.headers().get(HttpHeaderNames.RANGE));
+		assertEquals("0", req.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+		assertTrue(req.uri().contains("/bucket/obj"));
+		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	void rangeReadRequest_tailPartHasSmallerRange() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		// 100 bytes, threshold=30 → parts: 30, 30, 30, 10
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/tailtest", 0, 100);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 30);
+		// Tail part: partNumber=3, offset=90, size=10
+		final var tailItem = base.slice(90, 10);
+		final var tailOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, tailItem, "/bucket", null, TEST_CRED, 3, parent);
+		HttpRequest req = drv.rangeReadRequest(tailOp, "s3.us-east-1.amazonaws.com");
+		assertEquals("bytes=90-99", req.headers().get(HttpHeaderNames.RANGE));
+	}
+
+	@Test
+	void rangeReadRequest_firstPartStartsAtZero() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 2048);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		HttpRequest req = drv.rangeReadRequest(partOp, "s3.us-east-1.amazonaws.com");
+		assertEquals("bytes=0-1023", req.headers().get(HttpHeaderNames.RANGE));
+	}
+
+	@Test
+	void httpRequest_routesPartialReadToRangeRead() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		@SuppressWarnings("unchecked")
+		final var req = (HttpRequest) drv.httpRequest(
+						(Operation<Item>) (Operation<?>) partOp, "s3.us-east-1.amazonaws.com");
+		assertEquals(HttpMethod.GET, req.method());
+		assertNotNull(req.headers().get(HttpHeaderNames.RANGE), "Range header must be set for partial READ");
+		assertEquals("bytes=0-1023", req.headers().get(HttpHeaderNames.RANGE));
+	}
+
+	@Test
+	void httpRequest_throwsForCompositeRead() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		@SuppressWarnings("unchecked")
+		final var compositeOp = (Operation<Item>) (Operation<?>) parent;
+		assertThrows(AssertionError.class, () -> drv.httpRequest(compositeOp, "s3.us-east-1.amazonaws.com"));
+	}
+
+	// ---------- S3ResponseHandler ETag guard tests ----------
+
+	@Test
+	void responseHandler_capturesETagForCreateParts() throws Exception {
+		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-etag-test");
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		final var handler = new S3ResponseHandler<>(drv, false, false);
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.ETAG, "\"abc123\"");
+		// Use reflection to call protected handleResponseHeaders
+		Method m = S3ResponseHandler.class.getDeclaredMethod(
+						"handleResponseHeaders", Channel.class, Operation.class, HttpHeaders.class);
+		m.setAccessible(true);
+		m.invoke(handler, null, partOp, headers);
+		// ETag should be stored in parent contextData for CREATE parts
+		assertEquals("\"abc123\"", parent.get("1"), "ETag should be captured for CREATE part");
+	}
+
+	@Test
+	void responseHandler_skipsETagForReadParts() throws Exception {
+		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.READ, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		final var handler = new S3ResponseHandler<>(drv, false, false);
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.ETAG, "\"def456\"");
+		Method m = S3ResponseHandler.class.getDeclaredMethod(
+						"handleResponseHeaders", Channel.class, Operation.class, HttpHeaders.class);
+		m.setAccessible(true);
+		m.invoke(handler, null, partOp, headers);
+		// ETag should NOT be stored for READ parts
+		assertNull(parent.get("1"), "ETag should not be captured for READ parts");
+	}
+
+	// ========== Helpers for submit() / complete() tests ==========
+
+	@SuppressWarnings("unchecked")
+	private static void setOpResultOut(TestS3Driver drv) throws Exception {
+		Output<Operation<Item>> mockOutput = Mockito.mock(Output.class);
+		Mockito.when(mockOutput.put(Mockito.<Operation<Item>>any())).thenReturn(true);
+		Field outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(drv, mockOutput);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static BlockingQueue<Operation<Item>> childQueueOf(TestS3Driver drv) throws Exception {
+		Field field = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
+		field.setAccessible(true);
+		return (BlockingQueue<Operation<Item>>) field.get(drv);
+	}
+
+	private static com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>
+					newCompositeOp(OpType opType, long itemSize, long threshold) throws Exception {
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, itemSize);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167",
+						new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		return new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<>(
+						0, opType, base, "/bucket", null, TEST_CRED, null, 0, threshold);
+	}
+
+	// ========== Fix #1: httpRequest — composite DELETE delegates to super ==========
+
+	@Test
+	void httpRequest_delegatesCompositeDeleteToSuper() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var deleteOp = newCompositeOp(OpType.DELETE, 4096, 1024);
+		@SuppressWarnings("unchecked")
+		final var compositeOp = (Operation<Item>) (Operation<?>) deleteOp;
+		// Before fix: composite DELETE would throw AssertionError (only CREATE was handled).
+		// After fix: composite DELETE/UPDATE delegates to standard path via super.httpRequest().
+		final var req = (HttpRequest) drv.httpRequest(compositeOp, "s3.us-east-1.amazonaws.com");
+		assertEquals(HttpMethod.DELETE, req.method());
+		assertTrue(req.uri().contains("/bucket/obj"), "URI should contain the item path");
+		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	// ========== Fix #2: submit() — range-read initial and finalization passes ==========
+
+	@Test
+	void submit_compositeRead_initialPass_dispatchesSubOps() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var readOp = newCompositeOp(OpType.READ, 4096, 1024);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) readOp;
+
+		boolean result = drv.submit(op);
+
+		assertTrue(result, "submit should succeed");
+		assertEquals(Operation.Status.SUCC, op.status(), "Op should be marked SUCC");
+		// handleCompleted() should have dispatched sub-ops to the child queue
+		var queue = childQueueOf(drv);
+		assertEquals(4, queue.size(), "4 range-read sub-ops should be dispatched");
+	}
+
+	@Test
+	void submit_compositeRead_finalizationPass_marksSuccWithNoSubOpDispatch() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var readOp = newCompositeOp(OpType.READ, 4096, 1024);
+		// Generate sub-tasks and mark them all completed
+		readOp.subOperations();
+		for (int i = 0; i < 4; i++) readOp.markSubTaskCompleted();
+		assertTrue(readOp.allSubOperationsDone());
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) readOp;
+
+		boolean result = drv.submit(op);
+
+		assertTrue(result, "submit should succeed for finalization");
+		assertEquals(Operation.Status.SUCC, op.status());
+		// Finalization should NOT dispatch sub-ops
+		var queue = childQueueOf(drv);
+		assertTrue(queue.isEmpty(), "No sub-ops should be dispatched during finalization");
+	}
+
+	@Test
+	void submit_compositeRead_returnsFalseWhenConcurrencyExhausted() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+
+		// Drain all permits from the concurrency throttle
+		Field semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		Semaphore sem = (Semaphore) semField.get(drv);
+		sem.drainPermits();
+
+		var readOp = newCompositeOp(OpType.READ, 4096, 1024);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) readOp;
+
+		boolean result = drv.submit(op);
+
+		assertFalse(result, "submit should return false when concurrency is exhausted");
+	}
+
+	// ========== Fix #3: complete() — MPU logic scoped to CREATE only ==========
+
+	@Test
+	void complete_compositeDelete_doesNotSetUploadId() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var deleteOp = newCompositeOp(OpType.DELETE, 4096, 1024);
+		deleteOp.status(Operation.Status.SUCC);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) deleteOp;
+
+		// Before Fix #3, composite DELETE with non-null channel would enter MPU logic
+		// and try to extract upload ID. After the fix, the CREATE guard prevents this.
+		// With null channel, the guard is also short-circuited — this test verifies
+		// the complete() path is clean for composite DELETE operations.
+		assertDoesNotThrow(() -> drv.complete(null, op));
+		assertNull(deleteOp.get(S3Api.KEY_UPLOAD_ID), "DELETE op should not get upload ID");
+	}
+
+	// ========== Fix #4: submit() — recycled ops regenerate sub-tasks ==========
+
+	@Test
+	void submit_compositeRead_recycledOp_regeneratesSubTasks() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		// Create original op, generate sub-tasks, mark all done
+		var original = newCompositeOp(OpType.READ, 4096, 1024);
+		original.subOperations();
+		for (int i = 0; i < 4; i++) original.markSubTaskCompleted();
+		assertTrue(original.allSubOperationsDone());
+
+		// Create recycled copy — has empty subTasks and pendingSubTasksCount=0
+		var recycled = original.result();
+		assertTrue(recycled.allSubOperationsDone(),
+						"Recycled copy should initially have pending count = 0");
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) recycled;
+
+		// Before Fix #4, submit() would see allSubOperationsDone()==true and go to
+		// finalization without doing any real work. After the fix, subOperations()
+		// is called first to regenerate sub-tasks, resetting pendingSubTasksCount to N.
+		boolean result = drv.submit(op);
+
+		assertTrue(result, "submit should succeed for recycled op");
+		assertEquals(Operation.Status.SUCC, op.status());
+		// Recycled op should regenerate and dispatch sub-ops
+		var queue = childQueueOf(drv);
+		assertEquals(4, queue.size(), "Recycled op should regenerate and dispatch 4 sub-ops");
+	}
+
+	@Test
+	void submit_compositeRead_recycledOp_producesCleanTimingFields() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		// Create op with stale timing from a previous cycle
+		var original = newCompositeOp(OpType.READ, 4096, 1024);
+		original.subOperations();
+		for (int i = 0; i < 4; i++) original.markSubTaskCompleted();
+		var recycled = original.result();
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) recycled;
+
+		// submit() calls reset() before the timing cycle, clearing stale values
+		boolean result = drv.submit(op);
+		assertTrue(result);
+
+		// Verify latency is non-negative (reset cleared stale timing, then fresh timing was set)
+		assertTrue(op.latency() >= 0,
+						"Latency should be non-negative after clean timing cycle");
 	}
 }

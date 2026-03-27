@@ -676,14 +676,21 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				} else { // this is the initial state of the task
 					httpRequest = initMultipartUploadRequest(op, nodeAddr);
 				}
+			} else if (OpType.READ.equals(opType)) {
+				// Composite READs are dispatched as range-GETs by submit(), never as a single HTTP request
+				throw new AssertionError("Composite READ must be handled by submit(), not httpRequest()");
 			} else {
-				throw new AssertionError("Non-create multipart operations are not implemented yet");
+				// Composite DELETE/UPDATE: the item happens to be composite (has data ranges) but
+				// the operation itself is a plain DELETE/UPDATE — delegate to the standard path.
+				httpRequest = super.httpRequest(op, nodeAddr);
 			}
 		} else if (op instanceof PartialDataOperation) {
 			if (OpType.CREATE.equals(opType)) {
 				httpRequest = partUploadRequest((PartialDataOperation) op, nodeAddr);
+			} else if (OpType.READ.equals(opType)) {
+				httpRequest = rangeReadRequest((PartialDataOperation) op, nodeAddr);
 			} else {
-				throw new AssertionError("Non-create multipart operations are not implemented yet");
+				throw new AssertionError("Partial " + opType + " operations are not implemented");
 			}
 		} else if (op instanceof ListOperation) {
 			httpRequest = listRequest((ListOperation<?>) op, nodeAddr);
@@ -1020,6 +1027,39 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return httpRequest;
 	}
 
+	@SuppressWarnings("unchecked")
+	HttpRequest rangeReadRequest(
+					final PartialDataOperation partialOp, final String nodeAddr) {
+		final var parentOp = partialOp.parent();
+		final var item = (I) parentOp.item();
+		final var srcPath = partialOp.srcPath();
+		final var uri = dataUriPath(item, srcPath, partialOp.dstPath(), OpType.READ);
+		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
+		if (nodeAddr != null) {
+			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
+		}
+		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		// Compute byte range from part number and size threshold
+		final long sizeThreshold = parentOp.sizeThreshold();
+		final long rangeStart = (long) partialOp.partNumber() * sizeThreshold;
+		long partSize;
+		try {
+			partSize = ((DataItem) partialOp.item()).size();
+		} catch (final IOException e) {
+			partialOp.status(Operation.Status.FAIL_IO);
+			partSize = sizeThreshold;
+		}
+		final long rangeEnd = rangeStart + partSize - 1;
+		httpHeaders.set(HttpHeaderNames.RANGE, "bytes=" + rangeStart + "-" + rangeEnd);
+		final var httpMethod = readMetadataOnly ? HttpMethod.HEAD : HttpMethod.GET;
+		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
+						HTTP_1_1, httpMethod, uri, httpHeaders);
+		applyDynamicHeaders(httpHeaders);
+		applySharedHeaders(httpHeaders);
+		applyAuthHeaders(httpHeaders, httpMethod, uri, partialOp.credential());
+		return httpRequest;
+	}
+
 	private static final ThreadLocal<StringBuilder> THREAD_LOCAL_STRB = ThreadLocal.withInitial(StringBuilder::new);
 
 	FullHttpRequest completeMultipartUploadRequest(
@@ -1197,8 +1237,46 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected boolean submit(final O op) throws IllegalStateException {
+		if (op instanceof CompositeDataOperation && OpType.READ.equals(op.type())) {
+			final var compositeReadOp = (CompositeDataOperation) op;
+			// Ensure sub-tasks exist. For recycled ops (result() copy), the subTasks
+			// list is empty and pendingSubTasksCount==0 from the previous cycle.
+			// Calling subOperations() regenerates them, resetting
+			// pendingSubTasksCount to N so allSubOperationsDone() returns false.
+			compositeReadOp.subOperations();
+			if (compositeReadOp.allSubOperationsDone()) {
+				// Finalization pass: all range-GETs completed. Mark the parent SUCC and
+				// propagate to the metrics/output pipeline. Duration will be measured
+				// from the initial startRequest() to this finishResponse().
+				op.status(Operation.Status.SUCC);
+				complete(null, op);
+				return true;
+			}
+			// Initial pass: no HTTP request needed (range-GETs are stateless, unlike
+			// MPU which requires an initiate call). Reset timing so recycled ops get
+			// clean metrics, then complete immediately to trigger sub-operation
+			// dispatch in handleCompleted().
+			op.reset();
+			if (concurrencyThrottle.tryAcquire()) {
+				op.startRequest();
+				op.finishRequest();
+				concurrencyThrottle.release();
+				op.status(Operation.Status.SUCC);
+				op.startResponse();
+				complete(null, op);
+				return true;
+			} else {
+				return false;
+			}
+		}
+		return super.submit(op);
+	}
+
+	@Override
 	public void complete(final Channel channel, final O op) {
-		if (channel != null && op instanceof CompositeDataOperation) {
+		if (channel != null && op instanceof CompositeDataOperation
+						&& OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeDataOperation) op;
 			if (compositeOp.get(S3Api.KEY_MPU_ABORT) != null) {
 				// abort response — nothing more to do
