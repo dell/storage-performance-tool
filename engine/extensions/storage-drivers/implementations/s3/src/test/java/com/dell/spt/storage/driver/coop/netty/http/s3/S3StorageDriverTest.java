@@ -24,6 +24,8 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.item.PathItemImpl;
+import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -36,6 +38,12 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.util.Attribute;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -43,6 +51,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,7 +60,9 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.TreeMap;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -968,5 +980,293 @@ public class S3StorageDriverTest {
 		// Verify latency is non-negative (reset cleared stale timing, then fresh timing was set)
 		assertTrue(op.latency() >= 0,
 						"Latency should be non-negative after clean timing cycle");
+	}
+
+	// ========== Helpers for per-phase MPU logging tests ==========
+
+	private static class CapturingAppender extends AbstractAppender {
+		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		private final CountDownLatch latch;
+
+		CapturingAppender(int expectedMessages) {
+			super("test-capture", null, null, true, Property.EMPTY_ARRAY);
+			this.latch = new CountDownLatch(expectedMessages);
+		}
+
+		@Override
+		public void append(LogEvent event) {
+			messages.add(event.getMessage().getFormattedMessage());
+			latch.countDown();
+		}
+
+		void awaitMessages(long timeoutMs) throws InterruptedException {
+			latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	private static CapturingAppender attachCapture(int expectedMessages) {
+		var appender = new CapturingAppender(expectedMessages);
+		appender.start();
+		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
+		logger.addAppender(appender);
+		logger.setLevel(Level.INFO);
+		return appender;
+	}
+
+	private static void detachCapture(CapturingAppender appender) {
+		// Allow async logger thread to finish processing before removing the appender
+		try { Thread.sleep(50); } catch (InterruptedException ignored) { }
+		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
+		logger.removeAppender(appender);
+		appender.stop();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Channel mockChannelForComplete(String initUploadId) {
+		Channel channel = Mockito.mock(Channel.class);
+		// For INIT phase: channel.attr(KEY_ATTR_UPLOAD_ID).get()
+		Attribute<String> uploadIdAttr = Mockito.mock(Attribute.class);
+		Mockito.when(uploadIdAttr.get()).thenReturn(initUploadId);
+		Mockito.when(channel.attr(S3Api.KEY_ATTR_UPLOAD_ID)).thenReturn(uploadIdAttr);
+		// For super.complete(): report already released to skip connPool interaction
+		Attribute<Boolean> releasedAttr = Mockito.mock(Attribute.class);
+		Mockito.when(releasedAttr.getAndSet(Boolean.TRUE)).thenReturn(Boolean.TRUE);
+		Mockito.when(channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED)).thenReturn((Attribute) releasedAttr);
+		return channel;
+	}
+
+	// ========== Per-phase MPU logging: INIT ==========
+
+	@Test
+	void complete_mpuInit_logsInitPhaseAndSetsUploadId() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.status(Operation.Status.SUCC);
+		// Fresh op: pendingSubTasksCount=-1, allSubOperationsDone()=false → enters INIT branch
+
+		Channel channel = mockChannelForComplete("test-upload-id-123");
+
+		var capture = attachCapture(1);
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(2000);
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertEquals("test-upload-id-123", compositeOp.get(S3Api.KEY_UPLOAD_ID),
+						"INIT should store upload ID on the composite op");
+		assertEquals(1, capture.messages.size(), "Exactly one INIT log row expected");
+		assertTrue(capture.messages.get(0).startsWith("INIT,"), "Log row should start with INIT phase");
+		assertTrue(capture.messages.get(0).contains("test-upload-id-123"), "Log row should contain upload ID");
+	}
+
+	@Test
+	void complete_mpuInit_setsFailNotFoundWhenUploadIdMissing() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null); // null upload ID
+
+		var capture = attachCapture(1); // expect 0, but latch(1) so await times out quickly
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(200); // short timeout — no messages expected
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, compositeOp.status(),
+						"Missing upload ID should set RESP_FAIL_NOT_FOUND");
+		assertTrue(capture.messages.isEmpty(), "No log message should be emitted for missing upload ID");
+	}
+
+	// ========== Per-phase MPU logging: ABORT ==========
+
+	@Test
+	void complete_mpuAbort_logsAbortPhase() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.put(S3Api.KEY_UPLOAD_ID, "abort-id-456");
+		compositeOp.put(S3Api.KEY_MPU_ABORT, "true");
+		compositeOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null);
+
+		var capture = attachCapture(1);
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(2000);
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertEquals(1, capture.messages.size(), "Exactly one ABORT log row expected");
+		assertTrue(capture.messages.get(0).startsWith("ABORT,"), "Log row should start with ABORT phase");
+		assertTrue(capture.messages.get(0).contains("abort-id-456"), "Log row should contain upload ID");
+	}
+
+	// ========== Per-phase MPU logging: PART + COMPLETE ==========
+
+	@Test
+	void complete_mpuAllDone_logsPartAndCompletePhases() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.put(S3Api.KEY_UPLOAD_ID, "complete-id-789");
+		compositeOp.subOperations(); // generates 4 sub-tasks (4096 / 1024)
+		for (int i = 0; i < 4; i++) compositeOp.markSubTaskCompleted();
+		assertTrue(compositeOp.allSubOperationsDone());
+		compositeOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null);
+
+		var capture = attachCapture(5); // 4 PART + 1 COMPLETE
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(2000);
+		} finally {
+			detachCapture(capture);
+		}
+
+		// 4 PART rows + 1 COMPLETE row
+		assertEquals(5, capture.messages.size(), "4 PART + 1 COMPLETE rows expected");
+		for (int i = 0; i < 4; i++) {
+			String[] cols = capture.messages.get(i).split(",");
+			assertEquals(8, cols.length, "PART row should have 8 CSV columns");
+			assertEquals("PART", cols[0]);
+			assertEquals("/bucket/obj", cols[1], "ItemPath should be the composite item name");
+			assertEquals("complete-id-789", cols[2], "UploadId column");
+			assertEquals(String.valueOf(i + 1), cols[3], "1-based part number");
+			// StartTs, Duration, Latency are timing — just verify they parse as longs
+			assertDoesNotThrow(() -> Long.parseLong(cols[4]), "StartTs should be numeric");
+			assertDoesNotThrow(() -> Long.parseLong(cols[5]), "Duration should be numeric");
+			assertDoesNotThrow(() -> Long.parseLong(cols[6]), "Latency should be numeric");
+			assertEquals("1024", cols[7], "Bytes should equal the part size");
+		}
+		String[] completeCols = capture.messages.get(4).split(",");
+		assertEquals(8, completeCols.length, "COMPLETE row should have 8 CSV columns");
+		assertEquals("COMPLETE", completeCols[0]);
+		assertEquals("/bucket/obj", completeCols[1]);
+		assertEquals("complete-id-789", completeCols[2]);
+		assertEquals("-1", completeCols[3], "COMPLETE partNumber should be -1");
+		assertEquals("0", completeCols[7], "COMPLETE bytes should be 0");
+	}
+
+	@Test
+	void complete_mpuAbort_logsEmptyUploadIdWhenMissing() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		// No KEY_UPLOAD_ID set — simulates abort before init response
+		compositeOp.put(S3Api.KEY_MPU_ABORT, "true");
+		compositeOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null);
+
+		var capture = attachCapture(1);
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(2000);
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertEquals(1, capture.messages.size(), "Exactly one ABORT log row expected");
+		String[] cols = capture.messages.get(0).split(",");
+		assertEquals(8, cols.length, "ABORT row should have 8 CSV columns");
+		assertEquals("ABORT", cols[0]);
+		assertEquals("", cols[2], "UploadId should be empty when not set");
+	}
+
+	@Test
+	void complete_mpuAllDone_tailPartHasSmallerBytes() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		// 5000 / 1024 = 4 full parts + 1 tail part of 904 bytes
+		var compositeOp = newCompositeOp(OpType.CREATE, 5000, 1024);
+		compositeOp.put(S3Api.KEY_UPLOAD_ID, "tail-id");
+		compositeOp.subOperations(); // generates 5 sub-tasks
+		for (int i = 0; i < 5; i++) compositeOp.markSubTaskCompleted();
+		assertTrue(compositeOp.allSubOperationsDone());
+		compositeOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null);
+
+		var capture = attachCapture(6); // 5 PART + 1 COMPLETE
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) compositeOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(2000);
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertEquals(6, capture.messages.size(), "5 PART + 1 COMPLETE rows expected");
+		// First 4 parts: 1024 bytes each
+		for (int i = 0; i < 4; i++) {
+			String[] cols = capture.messages.get(i).split(",");
+			assertEquals("1024", cols[7], "Full part should be 1024 bytes");
+		}
+		// Tail part: 904 bytes
+		String[] tailCols = capture.messages.get(4).split(",");
+		assertEquals("PART", tailCols[0]);
+		assertEquals("5", tailCols[3], "Tail part number should be 5");
+		assertEquals("904", tailCols[7], "Tail part should be 904 bytes");
+		// COMPLETE row
+		assertTrue(capture.messages.get(5).startsWith("COMPLETE,"));
+	}
+
+	@Test
+	void complete_compositeDeleteWithChannel_skipsMpuLogging() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var deleteOp = newCompositeOp(OpType.DELETE, 4096, 1024);
+		deleteOp.status(Operation.Status.SUCC);
+
+		Channel channel = mockChannelForComplete(null);
+
+		var capture = attachCapture(1); // expect 0 messages
+		try {
+			@SuppressWarnings("unchecked")
+			final var op = (Operation<Item>) (Operation<?>) deleteOp;
+			drv.complete(channel, op);
+			capture.awaitMessages(200); // short timeout — no messages expected
+		} finally {
+			detachCapture(capture);
+		}
+
+		assertTrue(capture.messages.isEmpty(),
+						"Non-CREATE composite op with non-null channel should not produce MPU log rows");
+		assertNull(deleteOp.get(S3Api.KEY_UPLOAD_ID), "DELETE op should not get upload ID");
 	}
 }

@@ -1120,7 +1120,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, uri, mpuTask.credential());
-		Loggers.MULTIPART.info("abort,{},{}", item.name(), uploadId);
 		return httpRequest;
 	}
 
@@ -1278,25 +1277,73 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (channel != null && op instanceof CompositeDataOperation
 						&& OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeDataOperation) op;
-			if (compositeOp.get(S3Api.KEY_MPU_ABORT) != null) {
-				// abort response — nothing more to do
-			} else if (compositeOp.allSubOperationsDone()) {
-				Loggers.MULTIPART.info(
-								"{},{},{}",
-								compositeOp.item().name(),
-								compositeOp.get(S3Api.KEY_UPLOAD_ID),
-								compositeOp.latency());
-			} else {
-				final var uploadId = channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get();
-				if (uploadId == null) {
+			// Pre-super: extract upload ID from channel (channel may be released by super)
+			// and set failure status so super.complete() can close the channel if needed
+			if (compositeOp.get(S3Api.KEY_MPU_ABORT) == null
+							&& !compositeOp.allSubOperationsDone()) {
+				final var initUploadId = channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get();
+				if (initUploadId == null) {
 					op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
 				} else {
-					// multipart upload has been initialized as a result of this load operation
-					compositeOp.put(S3Api.KEY_UPLOAD_ID, uploadId);
+					compositeOp.put(S3Api.KEY_UPLOAD_ID, initUploadId);
 				}
 			}
+			super.complete(channel, op);
+			// Post-super: log with valid timing (finishResponse has set respTimeDone)
+			final var uploadId = compositeOp.get(S3Api.KEY_UPLOAD_ID);
+			if (compositeOp.get(S3Api.KEY_MPU_ABORT) != null) {
+				// abort response — log ABORT phase
+				Loggers.MULTIPART.info(
+								"ABORT,{},{},{},{},{},{},{}",
+								compositeOp.item().name(),
+								uploadId != null ? uploadId : "",
+								-1,
+								compositeOp.reqTimeStart() / 1000,
+								compositeOp.duration(),
+								compositeOp.latency(),
+								0);
+			} else if (compositeOp.allSubOperationsDone()) {
+				// all parts done — log PART rows for each sub-operation, then COMPLETE
+				for (final var rawSubOp : compositeOp.subOperations()) {
+					final var subOp = (PartialDataOperation<?>) rawSubOp;
+					long partBytes = 0;
+					try {
+						partBytes = ((DataItem) subOp.item()).size();
+					} catch (final IOException ignored) { }
+					Loggers.MULTIPART.info(
+									"PART,{},{},{},{},{},{},{}",
+									compositeOp.item().name(),
+									uploadId,
+									subOp.partNumber() + 1,
+									subOp.reqTimeStart() / 1000,
+									subOp.duration(),
+									subOp.latency(),
+									partBytes);
+				}
+				Loggers.MULTIPART.info(
+								"COMPLETE,{},{},{},{},{},{},{}",
+								compositeOp.item().name(),
+								uploadId,
+								-1,
+								compositeOp.reqTimeStart() / 1000,
+								compositeOp.duration(),
+								compositeOp.latency(),
+								0);
+			} else if (uploadId != null) {
+				// multipart upload has been initialized — log INIT phase
+				Loggers.MULTIPART.info(
+								"INIT,{},{},{},{},{},{},{}",
+								compositeOp.item().name(),
+								uploadId,
+								-1,
+								compositeOp.reqTimeStart() / 1000,
+								compositeOp.duration(),
+								compositeOp.latency(),
+								0);
+			}
+		} else {
+			super.complete(channel, op);
 		}
-		super.complete(channel, op);
 	}
 
 	@Override

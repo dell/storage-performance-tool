@@ -116,7 +116,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "ItemPath,UploadId,RespLatency[us]%n"
+          header: "Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes%n"
           pattern: "%m%n"
       - name: tablesMetricsFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}tables.metrics.log"
