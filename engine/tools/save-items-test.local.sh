@@ -10,6 +10,8 @@
 #
 # Skip cleanup: SKIP_CLEANUP=1 ./save-items-test.local.sh
 # Override knobs via env or .env file (same as jartest.local.sh).
+#
+# Results are preserved under ./results/save-items-<timestamp>/.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -55,8 +57,10 @@ unset _caller_env _v
 NODE_ADDRS="${S3_ENDPOINTS//http:\/\/}"
 NODE_ADDRS="${NODE_ADDRS//https:\/\/}"
 
-ITEMS_FILE="$(mktemp "${TMPDIR:-/tmp}/spt-items-XXXXXXXX.csv")"
-trap 'rm -f "$ITEMS_FILE"' EXIT
+# ---- Results directory -----------------------------------------------------
+RESULTS_DIR="${SCRIPT_DIR}/results/save-items-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RESULTS_DIR"
+ITEMS_FILE="${RESULTS_DIR}/items.csv"
 
 # ---- Shared flags ----------------------------------------------------------
 SHARED_ARGS=(
@@ -120,3 +124,4 @@ else
 fi
 
 echo "== save-items round-trip test finished =="
+echo "== Results preserved in: ${RESULTS_DIR} =="

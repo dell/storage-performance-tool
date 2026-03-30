@@ -311,8 +311,9 @@ var itemSize = {{.ItemSize}};
 var itemCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
 {{- if .SaveItems}}
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepID}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepID}}" + "/items.csv";
 {{- end}}
 
 var config = {
@@ -367,8 +368,9 @@ var itemSize = {{.ItemSize}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
 {{- if .SaveItems}}
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepID}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepID}}" + "/items.csv";
 {{- end}}
 
 var config = {
@@ -423,8 +425,9 @@ var itemSize = {{.ItemSize}};
 var itemCount = 1000; // default
 var outputPath = {{.OutputPath}};
 {{- if .SaveItems}}
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepID}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepID}}" + "/items.csv";
 {{- end}}
 
 var config = {
@@ -484,8 +487,9 @@ var itemSize = {{.ItemSize}};
 var seedCount = {{.SeedCount}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
 var pauseTime = 10; // seconds between phases
 
 // Helper functions
@@ -620,8 +624,9 @@ var itemSize = {{.ItemSize}};
 var seedCount = {{.SeedCount}};
 var readCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
 var pauseTime = 10; // seconds between phases
 
 // Helper functions
@@ -756,8 +761,9 @@ var itemSize = {{.ItemSize}};
 var seedCount = {{.SeedCount}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
 var pauseTime = 10; // seconds between phases
 
 // Helper functions
@@ -862,8 +868,9 @@ var itemSize = {{.ItemSize}};
 var seedCount = {{.SeedCount}};
 var readCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
 var pauseTime = 10; // seconds between phases
 
 // Helper functions
@@ -968,8 +975,9 @@ var itemSize = {{.ItemSize}};
 var seedCount = 2500; // default
 var duration = "60s"; // default
 var outputPath = {{.OutputPath}};
-var itemsFile = java.lang.System.getProperty("user.home")
-    + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
 var pauseTime = 10; // seconds between phases
 
 // Helper functions

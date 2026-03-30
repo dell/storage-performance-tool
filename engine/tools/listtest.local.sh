@@ -93,6 +93,13 @@ if [[ ! -x "$RUN_SCRIPT" ]]; then
   (cd "$REPO_ROOT" && ./gradlew -q :bundle:build)
 fi
 
+# ---- Results directory -----------------------------------------------------
+RESULTS_DIR="${SCRIPT_DIR}/results/listtest-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RESULTS_DIR"
+
+echo "== listtest: bucket=/${S3_BUCKET}, concurrency=${LIST_CONCURRENCY}, mode=${EFFECTIVE_MODE} =="
+echo "== Results: ${RESULTS_DIR} =="
+
 declare -a REMAPPED_ARGS=()
 for arg in "$@"; do
 	case "${arg,,}" in
@@ -113,7 +120,9 @@ done
 
 # If LIST_TIMEOUT is set, wrap with GNU timeout for safety
 if [[ -n "${LIST_TIMEOUT}" ]]; then
-  exec timeout -k 5 "${LIST_TIMEOUT}" "$RUN_SCRIPT" "${CLI_ARGS[@]}" "${REMAPPED_ARGS[@]}"
+  timeout -k 5 "${LIST_TIMEOUT}" "$RUN_SCRIPT" "${CLI_ARGS[@]}" "${REMAPPED_ARGS[@]}" 2>&1 | tee "${RESULTS_DIR}/output.log"
 else
-  exec "$RUN_SCRIPT" "${CLI_ARGS[@]}" "${REMAPPED_ARGS[@]}"
+  "$RUN_SCRIPT" "${CLI_ARGS[@]}" "${REMAPPED_ARGS[@]}" 2>&1 | tee "${RESULTS_DIR}/output.log"
 fi
+
+echo "== Results saved to: ${RESULTS_DIR} =="

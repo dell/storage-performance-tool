@@ -515,6 +515,10 @@ Available workload types:
 			warnSeedSize(params)
 		}
 
+		// Lock the base timestamp so that every GenerateScenario call
+		// (here and later in the orchestrator) produces identical step IDs.
+		params.BaseTimestamp = scenario.BaseTimestamp()
+
 		// Generate scenario content
 		scenarioContent, err := scenario.GenerateScenario(params)
 		if err != nil {

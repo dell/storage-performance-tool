@@ -50,7 +50,14 @@ if [[ ! -x "$RUN_SCRIPT" ]]; then
   (cd "$ENGINE_ROOT" && ./gradlew -q :bundle:build)
 fi
 
-exec "$RUN_SCRIPT" \
+# ---- Results directory -----------------------------------------------------
+RESULTS_DIR="${SCRIPT_DIR}/results/jartest-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RESULTS_DIR"
+
+echo "== jartest: ${JARTEST_OP_LIMIT_COUNT} × ${JARTEST_OBJECT_SIZE}, concurrency=${JARTEST_CONCURRENCY} =="
+echo "== Results: ${RESULTS_DIR} =="
+
+"$RUN_SCRIPT" \
   --storage-driver-type=s3 \
   --storage-net-node-addrs="${NODE_ADDRS}" \
   --storage-auth-version="${S3_AUTH_VERSION}" \
@@ -60,4 +67,6 @@ exec "$RUN_SCRIPT" \
   --storage-driver-limit-concurrency="${JARTEST_CONCURRENCY}" \
   --item-data-size="${JARTEST_OBJECT_SIZE}" \
   --load-op-limit-count="${JARTEST_OP_LIMIT_COUNT}" \
-  "$@"
+  "$@" 2>&1 | tee "${RESULTS_DIR}/output.log"
+
+echo "== Results saved to: ${RESULTS_DIR} =="

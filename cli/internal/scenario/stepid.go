@@ -6,11 +6,20 @@ import (
 	"time"
 )
 
-// baseTimestamp returns a UTC timestamp string in yyyymmdd.HHMMSS.mmm
-// This is stable for the scenario generation call and intended to be
-// shared across all steps in a single test for natural sorting.
-func baseTimestamp() string {
+// BaseTimestamp returns a new UTC timestamp string in yyyymmdd.HHMMSS.mmm.
+// Callers that need a stable timestamp across multiple GenerateScenario
+// invocations should call this once and store the result in Params.BaseTimestamp.
+func BaseTimestamp() string {
 	return time.Now().UTC().Format("20060102.150405.000")
+}
+
+// resolveTimestamp returns params.BaseTimestamp if non-empty, otherwise
+// generates a fresh timestamp via BaseTimestamp().
+func resolveTimestamp(params Params) string {
+	if params.BaseTimestamp != "" {
+		return params.BaseTimestamp
+	}
+	return BaseTimestamp()
 }
 
 // formatStepID builds: mt-<step-number>-<base-ts>-<op>
