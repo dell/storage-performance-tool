@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestBaseTimestamp_Format(t *testing.T) {
+	ts := BaseTimestamp()
+	re := regexp.MustCompile(`^[0-9]{8}\.[0-9]{6}\.[0-9]{3}$`)
+	if !re.MatchString(ts) {
+		t.Fatalf("BaseTimestamp() = %q, does not match yyyymmdd.HHMMSS.mmm", ts)
+	}
+}
+
+func TestResolveTimestamp_UsesParamsWhenSet(t *testing.T) {
+	fixed := "20260101.120000.000"
+	p := Params{BaseTimestamp: fixed}
+	got := resolveTimestamp(p)
+	if got != fixed {
+		t.Fatalf("resolveTimestamp() = %q, want %q", got, fixed)
+	}
+}
+
+func TestResolveTimestamp_GeneratesWhenEmpty(t *testing.T) {
+	p := Params{}
+	got := resolveTimestamp(p)
+	re := regexp.MustCompile(`^[0-9]{8}\.[0-9]{6}\.[0-9]{3}$`)
+	if !re.MatchString(got) {
+		t.Fatalf("resolveTimestamp() with empty BaseTimestamp = %q, expected valid format", got)
+	}
+}
+
 func TestFormatStepID_ZeroPadAndOrder(t *testing.T) {
 	ts := "20250909.154231.045"
 

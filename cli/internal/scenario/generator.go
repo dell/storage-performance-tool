@@ -36,7 +36,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 
 	// Prepare template data
 	// Use a single run-level timestamp for natural sorting across steps
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 
 	// Determine storage driver type
 	driverType := storageDriverTypeS3
@@ -104,7 +104,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 func GenerateReadScenario(params Params) (string, error) {
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 
 	driverType := storageDriverTypeS3
 	if params.UseRdma {
@@ -204,7 +204,7 @@ func GenerateListScenario(params Params) (string, error) {
 	}
 
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
-	baseTS := baseTimestamp()
+	baseTS := resolveTimestamp(params)
 	opLimit := 0
 	if params.ObjectCount > 0 {
 		opLimit = params.ObjectCount
@@ -265,7 +265,7 @@ func GenerateListScenario(params Params) (string, error) {
 // GenerateMockScenario creates a scenario for mock testing with optional cleanup
 func GenerateMockScenario(params Params) (string, error) {
 	// shared base timestamp for this scenario
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 	if params.Cleanup && params.ObjectCount > 0 {
 		// Use PipelineLoad for cleanup - create then delete
 		stepCreate := formatStepID(1, ts, "create")

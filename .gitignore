@@ -128,6 +128,7 @@ engine/.mvn/wrapper/maven-wrapper.jar
 engine/tmp/
 *.tmp
 engine/tools/log/
+engine/tools/results/
 engine/log/
 
 # Miscellaneous engine logs
