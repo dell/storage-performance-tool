@@ -1843,3 +1843,471 @@ func TestReadNoOpLimitInGeneratedScenarios(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateWriteScenario_SaveItems(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     Params
+		checkLines []string
+		notLines   []string
+	}{
+		{
+			name: "write count with save-items",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  100,
+				SaveItems:    true,
+			},
+			checkLines: []string{
+				`var itemsFile = java.lang.System.getProperty("user.home")`,
+				`"/items.csv"`,
+				`config["item"]["output"]["file"] = itemsFile`,
+			},
+		},
+		{
+			name: "write count without save-items",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  100,
+				SaveItems:    false,
+			},
+			notLines: []string{
+				`itemsFile`,
+				`config["item"]["output"]["file"]`,
+			},
+		},
+		{
+			name: "write duration with save-items",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      8,
+				ObjectSize:   "5MB",
+				Duration:     "5m",
+				SaveItems:    true,
+			},
+			checkLines: []string{
+				`var itemsFile`,
+				`config["item"]["output"]["file"] = itemsFile`,
+				`var duration = "5m"`,
+			},
+		},
+		{
+			name: "write default with save-items",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      2,
+				ObjectSize:   "1MB",
+				SaveItems:    true,
+			},
+			checkLines: []string{
+				`var itemsFile`,
+				`config["item"]["output"]["file"] = itemsFile`,
+				`var itemCount = 1000`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateWriteScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateWriteScenario() error = %v", err)
+			}
+
+			for _, line := range tt.checkLines {
+				if !strings.Contains(got, line) {
+					t.Errorf("missing expected line: %s\nGot:\n%s", line, got)
+				}
+			}
+
+			for _, line := range tt.notLines {
+				if strings.Contains(got, line) {
+					t.Errorf("should NOT contain: %s\nGot:\n%s", line, got)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateReadScenario_FromFile(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     Params
+		checkLines []string
+		notLines   []string
+	}{
+		{
+			name: "read from file with duration",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				Duration:     "2m",
+				ItemsFile:    "/data/items.csv",
+			},
+			checkLines: []string{
+				`var itemsFile = "/data/items.csv"`,
+				`var duration = "2m"`,
+				`ReadLoad`,
+				`"type": "read"`,
+				`"mode": true`,
+				`Using items file`,
+			},
+			notLines: []string{
+				`PreconditionLoad`,
+				`seedCount`,
+			},
+		},
+		{
+			name: "read from file with count",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "512KB",
+				ObjectCount:  5000,
+				ItemsFile:    "/tmp/my-items.csv",
+			},
+			checkLines: []string{
+				`var itemsFile = "/tmp/my-items.csv"`,
+				`var readCount = 5000`,
+				`ReadLoad`,
+				`"count": readCount`,
+			},
+			notLines: []string{
+				`PreconditionLoad`,
+				`seedCount`,
+				`DeleteLoad`,
+			},
+		},
+		{
+			name: "read from file with cleanup and duration",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      16,
+				ObjectSize:   "4MB",
+				Duration:     "5m",
+				Cleanup:      true,
+				ItemsFile:    "/data/items.csv",
+			},
+			checkLines: []string{
+				`var itemsFile = "/data/items.csv"`,
+				`ReadLoad`,
+				`DeleteLoad`,
+				`"type": "read"`,
+				`"type": "delete"`,
+			},
+			notLines: []string{
+				`PreconditionLoad`,
+				`seedCount`,
+			},
+		},
+		{
+			name: "read from file with cleanup and count",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      2,
+				ObjectSize:   "256KB",
+				ObjectCount:  1000,
+				Cleanup:      true,
+				ItemsFile:    "/data/items.csv",
+			},
+			checkLines: []string{
+				`var itemsFile = "/data/items.csv"`,
+				`ReadLoad`,
+				`DeleteLoad`,
+				`"count": readCount`,
+			},
+			notLines: []string{
+				`PreconditionLoad`,
+				`seedCount`,
+			},
+		},
+		{
+			name: "read from file defaults (no duration/count)",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ItemsFile:    "/data/items.csv",
+			},
+			checkLines: []string{
+				`var itemsFile = "/data/items.csv"`,
+				`var duration = "60s"`,
+				`ReadLoad`,
+				`"mode": true`,
+			},
+			notLines: []string{
+				`PreconditionLoad`,
+				`seedCount`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateReadScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateReadScenario() error = %v", err)
+			}
+
+			for _, line := range tt.checkLines {
+				if !strings.Contains(got, line) {
+					t.Errorf("missing expected line: %s\nGot:\n%s", line, got)
+				}
+			}
+
+			for _, line := range tt.notLines {
+				if strings.Contains(got, line) {
+					t.Errorf("should NOT contain: %s\nGot:\n%s", line, got)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateReadScenario_FromFile_StepIDs(t *testing.T) {
+	// Read-from-file scenarios should have step IDs starting from 001 (read)
+	// with no seed step ID
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "2m",
+		Cleanup:      true,
+		ItemsFile:    "/data/items.csv",
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	readIDPattern := regexp.MustCompile(`mt-001-\d{8}\.\d{6}\.\d{3}-read`)
+	deleteIDPattern := regexp.MustCompile(`mt-002-\d{8}\.\d{6}\.\d{3}-delete`)
+	seedIDPattern := regexp.MustCompile(`mt-\d{3}-\d{8}\.\d{6}\.\d{3}-seed`)
+
+	if !readIDPattern.MatchString(got) {
+		t.Errorf("Read-from-file scenario missing read step ID (mt-001-...-read)")
+	}
+	if !deleteIDPattern.MatchString(got) {
+		t.Errorf("Read-from-file scenario missing delete step ID (mt-002-...-delete)")
+	}
+	if seedIDPattern.MatchString(got) {
+		t.Errorf("Read-from-file scenario should NOT contain seed step ID")
+	}
+}
+
+func TestGenerateReadScenario_FromFile_RDMA(t *testing.T) {
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "bucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "1m",
+		UseRdma:      true,
+		ItemsFile:    "/data/items.csv",
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	if !strings.Contains(got, `"type": "s3-rdma"`) {
+		t.Errorf("Read-from-file scenario with RDMA should use s3-rdma driver\nGot:\n%s", got)
+	}
+}
+
+func TestGenerateReadScenario_FromFile_DefaultWithCleanup(t *testing.T) {
+	// Exercises the default branch for read-from-file with cleanup
+	// (no duration, no count → defaults to 60s duration with cleanup)
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Cleanup:      true,
+		ItemsFile:    "/data/items.csv",
+		// No Duration or ObjectCount set
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	// Should default to 60s duration
+	if !strings.Contains(got, `var duration = "60s"`) {
+		t.Errorf("expected default 60s duration\nGot:\n%s", got)
+	}
+	// Should have cleanup
+	if !strings.Contains(got, "DeleteLoad") {
+		t.Errorf("expected DeleteLoad for cleanup\nGot:\n%s", got)
+	}
+	// Should NOT have seed phase
+	if strings.Contains(got, "PreconditionLoad") {
+		t.Errorf("read-from-file should NOT have PreconditionLoad\nGot:\n%s", got)
+	}
+	if strings.Contains(got, "seedCount") {
+		t.Errorf("read-from-file should NOT reference seedCount\nGot:\n%s", got)
+	}
+}
+
+func TestGenerateWriteScenario_CleanupDefault(t *testing.T) {
+	// Exercises the write cleanup default branch (no count/duration)
+	params := Params{
+		WorkloadType: "write",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Cleanup:      true,
+		// No ObjectCount or Duration set
+	}
+
+	got, err := GenerateWriteScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateWriteScenario() error = %v", err)
+	}
+
+	// Should default to 1000 objects
+	if !strings.Contains(got, "var itemCount = 1000") {
+		t.Errorf("expected default 1000 objects for cleanup scenario\nGot:\n%s", got)
+	}
+	// Should have create and delete phases
+	if !strings.Contains(got, "CreateLoad") {
+		t.Errorf("expected CreateLoad\nGot:\n%s", got)
+	}
+	if !strings.Contains(got, "DeleteLoad") {
+		t.Errorf("expected DeleteLoad\nGot:\n%s", got)
+	}
+}
+
+func TestGenerateReadScenario_FromFile_NoCleanupDefaultStepIDs(t *testing.T) {
+	// Read-from-file without cleanup and no duration/count should
+	// default to 60s and only have a read step ID
+	params := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		ItemsFile:    "/data/items.csv",
+		// No Cleanup, no Duration, no ObjectCount
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() error = %v", err)
+	}
+
+	readIDPattern := regexp.MustCompile(`mt-001-\d{8}\.\d{6}\.\d{3}-read`)
+	if !readIDPattern.MatchString(got) {
+		t.Error("expected read step ID (mt-001-...-read)")
+	}
+
+	// Should NOT have delete step
+	if strings.Contains(got, "DeleteLoad") {
+		t.Errorf("should NOT have DeleteLoad without cleanup\nGot:\n%s", got)
+	}
+
+	// Should default to 60s
+	if !strings.Contains(got, `var duration = "60s"`) {
+		t.Errorf("expected default 60s duration\nGot:\n%s", got)
+	}
+}
+
+func TestGenerateWriteScenario_SaveItems_NotOnCleanup(t *testing.T) {
+	// SaveItems on write-with-cleanup templates doesn't add extra
+	// item.output.file since those templates already use itemsFile
+	// for create→delete passing. Verify the cleanup template still
+	// generates valid output with SaveItems set.
+	params := Params{
+		WorkloadType: "write",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		ObjectCount:  100,
+		Cleanup:      true,
+		SaveItems:    true,
+	}
+
+	got, err := GenerateWriteScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateWriteScenario() error = %v", err)
+	}
+
+	// Cleanup templates already produce itemsFile for create→delete
+	if !strings.Contains(got, "CreateLoad") {
+		t.Error("expected CreateLoad")
+	}
+	if !strings.Contains(got, "DeleteLoad") {
+		t.Error("expected DeleteLoad")
+	}
+	if !strings.Contains(got, "itemsFile") {
+		t.Error("expected itemsFile reference")
+	}
+}
+
+func TestGenerateReadScenario_StandardVsFromFile(t *testing.T) {
+	// Verify that standard read (with seed) and read-from-file produce
+	// fundamentally different scenarios
+	standardParams := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "2m",
+		SeedCount:    500,
+	}
+	fromFileParams := Params{
+		WorkloadType: "read",
+		Bucket:       "testbucket",
+		Threads:      4,
+		ObjectSize:   "1MB",
+		Duration:     "2m",
+		ItemsFile:    "/data/items.csv",
+	}
+
+	standard, err := GenerateReadScenario(standardParams)
+	if err != nil {
+		t.Fatalf("standard: %v", err)
+	}
+	fromFile, err := GenerateReadScenario(fromFileParams)
+	if err != nil {
+		t.Fatalf("fromFile: %v", err)
+	}
+
+	// Standard should have seed phase; from-file should not
+	if !strings.Contains(standard, "PreconditionLoad") {
+		t.Error("standard should have PreconditionLoad")
+	}
+	if strings.Contains(fromFile, "PreconditionLoad") {
+		t.Error("from-file should NOT have PreconditionLoad")
+	}
+
+	// Both should have ReadLoad
+	if !strings.Contains(standard, "ReadLoad") {
+		t.Error("standard should have ReadLoad")
+	}
+	if !strings.Contains(fromFile, "ReadLoad") {
+		t.Error("from-file should have ReadLoad")
+	}
+
+	// From-file should reference the provided path
+	if !strings.Contains(fromFile, "/data/items.csv") {
+		t.Error("from-file should reference the items file path")
+	}
+}

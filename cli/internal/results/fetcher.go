@@ -40,6 +40,8 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
 	// S3 Tables metrics (only present on s3-tables runs)
 	{Loggers: []string{"TablesMetrics"}, Suffix: constants.ResultsArtifactSuffixTablesMetrics, Required: false},
+	// Items CSV (only present when --save-items is used on write workloads)
+	{Loggers: []string{"items.csv"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
 }
 
 // FileStatus records outcome for a single artifact.

@@ -13,12 +13,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -190,6 +192,14 @@ public final class LogServlet extends HttpServlet {
 			final String loggerName = matcher.group(KEY_LOGGER_NAME);
 			final String logFileNamePattern = logFileNamePatternByName.get(loggerName);
 			if (null == logFileNamePattern) {
+				// Check for non-logger files (e.g. items.csv) in the step log directory
+				final Path stepDir = resolveStepLogDir(stepId);
+				if (stepDir != null) {
+					final Path candidate = stepDir.resolve(loggerName);
+					if (Files.exists(candidate)) {
+						return Optional.of(candidate);
+					}
+				}
 				throw new NoLoggerException("No such logger: \"" + loggerName + "\"");
 			} else if (logFileNamePattern.isEmpty()) {
 				throw new NoLogFileException(
@@ -201,6 +211,20 @@ public final class LogServlet extends HttpServlet {
 		} else {
 			return Optional.empty();
 		}
+	}
+
+	/**
+	 * Derive the step log directory from the first non-empty logger file pattern.
+	 * Returns null if no patterns are available.
+	 */
+	private Path resolveStepLogDir(final String stepId) {
+		for (final String pattern : logFileNamePatternByName.values()) {
+			if (pattern != null && !pattern.isEmpty()) {
+				final String resolved = pattern.replace(PATTERN_STEP_ID_SUBST, stepId);
+				return Paths.get(resolved).getParent();
+			}
+		}
+		return null;
 	}
 
 	private static void respondFileContent(
@@ -272,6 +296,7 @@ public final class LogServlet extends HttpServlet {
 		final var root = mapper.createObjectNode();
 		root.put("step_id", stepId);
 		final var items = mapper.createArrayNode();
+		final Set<String> indexedFiles = new HashSet<>();
 		for (final var e : logFileNamePatternByName.entrySet()) {
 			final String logger = e.getKey();
 			final String pattern = e.getValue();
@@ -281,6 +306,7 @@ public final class LogServlet extends HttpServlet {
 			final Path p = Paths.get(file);
 			if (!Files.exists(p))
 				continue;
+			indexedFiles.add(p.getFileName().toString());
 			final var item = mapper.createObjectNode();
 			item.put("logger", logger);
 			item.put("href", "/logs/" + stepId + "/" + logger);
@@ -310,6 +336,39 @@ public final class LogServlet extends HttpServlet {
 			}
 			item.put("content_type", ctype);
 			items.add(item);
+		}
+		// Discover non-logger files (e.g. items.csv from item output) in the step log dir
+		final Path stepLogDir = resolveStepLogDir(stepId);
+		if (stepLogDir != null && Files.isDirectory(stepLogDir)) {
+			try (final var dirStream = Files.list(stepLogDir)) {
+				dirStream.filter(Files::isRegularFile)
+								.filter(p -> !indexedFiles.contains(p.getFileName().toString()))
+								.forEach(p -> {
+									final String fileName = p.getFileName().toString();
+									final var item = mapper.createObjectNode();
+									item.put("logger", fileName);
+									item.put("href", "/logs/" + stepId + "/" + fileName);
+									try {
+										item.put("size", Files.size(p));
+										final long mtime = Files.getLastModifiedTime(p).toMillis();
+										item.put("modified", java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+														.withZone(java.time.ZoneOffset.UTC)
+														.format(java.time.Instant.ofEpochMilli(mtime)));
+									} catch (final IOException ioe) {
+										Loggers.MSG.debug("Unable to read size/mtime for file {}", p, ioe);
+									}
+									final String name = fileName.toLowerCase(Locale.ROOT);
+									String ct;
+									if (name.endsWith(".csv"))
+										ct = "text/csv";
+									else if (name.endsWith(".log") || name.endsWith(".txt"))
+										ct = "text/plain";
+									else
+										ct = "application/octet-stream";
+									item.put("content_type", ct);
+									items.add(item);
+								});
+			}
 		}
 		root.set("items", items);
 		resp.getWriter().write(mapper.writeValueAsString(root));
