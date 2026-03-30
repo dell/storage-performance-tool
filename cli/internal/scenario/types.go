@@ -23,7 +23,11 @@ type Params struct {
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
 	// Read workload
-	SeedCount int // Number of seed objects for read benchmark (default: 2500)
+	SeedCount int    // Number of seed objects for read benchmark (default: 2500)
+	ItemsFile string // Path to a local items.csv for read workload (skips seed phase)
+
+	// Write workload
+	SaveItems bool // Save items.csv to the step log directory for later retrieval
 
 	// RDMA acceleration
 	UseRdma            bool   // Use s3-rdma driver instead of s3

@@ -122,6 +122,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **Interactive & Headless** – flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
+- **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.
 - **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
 - **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
 - **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
