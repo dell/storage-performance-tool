@@ -90,8 +90,12 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
+| `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
+| `--items-file` | | `""` | Path to a saved `items.csv` for `read` (skips seed phase) |
 
 *Typically specify either `--object-count` or `--duration`, not both.*
+
+**`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
 
 #### 3. Test Behavior Options
 
@@ -223,6 +227,45 @@ spt run read \
     --duration 5m \
     --cleanup
 ```
+
+### Write-Then-Read Workflow
+
+The `--save-items` and `--items-file` flags enable decoupled write-then-read workflows where write and read phases run as independent commands with separate concurrency, duration, and tuning.
+
+```bash
+# Step 1: Write objects and save the item list
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --save-items \
+    --label w-1mb
+
+# The items.csv artifact is saved to the results directory:
+#   ./results/w-1mb-<timestamp>/w-1mb-*-create.items.csv
+
+# Step 2: Read using the saved item list (no seed phase)
+spt run read \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 64 \
+    --object-size 1MB \
+    --duration 5m \
+    --items-file ./results/w-1mb-*/w-1mb-*.items.csv \
+    --label r-1mb
+```
+
+This pattern is useful for:
+- **Independent concurrency tuning** — different thread counts for writes vs. reads.
+- **Naturally-sized data sets** — the write phase produces an item set determined by actual throughput rather than an upfront `--seed-objects` guess.
+- **Separate write metrics** — write performance is measured and reported independently.
+- **Re-running reads** — the same `items.csv` can feed multiple read passes with different settings (duration, RDMA, concurrency) without recreating objects.
 
 ### List Workload
 
@@ -473,6 +516,7 @@ Node status (port 9999)
 | `status` command | Implemented |
 | Post-test cleanup (`--cleanup`) | Implemented |
 | Auto-results retrieval | Implemented |
+| Save/reuse item lists (`--save-items` / `--items-file`) | Implemented |
 | RDMA acceleration | Implemented |
 | TUI live dashboard | Implemented |
 | Headless / CI mode | Implemented |

@@ -27,4 +27,5 @@ const (
 	ResultsArtifactSuffixOpTrace          = "op.trace.csv"
 	ResultsArtifactSuffixMultipart        = "multipart.csv"
 	ResultsArtifactSuffixTablesMetrics    = "tables.metrics.log"
+	ResultsArtifactSuffixItems            = "items.csv"
 )

@@ -848,6 +848,8 @@ func init() {
 	// Headless auto-termination
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
+	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
@@ -1018,6 +1020,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	keepScenario, _ := cmd.Flags().GetBool("keep-scenario")
 	params.KeepScenario = keepScenario
+
+	saveItems, _ := cmd.Flags().GetBool("save-items")
+	params.SaveItems = saveItems
+
+	itemsFile, _ := cmd.Flags().GetString("items-file")
+	params.ItemsFile = itemsFile
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads

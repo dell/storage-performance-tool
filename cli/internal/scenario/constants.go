@@ -55,6 +55,8 @@ const (
 	templateKeyFetchMetadata        = "FetchMetadata"
 	templateKeyIncludeVersions      = "IncludeVersions"
 	templateKeyMaxKeys              = "MaxKeys"
+	templateKeySaveItems            = "SaveItems"
+	templateKeyItemsFile            = "ItemsFile"
 
 	stepOpCreate = "create"
 	stepOpRead   = "read"

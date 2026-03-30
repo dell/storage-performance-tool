@@ -53,6 +53,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
+		templateKeySaveItems:         params.SaveItems,
 		// Step IDs using shared timestamp and ordered numbers
 		templateKeyStepID:       formatStepID(1, ts, stepOpCreate),
 		templateKeyStepIDCreate: formatStepID(1, ts, stepOpCreate),
@@ -124,7 +125,7 @@ func GenerateReadScenario(params Params) (string, error) {
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySeedCount:         seedCount,
-		// Step IDs: seed=1, read=2, delete=3
+		// Step IDs: seed=1, read=2, delete=3 (read-from-file: read=1, delete=2)
 		templateKeyStepIDSeed:   formatStepID(1, ts, stepOpSeed),
 		templateKeyStepIDRead:   formatStepID(2, ts, stepOpRead),
 		templateKeyStepIDDelete: formatStepID(3, ts, stepOpDelete),
@@ -132,22 +133,53 @@ func GenerateReadScenario(params Params) (string, error) {
 
 	var tmplStr string
 
-	if params.Cleanup {
-		if params.ObjectCount > 0 {
-			tmplStr = readWithCleanupCountTemplate
-		} else if params.Duration != "" {
-			tmplStr = readWithCleanupDurationTemplate
+	// When ItemsFile is set, use read-from-file templates (skip seed phase)
+	if params.ItemsFile != "" {
+		data[templateKeyItemsFile] = fmt.Sprintf(`"%s"`, escapeJSONString(params.ItemsFile))
+		// Renumber step IDs: read=1, delete=2 (no seed)
+		data[templateKeyStepIDRead] = formatStepID(1, ts, stepOpRead)
+		data[templateKeyStepIDDelete] = formatStepID(2, ts, stepOpDelete)
+
+		if params.Cleanup {
+			if params.ObjectCount > 0 {
+				tmplStr = readFromFileCountCleanupTemplate
+			} else if params.Duration != "" {
+				tmplStr = readFromFileDurationCleanupTemplate
+			} else {
+				// Default: duration-based with cleanup
+				data[templateKeyDuration] = `"60s"`
+				tmplStr = readFromFileDurationCleanupTemplate
+			}
 		} else {
-			tmplStr = readDefaultTemplate
+			if params.ObjectCount > 0 {
+				tmplStr = readFromFileCountTemplate
+			} else if params.Duration != "" {
+				tmplStr = readFromFileDurationTemplate
+			} else {
+				// Default: duration-based without cleanup
+				data[templateKeyDuration] = `"60s"`
+				tmplStr = readFromFileDurationTemplate
+			}
 		}
 	} else {
-		if params.ObjectCount > 0 {
-			tmplStr = readNoCleanupCountTemplate
-		} else if params.Duration != "" {
-			tmplStr = readNoCleanupDurationTemplate
+		// Standard read templates with seed phase
+		if params.Cleanup {
+			if params.ObjectCount > 0 {
+				tmplStr = readWithCleanupCountTemplate
+			} else if params.Duration != "" {
+				tmplStr = readWithCleanupDurationTemplate
+			} else {
+				tmplStr = readDefaultTemplate
+			}
 		} else {
-			// Default: cleanup=true with defaults
-			tmplStr = readDefaultTemplate
+			if params.ObjectCount > 0 {
+				tmplStr = readNoCleanupCountTemplate
+			} else if params.Duration != "" {
+				tmplStr = readNoCleanupDurationTemplate
+			} else {
+				// Default: cleanup=true with defaults
+				tmplStr = readDefaultTemplate
+			}
 		}
 	}
 

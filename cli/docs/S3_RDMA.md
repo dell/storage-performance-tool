@@ -35,6 +35,19 @@ spt run read \
   --duration 5m \
   --use-rdma \
   --rdma-local-ip 10.247.128.125
+
+# RDMA read from a saved item list (skips seed phase)
+spt run read \
+  --endpoints https://ecs.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket benchmark-test \
+  --threads 64 \
+  --object-size 1MB \
+  --duration 5m \
+  --items-file ./results/w-1mb-*/w-1mb-*.items.csv \
+  --use-rdma \
+  --rdma-local-ip 10.247.128.125
 ```
 
 ---
