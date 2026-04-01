@@ -105,10 +105,13 @@ public final class Main {
 			final var defaultConfig = loadDefaultConfig(appHomePath);
 			// extensions: prefer ext/ next to the JAR, fall back to appHomePath/ext (IDE/dev)
 			final var extDir = Extension.resolveExtDir();
+			System.out.println(extDir);
 			final var extDirFile = extDir != null ? extDir : Paths.get(appHomePath.toString(), DIR_EXT).toFile();
 			try (final var extClsLoader = Extension.extClassLoader(extDirFile)) {
 				final var extensions = Extension.load(extClsLoader);
 				// install the extensions
+				System.out.println("Installing extensions...");
+				System.out.println(extensions);
 				installExtensions(extensions, appHomePath);
 				final Config configWithArgs;
 				try {
@@ -450,9 +453,12 @@ public final class Main {
 
 			// Load and print extensions from ext/ next to the JAR
 			final var extDir = Extension.resolveExtDir();
+			System.out.println(extDir);
 			if (extDir != null) {
 				try (final var extClsLoader = Extension.extClassLoader(extDir)) {
+					System.out.println(extClsLoader);
 					final var extensions = Extension.load(extClsLoader);
+					System.out.println(extensions);
 					if (!extensions.isEmpty()) {
 						System.out.println("\nAvailable extensions:");
 						extensions.forEach(ext -> {

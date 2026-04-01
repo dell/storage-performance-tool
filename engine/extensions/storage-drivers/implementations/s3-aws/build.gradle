@@ -1,29 +1,55 @@
 plugins {
-    id 'java-library'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "0.1.0"
+
+ext {
+	rootPkg = "com.dell.spt.storage.driver.coop.aws.s3"
 }
 
 dependencies {
-    // AWS SDK for S3 - comprehensive dependencies for all features
-    implementation 'software.amazon.awssdk:s3:2.21.29'
-    implementation 'software.amazon.awssdk:auth:2.21.29'
-    implementation 'software.amazon.awssdk:regions:2.21.29'
-    implementation 'software.amazon.awssdk:aws-core:2.21.29'
-    implementation 'software.amazon.awssdk:sts:2.21.29'
-    implementation 'software.amazon.awssdk:http-client-spi:2.21.29'
-    implementation 'software.amazon.awssdk:apache-client:2.21.29'
-    implementation 'software.amazon.awssdk:sdk-core:2.21.29'
-    implementation 'software.amazon.awssdk:utils:2.21.29'
-    implementation 'software.amazon.awssdk:profiles:2.21.29'
+	// AWS SDK – extension-private, safe to bundle
+	implementation 'software.amazon.awssdk:s3:2.21.29'
+	implementation 'software.amazon.awssdk:auth:2.21.29'
+	implementation 'software.amazon.awssdk:regions:2.21.29'
+	implementation 'software.amazon.awssdk:aws-core:2.21.29'
+	implementation 'software.amazon.awssdk:sts:2.21.29'
+	implementation 'software.amazon.awssdk:http-client-spi:2.21.29'
+	implementation 'software.amazon.awssdk:apache-client:2.21.29'
+	implementation 'software.amazon.awssdk:sdk-core:2.21.29'
+	implementation 'software.amazon.awssdk:utils:2.21.29'
+	implementation 'software.amazon.awssdk:profiles:2.21.29'
 
-    // SPT core dependencies as project dependencies
-    implementation project(':core:spt-base')
-    implementation project(':extensions:storage-drivers:primitives:coop')
+	// SPT framework APIs – provided by parent classloader
+	compileOnly project(':core:spt-base')
+	// S3 driver dependency (compileOnly - loaded from parent classloader)
+	compileOnly(
+		project(':extensions:storage-drivers:implementations:s3'),
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:netty'),
+		project(':extensions:storage-drivers:protocols:http'),
+	)
 
-    // Logging
-    implementation 'org.slf4j:slf4j-api:1.7.36'
+	// Configuration / schema framework (used by the extension class)
+	compileOnly libs.confuse
+	compileOnly libs.confuse.io.yaml
 
-    // Testing
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.mockito:mockito-core:4.11.0'
+	// Shared logging API – do not bundle
+	compileOnly 'org.slf4j:slf4j-api:1.7.36'
+
+	// Tests
+	testImplementation 'junit:junit:4.13.2'
+	testImplementation 'org.mockito:mockito-core:4.11.0'
+}
+
+shadowJar {
+	// Preserve SPI registrations from dependencies + this module
+	mergeServiceFiles()
+
+	// Never bundle SPT framework classes
+	// exclude("com/dell/spt/**")
+
+	archiveClassifier.set("all")
 }
