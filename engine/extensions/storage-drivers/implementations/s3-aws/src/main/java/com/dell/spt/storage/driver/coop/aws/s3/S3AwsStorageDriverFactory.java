@@ -15,6 +15,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
 
 import java.io.InputStream;
 import java.net.URI;
@@ -45,17 +46,94 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
 
+		try {
+			return createInternal(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+		} catch (Exception e) {
+			System.err.println("DEBUG: Factory create failed: " + e.getMessage());
+			e.printStackTrace();
+			throw e;
+		}
+	}
+
+	private S3AwsStorageDriver<I, O> createInternal(
+					final String stepId,
+					final DataInput dataInput,
+					final Config storageConfig,
+					final boolean verifyFlag,
+					final int batchSize)
+					throws IllegalConfigurationException, InterruptedException {
+
 		// ---------------------------
-		// Required config values
+		// Required config values - support both legacy S3 and AWS formats
 		// ---------------------------
-		final String accessKey = storageConfig.stringVal("access-key");
-		final String secretKey = storageConfig.stringVal("secret-key");
-		final String region = storageConfig.stringVal("region");
+		String accessKey;
+		String secretKey;
+		String region;
+		String bucket;
+
+		// Try legacy S3 parameters first (for backward compatibility)
+		try {
+			accessKey = storageConfig.stringVal("auth-uid");
+		} catch (Exception e1) {
+			try {
+				accessKey = storageConfig.stringVal("storage-auth-uid");
+			} catch (Exception e2) {
+				// Try AWS-specific parameter
+				try {
+					accessKey = storageConfig.stringVal("access-key");
+				} catch (Exception e3) {
+					throw new IllegalConfigurationException("Missing required parameter: access-key (or storage-auth-uid)");
+				}
+			}
+		}
+
+		try {
+			secretKey = storageConfig.stringVal("auth-secret");
+		} catch (Exception e1) {
+			try {
+				secretKey = storageConfig.stringVal("storage-auth-secret");
+			} catch (Exception e2) {
+				// Try AWS-specific parameter
+				try {
+					secretKey = storageConfig.stringVal("secret-key");
+				} catch (Exception e3) {
+					throw new IllegalConfigurationException("Missing required parameter: secret-key (or storage-auth-secret)");
+				}
+			}
+		}
+
+		// Region is AWS-specific but optional for some S3-compatible services
+		try {
+			region = storageConfig.stringVal("region");
+		} catch (Exception e) {
+			// For S3-compatible services like SeaweedFS, use a default region
+			region = "eu-west-2";
+		}
+
+		// Ensure region is never null for AWS SDK
+		if (region == null || region.isEmpty()) {
+			region = "eu-west-2";
+		}
+
+		// Bucket name - try different parameter names
+		try {
+			bucket = storageConfig.stringVal("bucket");
+		} catch (Exception e1) {
+			try {
+				bucket = storageConfig.stringVal("storage-net-node-addrs");
+				// Extract bucket from node addresses if it's the first part
+				if (bucket != null && bucket.contains("/")) {
+					bucket = bucket.split("/")[0];
+				}
+			} catch (Exception e2) {
+				bucket = "default-bucket"; // Fallback
+			}
+		}
 
 		// ---------------------------
 		// Optional config values (confuse-style)
 		// ---------------------------
-		String endpoint;
+		String endpoint = null;
 		boolean pathStyle;
 		int maxConnections;
 		int socketTimeout;
@@ -63,32 +141,60 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 
 		try {
 			endpoint = storageConfig.stringVal("endpoint");
-		} catch (Exception e) {
-			endpoint = null;
+			if (endpoint == null) {
+				throw new Exception("endpoint parameter is null");
+			}
+		} catch (Exception e1) {
+			try {
+				// Try accessing nested config objects
+				Config netConfig = storageConfig.configVal("net");
+				Config nodeConfig = netConfig.configVal("node");
+				List<String> addrs = nodeConfig.listVal("addrs");
+
+				if (addrs != null && !addrs.isEmpty()) {
+					String nodeAddrs = addrs.get(0);
+
+					// Convert node address to endpoint URL
+					if (!nodeAddrs.startsWith("http://") && !nodeAddrs.startsWith("https://")) {
+						endpoint = "http://" + nodeAddrs;
+					} else {
+						endpoint = nodeAddrs;
+					}
+				} else {
+					endpoint = null;
+				}
+			} catch (Exception e2) {
+				endpoint = null;
+			}
 		}
 
 		try {
 			pathStyle = storageConfig.boolVal("path-style-access");
-		} catch (Exception e) {
-			pathStyle = false;
+		} catch (Exception e1) {
+			try {
+				// Try legacy S3 path style access parameter
+				pathStyle = storageConfig.boolVal("storage-net-s3-path-style-access");
+			} catch (Exception e2) {
+				pathStyle = false; // Default for AWS S3
+			}
 		}
 
 		try {
 			maxConnections = storageConfig.intVal("max-connections");
 		} catch (Exception e) {
-			maxConnections = 64;
+			maxConnections = 128; // Increased from 64 for better concurrency
 		}
 
 		try {
 			socketTimeout = storageConfig.intVal("socket-timeout-ms");
 		} catch (Exception e) {
-			socketTimeout = 60000;
+			socketTimeout = 30000; // Reduced from 60000 for faster failure detection
 		}
 
 		try {
 			connTimeout = storageConfig.intVal("connection-timeout-ms");
 		} catch (Exception e) {
-			connTimeout = 10000;
+			connTimeout = 10000; // Reverted to 10s for more stable connections
 		}
 
 		// ---------------------------
@@ -100,21 +206,23 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						.maxConnections(maxConnections)
 						.socketTimeout(Duration.ofMillis(socketTimeout))
 						.connectionTimeout(Duration.ofMillis(connTimeout))
+						.connectionAcquisitionTimeout(Duration.ofSeconds(5))
+						.connectionMaxIdleTime(Duration.ofMinutes(1))
+						.connectionTimeToLive(Duration.ofMinutes(5))
 						.build();
 
-		final var s3Builder = S3Client.builder()
+		S3Client s3Client = S3Client.builder()
 						.region(Region.of(region))
-						.credentialsProvider(
-										StaticCredentialsProvider.create(creds))
-						.httpClient(httpClient);
-
-		if (endpoint != null && !endpoint.isEmpty()) {
-			s3Builder.endpointOverride(URI.create(endpoint));
-		}
-
-		if (pathStyle) {
-			s3Builder.forcePathStyle(true);
-		}
+						.credentialsProvider(StaticCredentialsProvider.create(creds))
+						.httpClient(httpClient)
+						.endpointOverride(URI.create(endpoint))
+						.forcePathStyle(pathStyle)
+						.serviceConfiguration(S3Configuration.builder()
+										.chunkedEncodingEnabled(false)
+										.dualstackEnabled(false)
+										.accelerateModeEnabled(false)
+										.build())
+						.build();
 
 		return new S3AwsStorageDriver<>(
 						stepId,
@@ -122,7 +230,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						storageConfig,
 						verifyFlag,
 						batchSize,
-						s3Builder.build());
+						s3Client);
 	}
 
 	@Override
