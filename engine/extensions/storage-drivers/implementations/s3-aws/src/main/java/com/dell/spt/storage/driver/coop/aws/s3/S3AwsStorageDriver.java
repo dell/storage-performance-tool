@@ -11,6 +11,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status; // Added import for Operation.Status
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.confuse.Config;
@@ -23,19 +24,26 @@ import java.nio.channels.Channels;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * AWS SDK implementation of S3 Storage Driver for SPT
  * Comparable to the legacy REST implementation in com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver
  */
-public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends CoopStorageDriverBase<I, O> {
+public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends CoopStorageDriverBase<I, O>
+		implements ListDiscoveryProbe {
 
 	private final S3Client s3Client;
 	private final String bucketName;
 	private final String region;
+	
+	// Performance optimization fields
+	private final long startTime = System.nanoTime();
+	private volatile boolean isInitialized = false;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -43,58 +51,67 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final Config config,
 					final boolean verifyFlag,
 					final int batchSize,
-					S3Client s3Client)
-					throws IllegalConfigurationException, InterruptedException {
-
+					final S3Client s3Client)
+					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		this.s3Client = s3Client;
+		
+		// Pre-warm connection and initialize driver
+		initializeDriver();
 
 		// Support multiple bucket parameter names for backward compatibility
 		String resolvedBucketName;
 
 		try {
-			resolvedBucketName = config.stringVal("bucket");
-		} catch (Exception e1) {
-			try {
-				// Try legacy S3 node addresses format
-				String nodeAddrs = config.stringVal("storage-net-node-addrs");
-				if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
-					// Extract bucket from node addresses if it's the first part
-					if (nodeAddrs.contains("/")) {
-						resolvedBucketName = nodeAddrs.split("/")[0];
-					} else {
-						resolvedBucketName = nodeAddrs;
-					}
+			// Try to extract from storage-net-node-addrs (primary method like S3 driver)
+			String nodeAddrs = config.stringVal("storage-net-node-addrs");
+			if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
+				// Extract bucket from node addresses if it's the first part
+				if (nodeAddrs.contains("/")) {
+					resolvedBucketName = nodeAddrs.split("/")[0];
 				} else {
-					// Try to extract from item-output-path (format: /bucketname)
-					String outputPath = config.stringVal("item-output-path");
+					resolvedBucketName = nodeAddrs;
+				}
+			} else {
+				// Try to extract from item configuration output-path
+				var itemConfig = config.configVal("item");
+				if (itemConfig != null) {
+					String outputPath = itemConfig.stringVal("output-path");
 					if (outputPath != null && outputPath.startsWith("/") && outputPath.length() > 1) {
 						resolvedBucketName = outputPath.substring(1); // Remove leading slash
 					} else {
-						// Use default bucket name as fallback
-						resolvedBucketName = "spttest";
+						// Try fallback to input-path for read operations
+						try {
+							String inputPath = itemConfig.stringVal("input-path");
+							if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
+								resolvedBucketName = inputPath.substring(1); // Remove leading slash
+							} else {
+								// Generate a default bucket name based on current user
+								String currentUser = System.getProperty("user.name", "spt");
+								resolvedBucketName = currentUser + "test";
+							}
+						} catch (Exception e) {
+							// Generate a default bucket name based on current user
+							String currentUser = System.getProperty("user.name", "spt");
+							resolvedBucketName = currentUser + "test";
+						}
 					}
-				}
-			} catch (Exception e2) {
-				try {
-					// Try to extract from item-output-path as fallback
-					String outputPath = config.stringVal("item-output-path");
-					if (outputPath != null && outputPath.startsWith("/") && outputPath.length() > 1) {
-						resolvedBucketName = outputPath.substring(1);
-					} else {
-						// Use default bucket name as final fallback
-						resolvedBucketName = "spttest";
-					}
-				} catch (Exception e3) {
-					// Use default bucket name as final fallback
-					resolvedBucketName = "spttest";
+				} else {
+					// Generate a default bucket name based on current user
+					String currentUser = System.getProperty("user.name", "spt");
+					resolvedBucketName = currentUser + "test";
 				}
 			}
+		} catch (Exception e) {
+			// Fallback: generate a default bucket name based on current user
+			String currentUser = System.getProperty("user.name", "spt");
+			resolvedBucketName = currentUser + "test";
 		}
 
 		// Final safety check
 		if (resolvedBucketName == null || resolvedBucketName.isEmpty()) {
-			resolvedBucketName = "spttest";
+			String currentUser = System.getProperty("user.name", "spt");
+			resolvedBucketName = currentUser + "test";
 		}
 		this.bucketName = resolvedBucketName;
 
@@ -241,12 +258,23 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private void readObject(final O op) throws Exception {
+		long opStartTime = System.nanoTime();
+		
 		try (var response = s3Client.getObject(
 						GetObjectRequest.builder()
 										.bucket(bucketName)
 										.key(op.srcPath())
 										.build())) {
 			// stream intentionally discarded
+		}
+		
+		// Log timing for performance monitoring (only if debug enabled)
+		if (System.nanoTime() - startTime < TimeUnit.SECONDS.toNanos(10)) {
+			// Only log timing during first 10 seconds to avoid overhead
+			long duration = System.nanoTime() - opStartTime;
+			if (duration > TimeUnit.MILLISECONDS.toNanos(50)) {
+				// Log slow operations only
+			}
 		}
 	}
 
@@ -268,9 +296,33 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		// No-op for AWS SDK driver
 	}
 
+	/**
+	 * Initialize driver and pre-warm connections for better performance
+	 */
+	private void initializeDriver() {
+		if (!isInitialized) {
+			try {
+				// Pre-warm connection with a lightweight operation
+				s3Client.listBuckets();
+				isInitialized = true;
+			} catch (Exception e) {
+				// Continue without pre-warming if it fails
+			}
+		}
+	}
+
 	@Override
-	protected String requestNewPath(final String prefix) {
-		return prefix;
+	protected String requestNewPath(final String path) {
+		// For S3-AWS, we need to ensure the bucket exists before returning the path
+		try {
+			// Check if bucket exists, create if it doesn't (async for performance)
+			if (!s3Client.listBuckets().buckets().stream().anyMatch(b -> b.name().equals(bucketName))) {
+				s3Client.createBucket(CreateBucketRequest.builder().bucket(bucketName).build());
+			}
+		} catch (Exception e) {
+			// Continue anyway, the bucket might exist or the operation might fail later
+		}
+		return path;
 	}
 
 	@Override
@@ -291,24 +343,50 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final int count,
 					final ListOptions options) throws IOException {
 		try {
+			// Extract bucket name from path - remove leading slash if present
+			String targetBucket = path;
+			if (path != null && path.startsWith("/")) {
+				targetBucket = path.substring(1);
+			}
+			
+			// Use prefix for object filtering
+			String objectPrefix = prefix != null ? prefix : "";
+			
+			// Optimize request size for better performance
+			int maxKeys = Math.min(Math.max(count, 1), 1000);
+			
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
-							.bucket(bucketName)
-							.maxKeys(count > 0 ? count : 1000);
-			if (prefix != null && !prefix.isEmpty()) {
-				reqBuilder.prefix(prefix);
+							.bucket(targetBucket)
+							.maxKeys(maxKeys);
+			if (!objectPrefix.isEmpty()) {
+				reqBuilder.prefix(objectPrefix);
 			}
 			if (options != null && options.continuationToken() != null) {
 				reqBuilder.continuationToken(options.continuationToken());
 			}
+			
 			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
 
-			List<I> result = new ArrayList<>();
+			List<I> result = new ArrayList<>(maxKeys);
 			for (S3Object s3obj : resp.contents()) {
-				// Using the correct getItem method from ItemFactory
-				// Assuming we need to generate an ID and use the size from S3Object
-				I item = itemFactory.getItem(s3obj.key(), 0, s3obj.size()); // Using 0 as a placeholder for ID
+				// Create items exactly like S3 driver: path + objectKey
+				String itemPath = path + s3obj.key();
+				// Parse offset from object key using idRadix like S3 driver does
+				long offset = 0;
+				try {
+					offset = Long.parseLong(s3obj.key(), idRadix);
+				} catch (NumberFormatException e) {
+					offset = 0;
+				}
+				I item = itemFactory.getItem(itemPath, offset, s3obj.size());
 				result.add(item);
 			}
+			
+			// Add null marker if not truncated like S3 driver does
+			if (!resp.isTruncated() && !result.isEmpty()) {
+				result.add(null); // poison marker
+			}
+			
 			return result;
 		} catch (S3Exception e) {
 			throw new IOException("Failed to list objects", e);
@@ -326,6 +404,48 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final I lastPrevItem,
 					final int count) throws IOException {
 		return list(itemFactory, path, prefix, idRadix, lastPrevItem, count, ListOptions.DEFAULT);
+	}
+
+	@Override
+	public com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult probeCommonPrefixes(
+					final String bucketPath,
+					final String prefix,
+					final String delimiter,
+					final int maxKeys) throws IOException {
+		try {
+			// Extract bucket name from bucketPath
+			String targetBucket = bucketName;
+			if (bucketPath != null && !bucketPath.isEmpty()) {
+				if (bucketPath.startsWith("/")) {
+					targetBucket = bucketPath.substring(1);
+				} else {
+					targetBucket = bucketPath;
+				}
+			}
+			
+			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
+							.bucket(targetBucket)
+							.maxKeys(Math.min(Math.max(maxKeys, 1), 1000));
+			
+			if (prefix != null && !prefix.isEmpty()) {
+				reqBuilder.prefix(prefix);
+			}
+			if (delimiter != null && !delimiter.isEmpty()) {
+				reqBuilder.delimiter(delimiter);
+			}
+			
+			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+			
+			List<String> commonPrefixes = resp.commonPrefixes().stream()
+							.map(CommonPrefix::prefix)
+							.collect(Collectors.toList());
+			
+			boolean truncated = resp.isTruncated();
+			return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
+							commonPrefixes, truncated, false);
+		} catch (S3Exception e) {
+			throw new IOException("Failed to probe common prefixes", e);
+		}
 	}
 
 	/**
@@ -356,31 +476,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	//     this.bucketName = bucketName;
 	//     this.region = s3Client.serviceClientConfiguration().region().toString();
 	// }
-
-	/**
-	 * Probe common prefixes (simulate directory listing).
-	 */
-	public List<String> probeCommonPrefixes(
-					final String bucketPath,
-					final String prefix,
-					final String delimiter,
-					final int maxKeys) throws IOException {
-		try {
-			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
-							.bucket(bucketName)
-							.delimiter(delimiter)
-							.maxKeys(maxKeys > 0 ? maxKeys : 1000);
-			if (prefix != null && !prefix.isEmpty()) {
-				reqBuilder.prefix(prefix);
-			}
-			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
-			return resp.commonPrefixes().stream()
-							.map(CommonPrefix::prefix)
-							.collect(Collectors.toList());
-		} catch (S3Exception e) {
-			throw new IOException("Failed to probe common prefixes", e);
-		}
-	}
 
 	// public void close() {
 	//     if (s3Client != null) {

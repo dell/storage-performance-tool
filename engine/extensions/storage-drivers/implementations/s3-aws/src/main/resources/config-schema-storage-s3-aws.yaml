@@ -13,8 +13,7 @@ storage:
   secret-key: string
   region: string
   
-  # Bucket configuration
-  bucket: string
+  # Network configuration  
   storage-net-node-addrs: string
   
   # Endpoint configuration

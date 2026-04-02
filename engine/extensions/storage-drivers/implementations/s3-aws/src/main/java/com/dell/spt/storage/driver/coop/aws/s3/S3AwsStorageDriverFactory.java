@@ -198,17 +198,20 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		}
 
 		// ---------------------------
-		// Build AWS client
+		// Build AWS client with optimized performance settings
 		// ---------------------------
 		final var creds = AwsBasicCredentials.create(accessKey, secretKey);
 
+		// Use optimized Apache HTTP client for better performance
 		final var httpClient = ApacheHttpClient.builder()
 						.maxConnections(maxConnections)
-						.socketTimeout(Duration.ofMillis(socketTimeout))
 						.connectionTimeout(Duration.ofMillis(connTimeout))
-						.connectionAcquisitionTimeout(Duration.ofSeconds(5))
-						.connectionMaxIdleTime(Duration.ofMinutes(1))
-						.connectionTimeToLive(Duration.ofMinutes(5))
+						.socketTimeout(Duration.ofMillis(socketTimeout))
+						.connectionAcquisitionTimeout(Duration.ofSeconds(3))
+						.connectionMaxIdleTime(Duration.ofSeconds(30))
+						.connectionTimeToLive(Duration.ofMinutes(2))
+						// Performance optimizations
+						.tcpKeepAlive(true)
 						.build();
 
 		S3Client s3Client = S3Client.builder()
@@ -221,6 +224,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 										.chunkedEncodingEnabled(false)
 										.dualstackEnabled(false)
 										.accelerateModeEnabled(false)
+										// Performance optimizations
+										.useArnRegionEnabled(true)
 										.build())
 						.build();
 
