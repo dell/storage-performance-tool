@@ -24,7 +24,6 @@ import java.nio.channels.Channels;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -35,12 +34,12 @@ import java.util.concurrent.TimeUnit;
  * Comparable to the legacy REST implementation in com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver
  */
 public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends CoopStorageDriverBase<I, O>
-		implements ListDiscoveryProbe {
+				implements ListDiscoveryProbe {
 
 	private final S3Client s3Client;
 	private final String bucketName;
 	private final String region;
-	
+
 	// Performance optimization fields
 	private final long startTime = System.nanoTime();
 	private volatile boolean isInitialized = false;
@@ -55,7 +54,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		this.s3Client = s3Client;
-		
+
 		// Pre-warm connection and initialize driver
 		initializeDriver();
 
@@ -259,7 +258,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private void readObject(final O op) throws Exception {
 		long opStartTime = System.nanoTime();
-		
+
 		try (var response = s3Client.getObject(
 						GetObjectRequest.builder()
 										.bucket(bucketName)
@@ -267,7 +266,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 										.build())) {
 			// stream intentionally discarded
 		}
-		
+
 		// Log timing for performance monitoring (only if debug enabled)
 		if (System.nanoTime() - startTime < TimeUnit.SECONDS.toNanos(10)) {
 			// Only log timing during first 10 seconds to avoid overhead
@@ -348,13 +347,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (path != null && path.startsWith("/")) {
 				targetBucket = path.substring(1);
 			}
-			
+
 			// Use prefix for object filtering
 			String objectPrefix = prefix != null ? prefix : "";
-			
+
 			// Optimize request size for better performance
 			int maxKeys = Math.min(Math.max(count, 1), 1000);
-			
+
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
 							.bucket(targetBucket)
 							.maxKeys(maxKeys);
@@ -364,7 +363,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (options != null && options.continuationToken() != null) {
 				reqBuilder.continuationToken(options.continuationToken());
 			}
-			
+
 			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
 
 			List<I> result = new ArrayList<>(maxKeys);
@@ -381,12 +380,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				I item = itemFactory.getItem(itemPath, offset, s3obj.size());
 				result.add(item);
 			}
-			
+
 			// Add null marker if not truncated like S3 driver does
 			if (!resp.isTruncated() && !result.isEmpty()) {
 				result.add(null); // poison marker
 			}
-			
+
 			return result;
 		} catch (S3Exception e) {
 			throw new IOException("Failed to list objects", e);
@@ -422,24 +421,24 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					targetBucket = bucketPath;
 				}
 			}
-			
+
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
 							.bucket(targetBucket)
 							.maxKeys(Math.min(Math.max(maxKeys, 1), 1000));
-			
+
 			if (prefix != null && !prefix.isEmpty()) {
 				reqBuilder.prefix(prefix);
 			}
 			if (delimiter != null && !delimiter.isEmpty()) {
 				reqBuilder.delimiter(delimiter);
 			}
-			
+
 			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
-			
+
 			List<String> commonPrefixes = resp.commonPrefixes().stream()
 							.map(CommonPrefix::prefix)
 							.collect(Collectors.toList());
-			
+
 			boolean truncated = resp.isTruncated();
 			return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
 							commonPrefixes, truncated, false);
