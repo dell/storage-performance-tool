@@ -117,9 +117,10 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 
 ## Features
 
-- **Unified Experience** – SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** – write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
-- **Interactive & Headless** – flip between a terminal UI for live monitoring and headless mode for CI/CD.
+- **Unified Experience** -- SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
+- **Multi-Workload Support** -- write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
+- **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
+- **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.

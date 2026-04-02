@@ -6,6 +6,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
@@ -28,6 +29,8 @@ import org.apache.logging.log4j.CloseableThreadContext;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
+
+	static final int MAX_PART_RETRIES = 3;
 
 	protected final Semaphore concurrencyThrottle;
 	protected final BlockingQueue<O> childOpQueue;
@@ -177,6 +180,29 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			} else if (op instanceof PartialOperation) {
 				final var subOp = (PartialOperation) op;
 				final var parentOp = subOp.parent();
+				if (op.status() != Operation.Status.SUCC) {
+					if (subOp.retryCount() < MAX_PART_RETRIES) {
+						// retry the individual part instead of aborting the whole MPU
+						final var failStatus = op.status();
+						subOp.incrementRetryCount();
+						parentOp.undoMarkSubTaskCompleted();
+						op.status(Operation.Status.PENDING);
+						if (op.item() instanceof DataItem dataItem) {
+							dataItem.reset();
+						}
+						Loggers.ERR.warn(
+										"{}: part #{} failed ({}), retry {}/{}",
+										toString(), subOp.partNumber(), failStatus,
+										subOp.retryCount(), MAX_PART_RETRIES);
+						if (!childOpQueue.offer(op)) {
+							Loggers.ERR.warn(
+											"{}: Child operations queue overflow, dropping retry", toString());
+						}
+					} else {
+						// retries exhausted — abort the MPU
+						parentOp.put("mpuAbort", "true");
+					}
+				}
 				if (parentOp.allSubOperationsDone()) {
 					// execute once again to finalize the things if necessary:
 					// complete the multipart upload, for example

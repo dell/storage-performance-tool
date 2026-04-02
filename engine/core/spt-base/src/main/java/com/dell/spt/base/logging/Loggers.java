@@ -36,6 +36,7 @@ public interface Loggers {
 									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
 									"Threshold Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
+					Map.entry(MULTIPART.getName().substring(BASE.length()), "Multipart Upload Phases"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),
 					Map.entry(TABLES_METRICS.getName().substring(BASE.length()), "S3 Tables Metrics"));
 }

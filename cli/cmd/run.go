@@ -843,6 +843,9 @@ func init() {
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 
+	// Multipart Upload Options
+	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MB, 64MB, 256MB)")
+
 	// Test Behavior Options
 	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
 	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
@@ -1008,6 +1011,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	objectSize, _ := cmd.Flags().GetString("object-size")
 	params.ObjectSize = objectSize
+
+	partSize, _ := cmd.Flags().GetString("part-size")
+	params.PartSize = partSize
 
 	objectCount, _ := cmd.Flags().GetInt("object-count")
 	params.ObjectCount = objectCount
@@ -1216,6 +1222,11 @@ func formatScenarioParams(params scenario.Params) string {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
+	}
+
+	// Show part size if multipart upload is enabled
+	if params.PartSize != "" {
+		lines = append(lines, fmt.Sprintf("Part Size: %s (multipart upload)", params.PartSize))
 	}
 
 	// Always show object count (0 means not set)

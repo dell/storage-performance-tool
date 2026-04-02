@@ -1844,6 +1844,95 @@ func TestReadNoOpLimitInGeneratedScenarios(t *testing.T) {
 	}
 }
 
+func TestGenerateWriteScenario_PartSize(t *testing.T) {
+	tests := []struct {
+		name         string
+		params       Params
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name: "part size injects ranges threshold",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1GB",
+				ObjectCount:  100,
+				PartSize:     "64MB",
+			},
+			wantContains: []string{
+				`"ranges"`,
+				`"threshold": "64MB"`,
+			},
+		},
+		{
+			name: "no part size omits ranges",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1GB",
+				ObjectCount:  100,
+			},
+			wantAbsent: []string{
+				`"ranges"`,
+				`"threshold"`,
+			},
+		},
+		{
+			name: "part size with duration template",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1GB",
+				Duration:     "5m",
+				PartSize:     "64MB",
+			},
+			wantContains: []string{
+				`"ranges"`,
+				`"threshold": "64MB"`,
+			},
+		},
+		{
+			name: "part size with cleanup template",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "testbucket",
+				Threads:      4,
+				ObjectSize:   "1GB",
+				ObjectCount:  100,
+				PartSize:     "64MB",
+				Cleanup:      true,
+			},
+			wantContains: []string{
+				`"ranges"`,
+				`"threshold": "64MB"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateWriteScenario(tt.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("expected output to contain %q, got:\n%s", want, got)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("expected output NOT to contain %q, got:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateWriteScenario_SaveItems(t *testing.T) {
 	tests := []struct {
 		name       string

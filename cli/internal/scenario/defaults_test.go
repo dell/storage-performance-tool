@@ -708,6 +708,96 @@ func TestGenerateDefaults(t *testing.T) {
 		tests = append(tests, tt)
 	}
 
+	// Multipart upload (part-size) test cases
+	mpuCases := []struct {
+		name        string
+		params      Params
+		wantErr     bool
+		checkOutput func(t *testing.T, data []byte)
+	}{
+		{
+			name: "write with part-size sets batch size 1",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				PartSize:     "64MB",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Load == nil {
+					t.Fatal("Expected Load config to be set")
+				}
+				if config.Load.Batch == nil {
+					t.Fatal("Expected Load.Batch config to be set for MPU")
+				}
+				if config.Load.Batch.Size != 1 {
+					t.Errorf("Expected batch size 1 for MPU, got %d", config.Load.Batch.Size)
+				}
+			},
+		},
+		{
+			name: "write without part-size has no batch override",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				yamlStr := string(data)
+				if strings.Contains(yamlStr, "batch:") {
+					t.Error("Expected no batch config when part-size is not set")
+				}
+			},
+		},
+		{
+			name: "part-size with service-threads sets both",
+			params: Params{
+				WorkloadType:   "write",
+				Endpoint:       "http://s3.example.com",
+				AccessKey:      "key",
+				SecretKey:      "secret",
+				Bucket:         "bucket",
+				Threads:        4,
+				PartSize:       "64MB",
+				ServiceThreads: 8,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Load == nil {
+					t.Fatal("Expected Load config")
+				}
+				if config.Load.Batch == nil || config.Load.Batch.Size != 1 {
+					t.Error("Expected batch size 1 for MPU")
+				}
+				if config.Load.Service == nil || config.Load.Service.Threads != 8 {
+					t.Error("Expected service threads 8")
+				}
+			},
+		},
+	}
+	for _, tt := range mpuCases {
+		tests = append(tests, tt)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := GenerateDefaults(tt.params)

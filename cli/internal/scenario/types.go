@@ -11,6 +11,7 @@ type Params struct {
 	Prefix       string
 	Threads      int
 	ObjectSize   string
+	PartSize     string // Multipart upload part size (e.g. "64MB"); empty = single PUT
 	ObjectCount  int
 	Duration     string
 	AuthVersion  int

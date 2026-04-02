@@ -1,6 +1,8 @@
 # Changelog
 
 # Contents
+## 2026
+* [5.6.0](#560) 2026-03-27
 ## 2021
 * [4.3.0](#430) 2021-02-17
 * [4.3.1](#431) 2021-05-13
@@ -78,6 +80,19 @@
 * [0.1.5](#015) 09/22/14
 * [0.1.4](#014) 09/17/14
 * [0.1.3](#013) 08/15/14
+
+# 5.6.0
+
+## Multipart Upload Enhancements
+
+| Feature | Description |
+|---------|-------------|
+| `--part-size` CLI flag | Enable S3 multipart upload from the CLI. Maps to `item-data-ranges-threshold` in the engine. Applies to write workloads and read seed phases. |
+| AbortMultipartUpload | The engine now sends `DELETE ?uploadId=...` to abort incomplete uploads when part retries are exhausted or the step shuts down. Prevents orphaned parts from accumulating on the storage target. |
+| Per-part retry | Individual parts are retried up to 3 times before the entire upload is aborted. A transient network error on one part no longer kills the whole MPU. |
+| Per-part checksums | When `storage-checksum-enabled=true`, checksums (MD5, CRC32, CRC32C, SHA1, SHA256) are computed and sent for each individual part upload, not just simple PUTs. |
+| Batch-size auto-forcing | The CLI automatically sets `load.batch.size=1` when `--part-size` is set. The engine emits a warning if JAR users forget this setting. |
+| Broadened UploadId regex | The `S3ResponseHandler` regex for extracting UploadId now uses `[^<]+` instead of a restrictive character class, supporting MinIO, Ceph, and other S3-compatible stores. |
 
 # 4.3.2
 

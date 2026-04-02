@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
@@ -38,7 +39,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
-					"<UploadId>([a-zA-Z\\d\\-_+=/]+)</UploadId>", Pattern.MULTILINE);
+					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
 	private final boolean versioningEnabled;
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
@@ -49,7 +50,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders) {
-		if (op instanceof PartialDataOperation) {
+		if (op instanceof PartialDataOperation && OpType.CREATE.equals(op.type())) {
+			// Capture part ETags for MPU write — needed for CompleteMultipartUpload XML body
 			final PartialDataOperation subTask = (PartialDataOperation) op;
 			final String eTag = respHeaders.get(HttpHeaderNames.ETAG);
 			final CompositeDataOperation mpuTask = subTask.parent();

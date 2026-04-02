@@ -28,6 +28,8 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
 	c.Flags().Int("service-threads", 0, "")
+	c.Flags().String("part-size", "", "")
+	c.Flags().Int("auth-version", 4, "")
 	return c
 }
 
@@ -391,6 +393,53 @@ func TestApplyEnvDefaultsToRunFlags_ServiceThreadsInvalidEnv(t *testing.T) {
 		t.Fatal("expected error for invalid SPT_SERVICE_THREADS value")
 	}
 	if !strings.Contains(err.Error(), constants.EnvServiceThreads) {
+		t.Errorf("error should mention env var name, got: %v", err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_PartSizeFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvPartSize, "64MB")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetString("part-size"); v != "64MB" {
+		t.Fatalf("part-size not applied from env, got %q", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_PartSizeFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	_ = cmd.Flags().Set("part-size", "32MB")
+
+	os.Setenv(constants.EnvPartSize, "64MB")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	if v, _ := cmd.Flags().GetString("part-size"); v != "32MB" {
+		t.Fatal("CLI flag --part-size should win over SPT_PART_SIZE env")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_PartSizeInvalidEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvPartSize, "not-a-size")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
+
+	err := applyEnvDefaultsToRunFlags(cmd)
+	if err == nil {
+		t.Fatal("expected error for invalid SPT_PART_SIZE value")
+	}
+	if !strings.Contains(err.Error(), constants.EnvPartSize) {
 		t.Errorf("error should mention env var name, got: %v", err)
 	}
 }
