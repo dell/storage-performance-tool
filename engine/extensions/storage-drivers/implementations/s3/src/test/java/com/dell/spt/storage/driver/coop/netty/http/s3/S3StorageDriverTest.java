@@ -799,7 +799,7 @@ public class S3StorageDriverTest {
 	@SuppressWarnings("unchecked")
 	private static void setOpResultOut(TestS3Driver drv) throws Exception {
 		Output<Operation<Item>> mockOutput = Mockito.mock(Output.class);
-		Mockito.when(mockOutput.put(Mockito.<Operation<Item>>any())).thenReturn(true);
+		Mockito.when(mockOutput.put(Mockito.<Operation<Item>> any())).thenReturn(true);
 		Field outField = StorageDriverBase.class.getDeclaredField("opResultOut");
 		outField.setAccessible(true);
 		outField.set(drv, mockOutput);
@@ -812,8 +812,7 @@ public class S3StorageDriverTest {
 		return (BlockingQueue<Operation<Item>>) field.get(drv);
 	}
 
-	private static com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>
-					newCompositeOp(OpType opType, long itemSize, long threshold) throws Exception {
+	private static com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem> newCompositeOp(OpType opType, long itemSize, long threshold) throws Exception {
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, itemSize);
 		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167",
 						new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
@@ -868,7 +867,8 @@ public class S3StorageDriverTest {
 		var readOp = newCompositeOp(OpType.READ, 4096, 1024);
 		// Generate sub-tasks and mark them all completed
 		readOp.subOperations();
-		for (int i = 0; i < 4; i++) readOp.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			readOp.markSubTaskCompleted();
 		assertTrue(readOp.allSubOperationsDone());
 
 		@SuppressWarnings("unchecked")
@@ -935,7 +935,8 @@ public class S3StorageDriverTest {
 		// Create original op, generate sub-tasks, mark all done
 		var original = newCompositeOp(OpType.READ, 4096, 1024);
 		original.subOperations();
-		for (int i = 0; i < 4; i++) original.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			original.markSubTaskCompleted();
 		assertTrue(original.allSubOperationsDone());
 
 		// Create recycled copy — has empty subTasks and pendingSubTasksCount=0
@@ -967,7 +968,8 @@ public class S3StorageDriverTest {
 		// Create op with stale timing from a previous cycle
 		var original = newCompositeOp(OpType.READ, 4096, 1024);
 		original.subOperations();
-		for (int i = 0; i < 4; i++) original.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			original.markSubTaskCompleted();
 		var recycled = original.result();
 
 		@SuppressWarnings("unchecked")
@@ -1015,7 +1017,9 @@ public class S3StorageDriverTest {
 
 	private static void detachCapture(CapturingAppender appender) {
 		// Allow async logger thread to finish processing before removing the appender
-		try { Thread.sleep(50); } catch (InterruptedException ignored) { }
+		try {
+			Thread.sleep(50);
+		} catch (InterruptedException ignored) {}
 		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
 		logger.removeAppender(appender);
 		appender.stop();
@@ -1133,7 +1137,8 @@ public class S3StorageDriverTest {
 		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
 		compositeOp.put(S3Api.KEY_UPLOAD_ID, "complete-id-789");
 		compositeOp.subOperations(); // generates 4 sub-tasks (4096 / 1024)
-		for (int i = 0; i < 4; i++) compositeOp.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			compositeOp.markSubTaskCompleted();
 		assertTrue(compositeOp.allSubOperationsDone());
 		compositeOp.status(Operation.Status.SUCC);
 
@@ -1213,7 +1218,8 @@ public class S3StorageDriverTest {
 		var compositeOp = newCompositeOp(OpType.CREATE, 5000, 1024);
 		compositeOp.put(S3Api.KEY_UPLOAD_ID, "tail-id");
 		compositeOp.subOperations(); // generates 5 sub-tasks
-		for (int i = 0; i < 5; i++) compositeOp.markSubTaskCompleted();
+		for (int i = 0; i < 5; i++)
+			compositeOp.markSubTaskCompleted();
 		assertTrue(compositeOp.allSubOperationsDone());
 		compositeOp.status(Operation.Status.SUCC);
 

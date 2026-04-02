@@ -33,37 +33,37 @@
 var itemsFile = "items.csv";
 
 var writeConfig = {
-    "item": {
-        "data": {
-            "size": "1GB",
-            "ranges": {
-                "threshold": "64MB"
-            }
-        },
-        "output": {
-            "file": itemsFile,
-            "path": "/my-bucket"
-        }
-    },
-    "load": {
-        "batch": {
-            "size": 1
-        },
-        "op": {
-            "limit": {
-                "count": 10
-            }
-        }
-    },
-    "storage": {
-        "checksum-enabled": true,
-        "checksum-algorithm": "crc32c"
-    }
+	"item": {
+		"data": {
+			"size": "1GB",
+			"ranges": {
+				"threshold": "64MB"
+			}
+		},
+		"output": {
+			"file": itemsFile,
+			"path": "/my-bucket"
+		}
+	},
+	"load": {
+		"batch": {
+			"size": 1
+		},
+		"op": {
+			"limit": {
+				"count": 10
+			}
+		}
+	},
+	"storage": {
+		"checksum-enabled": true,
+		"checksum-algorithm": "crc32c"
+	}
 };
 
 Load
-    .config(writeConfig)
-    .run();
+	.config(writeConfig)
+	.run();
 
 // ---- Step 2 (optional): Read the objects back -------------------------------
 // Uncomment to verify the uploaded objects can be read.
@@ -100,16 +100,16 @@ Load
 // ---- Step 3: Cleanup (delete the objects) -----------------------------------
 
 DeleteLoad
-    .config({
-        "item": {
-            "input": {
-                "file": itemsFile
-            }
-        },
-        "load": {
-            "batch": {
-                "size": 4096
-            }
-        }
-    })
-    .run();
+	.config({
+		"item": {
+			"input": {
+				"file": itemsFile
+			}
+		},
+		"load": {
+			"batch": {
+				"size": 4096
+			}
+		}
+	})
+	.run();

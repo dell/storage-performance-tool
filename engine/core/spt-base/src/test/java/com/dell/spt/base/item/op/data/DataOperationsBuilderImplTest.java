@@ -4,7 +4,6 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
-import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

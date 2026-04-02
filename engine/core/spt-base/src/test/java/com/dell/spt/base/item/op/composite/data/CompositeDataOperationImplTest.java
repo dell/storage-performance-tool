@@ -6,7 +6,6 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.item.op.Operation;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
@@ -78,7 +77,8 @@ class CompositeDataOperationImplTest {
 	void resultCopy_preservesSizeThreshold() throws Exception {
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		op.subOperations();
-		for (int i = 0; i < 4; i++) op.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			op.markSubTaskCompleted();
 		var copy = op.result();
 		assertEquals(op.sizeThreshold(), copy.sizeThreshold());
 	}
@@ -87,7 +87,8 @@ class CompositeDataOperationImplTest {
 	void resultCopy_copiesPendingSubTasksCount() throws Exception {
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		op.subOperations(); // pendingSubTasksCount = 4
-		for (int i = 0; i < 4; i++) op.markSubTaskCompleted(); // pendingSubTasksCount = 0
+		for (int i = 0; i < 4; i++)
+			op.markSubTaskCompleted(); // pendingSubTasksCount = 0
 		var copy = op.result();
 		// Copy has pendingSubTasksCount = 0 (copied from original)
 		assertTrue(copy.allSubOperationsDone(), "Copy should reflect original's completed state");
@@ -97,7 +98,8 @@ class CompositeDataOperationImplTest {
 	void resultCopy_hasEmptySubTasks_regeneratedOnAccess() throws Exception {
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		op.subOperations(); // generates 4 sub-tasks
-		for (int i = 0; i < 4; i++) op.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			op.markSubTaskCompleted();
 		var copy = op.result();
 		// The copy constructor does NOT copy subTasks — the field initializes to empty ArrayList.
 		// Calling subOperations() on the copy regenerates them.
@@ -112,7 +114,8 @@ class CompositeDataOperationImplTest {
 		// sub-tasks and resets pendingSubTasksCount to N.
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		op.subOperations();
-		for (int i = 0; i < 4; i++) op.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			op.markSubTaskCompleted();
 		assertTrue(op.allSubOperationsDone());
 
 		var copy = op.result();
@@ -135,7 +138,8 @@ class CompositeDataOperationImplTest {
 	void subOperations_onCopy_generatesIndependentParts() throws Exception {
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		var originalParts = op.subOperations();
-		for (int i = 0; i < 4; i++) op.markSubTaskCompleted();
+		for (int i = 0; i < 4; i++)
+			op.markSubTaskCompleted();
 
 		var copy = op.result();
 		var copyParts = copy.subOperations();

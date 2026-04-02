@@ -1309,7 +1309,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					long partBytes = 0;
 					try {
 						partBytes = ((DataItem) subOp.item()).size();
-					} catch (final IOException ignored) { }
+					} catch (final IOException ignored) {}
 					Loggers.MULTIPART.info(
 									"PART,{},{},{},{},{},{},{}",
 									compositeOp.item().name(),
