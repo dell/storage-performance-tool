@@ -1,6 +1,7 @@
 plugins {
     id 'base'
     id 'jacoco'
+    alias(libs.plugins.versions)
 }
 
 def sptVersion = file('../VERSION').text.trim()
@@ -33,7 +34,7 @@ subprojects {
         }
         
         jacoco {
-            toolVersion = "0.8.11"
+            toolVersion = "0.8.13"
         }
         
         dependencies {
