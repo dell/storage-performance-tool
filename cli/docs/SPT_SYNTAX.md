@@ -40,6 +40,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
+- **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
@@ -135,7 +136,28 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |
 
-#### 6. RDMA Acceleration Options
+#### 6. Storage Driver Selection
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--s3-driver` | `default` | S3 storage driver backend (see below) |
+
+Available driver values:
+
+| Value | Engine driver | Description |
+|-------|---------------|-------------|
+| `default` | `s3` (Netty) | The standard REST/Netty-based S3 driver. Default for all workloads |
+| `netty` | `s3` (Netty) | Alias for `default` |
+| `aws` | `s3-aws` | AWS SDK v2 synchronous client. Useful for compatibility testing or environments where the Netty driver is not suitable |
+| `rdma` | `s3-rdma` | RDMA-accelerated S3 driver. Equivalent to `--use-rdma` |
+
+**Flag interaction with `--use-rdma`:**
+
+- `--use-rdma` remains the primary way to enable RDMA and is equivalent to `--s3-driver rdma`.
+- If both `--s3-driver` and `--use-rdma` are specified, they must agree — `--s3-driver rdma --use-rdma` is fine, but `--s3-driver aws --use-rdma` is an error.
+- When `--s3-driver rdma` is used, the RDMA acceleration flags (below) apply normally.
+
+#### 7. RDMA Acceleration Options
 
 See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troubleshooting.
 
@@ -149,7 +171,7 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 
-#### 7. S3 Tables Options
+#### 8. S3 Tables Options
 
 These flags apply only to the `tables` workload type. See [S3_TABLES.md](S3_TABLES.md) for detailed documentation.
 
@@ -170,7 +192,7 @@ These flags apply only to the `tables` workload type. See [S3_TABLES.md](S3_TABL
 | `--compaction-timeout` | `4h` | Max wait for compaction to complete |
 | `--no-provision` | `false` | Skip table bucket/namespace/table creation |
 
-#### 8. TUI / Headless Options
+#### 9. TUI / Headless Options
 
 By default, `spt run` launches an interactive TUI. Use `--headless` for CI or unattended runs.
 
@@ -404,6 +426,22 @@ spt run write \
     --use-rdma \
     --rdma-local-ip 10.247.128.125 \
     --rdma-threshold 1MB
+```
+
+### AWS SDK Driver
+
+```bash
+# Write using the AWS SDK driver instead of the default Netty driver
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --s3-driver aws \
+    --cleanup
 ```
 
 ### Distributed / Attach Mode
