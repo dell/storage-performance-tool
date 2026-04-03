@@ -69,6 +69,7 @@ cli/tools/codehealth/deadfinder/report.json
 cli/tools/codehealth/deadfinder/deadfinder
 cli/mike
 spt-scenario-*.js
+items*.csv
 
 # Local documentation exports
 cli/*.pdf
