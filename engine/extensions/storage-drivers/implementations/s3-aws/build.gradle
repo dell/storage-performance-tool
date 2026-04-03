@@ -44,12 +44,10 @@ dependencies {
 
 	// SPT framework APIs – provided by parent classloader
 	compileOnly project(':core:spt-base')
-	// S3 driver dependency (compileOnly - loaded from parent classloader)
+	// SPT driver primitives – provided by parent classloader
 	compileOnly(
-		project(':extensions:storage-drivers:implementations:s3'),
 		project(':extensions:storage-drivers:primitives:coop'),
 		project(':extensions:storage-drivers:primitives:nio'),
-		project(':extensions:storage-drivers:primitives:netty'),
 	)
 
 	// Configuration / schema framework (used by the extension class)

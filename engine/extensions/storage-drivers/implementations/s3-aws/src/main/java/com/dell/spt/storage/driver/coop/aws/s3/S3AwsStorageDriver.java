@@ -16,6 +16,9 @@ import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
 import com.github.akurilov.confuse.Config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -35,13 +38,10 @@ import java.util.stream.Collectors;
 public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends NioStorageDriverBase<I, O>
 				implements ListDiscoveryProbe {
 
+	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
+
 	private final S3Client s3Client;
 	private final String bucketName;
-	private final String region;
-
-	// Performance optimization fields
-	private final long startTime = System.nanoTime();
-	private volatile boolean isInitialized = false;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -52,10 +52,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final S3Client s3Client)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
+		if (verifyFlag) {
+			LOG.warn(
+							"S3-AWS driver does not support --item-data-verify; reads will report SUCC without integrity checks");
+		}
 		this.s3Client = s3Client;
-
-		// Pre-warm connection and initialize driver
-		initializeDriver();
 
 		// Support multiple bucket parameter names for backward compatibility
 		String resolvedBucketName;
@@ -112,15 +113,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			resolvedBucketName = currentUser + "test";
 		}
 		this.bucketName = resolvedBucketName;
-
-		// Support optional region parameter with default
-		String resolvedRegion;
-		try {
-			resolvedRegion = config.stringVal("region");
-		} catch (Exception e) {
-			resolvedRegion = "eu-west-2"; // Default region for S3-compatible service
-		}
-		this.region = resolvedRegion;
 	}
 
 	@Override
@@ -129,8 +121,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// Execute AWS SDK operation synchronously - NioStorageDriverBase handles threading
 			execute(op);
 
-			// Set bytes transferred for metrics
-			if (op.item() instanceof DataItem) {
+			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes)
+			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
 				DataItem dataItem = (DataItem) op.item();
 				if (op instanceof DataOperation) {
 					((DataOperation) op).countBytesDone(dataItem.size());
@@ -141,7 +133,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			finishOperation(op);
 
 		} catch (Exception e) {
-			// For failed operations, still need to properly complete timing
+			// For failed operations, still need to properly complete timing.
+			// finishOperation must NOT run here — it would mark the op as SUCC.
 			op.status(Status.FAIL_UNKNOWN);
 			try {
 				op.startResponse();
@@ -154,19 +147,25 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	@Override
 	protected String requestNewPath(final String path) {
-		// Extract bucket name from path and validate it exists
+		// Extract bucket name from path and validate/create it
 		// Path format: /bucketname or /bucketname/prefix
 		final String relPath = path.startsWith("/") ? path.substring(1) : path;
 		final int slashPos = relPath.indexOf('/');
-		final String bucketPath = "/" + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
+		final String targetBucket = slashPos > 0 ? relPath.substring(0, slashPos) : relPath;
+		final String bucketPath = "/" + targetBucket;
 
-		// The bucket name is already configured in the driver, so we just validate the path format
-		// and return the bucket path for the framework
 		try {
-			// Validate that the configured bucket exists by doing a HeadBucket request
-			s3Client.headBucket(HeadBucketRequest.builder().bucket(bucketName).build());
+			// Validate that the target bucket exists
+			s3Client.headBucket(HeadBucketRequest.builder().bucket(targetBucket).build());
+		} catch (NoSuchBucketException e) {
+			// Bucket doesn't exist — create it (matches standard S3 driver behavior)
+			try {
+				s3Client.createBucket(CreateBucketRequest.builder().bucket(targetBucket).build());
+			} catch (Exception createEx) {
+				throw new RuntimeException("Failed to create bucket: " + targetBucket, createEx);
+			}
 		} catch (Exception e) {
-			throw new RuntimeException("Failed to validate bucket: " + bucketName, e);
+			throw new RuntimeException("Failed to validate bucket: " + targetBucket, e);
 		}
 
 		return bucketPath;
@@ -232,14 +231,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return new String[]{relPath.substring(0, slashPos), relPath.substring(slashPos + 1)
 			};
 		}
-		// No slash — entire relPath is the bucket, key is empty (shouldn't happen
-		// in normal operation but handle gracefully)
-		return new String[]{relPath, ""
+		// No slash — entire relPath is the bucket, key is absent
+		return new String[]{relPath, null
 		};
 	}
 
 	private void execute(final O op) throws Exception {
 		switch (op.type()) {
+		case NOOP:
+			break;
+
 		case CREATE:
 		case UPDATE:
 			putObject(op);
@@ -318,21 +319,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * Initialize driver and pre-warm connections for better performance
-	 */
-	private void initializeDriver() {
-		if (!isInitialized) {
-			try {
-				// Pre-warm connection with a lightweight operation
-				s3Client.listBuckets();
-				isInitialized = true;
-			} catch (Exception e) {
-				// Continue without pre-warming if it fails
-			}
-		}
-	}
-
-	/**
 	 * List objects in the bucket with optional prefix and options.
 	 */
 	public List<I> list(
@@ -344,26 +330,31 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final int count,
 					final ListOptions options) throws IOException {
 		try {
-			// Use the driver's configured bucket name
-			// The prefix parameter is used for filtering objects, like S3 driver does
-			// The path parameter is the bucket path, not used for prefix filtering
+			// Extract bucket from path parameter, falling back to configured bucketName
+			String targetBucket = bucketName;
+			if (path != null && !path.isEmpty()) {
+				String rel = path.startsWith("/") ? path.substring(1) : path;
+				int slash = rel.indexOf('/');
+				targetBucket = slash > 0 ? rel.substring(0, slash) : rel;
+			}
 
 			// Optimize request size for better performance
 			int maxKeys = Math.min(Math.max(count, 1), 1000);
 
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
-							.bucket(bucketName)
+							.bucket(targetBucket)
 							.maxKeys(maxKeys);
 			// Use prefix parameter directly like S3 driver does
 			if (prefix != null && !prefix.isEmpty()) {
 				reqBuilder.prefix(prefix);
 			}
 
-			// Handle pagination like S3 driver does
+			// Handle pagination: continuationToken → startAfter → lastPrevItem
 			if (options != null && options.continuationToken() != null && !options.continuationToken().isEmpty()) {
 				reqBuilder.continuationToken(options.continuationToken());
+			} else if (options != null && options.startAfter() != null && !options.startAfter().isEmpty()) {
+				reqBuilder.startAfter(options.startAfter());
 			} else if (lastPrevItem != null) {
-				// Use lastPrevItem name as startAfter for pagination
 				String startAfter = lastPrevItem.name();
 				if (startAfter.startsWith("/")) {
 					startAfter = startAfter.substring(1);
@@ -397,8 +388,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				result.add(item);
 			}
 
-			// Add null marker if not truncated like S3 driver does
-			if (!Boolean.TRUE.equals(resp.isTruncated()) && !result.isEmpty()) {
+			// Add null poison marker if not truncated (matches standard S3 driver)
+			if (!Boolean.TRUE.equals(resp.isTruncated())) {
 				result.add(null); // poison marker
 			}
 
@@ -464,46 +455,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
-	/**
-	 * Constructor with AWS credentials and configuration
-	 */
-	// public S3AwsStorageDriver(String accessKey, String secretKey, String region, String bucketName, String endpointOverride) {
-	//     this.region = region;
-	//     this.bucketName = bucketName;
-
-	//     AwsCredentials credentials = AwsBasicCredentials.create(accessKey, secretKey);
-
-	//     S3ClientBuilder builder = S3Client.builder()
-	//             .credentialsProvider(StaticCredentialsProvider.create(credentials))
-	//             .region(Region.of(region));
-
-	//     if (endpointOverride != null && !endpointOverride.isEmpty()) {
-	//         builder.endpointOverride(java.net.URI.create(endpointOverride));
-	//     }
-
-	//     this.s3Client = builder.build();
-	// }
-
-	/**
-	 * Constructor with existing S3Client
-	 */
-	// public S3AwsStorageDriver(S3Client s3Client, String bucketName) {
-	//     this.s3Client = s3Client;
-	//     this.bucketName = bucketName;
-	//     this.region = s3Client.serviceClientConfiguration().region().toString();
-	// }
-
-	// public void close() {
-	//     if (s3Client != null) {
-	//         s3Client.close();
-	//     }
-	// }
-
 	public String getBucketName() {
 		return bucketName;
 	}
 
-	public String getRegion() {
-		return region;
-	}
 }

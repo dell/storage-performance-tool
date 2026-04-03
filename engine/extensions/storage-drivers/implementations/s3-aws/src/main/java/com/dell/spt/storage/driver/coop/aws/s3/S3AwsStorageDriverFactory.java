@@ -46,13 +46,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
 
-		try {
-			return createInternal(stepId, dataInput, storageConfig, verifyFlag, batchSize);
-		} catch (Exception e) {
-			System.err.println("DEBUG: Factory create failed: " + e.getMessage());
-			e.printStackTrace();
-			throw e;
-		}
+		return createInternal(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 	}
 
 	private S3AwsStorageDriver<I, O> createInternal(
@@ -69,7 +63,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		String accessKey;
 		String secretKey;
 		String region;
-		String bucket;
 
 		// Try legacy S3 parameters first (for backward compatibility)
 		try {
@@ -115,20 +108,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			region = "eu-west-2";
 		}
 
-		// Bucket name - try different parameter names
-		try {
-			bucket = storageConfig.stringVal("bucket");
-		} catch (Exception e1) {
-			try {
-				bucket = storageConfig.stringVal("storage-net-node-addrs");
-				// Extract bucket from node addresses if it's the first part
-				if (bucket != null && bucket.contains("/")) {
-					bucket = bucket.split("/")[0];
-				}
-			} catch (Exception e2) {
-				bucket = "default-bucket"; // Fallback
-			}
-		}
+		// Note: bucket resolution is handled by the driver constructor,
+		// not by the factory — the driver reads it from config directly.
 
 		// ---------------------------
 		// Optional config values (confuse-style)
@@ -213,6 +194,11 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						// Performance optimizations
 						.tcpKeepAlive(true)
 						.build();
+
+		if (endpoint == null || endpoint.isEmpty()) {
+			throw new IllegalConfigurationException(
+							"Missing required parameter: endpoint (or storage.net.node.addrs)");
+		}
 
 		S3Client s3Client = S3Client.builder()
 						.region(Region.of(region))

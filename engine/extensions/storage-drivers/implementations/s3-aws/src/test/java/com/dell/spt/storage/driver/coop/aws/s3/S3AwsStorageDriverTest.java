@@ -36,7 +36,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
-public class S3StorageDriverTest {
+public class S3AwsStorageDriverTest {
 
 	private S3AwsStorageDriver<Item, Operation<Item>> drv;
 	private S3Client mockS3Client;
@@ -92,14 +92,14 @@ public class S3StorageDriverTest {
 		void bucketOnly_noKey() {
 			String[] bk = S3AwsStorageDriver.parseBucketAndKey("/onlybucket");
 			assertEquals("onlybucket", bk[0]);
-			assertEquals("", bk[1]);
+			assertNull(bk[1]);
 		}
 
 		@Test
 		void bucketOnlyNoSlash() {
 			String[] bk = S3AwsStorageDriver.parseBucketAndKey("onlybucket");
 			assertEquals("onlybucket", bk[0]);
-			assertEquals("", bk[1]);
+			assertNull(bk[1]);
 		}
 
 		@ParameterizedTest
@@ -224,7 +224,7 @@ public class S3StorageDriverTest {
 			Item mockItem = mock(Item.class);
 			when(factory.getItem(anyString(), anyLong(), anyLong())).thenReturn(mockItem);
 
-			List<Item> result = drv.list(factory, "/path", prefix, 10, null, count, ListOptions.DEFAULT);
+			List<Item> result = drv.list(factory, "/test-bucket", prefix, 10, null, count, ListOptions.DEFAULT);
 
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
@@ -259,6 +259,29 @@ public class S3StorageDriverTest {
 			verify(mockS3Client).listObjectsV2(cap.capture());
 
 			assertEquals(token, cap.getValue().continuationToken());
+		}
+
+		@Test
+		void withOptionsStartAfter_setsStartAfter() throws Exception {
+			ListOptions options = ListOptions.builder().startAfter("key-42").build();
+
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 50, options);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("key-42", cap.getValue().startAfter());
+			assertNull(cap.getValue().continuationToken());
 		}
 
 		@Test
@@ -322,7 +345,9 @@ public class S3StorageDriverTest {
 			ItemFactory<Item> factory = mock(ItemFactory.class);
 
 			List<Item> result = drv.list(factory, null, null, 10, null, 100, null);
-			assertTrue(result.isEmpty());
+			// Empty non-truncated response still gets null poison marker
+			assertEquals(1, result.size());
+			assertNull(result.get(0));
 		}
 
 		@Test
@@ -373,6 +398,46 @@ public class S3StorageDriverTest {
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
 			assertEquals(1000, cap.getValue().maxKeys());
+		}
+
+		@Test
+		void extractsBucketFromPathParam() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, "/other-bucket", null, 10, null, 50, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("other-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void nullPath_fallsBackToConfiguredBucket() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 50, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("test-bucket", cap.getValue().bucket());
 		}
 
 		@Test
@@ -679,6 +744,11 @@ public class S3StorageDriverTest {
 			m.setAccessible(true);
 			String result = (String) m.invoke(drv, "/large/prefix");
 			assertEquals("/large", result);
+
+			// Verify headBucket was called with the bucket from path, not this.bucketName
+			ArgumentCaptor<HeadBucketRequest> cap = ArgumentCaptor.forClass(HeadBucketRequest.class);
+			verify(mockS3Client).headBucket(cap.capture());
+			assertEquals("large", cap.getValue().bucket());
 		}
 
 		@Test
@@ -693,15 +763,47 @@ public class S3StorageDriverTest {
 		}
 
 		@Test
-		void headBucketFailure_throwsRuntimeException() throws Exception {
+		void missingBucket_createsIt() throws Exception {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
+			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
+							.thenReturn(CreateBucketResponse.builder().build());
+
+			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
+			m.setAccessible(true);
+			String result = (String) m.invoke(drv, "/newbucket");
+			assertEquals("/newbucket", result);
+
+			ArgumentCaptor<CreateBucketRequest> cap = ArgumentCaptor.forClass(CreateBucketRequest.class);
+			verify(mockS3Client).createBucket(cap.capture());
+			assertEquals("newbucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void headBucketFailure_nonNoSuchBucket_throwsRuntimeException() throws Exception {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenThrow(S3Exception.builder().message("access denied").build());
 
 			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
 			m.setAccessible(true);
 
 			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
 							() -> m.invoke(drv, "/nonexistent"));
+			assertInstanceOf(RuntimeException.class, ex.getCause());
+		}
+
+		@Test
+		void createBucketFailure_throwsRuntimeException() throws Exception {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
+			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
+							.thenThrow(S3Exception.builder().message("create failed").build());
+
+			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
+			m.setAccessible(true);
+
+			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
+							() -> m.invoke(drv, "/failbucket"));
 			assertInstanceOf(RuntimeException.class, ex.getCause());
 		}
 	}
@@ -729,20 +831,12 @@ public class S3StorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// getBucketName / getRegion accessors
+	// getBucketName accessor
 	// -----------------------------------------------------------------------
 
 	@Test
 	void getBucketName_returnsConfiguredBucket() {
 		assertEquals("test-bucket", drv.getBucketName());
-	}
-
-	@Test
-	void getRegion_returnsConfiguredRegion() throws Exception {
-		Field regionField = S3AwsStorageDriver.class.getDeclaredField("region");
-		regionField.setAccessible(true);
-		regionField.set(drv, "us-east-1");
-		assertEquals("us-east-1", drv.getRegion());
 	}
 
 	// -----------------------------------------------------------------------
