@@ -9,7 +9,8 @@ import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
-import com.dell.spt.base.item.op.Operation.Status; // Added import for Operation.Status
+import com.dell.spt.base.item.op.Operation.Status;
+import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
@@ -264,6 +265,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			deleteObject(op);
 			break;
 
+		case LIST:
+			listObjects(op);
+			break;
+
 		default:
 			throw new UnsupportedOperationException(op.type().toString());
 		}
@@ -326,6 +331,90 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 										.bucket(bk[0])
 										.key(bk[1])
 										.build());
+	}
+
+	@SuppressWarnings("unchecked")
+	private void listObjects(final O op) {
+		final var listOp = (ListOperation<? extends PathItem>) op;
+		final var options = listOp.options();
+
+		// Resolve bucket from srcPath (e.g. "/spttest" → "spttest")
+		String targetBucket = bucketName;
+		final var srcPath = op.srcPath();
+		if (srcPath != null && !srcPath.isEmpty()) {
+			final var rel = srcPath.startsWith("/") ? srcPath.substring(1) : srcPath;
+			final var slash = rel.indexOf('/');
+			targetBucket = slash > 0 ? rel.substring(0, slash) : rel;
+		}
+
+		final var maxKeys = options.maxKeys() > 0 ? Math.min(options.maxKeys(), 1000) : 1000;
+
+		ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
+						.bucket(targetBucket)
+						.maxKeys(maxKeys);
+
+		// Prefix from the item name (the framework sets item name as the listing prefix)
+		final var prefix = op.item().name();
+		if (prefix != null && !prefix.isEmpty()) {
+			// Strip leading slash — S3 prefixes don't start with /
+			reqBuilder.prefix(prefix.startsWith("/") ? prefix.substring(1) : prefix);
+		}
+
+		// Delimiter
+		final var delimiter = options.delimiter();
+		if (delimiter != null && !delimiter.isEmpty()) {
+			reqBuilder.delimiter(delimiter);
+		}
+
+		// Pagination via continuationToken or startAfter
+		final var contToken = options.continuationToken();
+		if (contToken != null && !contToken.isEmpty()) {
+			reqBuilder.continuationToken(contToken);
+		} else {
+			final var startAfter = listOp.startAfter();
+			if (startAfter != null && !startAfter.isEmpty()) {
+				reqBuilder.startAfter(startAfter);
+			}
+		}
+
+		ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+
+		int objectCount = 0;
+		long bytesTotal = 0;
+		String firstKey = null;
+		String lastKey = null;
+
+		for (S3Object s3obj : resp.contents()) {
+			objectCount++;
+			if (options.fetchMetadata()) {
+				bytesTotal += s3obj.size();
+			}
+			final var key = s3obj.key();
+			if (firstKey == null) {
+				firstKey = key;
+			}
+			lastKey = key;
+		}
+
+		listOp.objectsListed(objectCount);
+		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+		listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
+
+		if (firstKey != null) {
+			listOp.pageFirstKey(firstKey);
+		}
+		listOp.continuationToken(resp.nextContinuationToken());
+
+		// Update options with the new continuation token for the next page
+		listOp.options(
+						options.toBuilder()
+										.continuationToken(resp.nextContinuationToken())
+										.build());
+
+		if (lastKey != null) {
+			listOp.startAfter(lastKey);
+		}
+		listOp.countBytesDone(listOp.bytesListed());
 	}
 
 	/**

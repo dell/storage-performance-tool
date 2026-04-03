@@ -3,9 +3,11 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.github.akurilov.confuse.Config;
@@ -803,17 +805,6 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void unsupportedOpType_throwsUnsupportedOperationException() {
-			Operation<Item> op = mock(Operation.class);
-			Item item = mock(Item.class);
-			when(op.type()).thenReturn(OpType.LIST);
-			when(op.item()).thenReturn(item);
-
-			assertThrows(UnsupportedOperationException.class, () -> drv.execute(op));
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
 		void noopOperation_doesNotCallS3() throws Exception {
 			Operation<Item> op = mock(Operation.class);
 			when(op.type()).thenReturn(OpType.NOOP);
@@ -821,6 +812,193 @@ public class S3AwsStorageDriverTest {
 			drv.execute(op);
 
 			verifyNoInteractions(mockS3Client);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// listObjects — tested via execute() with LIST OpType
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ListObjectsTest {
+
+		private ListObjectsV2Response buildListResponse(
+						List<S3Object> contents, boolean truncated, String nextToken) {
+			ListObjectsV2Response.Builder b = ListObjectsV2Response.builder()
+							.contents(contents)
+							.isTruncated(truncated);
+			if (nextToken != null) {
+				b.nextContinuationToken(nextToken);
+			}
+			return b.build();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void listsWithCorrectBucketAndPrefix() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(
+															S3Object.builder().key("obj1").size(100L).build(),
+															S3Object.builder().key("obj2").size(200L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("mybucket", cap.getValue().bucket());
+
+			verify(op).objectsListed(2);
+			verify(op).truncated(false);
+			verify(op).pageFirstKey("obj1");
+			verify(op).startAfter("obj2");
+			verify(op).continuationToken(null);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void listsWithPrefixFromItemName() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("/logs/");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("logs/", cap.getValue().prefix());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void truncatedResponse_setsTokenAndTruncated() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(S3Object.builder().key("a").size(10L).build()),
+											true, "next-token-123"));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).objectsListed(1);
+			verify(op).truncated(true);
+			verify(op).continuationToken("next-token-123");
+			verify(op).startAfter("a");
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void paginationUsesContinuationToken() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			ListOptions opts = ListOptions.DEFAULT.toBuilder()
+							.continuationToken("prev-token")
+							.build();
+			when(op.options()).thenReturn(opts);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("prev-token", cap.getValue().continuationToken());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void fallsBackToConfiguredBucket_whenSrcPathNull() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn(null);
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("test-bucket", cap.getValue().bucket());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void fetchMetadata_accumulatesBytes() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			ListOptions opts = ListOptions.DEFAULT.toBuilder()
+							.fetchMetadata(true)
+							.build();
+			when(op.options()).thenReturn(opts);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(
+															S3Object.builder().key("a").size(100L).build(),
+															S3Object.builder().key("b").size(250L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).bytesListed(350L);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void noFetchMetadata_zeroBytes() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(S3Object.builder().key("x").size(999L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).bytesListed(0L);
 		}
 	}
 
