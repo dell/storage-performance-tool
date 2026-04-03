@@ -21,11 +21,11 @@ const (
 	// S3DriverRdma selects the RDMA-accelerated S3 driver.
 	S3DriverRdma = "rdma"
 
-	itemTypeData              = "data"
-	itemTypePath              = "path"
-	itemNamingTypeRandom      = "random"
-	loadOpTypeNoop            = "noop"
-	loadOpTypeList            = "list"
+	itemTypeData         = "data"
+	itemTypePath         = "path"
+	itemNamingTypeRandom = "random"
+	loadOpTypeNoop       = "noop"
+	loadOpTypeList       = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 
