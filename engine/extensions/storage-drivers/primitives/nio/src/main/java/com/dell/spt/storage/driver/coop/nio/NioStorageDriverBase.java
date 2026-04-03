@@ -286,6 +286,11 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			concurrencyThrottle.release(permits - numOps);
 			permits = numOps;
 		}
+		// Cap the number of ops we distribute at the number of permits acquired.
+		// Each op placed in a worker buffer will eventually release one permit on
+		// completion — distributing more ops than permits would inflate the
+		// semaphore past concurrencyLimit.
+		final int limit = from + permits;
 		CircularBuffer<O> opBuff;
 		Lock opBuffLock;
 		var j = from;
@@ -301,7 +306,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			opBuffLock = opBuffLocks[m];
 			if (opBuffLock.tryLock()) {
 				try {
-					n = Math.min(to - j, opBuffCapacity - opBuff.size());
+					n = Math.min(limit - j, opBuffCapacity - opBuff.size());
 					for (k = 0; k < n; k++) {
 						opBuff.add(ops.get(j + k));
 					}
@@ -313,14 +318,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					opBuffLock.unlock();
 				}
 			}
-			if (j == to) {
+			if (j >= limit) {
 				break;
 			}
 		}
 		// Refund permits for any ops that could not be buffered
 		final int submitted = j - from;
-		if (submitted < numOps) {
-			concurrencyThrottle.release(numOps - submitted);
+		if (submitted < permits) {
+			concurrencyThrottle.release(permits - submitted);
 		}
 		return submitted;
 	}

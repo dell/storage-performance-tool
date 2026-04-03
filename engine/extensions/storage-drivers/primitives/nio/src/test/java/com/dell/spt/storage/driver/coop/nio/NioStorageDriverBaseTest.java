@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -48,8 +49,12 @@ public class NioStorageDriverBaseTest {
 	}
 
 	private NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> newDriver() throws Exception {
+		return newDriver(storageConfig);
+	}
+
+	private NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> newDriver(Config config) throws Exception {
 		var drv = new NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>>(
-						"test-nio", dataInput, storageConfig, false, 16);
+						"test-nio", dataInput, config, false, 16);
 		drv.operationResultOutput(results);
 		return drv;
 	}
@@ -161,10 +166,112 @@ public class NioStorageDriverBaseTest {
 		// If we get here without hanging, the test passed
 	}
 
+	/**
+	 * Regression test for the permit leak in submit(List, int, int).
+	 *
+	 * With concurrency=1, drainPermits() returns at most 1 permit, but the
+	 * distribution loop is bounded by (to - j) and opBuffCapacity — not by
+	 * the number of permits acquired. This causes all ops in the batch to
+	 * enter worker buffers with only 1 permit consumed. Each completion then
+	 * releases a permit, inflating availablePermits far past concurrencyLimit.
+	 *
+	 * After all ops complete, activeOpCount() should be 0. With the bug it
+	 * goes deeply negative (e.g. -99 for 100 ops with concurrency=1).
+	 */
+	@Test
+	void testPermitIntegrityAfterBatchCompletion() throws Exception {
+		final int opCount = 100;
+		final var lowConcurrencyConfig = buildStorageConfig(1);
+		try (var drv = newDriver(lowConcurrencyConfig)) {
+			drv.start();
+			for (int i = 0; i < opCount; i++) {
+				var op = newCreateOp("permit-leak-" + i, 256);
+				int retries = 0;
+				while (!drv.put(op) && retries++ < 500) {
+					Thread.sleep(1);
+				}
+				assertTrue(retries < 500, "Failed to submit op " + i + " after retries");
+			}
+			// Wait for all ops to complete
+			for (int i = 0; i < opCount; i++) {
+				var result = results.await(5000);
+				assertNotNull(result, "Op " + i + " should complete within timeout");
+			}
+			// Allow worker threads to finish releasing permits
+			Thread.sleep(100);
+
+			int activeOps = drv.activeOpCount();
+			assertTrue(activeOps >= 0,
+							"activeOpCount() should never be negative after all ops complete, but was " + activeOps
+											+ " (permit leak: semaphore has more permits than concurrencyLimit)");
+			assertEquals(0, activeOps,
+							"activeOpCount() should be exactly 0 when all ops have completed");
+			assertTrue(drv.isIdle(), "Driver should be idle after all ops complete");
+		}
+	}
+
+	/**
+	 * Verifies that activeOpCount() never goes negative during processing.
+	 *
+	 * A monitoring thread samples activeOpCount() while ops are in flight.
+	 * With the permit leak, the semaphore overflows as fast-completing ops
+	 * release permits that were never acquired, causing negative readings
+	 * even mid-run.
+	 */
+	@Test
+	void testActiveOpCountNeverNegativeDuringProcessing() throws Exception {
+		final int opCount = 200;
+		final var lowConcurrencyConfig = buildStorageConfig(1);
+		try (var drv = newDriver(lowConcurrencyConfig)) {
+			drv.start();
+
+			final var minObserved = new AtomicInteger(Integer.MAX_VALUE);
+			final var monitoring = new AtomicInteger(1);
+
+			// Monitor thread samples activeOpCount at high frequency
+			Thread monitor = new Thread(() -> {
+				while (monitoring.get() != 0) {
+					int active = drv.activeOpCount();
+					minObserved.accumulateAndGet(active, Math::min);
+					Thread.yield();
+				}
+			});
+			monitor.setDaemon(true);
+			monitor.start();
+
+			for (int i = 0; i < opCount; i++) {
+				var op = newCreateOp("monitor-" + i, 256);
+				int retries = 0;
+				while (!drv.put(op) && retries++ < 500) {
+					Thread.sleep(1);
+				}
+				assertTrue(retries < 500, "Failed to submit op " + i);
+			}
+			// Wait for all ops to complete
+			for (int i = 0; i < opCount; i++) {
+				var result = results.await(5000);
+				assertNotNull(result, "Op " + i + " should complete");
+			}
+			Thread.sleep(100);
+
+			monitoring.set(0);
+			monitor.join(1000);
+
+			int min = minObserved.get();
+			assertTrue(min >= 0,
+							"activeOpCount() was observed as " + min
+											+ " during processing — permits leaked past concurrencyLimit");
+		}
+	}
+
 	// --- Test infrastructure ---
 
 	/** Minimal storage config matching the driver constructor hierarchy. */
 	private static Config buildStorageConfig() {
+		return buildStorageConfig(4);
+	}
+
+	private static Config buildStorageConfig(int concurrency) {
 		Map<String, Object> schema = new HashMap<>();
 		schema.put("namespace", String.class);
 
@@ -203,7 +310,7 @@ public class NioStorageDriverBaseTest {
 		Map<String, Object> limitQueueVals = new HashMap<>();
 		limitQueueVals.put("input", 64);
 		Map<String, Object> limitVals = new HashMap<>();
-		limitVals.put("concurrency", 4);
+		limitVals.put("concurrency", concurrency);
 		limitVals.put("queue", limitQueueVals);
 		Map<String, Object> driverVals = new HashMap<>();
 		driverVals.put("type", "dummy-mock");
