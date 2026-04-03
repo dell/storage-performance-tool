@@ -36,7 +36,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 
 	// Prepare template data
 	// Use a single run-level timestamp for natural sorting across steps
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 
 	// Determine storage driver type
 	driverType := storageDriverTypeS3
@@ -51,6 +51,8 @@ func GenerateWriteScenario(params Params) (string, error) {
 		templateKeyItemCount:         params.ObjectCount,
 		templateKeyOutputPath:        fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
 		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
+		templateKeyPartSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.PartSize)),
+		templateKeyHasPartSize:       params.PartSize != "",
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySaveItems:         params.SaveItems,
@@ -104,7 +106,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 func GenerateReadScenario(params Params) (string, error) {
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 
 	driverType := storageDriverTypeS3
 	if params.UseRdma {
@@ -122,6 +124,8 @@ func GenerateReadScenario(params Params) (string, error) {
 		templateKeyItemCount:         params.ObjectCount,
 		templateKeyOutputPath:        fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
 		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
+		templateKeyPartSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.PartSize)),
+		templateKeyHasPartSize:       params.PartSize != "",
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySeedCount:         seedCount,
@@ -204,7 +208,7 @@ func GenerateListScenario(params Params) (string, error) {
 	}
 
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
-	baseTS := baseTimestamp()
+	baseTS := resolveTimestamp(params)
 	opLimit := 0
 	if params.ObjectCount > 0 {
 		opLimit = params.ObjectCount
@@ -265,7 +269,7 @@ func GenerateListScenario(params Params) (string, error) {
 // GenerateMockScenario creates a scenario for mock testing with optional cleanup
 func GenerateMockScenario(params Params) (string, error) {
 	// shared base timestamp for this scenario
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 	if params.Cleanup && params.ObjectCount > 0 {
 		// Use PipelineLoad for cleanup - create then delete
 		stepCreate := formatStepID(1, ts, "create")

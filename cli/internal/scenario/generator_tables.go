@@ -16,7 +16,7 @@ func GenerateTablesScenario(params Params) (string, error) {
 		duration = "5m"
 	}
 
-	ts := baseTimestamp()
+	ts := resolveTimestamp(params)
 
 	data := map[string]interface{}{
 		templateKeyTablesAccessKey:        params.AccessKey,

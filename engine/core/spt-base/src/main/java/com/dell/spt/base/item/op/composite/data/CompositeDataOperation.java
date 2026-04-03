@@ -10,4 +10,7 @@ public interface CompositeDataOperation<I extends DataItem> extends CompositeOpe
 
 	@Override
 	List<? extends PartialDataOperation<I>> subOperations();
+
+	/** Returns the size threshold used to partition the item into sub-operations. */
+	long sizeThreshold();
 }

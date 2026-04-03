@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/spf13/cobra"
 )
 
@@ -104,6 +105,13 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = false
 		return err
 	}
+
+	// Validate part-size if specified
+	if err := validatePartSize(cmd); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
+
 	return nil
 }
 
@@ -165,4 +173,35 @@ func collectNormalizedEndpoints(cmd *cobra.Command) []string {
 	}
 
 	return combined
+}
+
+// validatePartSize checks that --part-size, when provided, is a valid parseable
+// size and is smaller than --object-size (multipart with a single part is pointless).
+// We intentionally do NOT enforce a minimum part size here — different S3-compatible
+// storage systems have varying constraints, so we let the storage system reject
+// invalid values at runtime rather than blocking up front.
+func validatePartSize(cmd *cobra.Command) error {
+	partSize, _ := cmd.Flags().GetString("part-size")
+	if partSize == "" {
+		return nil
+	}
+
+	partBytes, err := sizeparse.Parse(partSize)
+	if err != nil {
+		return fmt.Errorf("invalid --part-size value %q: %w", partSize, err)
+	}
+	if partBytes <= 0 {
+		return fmt.Errorf("--part-size must be a positive size (got %s)", partSize)
+	}
+
+	// If object size is set, part size must be smaller (otherwise MPU is pointless)
+	objectSize, _ := cmd.Flags().GetString("object-size")
+	if objectSize != "" {
+		objBytes, err := sizeparse.Parse(objectSize)
+		if err == nil && objBytes > 0 && partBytes >= objBytes {
+			return fmt.Errorf("--part-size (%s) must be smaller than --object-size (%s)", partSize, objectSize)
+		}
+	}
+
+	return nil
 }

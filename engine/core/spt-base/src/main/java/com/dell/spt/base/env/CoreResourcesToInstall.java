@@ -42,7 +42,7 @@ public final class CoreResourcesToInstall extends InstallableJarResources {
 		final var msg = " " + APP_NAME + " v " + appVersion + " ";
 		final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
 		System.out.println(pad + msg + pad);
-		appHomePath = resolveAppHome(appVersion);
+		appHomePath = resolveAppHome();
 	}
 
 	public final Path appHomePath() {
@@ -56,7 +56,7 @@ public final class CoreResourcesToInstall extends InstallableJarResources {
 	 *   <li>A temporary directory, auto-removed on JVM shutdown</li>
 	 * </ol>
 	 */
-	private static Path resolveAppHome(final String appVersion) {
+	private static Path resolveAppHome() {
 		final var envHome = System.getenv(ENV_SPT_HOME);
 		if (envHome != null && !envHome.isEmpty()) {
 			return Path.of(envHome);

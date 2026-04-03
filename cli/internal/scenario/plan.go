@@ -47,17 +47,3 @@ func BuildStepPlanFromScenario(scenarioText string) (StepPlan, error) {
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].Number < steps[j].Number })
 	return StepPlan{Steps: steps}, nil
 }
-
-// GenerateScenarioWithPlan returns the scenario and a parsed StepPlan.
-// It wraps GenerateScenario to ensure the plan matches the emitted content.
-func GenerateScenarioWithPlan(params Params) (string, StepPlan, error) {
-	s, err := GenerateScenario(params)
-	if err != nil {
-		return "", StepPlan{}, err
-	}
-	plan, err := BuildStepPlanFromScenario(s)
-	if err != nil {
-		return s, StepPlan{}, err
-	}
-	return s, plan, nil
-}

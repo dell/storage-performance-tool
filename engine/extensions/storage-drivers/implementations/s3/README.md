@@ -15,7 +15,8 @@ Spt storage driver extention for testing of **S3 type storages**. The repo conta
     4.1. [Main functionality](#41-main-functionality)<br/>
     4.1. [HTTP functionality](#41-http-functionality)<br/>
     4.2. [Object Tagging](#42-object-tagging)<br/>
-    4.3.  [Versioning](#43-versioning)>/br>
+    4.3. [Versioning](#43-versioning)<br/>
+    4.4. [Multipart Upload](#44-multipart-upload)<br/>
 5. [Minio S3 server](#5-minio-s3-server)<br/>
 
 ## 1. Features
@@ -148,13 +149,13 @@ docker run \
 | storage-object-tagging-enabled                 | Flag | false | Work (PUT/GET/DELETE) with object tagging or not (default)
 | storage-object-tagging-tags                    | Map  | {}    | Map of name-value tags, effective only for the `UPDATE` operation when tagging is enabled
 | storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not
-| storage-checksum-enabled                       | Flag | false | Pass checksum to server on PUT?
-| storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]
+| storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
+| storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
 
 ### 3.2. Other Options
 
 * A **bucket** may be specified with either `item-input-path` or `item-output-path` configuration option
-* Multipart upload should be enabled using the `item-data-ranges-threshold` configuration option
+* Multipart upload is configured via the `item-data-ranges-threshold` option (exposed by the CLI as `--part-size`). See [Multipart Upload](#44-multipart-upload) below for details.
 * The default storage port is set to 9020 for the docker image
 
 ## 4. Usage
@@ -396,6 +397,107 @@ docker run \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --item-input-file=itemsWithVersionsList.csv \
     --storage-object-versioning=true
+```
+
+### 4.4. Multipart Upload
+
+S3 [Multipart Upload](https://docs.aws.amazon.com/AmazonS3/latest/dev/mpuoverview.html) allows large objects to be uploaded in parallel parts. SPT supports a complete MPU lifecycle including automatic abort and per-part retry.
+
+#### 4.4.1. Enabling MPU
+
+Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. The CLI exposes this as `--part-size`.
+
+**Required companion setting:** `load-batch-size` must be set to `1` when using MPU. The CLI does this automatically; JAR users must set it explicitly. Omitting this causes the internal child-operation queue to overflow, silently dropping part uploads.
+
+#### 4.4.2. Lifecycle
+
+Each multipart upload proceeds through four phases:
+
+1. **Initiate** -- `POST /<bucket>/<key>?uploads` returns an upload ID.
+2. **Upload Parts** -- each part is uploaded in parallel via `PUT /<bucket>/<key>?partNumber=N&uploadId=ID`. Parts share the concurrency pool configured by `storage-driver-limit-concurrency`.
+3. **Complete** -- `POST /<bucket>/<key>?uploadId=ID` with an XML body listing all part numbers and ETags.
+4. **Abort** (on failure) -- `DELETE /<bucket>/<key>?uploadId=ID` cleans up incomplete uploads when part retries are exhausted.
+
+#### 4.4.3. Part-Level Retry
+
+Individual parts are retried up to 3 times on failure. Only after all retries for a part are exhausted does the engine abort the entire multipart upload. This prevents a single transient network error from wasting all successfully uploaded parts.
+
+#### 4.4.4. Per-Part Checksums
+
+When `storage-checksum-enabled=true`, the selected checksum algorithm is applied to **each individual part upload**. The checksum is computed over the part's data slice and sent in the appropriate S3 header (`Content-MD5` for MD5, or `x-amz-checksum-<algorithm>` for CRC32/CRC32C/SHA1/SHA256).
+
+#### 4.4.5. Reporting
+
+Completed multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with columns: `ItemPath`, `UploadId`, `RespLatency[us]`. Aborted uploads are also logged with an `abort` prefix.
+
+#### 4.4.6. Example: Scenario File (JAR users)
+
+Users running the engine JAR directly can configure MPU in a JavaScript scenario file:
+
+```javascript
+Load
+    .config({
+        "item": {
+            "data": {
+                "size": "1GB",
+                "ranges": {
+                    "threshold": "64MB"
+                }
+            },
+            "output": {
+                "path": "/my-bucket"
+            }
+        },
+        "load": {
+            "batch": {
+                "size": 1
+            },
+            "step": {
+                "limit": {
+                    "count": 100
+                }
+            }
+        },
+        "storage": {
+            "auth": {
+                "uid": "accessKey",
+                "secret": "secretKey"
+            },
+            "net": {
+                "node": {
+                    "addrs": ["s3.example.com"]
+                }
+            }
+        }
+    })
+    .run();
+```
+
+To also enable per-part checksums, add:
+
+```javascript
+        "storage": {
+            "checksum-enabled": true,
+            "checksum-algorithm": "crc32c",
+            // ... auth and net config ...
+        }
+```
+
+Or via command-line flags:
+
+```bash
+java -jar spt-base-<VERSION>.jar \
+    --storage-driver-type=s3 \
+    --storage-net-node-addrs=s3.example.com \
+    --storage-auth-uid=accessKey \
+    --storage-auth-secret=secretKey \
+    --item-data-size=1GB \
+    --item-data-ranges-threshold=64MB \
+    --item-output-path=/my-bucket \
+    --load-batch-size=1 \
+    --load-op-limit-count=100 \
+    --storage-checksum-enabled \
+    --storage-checksum-algorithm=crc32c
 ```
 
 ## 5. Minio S3 server

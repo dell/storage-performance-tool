@@ -246,6 +246,31 @@ func TestFormatScenarioParams(t *testing.T) {
 				"Cleanup: No",
 			},
 		},
+		{
+			name: "Write with part-size shows multipart info",
+			params: scenario.ScenarioParams{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				Endpoints:    []string{"http://s3.example.com"},
+				AccessKey:    "access123",
+				SecretKey:    "secret456",
+				Bucket:       "mybucket",
+				Threads:      8,
+				ObjectSize:   "1GB",
+				PartSize:     "64MB",
+				ObjectCount:  100,
+				Duration:     "",
+				Cleanup:      false,
+				KeepScenario: false,
+			},
+			expected: []string{
+				"Workload Type: write",
+				"Object Size: 1GB",
+				"Part Size: 64MB (multipart upload)",
+				"Object Count: 100",
+				"Threads: 8",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,6 +309,9 @@ func TestFormatScenarioParams(t *testing.T) {
 				}
 				if tt.params.WorkloadType == WorkloadTypeRead {
 					expectedLineCount++ // Seed Objects line for read workloads
+				}
+				if tt.params.PartSize != "" {
+					expectedLineCount++ // Part Size line for MPU workloads
 				}
 				if len(lines) != expectedLineCount {
 					t.Errorf("Expected %d lines for non-mock workload, got %d\nOutput:\n%s", expectedLineCount, len(lines), output)

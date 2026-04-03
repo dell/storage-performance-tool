@@ -151,7 +151,11 @@ if [[ -n "${RDMA_LOCAL_IP}" ]]; then
 fi
 
 # Items file for passing created items from write to read phase
-ITEMS_FILE="/tmp/spt/rdmatest-items.csv"
+RESULTS_DIR="${SCRIPT_DIR}/results/rdmatest-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RESULTS_DIR"
+ITEMS_FILE="${RESULTS_DIR}/items.csv"
+
+echo "== Results: ${RESULTS_DIR} ==" >&2
 
 # Common SPT args
 COMMON_ARGS=(
@@ -189,7 +193,7 @@ run_write() {
     "${COMMON_ARGS[@]}" \
     "--item-output-path=/${S3_BUCKET}" \
     "--item-output-file=${ITEMS_FILE}" \
-    "$@"
+    "$@" 2>&1 | tee "${RESULTS_DIR}/write.log"
 }
 
 run_read() {
@@ -208,7 +212,7 @@ run_read() {
     "${COMMON_ARGS[@]}" \
     --load-op-type=read \
     "${items_arg[@]}" \
-    "$@"
+    "$@" 2>&1 | tee "${RESULTS_DIR}/read.log"
 }
 
 case "$MODE" in
@@ -225,3 +229,5 @@ case "$MODE" in
     run_read "$@"
     ;;
 esac
+
+echo "== Results saved to: ${RESULTS_DIR} =="

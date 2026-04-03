@@ -99,6 +99,16 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// Multipart upload part size (accepts humanized sizes like "64MB")
+	if f := cmd.Flags().Lookup("part-size"); f != nil && !cmd.Flags().Changed("part-size") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvPartSize)); v != "" {
+			if _, err := sizeparse.Parse(v); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvPartSize, v, err)
+			}
+			_ = cmd.Flags().Set("part-size", v)
+		}
+	}
+
 	// Engine VT parallelism: --service-threads or SPT_SERVICE_THREADS
 	if f := cmd.Flags().Lookup("service-threads"); f != nil && !cmd.Flags().Changed("service-threads") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvServiceThreads)); v != "" {

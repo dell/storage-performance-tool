@@ -39,6 +39,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Workload:** `THREADS` (parallel client threads)
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
+- **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
@@ -87,6 +88,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MB`, `256KB`, `4GB`). Ignored for `list` |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). When set, `load.batch.size` is automatically forced to `1`. Applies to `write` workloads and `read` seed phases |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
@@ -211,6 +213,68 @@ spt run write \
     --duration 5m \
     --cleanup
 ```
+
+### Multipart Upload Write
+
+Use `--part-size` to enable S3 multipart upload. Objects larger than the part size are automatically split into parts and uploaded in parallel using the engine's concurrency pool.
+
+```bash
+# Write 100 x 1GB objects using 64MB multipart parts
+spt run write \
+    --endpoints http://s3a:9000,http://s3b:9000 \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1GB \
+    --part-size 64MB \
+    --object-count 100
+```
+
+```bash
+# Duration-based multipart write with cleanup
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1GB \
+    --part-size 256MB \
+    --duration 10m \
+    --cleanup
+```
+
+**How it works:**
+
+When `--part-size` is set, each object goes through a four-phase lifecycle:
+
+1. **Initiate** -- `POST ?uploads` creates the multipart upload and returns an upload ID.
+2. **Upload Parts** -- each part is uploaded in parallel via `PUT ?partNumber=N&uploadId=ID`.
+3. **Complete** -- `POST ?uploadId=ID` finalizes the upload with the collected part ETags.
+4. **Abort** (on failure) -- `DELETE ?uploadId=ID` cleans up the incomplete upload on the storage target.
+
+**Fault tolerance:**
+
+- Individual parts are retried up to **3 times** before the upload is considered failed. This means a transient network error on one part does not waste the successfully uploaded parts immediately.
+- If all retries for a part are exhausted, the engine automatically sends an `AbortMultipartUpload` request to clean up the incomplete upload. This prevents orphaned parts from accumulating on the storage target.
+
+**Checksums:**
+
+When the engine's checksum feature is enabled (`storage-checksum-enabled=true` in defaults or scenario config), checksums are computed and sent for **each individual part upload**, not just the final object. Supported algorithms: `md5`, `crc32`, `crc32c`, `sha1`, `sha256`.
+
+**Results artifacts:**
+
+When multipart uploads are used, the engine produces a `parts.upload.csv` artifact (fetched as `<stepID>.multipart.csv` in the results directory) containing one row per completed upload with columns: `ItemPath`, `UploadId`, `RespLatency[us]`.
+
+**Notes:**
+
+- `--part-size` must be smaller than `--object-size` (multipart with a single part is pointless).
+- No minimum part size is enforced by the CLI -- different S3-compatible storage systems have varying constraints, so the storage system reports errors for invalid sizes at runtime.
+- When `--part-size` is set, the engine's `load.batch.size` is automatically forced to `1`. This is required because each multipart upload spawns N sub-operations for its parts; the default batch size of 4096 would flood the internal operation queue and cause silently dropped operations.
+- Part uploads share the `--threads` concurrency pool with regular operations.
+- If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
+- `--part-size` also applies to the seed (precondition) phase of `read` workloads, so large seed objects are written using multipart upload.
 
 ### Read Workload
 

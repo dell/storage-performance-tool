@@ -29,7 +29,7 @@ reference.
 | item-data-ranges-concat                        | Range        | null             | The number/range of numbers of the source objects used to concatenate every destination objec
 | item-data-ranges-fixed                         | Byte Range<br/> **list** | null | The fixed byte ranges to update or read (depends on the specified load type) |
 | item-data-ranges-random                        | Integer >= 0 | 0                | The count of the random ranges to update or read |
-| item-data-ranges-threshold                     | Size | 0                        | The size threshold to enable the multipart upload if supported by the configured storage driver |
+| item-data-ranges-threshold                     | Size | 0                        | The size threshold to enable multipart upload (also used as the part size). When set to a value like `"64MB"`, objects larger than this are split into parts of this size and uploaded via the S3 MPU API. Exposed by the CLI as `--part-size`. Accepts human-readable size strings (e.g., `"5MB"`, `"64MB"`) or raw byte counts. 0 disables MPU. |
 | item-data-size                                 | Size | 1MB                      | The size of the data items to process. Doesn't have any effect if item.type=container |
 | item-data-verify                               | Flag | false                    | Specifies whether to verify the content while reading the data items or not. Doesn't have any effect if load-op-type != read |
 | item-input-file                                | Path | null                     | The source file for the items to process. If null the behavior depends on the load type. |
@@ -43,7 +43,7 @@ reference.
 | item-output-file                               | Path | null                     | Specified the target file for the items processed successfully. If null the items info is not saved.
 | item-output-path                               | String or Expression | %{date:<br/>format(\"yyyyMMdd.HHmmss.SSS\")<br/>.format(date:from(time:millisSinceEpoch()<br/>)} | The target path. By default the expression will once generate the constant value equal to the timestamp.
 | item-type                                      | Enum | data                     | The type of the item to use, the possible values are: "data", "path", "token". In case of filesystem "data" means files and "path" means directories
-| load-batch-size                                | Integer >= 1| 4096              | The count of the items/operations processed by a single invocation. It may be useful to set to 1 for MPU or DLO tests
+| load-batch-size                                | Integer >= 1| 4096              | The count of the items/operations processed by a single invocation. **Must be set to `1` for multipart upload (MPU) or DLO tests** -- the CLI does this automatically when `--part-size` is set. Using the default of 4096 with MPU causes the internal child-operation queue to overflow, silently dropping part uploads and degrading throughput. |
 | load-op-limit-count                            | Integer >= 0 | 0                 | The maximum number of the load operations to execute for a load step. 0 means infinite
 | load-op-limit-fail-count                       | Integer >= 0 | 100000            | The maximum number of the failed load operations before the step will be stopped, 0 means no limit
 | load-op-limit-fail-rate                        | Boolean | false                  | Stop the step if failures rate is more than success rate and if the flag is set to true
@@ -52,7 +52,7 @@ reference.
 | load-op-output-duplicates                      | Flag | false                     | Specifies whether to add duplicates to output items list when in recycle mode or only print them once. No duplicates by default |
 | load-op-recycle-mode                           | Flag | false                     | Specifies whether to recycle the successfully finished operations multiple times or not
 | load-op-recycle-contents-update                | Flag | false                     | Specifies whether to update the contents of the recycled object. Note: usually you just want to have a new object. This is rarely used. E.g. s3 versioning.
-| load-op-retry                                  | Flag | false                     | Specifies whether to retry the failed operations or not
+| load-op-retry                                  | Flag | false                     | Specifies whether to retry the failed operations or not. **Note:** For multipart uploads, individual part retries (up to 3 per part) happen automatically regardless of this flag. This flag controls whole-operation-level retry. |
 | load-op-shuffle                                | Flag | false                     | Defines whether to shuffle or not the items got from the item input, what should make the order of the load operations execution randomized
 | load-op-type                                   | Enum | create                    | The operation to process the items, may be "create", "update", "read", "delete", "noop" or "list"
 | log-level                                      | String | info                     | Global logging verbosity. Accepts standard Log4j levels such as `trace`, `debug`, `info`, `warn`, `error`. |

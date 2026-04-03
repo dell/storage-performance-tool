@@ -11,6 +11,7 @@ type Params struct {
 	Prefix       string
 	Threads      int
 	ObjectSize   string
+	PartSize     string // Multipart upload part size (e.g. "64MB"); empty = single PUT
 	ObjectCount  int
 	Duration     string
 	AuthVersion  int
@@ -37,6 +38,11 @@ type Params struct {
 	RdmaDevice         string // RDMA device name (default: "auto")
 	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
+
+	// Stable timestamp for step IDs.  When set, all Generate*Scenario
+	// functions use this value instead of calling time.Now(), ensuring that
+	// repeated generation from the same Params produces identical step IDs.
+	BaseTimestamp string
 
 	// TUI layout
 	MinimalTUI bool // Start TUI with graphs and messages panels collapsed
