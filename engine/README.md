@@ -89,6 +89,37 @@ run.bat --version     # Windows
   --load-op-limit-count=1000
 ```
 
+### Selecting a Storage Driver
+
+SPT supports multiple S3 storage driver backends. Use `--storage-driver-type` to select one:
+
+| Value | Description |
+|-------|-------------|
+| `s3` | Default Netty/REST-based S3 driver |
+| `s3-aws` | AWS SDK v2 synchronous client |
+| `s3-rdma` | RDMA-accelerated S3 driver (requires RDMA hardware) |
+
+```bash
+# Write test using the AWS SDK driver
+./run.sh \
+  --storage-driver-type=s3-aws \
+  --storage-net-node-addrs=your-s3-endpoint.com:9020 \
+  --storage-auth-uid=your-access-key \
+  --storage-auth-secret=your-secret-key \
+  --item-data-size=1MB \
+  --load-op-limit-count=1000
+
+# Read test using the AWS SDK driver
+./run.sh \
+  --storage-driver-type=s3-aws \
+  --storage-net-node-addrs=your-s3-endpoint.com:9020 \
+  --storage-auth-uid=your-access-key \
+  --storage-auth-secret=your-secret-key \
+  --load-op-type=read \
+  --item-input-file=items.csv \
+  --load-op-limit-count=500
+```
+
 Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 
 ### Common Command-Line Options
@@ -142,6 +173,13 @@ make docker
 # Run a simple test
 docker run --rm ghcr.io/dell/storage-performance-tool:latest \
   --storage-driver-type=s3 \
+  --storage-net-node-addrs=your-s3-endpoint.com \
+  --storage-auth-uid=your-access-key \
+  --storage-auth-secret=your-secret-key
+
+# Run using the AWS SDK driver
+docker run --rm ghcr.io/dell/storage-performance-tool:latest \
+  --storage-driver-type=s3-aws \
   --storage-net-node-addrs=your-s3-endpoint.com \
   --storage-auth-uid=your-access-key \
   --storage-auth-secret=your-secret-key

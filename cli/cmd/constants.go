@@ -53,6 +53,7 @@ const (
 const (
 	SptStorageDriverType       = "--storage-driver-type"
 	SptStorageDriverTypeS3     = "s3"
+	SptStorageDriverTypeS3Aws  = "s3-aws"
 	SptStorageDriverTypeS3Rdma = "s3-rdma"
 	SptStorageDriverTypeMock   = "dummy-mock"
 	SptStorageNetNodeAddrs     = "--storage-net-node-addrs"

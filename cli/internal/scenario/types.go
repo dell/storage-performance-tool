@@ -31,7 +31,7 @@ type Params struct {
 	SaveItems bool // Save items.csv to the step log directory for later retrieval
 
 	// RDMA acceleration
-	UseRdma            bool   // Use s3-rdma driver instead of s3
+	S3Driver           string // Storage driver selection: "default"/"netty" → s3, "aws" → s3-aws, "rdma" → s3-rdma
 	RdmaLocalIP        string // Local RDMA interface IP (required for RDMA)
 	RdmaThresholdBytes int64  // Min object size for RDMA (default: 1048576)
 	RdmaFallback       bool   // Fall back to HTTP if RDMA init fails (default: false)
@@ -75,3 +75,19 @@ type TablesParams struct {
 //
 //nolint:revive // compatibility alias retained during migration away from stuttered name
 type ScenarioParams = Params
+
+// resolveStorageDriverType maps the user-facing S3Driver value to the engine
+// storage-driver-type string. An empty value (or "default"/"netty") resolves
+// to the standard Netty-based "s3" driver.
+func resolveStorageDriverType(s3Driver string) string {
+	switch s3Driver {
+	case S3DriverAws:
+		return storageDriverTypeS3Aws
+	case S3DriverRdma:
+		return storageDriverTypeS3Rdma
+	case S3DriverDefault, S3DriverNetty, "":
+		return storageDriverTypeS3
+	default:
+		return storageDriverTypeS3
+	}
+}

@@ -28,10 +28,14 @@ CLEANUP=${CLEANUP:-true}
 MOCK=${MOCK:-false}
 USE_RDMA=${USE_RDMA:-false}
 
+# Storage driver selection (default, netty, aws, rdma)
+S3_DRIVER=${SPT_S3_DRIVER:-"default"}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --mock) MOCK=true; shift 1 ;;
     --use-rdma) USE_RDMA=true; shift 1 ;;
+    --s3-driver) S3_DRIVER="${2:-}"; [ "$S3_DRIVER" = "rdma" ] && USE_RDMA=true; shift 2 ;;
     --s3-endpoint) S3_ENDPOINT="${2:-}"; shift 2 ;;
     --s3-endpoints) S3_ENDPOINTS="${2:-}"; shift 2 ;;
     --s3-access-key) S3_ACCESS_KEY="${2:-}"; shift 2 ;;
@@ -52,6 +56,7 @@ while [ $# -gt 0 ]; do
 Usage: $(basename "$0") [options]  (headless)
   --mock                   Run a mock workload (no S3 endpoint required)
   --use-rdma               Enable RDMA device passthrough in containers
+  --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
   --s3-endpoint URL        Single S3 endpoint (env: S3_ENDPOINT)
   --s3-endpoints CSV       Multiple S3 endpoints (env: S3_ENDPOINTS)
   --s3-access-key KEY      S3 access key (env: S3_ACCESS_KEY)
@@ -97,6 +102,9 @@ else
   RUN_SPEC="ObjectCount: $OBJECT_COUNT"
 fi
 echo "Threads: $THREADS  ObjectSize: $OBJECT_SIZE  $RUN_SPEC"
+if [ "$S3_DRIVER" != "default" ]; then
+  echo "S3 Driver: $S3_DRIVER"
+fi
 if $USE_RDMA; then
   echo "RDMA:    enabled (SPT_RDMA=true)"
   [[ -n "${SPT_IMAGE:-}" ]] && echo "Image:   $SPT_IMAGE"
@@ -119,6 +127,11 @@ else
   else
     cmd+=(--endpoint "$S3_ENDPOINT")
   fi
+fi
+
+# Storage driver (only pass when non-default to avoid requiring the flag on older builds)
+if [ "$S3_DRIVER" != "default" ]; then
+  cmd+=(--s3-driver "$S3_DRIVER")
 fi
 
 if [ -n "$DURATION" ]; then

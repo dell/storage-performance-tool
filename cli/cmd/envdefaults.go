@@ -99,6 +99,9 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// S3 driver selection: SPT_S3_DRIVER env var (values: default, netty, aws, rdma)
+	_ = setIf("s3-driver", constants.EnvS3Driver)
+
 	// Multipart upload part size (accepts humanized sizes like "64MB")
 	if f := cmd.Flags().Lookup("part-size"); f != nil && !cmd.Flags().Changed("part-size") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvPartSize)); v != "" {

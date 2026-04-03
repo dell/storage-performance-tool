@@ -574,9 +574,12 @@ Available workload types:
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
 
-		if params.UseRdma {
+		switch params.S3Driver {
+		case scenario.S3DriverRdma:
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
 			fmt.Println("RDMA mode enabled: using s3-rdma driver with device passthrough.")
+		case scenario.S3DriverAws:
+			fmt.Println("Using AWS SDK S3 driver (s3-aws).")
 		}
 
 		// Check for port conflicts before launching Spt
@@ -901,6 +904,9 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 
 	// RDMA Acceleration Options
+	runCmd.Flags().String("s3-driver", "default",
+		`S3 storage driver backend: "default" (Netty), "aws" (AWS SDK), "rdma" (RDMA-accelerated).
+Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
 	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
 	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
@@ -1095,10 +1101,31 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 	}
 
-	// RDMA acceleration
+	// S3 driver selection: --s3-driver takes precedence, --use-rdma is a synonym for --s3-driver rdma
+	s3Driver, _ := cmd.Flags().GetString("s3-driver")
 	useRdma, _ := cmd.Flags().GetBool("use-rdma")
-	params.UseRdma = useRdma
-	if useRdma {
+
+	s3DriverExplicit := cmd.Flags().Changed("s3-driver")
+	useRdmaExplicit := cmd.Flags().Changed("use-rdma")
+
+	if s3DriverExplicit && useRdmaExplicit && useRdma && s3Driver != scenario.S3DriverRdma {
+		return params, fmt.Errorf("conflicting flags: --s3-driver %q and --use-rdma cannot be used together", s3Driver)
+	}
+
+	if useRdma && !s3DriverExplicit {
+		s3Driver = scenario.S3DriverRdma
+	}
+
+	// Validate the driver value
+	switch s3Driver {
+	case scenario.S3DriverDefault, scenario.S3DriverNetty, scenario.S3DriverAws, scenario.S3DriverRdma, "":
+		// valid ("" treated as default)
+	default:
+		return params, fmt.Errorf("invalid --s3-driver value %q: must be one of: default, netty, aws, rdma", s3Driver)
+	}
+
+	params.S3Driver = s3Driver
+	if s3Driver == scenario.S3DriverRdma {
 		params.RdmaLocalIP, _ = cmd.Flags().GetString("rdma-local-ip")
 		thresholdStr, _ := cmd.Flags().GetString("rdma-threshold")
 		thresholdBytes, err := sizeparse.Parse(thresholdStr)

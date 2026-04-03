@@ -11,6 +11,7 @@ const (
 	EnvS3AuthVersion  = "S3_AUTH_VERSION"
 	EnvSkipImagePull  = "SPT_SKIP_IMAGE_PULL"
 	EnvRdmaEnabled    = "SPT_RDMA"
+	EnvS3Driver       = "SPT_S3_DRIVER"
 	EnvServiceThreads = "SPT_SERVICE_THREADS"
 
 	// Multipart upload configuration

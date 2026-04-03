@@ -311,7 +311,7 @@ func TestGenerateDefaults(t *testing.T) {
 				SecretKey:          "testsecret",
 				Bucket:             "testbucket",
 				Threads:            4,
-				UseRdma:            true,
+				S3Driver:           S3DriverRdma,
 				RdmaFallback:       true,
 				RdmaThresholdBytes: 1048576, // Cobra default
 				RdmaTimeoutMs:      30000,   // Cobra default
@@ -355,7 +355,7 @@ func TestGenerateDefaults(t *testing.T) {
 				SecretKey:          "testsecret",
 				Bucket:             "testbucket",
 				Threads:            4,
-				UseRdma:            true,
+				S3Driver:           S3DriverRdma,
 				RdmaFallback:       true,
 				RdmaThresholdBytes: 0,     // explicit zero — force RDMA for all sizes
 				RdmaTimeoutMs:      30000, // Cobra default
@@ -388,7 +388,7 @@ func TestGenerateDefaults(t *testing.T) {
 				SecretKey:          "testsecret",
 				Bucket:             "testbucket",
 				Threads:            16,
-				UseRdma:            true,
+				S3Driver:           S3DriverRdma,
 				RdmaLocalIP:        "10.247.128.125",
 				RdmaThresholdBytes: 4194304,
 				RdmaFallback:       false,
@@ -467,7 +467,7 @@ func TestGenerateDefaults(t *testing.T) {
 				SecretKey:    "secret",
 				Bucket:       "listbucket",
 				Threads:      4,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 				RdmaFallback: true,
 			},
 			wantErr: false,
@@ -487,11 +487,11 @@ func TestGenerateDefaults(t *testing.T) {
 			},
 		},
 		{
-			name: "Mock workload ignores UseRdma",
+			name: "Mock workload ignores S3Driver",
 			params: Params{
 				WorkloadType: "mock",
 				Threads:      4,
-				UseRdma:      true, // should be ignored for mock workloads
+				S3Driver:     S3DriverRdma, // should be ignored for mock workloads
 			},
 			wantErr: false,
 			checkOutput: func(t *testing.T, data []byte) {
@@ -505,6 +505,55 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 				if config.Storage.Rdma != nil {
 					t.Error("Mock workload should not have storage.rdma section")
+				}
+			},
+		},
+		{
+			name: "S3 write with AWS driver",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      4,
+				S3Driver:     S3DriverAws,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-aws" {
+					t.Errorf("Expected driver type 's3-aws', got %q", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma != nil {
+					t.Error("AWS driver should not have storage.rdma section")
+				}
+			},
+		},
+		{
+			name: "S3 write with default driver omits driver type",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      4,
+				S3Driver:     S3DriverDefault,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "" {
+					t.Errorf("Default driver should omit type, got %q", config.Storage.Driver.Type)
 				}
 			},
 		},

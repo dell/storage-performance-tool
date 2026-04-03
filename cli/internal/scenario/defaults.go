@@ -301,10 +301,14 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}
 
-		// RDMA acceleration: override driver type and populate rdma config section
-		if params.UseRdma {
-			config.Storage.Driver.Type = storageDriverTypeS3Rdma
+		// S3 driver selection: set driver type for non-default drivers
+		driverType := resolveStorageDriverType(params.S3Driver)
+		if driverType != storageDriverTypeS3 {
+			config.Storage.Driver.Type = driverType
+		}
 
+		// RDMA acceleration: populate rdma config section when using s3-rdma driver
+		if params.S3Driver == S3DriverRdma {
 			threshold := params.RdmaThresholdBytes
 			device := params.RdmaDevice
 			if device == "" {

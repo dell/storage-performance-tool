@@ -1169,8 +1169,8 @@ func TestNoOpLimitInGeneratedScenarios(t *testing.T) {
 	}
 }
 
-// TestStorageDriverType verifies the correct storage driver type (s3 vs s3-rdma)
-// is generated in the JavaScript scenario based on UseRdma flag.
+// TestStorageDriverType verifies the correct storage driver type (s3, s3-aws, s3-rdma)
+// is generated in the JavaScript scenario based on S3Driver field.
 func TestStorageDriverType(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1198,7 +1198,7 @@ func TestStorageDriverType(t *testing.T) {
 				Threads:      4,
 				ObjectSize:   "1MB",
 				ObjectCount:  100,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1222,7 +1222,7 @@ func TestStorageDriverType(t *testing.T) {
 				Threads:      8,
 				ObjectSize:   "1MB",
 				Duration:     "30s",
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1244,7 +1244,7 @@ func TestStorageDriverType(t *testing.T) {
 				Bucket:       "bucket",
 				Threads:      2,
 				ObjectSize:   "1MB",
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1270,7 +1270,7 @@ func TestStorageDriverType(t *testing.T) {
 				ObjectSize:   "1MB",
 				ObjectCount:  50,
 				Cleanup:      true,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1296,9 +1296,35 @@ func TestStorageDriverType(t *testing.T) {
 				ObjectSize:   "1MB",
 				Duration:     "1m",
 				Cleanup:      true,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "write count - AWS driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				ObjectCount:  100,
+				S3Driver:     S3DriverAws,
+			},
+			wantDriverType: `"type": "s3-aws"`,
+			notDriverType:  `"type": "s3-rdma"`,
+		},
+		{
+			name: "write duration - AWS driver",
+			params: Params{
+				WorkloadType: "write",
+				Bucket:       "bucket",
+				Threads:      8,
+				ObjectSize:   "1MB",
+				Duration:     "30s",
+				S3Driver:     S3DriverAws,
+			},
+			wantDriverType: `"type": "s3-aws"`,
+			notDriverType:  `"type": "s3-rdma"`,
 		},
 	}
 
@@ -1320,14 +1346,14 @@ func TestStorageDriverType(t *testing.T) {
 	}
 }
 
-func TestRdmaDoesNotAffectListScenario(t *testing.T) {
-	// List scenarios always use "s3" driver regardless of UseRdma
+func TestListScenarioRespectsS3Driver(t *testing.T) {
+	// List scenarios respect the S3Driver field for driver selection
 	params := Params{
 		WorkloadType: "list",
 		Bucket:       "testbucket",
 		Threads:      4,
 		ObjectCount:  100,
-		UseRdma:      true, // should be ignored for list workloads
+		S3Driver:     S3DriverAws,
 	}
 
 	got, err := GenerateListScenario(params)
@@ -1335,22 +1361,19 @@ func TestRdmaDoesNotAffectListScenario(t *testing.T) {
 		t.Fatalf("GenerateListScenario() error = %v", err)
 	}
 
-	if !strings.Contains(got, `"type": "s3"`) {
-		t.Error("List scenario should always use s3 driver type")
-	}
-	if strings.Contains(got, `"type": "s3-rdma"`) {
-		t.Error("List scenario should never use s3-rdma driver type")
+	if !strings.Contains(got, `"type": "s3-aws"`) {
+		t.Error("List scenario should use s3-aws driver when S3Driver is set to aws")
 	}
 }
 
 func TestRdmaDoesNotAffectMockScenario(t *testing.T) {
-	// Mock scenarios always use "dummy-mock" driver regardless of UseRdma
+	// Mock scenarios always use "dummy-mock" driver regardless of S3Driver
 	params := Params{
 		WorkloadType: "mock",
 		Threads:      2,
 		ObjectSize:   "1KB",
 		ObjectCount:  50,
-		UseRdma:      true, // should be ignored for mock workloads
+		S3Driver:     S3DriverRdma, // should be ignored for mock workloads
 	}
 
 	got, err := GenerateMockScenario(params)
@@ -1367,7 +1390,7 @@ func TestRdmaDoesNotAffectMockScenario(t *testing.T) {
 }
 
 func TestGenerateScenario_RdmaRouting(t *testing.T) {
-	// Verify GenerateScenario routes correctly and UseRdma only affects write
+	// Verify GenerateScenario routes correctly and S3Driver only affects write/read
 	tests := []struct {
 		name          string
 		params        Params
@@ -1382,7 +1405,7 @@ func TestGenerateScenario_RdmaRouting(t *testing.T) {
 				Threads:      1,
 				ObjectSize:   "1MB",
 				ObjectCount:  10,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriver: `"type": "s3-rdma"`,
 		},
@@ -1399,25 +1422,24 @@ func TestGenerateScenario_RdmaRouting(t *testing.T) {
 			notWantDriver: `"type": "s3-rdma"`,
 		},
 		{
-			name: "list ignores UseRdma",
+			name: "list respects S3Driver rdma",
 			params: Params{
 				WorkloadType: "list",
 				Bucket:       "b",
 				Threads:      1,
 				ObjectCount:  10,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
-			wantDriver:    `"type": "s3"`,
-			notWantDriver: `"type": "s3-rdma"`,
+			wantDriver: `"type": "s3-rdma"`,
 		},
 		{
-			name: "mock ignores UseRdma",
+			name: "mock ignores S3Driver rdma",
 			params: Params{
 				WorkloadType: "mock",
 				Threads:      1,
 				ObjectSize:   "1KB",
 				ObjectCount:  10,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriver:    `"type": "dummy-mock"`,
 			notWantDriver: `"type": "s3-rdma"`,
@@ -1655,7 +1677,7 @@ func TestGenerateReadScenario_RDMA(t *testing.T) {
 				ObjectSize:   "1MB",
 				Duration:     "1m",
 				Cleanup:      true,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1668,7 +1690,7 @@ func TestGenerateReadScenario_RDMA(t *testing.T) {
 				ObjectSize:   "1MB",
 				ObjectCount:  5000,
 				Cleanup:      true,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
 		},
@@ -1681,9 +1703,23 @@ func TestGenerateReadScenario_RDMA(t *testing.T) {
 				ObjectSize:   "4MB",
 				Duration:     "30s",
 				Cleanup:      false,
-				UseRdma:      true,
+				S3Driver:     S3DriverRdma,
 			},
 			wantDriverType: `"type": "s3-rdma"`,
+		},
+		{
+			name: "read with AWS driver",
+			params: Params{
+				WorkloadType: "read",
+				Bucket:       "bucket",
+				Threads:      4,
+				ObjectSize:   "1MB",
+				Duration:     "1m",
+				Cleanup:      true,
+				S3Driver:     S3DriverAws,
+			},
+			wantDriverType: `"type": "s3-aws"`,
+			notDriverType:  `"type": "s3-rdma"`,
 		},
 	}
 
@@ -2207,7 +2243,7 @@ func TestGenerateReadScenario_FromFile_RDMA(t *testing.T) {
 		Threads:      4,
 		ObjectSize:   "1MB",
 		Duration:     "1m",
-		UseRdma:      true,
+		S3Driver:     S3DriverRdma,
 		ItemsFile:    "/data/items.csv",
 	}
 
@@ -2470,5 +2506,27 @@ func TestGenerateReadScenario_StandardVsFromFile(t *testing.T) {
 	// From-file should reference the provided path
 	if !strings.Contains(fromFile, "/data/items.csv") {
 		t.Error("from-file should reference the items file path")
+	}
+}
+
+func TestResolveStorageDriverType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", "s3"},
+		{S3DriverDefault, "s3"},
+		{S3DriverNetty, "s3"},
+		{S3DriverAws, "s3-aws"},
+		{S3DriverRdma, "s3-rdma"},
+		{"unknown-value", "s3"}, // fallback
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := resolveStorageDriverType(tt.input)
+			if got != tt.want {
+				t.Errorf("resolveStorageDriverType(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -432,6 +433,14 @@ func TestBuildScenarioParams(t *testing.T) {
 			cmd.Flags().Bool("cleanup", false, "")
 			cmd.Flags().Bool("create-prefix", false, "")
 			cmd.Flags().Int("service-threads", 0, "")
+			cmd.Flags().String("s3-driver", "default", "")
+			cmd.Flags().Bool("use-rdma", false, "")
+			cmd.Flags().String("rdma-local-ip", "", "")
+			cmd.Flags().String("rdma-threshold", "1MB", "")
+			cmd.Flags().Bool("rdma-fallback", false, "")
+			cmd.Flags().String("rdma-device", "auto", "")
+			cmd.Flags().String("rdma-log-level", "WARN", "")
+			cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
 
 			// Set the flag values from the test case
 			for flagName, value := range tt.flags {
@@ -453,7 +462,10 @@ func TestBuildScenarioParams(t *testing.T) {
 				t.Fatalf("buildScenarioParams() unexpected error: %v", err)
 			}
 
-			// Check result
+			// Check result — fill in S3Driver default if the test didn't set it
+			if tt.expected.S3Driver == "" {
+				tt.expected.S3Driver = scenario.S3DriverDefault
+			}
 			if !reflect.DeepEqual(got, tt.expected) {
 				t.Errorf("buildScenarioParams() = %+v, want %+v", got, tt.expected)
 			}
@@ -540,6 +552,14 @@ func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 			cmd.Flags().String("object-size", "", "")
 			cmd.Flags().Int("object-count", 0, "")
 			cmd.Flags().String("duration", "", "")
+			cmd.Flags().String("s3-driver", "default", "")
+			cmd.Flags().Bool("use-rdma", false, "")
+			cmd.Flags().String("rdma-local-ip", "", "")
+			cmd.Flags().String("rdma-threshold", "1MB", "")
+			cmd.Flags().Bool("rdma-fallback", false, "")
+			cmd.Flags().String("rdma-device", "auto", "")
+			cmd.Flags().String("rdma-log-level", "WARN", "")
+			cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
 
 			// Setup flags for this test
 			tt.setupFlags(cmd)
@@ -581,6 +601,14 @@ func TestBuildScenarioParamsServiceThreads(t *testing.T) {
 			cmd.Flags().Int("object-count", 0, "")
 			cmd.Flags().String("duration", "", "")
 			cmd.Flags().Int("service-threads", 0, "")
+			cmd.Flags().String("s3-driver", "default", "")
+			cmd.Flags().Bool("use-rdma", false, "")
+			cmd.Flags().String("rdma-local-ip", "", "")
+			cmd.Flags().String("rdma-threshold", "1MB", "")
+			cmd.Flags().Bool("rdma-fallback", false, "")
+			cmd.Flags().String("rdma-device", "auto", "")
+			cmd.Flags().String("rdma-log-level", "WARN", "")
+			cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
 
 			_ = cmd.Flags().Set("service-threads", fmt.Sprintf("%d", tt.value))
 
@@ -593,4 +621,92 @@ func TestBuildScenarioParamsServiceThreads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().String("endpoint", "", "")
+		cmd.Flags().StringSlice("endpoints", []string{}, "")
+		cmd.Flags().Bool("slice-endpoints", false, "")
+		cmd.Flags().String("access-key", "", "")
+		cmd.Flags().String("secret-key", "", "")
+		cmd.Flags().String("bucket", "", "")
+		cmd.Flags().String("prefix", "", "")
+		cmd.Flags().Int("auth-version", 4, "")
+		cmd.Flags().Int("threads", 0, "")
+		cmd.Flags().String("object-size", "", "")
+		cmd.Flags().Int("object-count", 0, "")
+		cmd.Flags().String("duration", "", "")
+		cmd.Flags().Bool("cleanup", false, "")
+		cmd.Flags().Int("service-threads", 0, "")
+		cmd.Flags().String("s3-driver", "default", "")
+		cmd.Flags().Bool("use-rdma", false, "")
+		cmd.Flags().String("rdma-local-ip", "", "")
+		cmd.Flags().String("rdma-threshold", "1MB", "")
+		cmd.Flags().Bool("rdma-fallback", false, "")
+		cmd.Flags().String("rdma-device", "auto", "")
+		cmd.Flags().String("rdma-log-level", "WARN", "")
+		cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+		return cmd
+	}
+
+	t.Run("--s3-driver aws sets S3Driver", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "aws")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.S3Driver != scenario.S3DriverAws {
+			t.Errorf("S3Driver = %q, want %q", p.S3Driver, scenario.S3DriverAws)
+		}
+	})
+
+	t.Run("--use-rdma alone sets S3Driver to rdma", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("use-rdma", "true")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.S3Driver != scenario.S3DriverRdma {
+			t.Errorf("S3Driver = %q, want %q", p.S3Driver, scenario.S3DriverRdma)
+		}
+	})
+
+	t.Run("--s3-driver rdma --use-rdma is not a conflict", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("use-rdma", "true")
+		_, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("expected no error for consistent flags, got: %v", err)
+		}
+	})
+
+	t.Run("--s3-driver aws --use-rdma conflicts", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "aws")
+		_ = cmd.Flags().Set("use-rdma", "true")
+		_, err := buildScenarioParams("mock", cmd)
+		if err == nil {
+			t.Fatal("expected conflict error")
+		}
+		if !strings.Contains(err.Error(), "conflicting") {
+			t.Errorf("expected 'conflicting' in error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid --s3-driver value", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "bogus")
+		_, err := buildScenarioParams("mock", cmd)
+		if err == nil {
+			t.Fatal("expected validation error")
+		}
+		if !strings.Contains(err.Error(), "invalid --s3-driver") {
+			t.Errorf("expected validation message, got: %v", err)
+		}
+	})
 }

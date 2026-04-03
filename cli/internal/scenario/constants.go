@@ -8,13 +8,24 @@ const (
 	workloadTypeTables = "tables"
 
 	storageDriverTypeS3       = "s3"
+	storageDriverTypeS3Aws    = "s3-aws"
 	storageDriverTypeS3Rdma   = "s3-rdma"
 	storageDriverTypeS3Tables = "s3-tables"
-	itemTypeData              = "data"
-	itemTypePath              = "path"
-	itemNamingTypeRandom      = "random"
-	loadOpTypeNoop            = "noop"
-	loadOpTypeList            = "list"
+
+	// S3DriverDefault selects the standard Netty-based S3 driver.
+	S3DriverDefault = "default"
+	// S3DriverNetty is an alias for S3DriverDefault.
+	S3DriverNetty = "netty"
+	// S3DriverAws selects the AWS SDK S3 driver.
+	S3DriverAws = "aws"
+	// S3DriverRdma selects the RDMA-accelerated S3 driver.
+	S3DriverRdma = "rdma"
+
+	itemTypeData         = "data"
+	itemTypePath         = "path"
+	itemNamingTypeRandom = "random"
+	loadOpTypeNoop       = "noop"
+	loadOpTypeList       = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 

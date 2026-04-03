@@ -28,6 +28,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
 	c.Flags().Int("service-threads", 0, "")
+	c.Flags().String("s3-driver", "default", "")
 	c.Flags().String("part-size", "", "")
 	c.Flags().Int("auth-version", 4, "")
 	return c
@@ -441,5 +442,39 @@ func TestApplyEnvDefaultsToRunFlags_PartSizeInvalidEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), constants.EnvPartSize) {
 		t.Errorf("error should mention env var name, got: %v", err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_S3DriverFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvS3Driver, "aws")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvS3Driver) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetString("s3-driver")
+	if got != "aws" {
+		t.Errorf("expected s3-driver=aws from env, got %q", got)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_S3DriverFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+
+	os.Setenv(constants.EnvS3Driver, "aws")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvS3Driver) })
+
+	_ = cmd.Flags().Set("s3-driver", "rdma") // explicit flag
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetString("s3-driver")
+	if got != "rdma" {
+		t.Errorf("expected s3-driver=rdma (CLI flag should win), got %q", got)
 	}
 }

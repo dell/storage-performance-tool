@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Seeds 1000 objects then reads them for 60 seconds (by default).
 # RDMA is off by default; pass --use-rdma to enable.
+# Storage driver is selectable via --s3-driver (default, aws, rdma).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 [ -f "$ROOT_DIR/.env" ] && source "$ROOT_DIR/.env"
@@ -27,6 +28,9 @@ FORCE=${FORCE:-true}
 CLEANUP=${CLEANUP:-true}
 KEEP_SCENARIO=${KEEP_SCENARIO:-true}
 ATTACH_EXISTING=${ATTACH_EXISTING:-false}
+
+# Storage driver selection (default, netty, aws, rdma)
+S3_DRIVER=${SPT_S3_DRIVER:-"default"}
 
 # RDMA (off by default; pass --use-rdma to enable)
 USE_RDMA=${USE_RDMA:-false}
@@ -62,6 +66,7 @@ while [ $# -gt 0 ]; do
     --no-keep-scenario) KEEP_SCENARIO=false; shift 1 ;;
     --attach-existing) ATTACH_EXISTING=true; shift 1 ;;
     --no-attach-existing) ATTACH_EXISTING=false; shift 1 ;;
+    --s3-driver) S3_DRIVER="${2:-}"; [ "$S3_DRIVER" = "rdma" ] && USE_RDMA=true; shift 2 ;;
     --use-rdma) USE_RDMA=true; shift 1 ;;
     --no-rdma) USE_RDMA=false; shift 1 ;;
     --rdma-fallback) RDMA_FALLBACK=true; shift 1 ;;
@@ -94,6 +99,9 @@ Workload:
   --object-count N         Read ops; only used if --duration is empty
   --min-hosts N            Minimum hosts required (default: $MIN_HOSTS)
 
+Driver:
+  --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
+
 RDMA:
   --use-rdma               Enable RDMA-accelerated S3 driver (default: off)
   --no-rdma                Disable RDMA (default)
@@ -113,6 +121,7 @@ General:
 
 Examples:
   $(basename "$0")                                     # 2500 seed, 60s read, HTTP
+  $(basename "$0") --s3-driver aws                     # use AWS SDK driver
   $(basename "$0") --use-rdma --rdma-threshold 0       # RDMA for all sizes
   $(basename "$0") --seed-objects 5000 --duration 5m   # larger seed, longer read
   $(basename "$0") --no-cleanup                        # keep seed data for reuse
@@ -137,6 +146,9 @@ else
   RUN_SPEC="ObjectCount: ${OBJECT_COUNT:-1000}"
 fi
 echo "Threads: $THREADS  ObjectSize: $OBJECT_SIZE  SeedObjects: $SEED_OBJECTS  $RUN_SPEC"
+if [ "$S3_DRIVER" != "default" ]; then
+  echo "S3 Driver: $S3_DRIVER"
+fi
 if $USE_RDMA; then
   echo "RDMA: enabled  fallback=$RDMA_FALLBACK  threshold=$RDMA_THRESHOLD  device=$RDMA_DEVICE"
 else
@@ -159,6 +171,11 @@ if [ -n "$S3_ENDPOINTS" ]; then
   cmd+=(--endpoints "$S3_ENDPOINTS")
 elif [ -n "$S3_ENDPOINT" ]; then
   cmd+=(--endpoint "$S3_ENDPOINT")
+fi
+
+# Storage driver (only pass when non-default to avoid requiring the flag on older builds)
+if [ "$S3_DRIVER" != "default" ]; then
+  cmd+=(--s3-driver "$S3_DRIVER")
 fi
 
 if [ -n "$DURATION" ]; then

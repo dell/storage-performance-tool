@@ -25,6 +25,9 @@ MOCK=${MOCK:-false}
 AUTO_TERMINATE_SECONDS=${AUTO_TERMINATE_SECONDS:-0}
 ATTACH_EXISTING=${ATTACH_EXISTING:-false}
 
+# Storage driver selection (default, netty, aws, rdma)
+S3_DRIVER=${SPT_S3_DRIVER:-"default"}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --mock) MOCK=true; shift 1 ;;
@@ -49,6 +52,7 @@ while [ $# -gt 0 ]; do
     --no-keep-scenario) KEEP_SCENARIO=false; shift 1 ;;
     --attach-existing) ATTACH_EXISTING=true; shift 1 ;;
     --no-attach-existing) ATTACH_EXISTING=false; shift 1 ;;
+    --s3-driver) S3_DRIVER="${2:-}"; shift 2 ;;
     -h|--help)
       cat << EOF
 Usage: $(basename "$0") [options]  (headless)
@@ -69,6 +73,7 @@ Usage: $(basename "$0") [options]  (headless)
   --[no-]cleanup           delete created objects (default: $CLEANUP)
   --[no-]keep-scenario     keep generated scenario (default: $KEEP_SCENARIO)
   --[no-]attach-existing   reuse prestarted worker nodes (default: $ATTACH_EXISTING)
+  --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
 
 Tips:
   - Target multiple endpoints with --s3-endpoints or env S3_ENDPOINTS.
@@ -98,6 +103,9 @@ else
   RUN_SPEC="ObjectCount: $OBJECT_COUNT"
 fi
 echo "Threads: $THREADS  ObjectSize: $OBJECT_SIZE  $RUN_SPEC"
+if [ "$S3_DRIVER" != "default" ]; then
+  echo "S3 Driver: $S3_DRIVER"
+fi
 if [[ "$AUTO_TERMINATE_SECONDS" =~ ^[0-9]+$ ]] && [ "$AUTO_TERMINATE_SECONDS" -gt 0 ]; then
   echo "Auto-terminate: ${AUTO_TERMINATE_SECONDS}s"
 fi
@@ -121,6 +129,11 @@ else
   else
     cmd+=(--endpoint "$S3_ENDPOINT")
   fi
+fi
+
+# Storage driver (only pass when non-default to avoid requiring the flag on older builds)
+if [ "$S3_DRIVER" != "default" ]; then
+  cmd+=(--s3-driver "$S3_DRIVER")
 fi
 
 if [ -n "$DURATION" ]; then
