@@ -10,9 +10,14 @@ ext {
 }
 
 dependencies {
-	// AWS SDK – extension-private, safe to bundle
+	// AWS SDK – extension-private, safe to bundle.
+	// Exclude Netty and SLF4J globally: the s3-aws driver uses the Apache HTTP
+	// client, not the Netty NIO client, and the AWS SDK BOM pulls in an older
+	// Netty (4.1.x) that conflicts with the engine's own Netty (4.2.x).
 	implementation('software.amazon.awssdk:s3:2.21.29') {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
+		exclude group: 'io.netty'
+		exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
 	}
 	implementation('software.amazon.awssdk:auth:2.21.29') {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
@@ -31,6 +36,7 @@ dependencies {
 	}
 	implementation('software.amazon.awssdk:apache-client:2.21.29') {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
+		exclude group: 'io.netty'
 	}
 	implementation('software.amazon.awssdk:sdk-core:2.21.29') {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
@@ -73,6 +79,11 @@ shadowJar {
 	exclude('ch/qos/logback/**')
 	exclude('org/apache/log4j/**')
 	exclude('org/apache/logging/**')
+
+	// Exclude Netty classes — the AWS SDK's transitive netty-nio-client (4.1.x)
+	// conflicts with the engine's own Netty (4.2.x). The s3-aws driver uses the
+	// Apache HTTP client and does not need Netty.
+	exclude('io/netty/**')
 
 	// Never bundle SPT framework classes
 	// exclude("com/dell/spt/**")
