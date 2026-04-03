@@ -1,0 +1,1397 @@
+package com.dell.spt.storage.driver.coop.aws.s3;
+
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.PathItem;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
+import com.dell.spt.base.storage.driver.ListOptions;
+import com.github.akurilov.confuse.Config;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
+
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
+
+public class S3AwsStorageDriverTest {
+
+	private S3AwsStorageDriver<Item, Operation<Item>> drv;
+	private S3Client mockS3Client;
+
+	@SuppressWarnings("unchecked")
+	private S3AwsStorageDriver<Item, Operation<Item>> newDriverMock() {
+		return Mockito.mock(S3AwsStorageDriver.class,
+						Mockito.withSettings().lenient().defaultAnswer(Mockito.CALLS_REAL_METHODS));
+	}
+
+	private void setBucketName(S3AwsStorageDriver<Item, Operation<Item>> driver, String bucketName) throws Exception {
+		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
+		bucketField.setAccessible(true);
+		bucketField.set(driver, bucketName);
+	}
+
+	private void setS3Client(S3AwsStorageDriver<Item, Operation<Item>> driver, S3Client s3Client) throws Exception {
+		Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3Client");
+		clientField.setAccessible(true);
+		clientField.set(driver, s3Client);
+	}
+
+	@BeforeEach
+	void setUp() throws Exception {
+		drv = newDriverMock();
+		mockS3Client = mock(S3Client.class);
+		setS3Client(drv, mockS3Client);
+		setBucketName(drv, "test-bucket");
+	}
+
+	// -----------------------------------------------------------------------
+	// parseBucketAndKey — static, package-visible, easy to test directly
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ParseBucketAndKeyTest {
+
+		@Test
+		void withLeadingSlashAndKey() {
+			String[] bk = S3AwsStorageDriver.parseBucketAndKey("/large/mkk0lurmliru");
+			assertEquals("large", bk[0]);
+			assertEquals("mkk0lurmliru", bk[1]);
+		}
+
+		@Test
+		void withoutLeadingSlash() {
+			String[] bk = S3AwsStorageDriver.parseBucketAndKey("mybucket/my/nested/key.txt");
+			assertEquals("mybucket", bk[0]);
+			assertEquals("my/nested/key.txt", bk[1]);
+		}
+
+		@Test
+		void bucketOnly_noKey() {
+			String[] bk = S3AwsStorageDriver.parseBucketAndKey("/onlybucket");
+			assertEquals("onlybucket", bk[0]);
+			assertNull(bk[1]);
+		}
+
+		@Test
+		void bucketOnlyNoSlash() {
+			String[] bk = S3AwsStorageDriver.parseBucketAndKey("onlybucket");
+			assertEquals("onlybucket", bk[0]);
+			assertNull(bk[1]);
+		}
+
+		@ParameterizedTest
+		@CsvSource({
+				"/b/k, b, k",
+				"/bucket/prefix/deep/key, bucket, prefix/deep/key",
+				"bucket/key, bucket, key",
+		})
+		void parameterized(String input, String expectedBucket, String expectedKey) {
+			String[] bk = S3AwsStorageDriver.parseBucketAndKey(input);
+			assertEquals(expectedBucket, bk[0]);
+			assertEquals(expectedKey, bk[1]);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// resolveBucketAndKey — package-visible, tested directly
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveBucketAndKeyTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void withDstPath_simpleBucket() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/large");
+			when(item.name()).thenReturn("mkk0lurmliru");
+			when(op.item()).thenReturn(item);
+
+			String[] bk = drv.resolveBucketAndKey(op);
+			assertEquals("large", bk[0]);
+			assertEquals("mkk0lurmliru", bk[1]);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void withDstPath_nestedPrefix() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/bucket/prefix");
+			when(item.name()).thenReturn("mykey");
+			when(op.item()).thenReturn(item);
+
+			String[] bk = drv.resolveBucketAndKey(op);
+			assertEquals("bucket", bk[0]);
+			assertEquals("prefix/mykey", bk[1]);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void withDstPath_itemNameHasLeadingSlash() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("/somekey");
+			when(op.item()).thenReturn(item);
+
+			String[] bk = drv.resolveBucketAndKey(op);
+			assertEquals("mybucket", bk[0]);
+			assertEquals("somekey", bk[1]);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void noDstPath_fallsBackToParseBucketAndKey() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn(null);
+			when(item.name()).thenReturn("/fallback-bucket/fallback-key");
+			when(op.item()).thenReturn(item);
+
+			String[] bk = drv.resolveBucketAndKey(op);
+			assertEquals("fallback-bucket", bk[0]);
+			assertEquals("fallback-key", bk[1]);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void emptyDstPath_fallsBackToParseBucketAndKey() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("");
+			when(item.name()).thenReturn("/b/k");
+			when(op.item()).thenReturn(item);
+
+			String[] bk = drv.resolveBucketAndKey(op);
+			assertEquals("b", bk[0]);
+			assertEquals("k", bk[1]);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// resolveBucketAndKey — recycled operations (buildItemPath mutates item name)
+	//
+	// After the first execution cycle the framework calls op.result() which
+	// invokes buildItemPath(item, dstPath).  This prepends dstPath to the
+	// item name, e.g. "mkk0lurmliru" → "/spttest/mkk0lurmliru".
+	// On the next recycle pass the same item (with the mutated name) is
+	// handed back to the driver.  resolveBucketAndKey must still resolve
+	// the *same* bucket and key it did on the first call.
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveBucketAndKeyRecycleTest {
+
+		/**
+		 * Simulate the exact sequence that happens during recycle:
+		 *   1st call: dstPath="/spttest", itemName="mkk0lurmliru"
+		 *             → expect ["spttest", "mkk0lurmliru"]
+		 *   buildItemPath mutates itemName → "/spttest/mkk0lurmliru"
+		 *   2nd call: dstPath="/spttest", itemName="/spttest/mkk0lurmliru"
+		 *             → must still return ["spttest", "mkk0lurmliru"]
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_simpleBucket_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/spttest");
+			when(item.name()).thenReturn("mkk0lurmliru");
+			when(op.item()).thenReturn(item);
+
+			// First call — pristine item name
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("spttest", first[0], "bucket on 1st call");
+			assertEquals("mkk0lurmliru", first[1], "key on 1st call");
+
+			// Simulate buildItemPath: dstPath + "/" + itemName
+			when(item.name()).thenReturn("/spttest/mkk0lurmliru");
+
+			// Second call — recycled item name
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("spttest", second[0], "bucket on recycled call");
+			assertEquals("mkk0lurmliru", second[1], "key on recycled call");
+		}
+
+		/**
+		 * Same scenario with a nested prefix: dstPath="/bucket/prefix"
+		 *   1st: itemName="mykey" → ["bucket", "prefix/mykey"]
+		 *   after buildItemPath: itemName="/bucket/prefix/mykey"
+		 *   2nd: → must still return ["bucket", "prefix/mykey"]
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_nestedPrefix_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/bucket/prefix");
+			when(item.name()).thenReturn("mykey");
+			when(op.item()).thenReturn(item);
+
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("bucket", first[0], "bucket on 1st call");
+			assertEquals("prefix/mykey", first[1], "key on 1st call");
+
+			// After buildItemPath: "/bucket/prefix" + "/" + "mykey"
+			when(item.name()).thenReturn("/bucket/prefix/mykey");
+
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("bucket", second[0], "bucket on recycled call");
+			assertEquals("prefix/mykey", second[1], "key on recycled call");
+		}
+
+		/**
+		 * Item name already has a leading slash on the first call (some
+		 * item input formats produce this).  After buildItemPath it may
+		 * become "/spttest/somekey" from an original "/somekey".
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_itemHadLeadingSlash_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("/somekey");
+			when(op.item()).thenReturn(item);
+
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("mybucket", first[0]);
+			assertEquals("somekey", first[1]);
+
+			// After buildItemPath: itemName stays "/mybucket/somekey"
+			// (buildItemPath prepends dstPath when name doesn't start with it)
+			when(item.name()).thenReturn("/mybucket/somekey");
+
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("mybucket", second[0], "bucket on recycled call");
+			assertEquals("somekey", second[1], "key on recycled call");
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// list() — 7-arg variant
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ListTest {
+
+		@Test
+		void usesCorrectBucketPrefixAndMaxKeys() throws Exception {
+			String prefix = "test-prefix";
+			int count = 100;
+
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(
+											S3Object.builder().key("test-object-1.txt").size(1024L)
+															.lastModified(Instant.now()).build(),
+											S3Object.builder().key("test-object-2.txt").size(2048L)
+															.lastModified(Instant.now()).build())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+			Item mockItem = mock(Item.class);
+			when(factory.getItem(anyString(), anyLong(), anyLong())).thenReturn(mockItem);
+
+			List<Item> result = drv.list(factory, "/test-bucket", prefix, 10, null, count, ListOptions.DEFAULT);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+
+			assertEquals("test-bucket", cap.getValue().bucket());
+			assertEquals(prefix, cap.getValue().prefix());
+			assertEquals(count, cap.getValue().maxKeys());
+			// 2 items + null poison marker (not truncated)
+			assertEquals(3, result.size());
+			assertNull(result.get(2));
+		}
+
+		@Test
+		void withContinuationToken() throws Exception {
+			String token = "next-page-token";
+			ListOptions options = ListOptions.builder().continuationToken(token).build();
+
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, "pfx/", 10, null, 50, options);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+
+			assertEquals(token, cap.getValue().continuationToken());
+		}
+
+		@Test
+		void withOptionsStartAfter_setsStartAfter() throws Exception {
+			ListOptions options = ListOptions.builder().startAfter("key-42").build();
+
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 50, options);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("key-42", cap.getValue().startAfter());
+			assertNull(cap.getValue().continuationToken());
+		}
+
+		@Test
+		void withLastPrevItem_setsStartAfter() throws Exception {
+			Item prevItem = mock(Item.class);
+			when(prevItem.name()).thenReturn("/object-49");
+
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, prevItem, 100, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+
+			assertEquals("object-49", cap.getValue().startAfter());
+		}
+
+		@Test
+		void truncatedResponse_noPoisonMarker() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(S3Object.builder().key("obj1").size(10L)
+											.lastModified(Instant.now()).build())
+							.isTruncated(true) // explicitly set true for this test
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+			Item mockItem = mock(Item.class);
+			when(factory.getItem(anyString(), anyLong(), anyLong())).thenReturn(mockItem);
+
+			List<Item> result = drv.list(factory, null, null, 10, null, 100, null);
+
+			// Truncated → no null poison marker
+			assertEquals(1, result.size());
+			assertNotNull(result.get(0));
+		}
+
+		@Test
+		void emptyResponse_returnsEmptyList() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			List<Item> result = drv.list(factory, null, null, 10, null, 100, null);
+			// Empty non-truncated response still gets null poison marker
+			assertEquals(1, result.size());
+			assertNull(result.get(0));
+		}
+
+		@Test
+		void s3Exception_wrappedAsIOException() {
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenThrow(S3Exception.builder().message("boom").build());
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			assertThrows(IOException.class,
+							() -> drv.list(factory, null, null, 10, null, 100, null));
+		}
+
+		@Test
+		void sixArgOverload_delegatesToSevenArg() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			List<Item> result = drv.list(factory, "/path", "pfx", 10, null, 50);
+			assertNotNull(result);
+			verify(mockS3Client).listObjectsV2(any(ListObjectsV2Request.class));
+		}
+
+		@Test
+		void maxKeysClampedTo1000() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 5000, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals(1000, cap.getValue().maxKeys());
+		}
+
+		@Test
+		void extractsBucketFromPathParam() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, "/other-bucket", null, 10, null, 50, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("other-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void nullPath_fallsBackToConfiguredBucket() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 50, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("test-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void maxKeysClampedToAtLeast1() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			@SuppressWarnings("unchecked")
+			ItemFactory<Item> factory = mock(ItemFactory.class);
+
+			drv.list(factory, null, null, 10, null, 0, null);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals(1, cap.getValue().maxKeys());
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// probeCommonPrefixes
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ProbeCommonPrefixesTest {
+
+		@Test
+		void returnsDiscoverResult_withCorrectPrefixes() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(
+											CommonPrefix.builder().prefix("dir1/").build(),
+											CommonPrefix.builder().prefix("dir2/").build())
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			ListDiscoveryProbe.DiscoverResult result = drv.probeCommonPrefixes("/test-bucket", "pfx/", "/", 100);
+
+			assertEquals(2, result.commonPrefixes().size());
+			assertTrue(result.commonPrefixes().contains("dir1/"));
+			assertTrue(result.commonPrefixes().contains("dir2/"));
+			assertFalse(result.truncated());
+			assertFalse(result.hasContents());
+		}
+
+		@Test
+		void extractsBucketFromBucketPath_withLeadingSlash() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(Collections.emptyList())
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			drv.probeCommonPrefixes("/my-custom-bucket", "", "/", 10);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("my-custom-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void extractsBucketFromBucketPath_withoutLeadingSlash() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(Collections.emptyList())
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			drv.probeCommonPrefixes("raw-bucket", "", "/", 10);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("raw-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void nullBucketPath_usesConfiguredBucketName() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(Collections.emptyList())
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			drv.probeCommonPrefixes(null, "", "/", 10);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("test-bucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void truncatedResponse_setsTruncatedFlag() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(CommonPrefix.builder().prefix("a/").build())
+							.contents(S3Object.builder().key("obj").size(1L)
+											.lastModified(Instant.now()).build())
+							.isTruncated(true)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			ListDiscoveryProbe.DiscoverResult result = drv.probeCommonPrefixes("/bucket", "", "/", 10);
+
+			assertTrue(result.truncated());
+			assertTrue(result.hasContents());
+		}
+
+		@Test
+		void setsDelimiterAndPrefix() throws Exception {
+			ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+							.commonPrefixes(Collections.emptyList())
+							.contents(Collections.emptyList())
+							.isTruncated(false)
+							.build();
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(mockResponse);
+
+			drv.probeCommonPrefixes("/bucket", "my-prefix/", "-", 500);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("my-prefix/", cap.getValue().prefix());
+			assertEquals("-", cap.getValue().delimiter());
+			assertEquals(500, cap.getValue().maxKeys());
+		}
+
+		@Test
+		void s3Exception_wrappedAsIOException() {
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenThrow(S3Exception.builder().message("access denied").build());
+
+			assertThrows(IOException.class,
+							() -> drv.probeCommonPrefixes("/bucket", "", "/", 10));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// deleteObject — tested via execute() (now package-visible)
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class DeleteObjectTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void deletesWithCorrectBucketAndKey() throws Exception {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.DELETE);
+			when(op.dstPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("mykey.dat");
+			when(op.item()).thenReturn(item);
+
+			drv.execute(op);
+
+			ArgumentCaptor<DeleteObjectRequest> cap = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(mockS3Client).deleteObject(cap.capture());
+			assertEquals("mybucket", cap.getValue().bucket());
+			assertEquals("mykey.dat", cap.getValue().key());
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// putObject — tested via execute() (now package-visible)
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class PutObjectTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void putsDataItemWithCorrectBucketAndKey() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("upload.bin");
+			when(dataItem.size()).thenReturn(1024L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.dstPath()).thenReturn("/upload-bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
+			assertEquals("upload-bucket", cap.getValue().bucket());
+			assertEquals("upload.bin", cap.getValue().key());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void updateRoutesToPut() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("update.bin");
+			when(dataItem.size()).thenReturn(512L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.UPDATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			verify(mockS3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// readObject — tested via execute() (now package-visible)
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ReadObjectTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void readsWithCorrectBucketAndKey() throws Exception {
+			Item item = mock(Item.class);
+			when(item.name()).thenReturn("read-me.dat");
+
+			Operation<Item> op = mock(Operation.class);
+			when(op.type()).thenReturn(OpType.READ);
+			when(op.dstPath()).thenReturn("/read-bucket");
+			when(op.item()).thenReturn(item);
+
+			// Mock getObject to return an input stream
+			GetObjectResponse getResp = GetObjectResponse.builder().build();
+			ResponseInputStream<GetObjectResponse> ris = new ResponseInputStream<>(
+							getResp, new ByteArrayInputStream(new byte[0]));
+			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
+
+			drv.execute(op);
+
+			ArgumentCaptor<GetObjectRequest> cap = ArgumentCaptor.forClass(GetObjectRequest.class);
+			verify(mockS3Client).getObject(cap.capture());
+			assertEquals("read-bucket", cap.getValue().bucket());
+			assertEquals("read-me.dat", cap.getValue().key());
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// execute() dispatch — unsupported type + NOOP
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ExecuteDispatchTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void noopOperation_doesNotCallS3() throws Exception {
+			Operation<Item> op = mock(Operation.class);
+			when(op.type()).thenReturn(OpType.NOOP);
+
+			drv.execute(op);
+
+			verifyNoInteractions(mockS3Client);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// listObjects — tested via execute() with LIST OpType
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ListObjectsTest {
+
+		private ListObjectsV2Response buildListResponse(
+						List<S3Object> contents, boolean truncated, String nextToken) {
+			ListObjectsV2Response.Builder b = ListObjectsV2Response.builder()
+							.contents(contents)
+							.isTruncated(truncated);
+			if (nextToken != null) {
+				b.nextContinuationToken(nextToken);
+			}
+			return b.build();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void listsWithCorrectBucketAndPrefix() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(
+															S3Object.builder().key("obj1").size(100L).build(),
+															S3Object.builder().key("obj2").size(200L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("mybucket", cap.getValue().bucket());
+
+			verify(op).objectsListed(2);
+			verify(op).truncated(false);
+			verify(op).pageFirstKey("obj1");
+			verify(op).startAfter("obj2");
+			verify(op).continuationToken(null);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void listsWithPrefixFromItemName() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("/logs/");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("logs/", cap.getValue().prefix());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void truncatedResponse_setsTokenAndTruncated() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(S3Object.builder().key("a").size(10L).build()),
+											true, "next-token-123"));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).objectsListed(1);
+			verify(op).truncated(true);
+			verify(op).continuationToken("next-token-123");
+			verify(op).startAfter("a");
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void paginationUsesContinuationToken() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			ListOptions opts = ListOptions.DEFAULT.toBuilder()
+							.continuationToken("prev-token")
+							.build();
+			when(op.options()).thenReturn(opts);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("prev-token", cap.getValue().continuationToken());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void fallsBackToConfiguredBucket_whenSrcPathNull() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn(null);
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(Collections.emptyList(), false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertEquals("test-bucket", cap.getValue().bucket());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void fetchMetadata_accumulatesBytes() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			ListOptions opts = ListOptions.DEFAULT.toBuilder()
+							.fetchMetadata(true)
+							.build();
+			when(op.options()).thenReturn(opts);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(
+															S3Object.builder().key("a").size(100L).build(),
+															S3Object.builder().key("b").size(250L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).bytesListed(350L);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void noFetchMetadata_zeroBytes() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(buildListResponse(
+											List.of(S3Object.builder().key("x").size(999L).build()),
+											false, null));
+
+			drv.execute((Operation<Item>) (Operation<?>) op);
+
+			verify(op).bytesListed(0L);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// requestNewPath — protected, callable from same package
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class RequestNewPathTest {
+
+		@Test
+		void extractsBucketPath_withSlash() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenReturn(HeadBucketResponse.builder().build());
+
+			String result = drv.requestNewPath("/large/prefix");
+			assertEquals("/large", result);
+
+			// Verify headBucket was called with the bucket from path, not this.bucketName
+			ArgumentCaptor<HeadBucketRequest> cap = ArgumentCaptor.forClass(HeadBucketRequest.class);
+			verify(mockS3Client).headBucket(cap.capture());
+			assertEquals("large", cap.getValue().bucket());
+		}
+
+		@Test
+		void extractsBucketPath_noSubpath() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenReturn(HeadBucketResponse.builder().build());
+
+			String result = drv.requestNewPath("/mybucket");
+			assertEquals("/mybucket", result);
+		}
+
+		@Test
+		void missingBucket_createsIt() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
+			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
+							.thenReturn(CreateBucketResponse.builder().build());
+
+			String result = drv.requestNewPath("/newbucket");
+			assertEquals("/newbucket", result);
+
+			ArgumentCaptor<CreateBucketRequest> cap = ArgumentCaptor.forClass(CreateBucketRequest.class);
+			verify(mockS3Client).createBucket(cap.capture());
+			assertEquals("newbucket", cap.getValue().bucket());
+		}
+
+		@Test
+		void headBucketFailure_nonNoSuchBucket_throwsRuntimeException() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenThrow(S3Exception.builder().message("access denied").build());
+
+			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/nonexistent"));
+		}
+
+		@Test
+		void createBucketFailure_throwsRuntimeException() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
+			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
+							.thenThrow(S3Exception.builder().message("create failed").build());
+
+			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/failbucket"));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// requestNewAuthToken — protected, callable from same package
+	// -----------------------------------------------------------------------
+
+	@Test
+	void requestNewAuthToken_returnsNull() {
+		assertNull(drv.requestNewAuthToken(null));
+	}
+
+	// -----------------------------------------------------------------------
+	// adjustIoBuffers — no-op
+	// -----------------------------------------------------------------------
+
+	@Test
+	void adjustIoBuffers_doesNotThrow() {
+		assertDoesNotThrow(() -> drv.adjustIoBuffers(4096, OpType.READ));
+	}
+
+	// -----------------------------------------------------------------------
+	// getBucketName accessor
+	// -----------------------------------------------------------------------
+
+	@Test
+	void getBucketName_returnsConfiguredBucket() {
+		assertEquals("test-bucket", drv.getBucketName());
+	}
+
+	// -----------------------------------------------------------------------
+	// invokeNio — the main operation entry point
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class InvokeNioTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void successfulDelete_callsFinishOperation() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.DELETE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("key");
+			when(op.item()).thenReturn(item);
+
+			drv.invokeNio(op);
+
+			verify(mockS3Client).deleteObject(any(DeleteObjectRequest.class));
+			// finishOperation calls startResponse, finishResponse, and status(SUCC)
+			verify(op).startResponse();
+			verify(op).finishResponse();
+			verify(op).status(Operation.Status.SUCC);
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void successfulRead_withDataItem_countsBytesDone() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj");
+			when(dataItem.size()).thenReturn(2048L);
+
+			// Create op that is both Operation and DataOperation
+			DataOperation<DataItem> dataOp = mock(DataOperation.class);
+			when(dataOp.type()).thenReturn(OpType.READ);
+			when(dataOp.dstPath()).thenReturn("/bucket");
+			when(dataOp.item()).thenReturn(dataItem);
+
+			GetObjectResponse getResp = GetObjectResponse.builder().build();
+			ResponseInputStream<GetObjectResponse> ris = new ResponseInputStream<>(
+							getResp, new ByteArrayInputStream(new byte[0]));
+			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
+
+			drv.invokeNio((Operation) dataOp);
+
+			// readObject calls countBytesDone, then invokeNio calls it again for metrics
+			verify(dataOp, atLeast(1)).countBytesDone(anyLong());
+			verify(dataOp).status(Operation.Status.SUCC);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void failedOperation_setsStatusToFailUnknown() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.READ);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("key");
+			when(op.item()).thenReturn(item);
+
+			// Make getObject throw an exception
+			when(mockS3Client.getObject(any(GetObjectRequest.class)))
+							.thenThrow(NoSuchKeyException.builder().message("not found").build());
+
+			drv.invokeNio(op);
+
+			verify(op).status(Operation.Status.FAIL_UNKNOWN);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void failedOperation_handlesTimingErrors() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.READ);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("key");
+			when(op.item()).thenReturn(item);
+
+			when(mockS3Client.getObject(any(GetObjectRequest.class)))
+							.thenThrow(NoSuchKeyException.builder().message("not found").build());
+			// Make startResponse throw too, to exercise the inner catch
+			doThrow(new IllegalStateException("already started")).when(op).startResponse();
+
+			// Should not throw despite double failure
+			assertDoesNotThrow(() -> drv.invokeNio(op));
+			verify(op).status(Operation.Status.FAIL_UNKNOWN);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void successfulDelete_nonDataItem_skipsCountBytesDone() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class); // plain Item, not DataItem
+			when(op.type()).thenReturn(OpType.DELETE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("key");
+			when(op.item()).thenReturn(item);
+
+			drv.invokeNio(op);
+
+			// Should succeed without attempting countBytesDone
+			verify(op).status(Operation.Status.SUCC);
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void successfulCreate_dataItem_countsBytesDone() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj");
+			when(dataItem.size()).thenReturn(2048L);
+
+			DataOperation<DataItem> dataOp = mock(DataOperation.class);
+			when(dataOp.type()).thenReturn(OpType.CREATE);
+			when(dataOp.dstPath()).thenReturn("/bucket");
+			when(dataOp.item()).thenReturn(dataItem);
+
+			drv.invokeNio((Operation) dataOp);
+
+			// invokeNio calls countBytesDone(dataItem.size()) for non-READ DataItem ops
+			verify(dataOp).countBytesDone(2048L);
+			verify(dataOp).status(Operation.Status.SUCC);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// putObject — additional edge cases
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class PutObjectEdgeCasesTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void unsupportedItemType_throwsUnsupportedOperationException() {
+			Item plainItem = mock(Item.class); // not DataItem, not PathItem
+			when(plainItem.name()).thenReturn("plain");
+
+			Operation<Item> op = mock(Operation.class);
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn(plainItem);
+
+			var ex = assertThrows(UnsupportedOperationException.class, () -> drv.execute(op));
+			assertTrue(ex.getMessage().contains("DataItem or PathItem"));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// readObject — DataOperation branch with actual bytes
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ReadObjectDataOperationTest {
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void readsDataAndCountsBytes() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("data.bin");
+
+			DataOperation dataOp = mock(DataOperation.class);
+			when(dataOp.type()).thenReturn(OpType.READ);
+			when(dataOp.dstPath()).thenReturn("/bucket");
+			when(dataOp.item()).thenReturn(dataItem);
+
+			byte[] content = new byte[4096];
+			GetObjectResponse getResp = GetObjectResponse.builder().build();
+			ResponseInputStream<GetObjectResponse> ris = new ResponseInputStream<>(
+							getResp, new ByteArrayInputStream(content));
+			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
+
+			drv.execute((Operation) dataOp);
+
+			// readObject should count the 4096 bytes read
+			verify(dataOp).countBytesDone(4096L);
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void nonDataOperation_doesNotCountBytes() throws Exception {
+			Item item = mock(Item.class);
+			when(item.name()).thenReturn("obj");
+
+			Operation<Item> op = mock(Operation.class);
+			when(op.type()).thenReturn(OpType.READ);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn(item);
+
+			GetObjectResponse getResp = GetObjectResponse.builder().build();
+			ResponseInputStream<GetObjectResponse> ris = new ResponseInputStream<>(
+							getResp, new ByteArrayInputStream(new byte[100]));
+			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
+
+			// Should not throw - just doesn't call countBytesDone
+			assertDoesNotThrow(() -> drv.execute(op));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// requestNewPath — path without leading slash
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class RequestNewPathEdgeCasesTest {
+
+		@Test
+		void pathWithoutLeadingSlash() {
+			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
+							.thenReturn(HeadBucketResponse.builder().build());
+
+			String result = drv.requestNewPath("nobucket");
+			assertEquals("/nobucket", result);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// resolveBucketName — static, extracted from constructor
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveBucketNameTest {
+
+		@Test
+		void fromItemOutputPath() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			// storage-net-node-addrs always throws (confuse path mismatch in practice)
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/mybucket");
+
+			assertEquals("mybucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromItemInputPath_whenOutputPathNull() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn(null);
+			when(itemConfig.stringVal("input-path")).thenReturn("/readbucket");
+
+			assertEquals("readbucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromNodeAddrs_withSlash() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("addr/extra");
+
+			assertEquals("addr", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromNodeAddrs_noSlash() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("justaddr");
+
+			assertEquals("justaddr", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void allSourcesMissing_fallsBackToUsername() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
+
+			String result = S3AwsStorageDriver.resolveBucketName(config);
+			String expectedUser = System.getProperty("user.name", "spt");
+			assertEquals(expectedUser + "test", result);
+		}
+
+		@Test
+		void nodeAddrsEmpty_fallsThrough() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("");
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/frombucket");
+
+			assertEquals("frombucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void outputPathTooShort_fallsToInputPath() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/"); // too short
+			when(itemConfig.stringVal("input-path")).thenReturn("/inputbucket");
+
+			assertEquals("inputbucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+	}
+}

@@ -19,6 +19,7 @@ include 'extensions:storage-drivers:protocols:fs'
 // Storage drivers - implementations
 include 'extensions:storage-drivers:implementations:atmos'
 include 'extensions:storage-drivers:implementations:s3'
+include 'extensions:storage-drivers:implementations:s3-aws'
 include 'extensions:storage-drivers:implementations:swift'
 include 'extensions:storage-drivers:implementations:s3-rdma'
 include 'extensions:storage-drivers:implementations:s3-tables'
