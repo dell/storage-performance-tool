@@ -58,61 +58,53 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		this.s3Client = s3Client;
 
-		// Support multiple bucket parameter names for backward compatibility
-		String resolvedBucketName;
+		this.bucketName = resolveBucketName(config);
+	}
+
+	/**
+	 * Resolve bucket name from config, trying multiple sources in order:
+	 * 1. storage-net-node-addrs (parsed as confuse nested path)
+	 * 2. item.output-path (for write operations)
+	 * 3. item.input-path (for read operations)
+	 * 4. System username + "test" (fallback)
+	 */
+	static String resolveBucketName(final Config config) {
+		String resolved = null;
 
 		try {
-			// Try to extract from storage-net-node-addrs (primary method like S3 driver)
 			String nodeAddrs = config.stringVal("storage-net-node-addrs");
 			if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
-				// Extract bucket from node addresses if it's the first part
 				if (nodeAddrs.contains("/")) {
-					resolvedBucketName = nodeAddrs.split("/")[0];
+					resolved = nodeAddrs.split("/")[0];
 				} else {
-					resolvedBucketName = nodeAddrs;
+					resolved = nodeAddrs;
 				}
-			} else {
-				// Try to extract from item configuration output-path
+			}
+		} catch (Exception ignored) { }
+
+		if (resolved == null) {
+			try {
 				var itemConfig = config.configVal("item");
 				if (itemConfig != null) {
 					String outputPath = itemConfig.stringVal("output-path");
 					if (outputPath != null && outputPath.startsWith("/") && outputPath.length() > 1) {
-						resolvedBucketName = outputPath.substring(1); // Remove leading slash
+						resolved = outputPath.substring(1);
 					} else {
-						// Try fallback to input-path for read operations
 						try {
 							String inputPath = itemConfig.stringVal("input-path");
 							if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
-								resolvedBucketName = inputPath.substring(1); // Remove leading slash
-							} else {
-								// Generate a default bucket name based on current user
-								String currentUser = System.getProperty("user.name", "spt");
-								resolvedBucketName = currentUser + "test";
+								resolved = inputPath.substring(1);
 							}
-						} catch (Exception e) {
-							// Generate a default bucket name based on current user
-							String currentUser = System.getProperty("user.name", "spt");
-							resolvedBucketName = currentUser + "test";
-						}
+						} catch (Exception ignored) { }
 					}
-				} else {
-					// Generate a default bucket name based on current user
-					String currentUser = System.getProperty("user.name", "spt");
-					resolvedBucketName = currentUser + "test";
 				}
-			}
-		} catch (Exception e) {
-			// Fallback: generate a default bucket name based on current user
-			String currentUser = System.getProperty("user.name", "spt");
-			resolvedBucketName = currentUser + "test";
+			} catch (Exception ignored) { }
 		}
 
-		// Final safety check
-		if (resolvedBucketName == null || resolvedBucketName.isEmpty()) {
-			String currentUser = System.getProperty("user.name", "spt");
-			resolvedBucketName = currentUser + "test";
+		if (resolved == null || resolved.isEmpty()) {
+			resolved = System.getProperty("user.name", "spt") + "test";
 		}
-		this.bucketName = resolvedBucketName;
+		return resolved;
 	}
 
 	@Override
@@ -195,7 +187,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 *
 	 * @return a two-element array: [0] = bucket, [1] = key
 	 */
-	private String[] resolveBucketAndKey(final O op) {
+	String[] resolveBucketAndKey(final O op) {
 		final var dstPath = op.dstPath();
 		final var itemName = op.item().name();
 
@@ -236,7 +228,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		};
 	}
 
-	private void execute(final O op) throws Exception {
+	void execute(final O op) throws Exception {
 		switch (op.type()) {
 		case NOOP:
 			break;

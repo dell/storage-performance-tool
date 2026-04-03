@@ -3,72 +3,226 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.github.akurilov.confuse.Config;
 
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+
+import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class S3AwsStorageDriverFactoryTest {
 
-	/**
-	 * When neither "endpoint" nor nested "net.node.addrs" resolve to a value,
-	 * the factory must throw {@link IllegalConfigurationException} with a clear
-	 * message instead of crashing with NPE inside {@code URI.create(null)}.
-	 */
-	@Test
-	void create_missingEndpoint_throwsIllegalConfigurationException() {
-		Config storageConfig = mock(Config.class);
+	// -----------------------------------------------------------------------
+	// Helper: build a mock Config chain for the endpoint resolution path
+	//   storageConfig → configVal("net") → netConfig
+	//   netConfig → configVal("node") → nodeConfig
+	//   nodeConfig → listVal("addrs"), intVal("port")
+	//   netConfig → configVal("ssl") → sslConfig → boolVal("enabled")
+	// -----------------------------------------------------------------------
 
-		// auth-uid and auth-secret resolve (so we get past credential checks)
-		when(storageConfig.stringVal("auth-uid")).thenReturn("access");
-		when(storageConfig.stringVal("auth-secret")).thenReturn("secret");
-		when(storageConfig.stringVal("region")).thenReturn("us-east-1");
-		when(storageConfig.stringVal("bucket")).thenReturn("test-bucket");
-
-		// endpoint is null — primary lookup throws, fallback also throws
-		when(storageConfig.stringVal("endpoint")).thenReturn(null);
-		when(storageConfig.configVal("net")).thenThrow(new RuntimeException("no net config"));
-
-		// optional params — defaults are fine
-		when(storageConfig.boolVal("path-style-access")).thenReturn(true);
-		when(storageConfig.intVal("max-connections")).thenThrow(new RuntimeException("missing"));
-		when(storageConfig.intVal("socket-timeout-ms")).thenThrow(new RuntimeException("missing"));
-		when(storageConfig.intVal("connection-timeout-ms")).thenThrow(new RuntimeException("missing"));
-
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
-
-		var ex = assertThrows(IllegalConfigurationException.class,
-						() -> factory.create("step-1", null, storageConfig, false, 1));
-		assertTrue(ex.getMessage().contains("endpoint"),
-						"Error message should mention 'endpoint', got: " + ex.getMessage());
+	private Config mockNodeConfig(List<String> addrs, int port) {
+		Config nodeConfig = mock(Config.class);
+		doReturn(addrs).when(nodeConfig).listVal("addrs");
+		if (port > 0) {
+			when(nodeConfig.intVal("port")).thenReturn(port);
+		} else {
+			when(nodeConfig.intVal("port")).thenThrow(new RuntimeException("no port"));
+		}
+		return nodeConfig;
 	}
 
-	/**
-	 * When endpoint is set to an empty string, same guard should fire.
-	 */
-	@Test
-	void create_emptyEndpoint_throwsIllegalConfigurationException() {
+	private Config mockNetConfig(Config nodeConfig, Boolean sslEnabled) {
+		Config netConfig = mock(Config.class);
+		when(netConfig.configVal("node")).thenReturn(nodeConfig);
+		if (sslEnabled != null) {
+			Config sslConfig = mock(Config.class);
+			when(sslConfig.boolVal("enabled")).thenReturn(sslEnabled);
+			when(netConfig.configVal("ssl")).thenReturn(sslConfig);
+		} else {
+			when(netConfig.configVal("ssl")).thenThrow(new RuntimeException("no ssl"));
+		}
+		return netConfig;
+	}
+
+	private Config mockStorageConfig(Config netConfig) {
 		Config storageConfig = mock(Config.class);
+		when(storageConfig.configVal("net")).thenReturn(netConfig);
+		return storageConfig;
+	}
 
-		when(storageConfig.stringVal("auth-uid")).thenReturn("access");
-		when(storageConfig.stringVal("auth-secret")).thenReturn("secret");
-		when(storageConfig.stringVal("region")).thenReturn("us-east-1");
-		when(storageConfig.stringVal("bucket")).thenReturn("test-bucket");
+	// -----------------------------------------------------------------------
+	// resolveEndpoint — the extracted static method
+	// -----------------------------------------------------------------------
 
-		// endpoint resolves to empty string
-		when(storageConfig.stringVal("endpoint")).thenReturn("");
-		when(storageConfig.configVal("net")).thenThrow(new RuntimeException("no net config"));
+	@Nested
+	class ResolveEndpointTest {
 
-		when(storageConfig.boolVal("path-style-access")).thenReturn(true);
-		when(storageConfig.intVal("max-connections")).thenThrow(new RuntimeException("missing"));
-		when(storageConfig.intVal("socket-timeout-ms")).thenThrow(new RuntimeException("missing"));
-		when(storageConfig.intVal("connection-timeout-ms")).thenThrow(new RuntimeException("missing"));
+		@Test
+		void bareHostname_withPort() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1"), 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
 
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("http://10.0.0.1:8333", endpoint);
+		}
 
-		var ex = assertThrows(IllegalConfigurationException.class,
-						() -> factory.create("step-1", null, storageConfig, false, 1));
-		assertTrue(ex.getMessage().contains("endpoint"),
-						"Error message should mention 'endpoint', got: " + ex.getMessage());
+		@Test
+		void bareHostname_withPort_sslEnabled() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1"), 443);
+			Config netConfig = mockNetConfig(nodeConfig, true);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("https://10.0.0.1:443", endpoint);
+		}
+
+		@Test
+		void schemePrefixedAddr_usedAsIs() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("http://my-s3:9000"), 0);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("http://my-s3:9000", endpoint);
+		}
+
+		@Test
+		void httpsPrefixedAddr_usedAsIs() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("https://s3.amazonaws.com"), 0);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("https://s3.amazonaws.com", endpoint);
+		}
+
+		@Test
+		void hostColonPort_noConfigPort() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1:9999"), 0);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("http://10.0.0.1:9999", endpoint);
+		}
+
+		@Test
+		void hostColonPort_sslEnabled() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1:9999"), 0);
+			Config netConfig = mockNetConfig(nodeConfig, true);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("https://10.0.0.1:9999", endpoint);
+		}
+
+		@Test
+		void emptyAddrsList_throws() {
+			Config nodeConfig = mockNodeConfig(Collections.emptyList(), 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			var ex = assertThrows(IllegalConfigurationException.class,
+							() -> S3AwsStorageDriverFactory.resolveEndpoint(storageConfig));
+			assertTrue(ex.getMessage().contains("endpoint") || ex.getMessage().contains("addrs"));
+		}
+
+		@Test
+		void nullAddrsList_throws() throws Exception {
+			Config nodeConfig = mockNodeConfig(null, 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			assertThrows(IllegalConfigurationException.class,
+							() -> S3AwsStorageDriverFactory.resolveEndpoint(storageConfig));
+		}
+
+		@Test
+		void netConfigMissing_throws() {
+			Config storageConfig = mock(Config.class);
+			when(storageConfig.configVal("net"))
+							.thenThrow(new RuntimeException("no net config"));
+
+			var ex = assertThrows(IllegalConfigurationException.class,
+							() -> S3AwsStorageDriverFactory.resolveEndpoint(storageConfig));
+			assertTrue(ex.getMessage().contains("endpoint") || ex.getMessage().contains("addrs"));
+		}
+
+		@Test
+		void usesFirstAddr_whenMultipleProvided() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"), 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("http://10.0.0.1:8333", endpoint);
+		}
+
+		@Test
+		void bareHostname_noPort_defaultsToSchemeOnly() throws Exception {
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1"), 0);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+
+			String endpoint = S3AwsStorageDriverFactory.resolveEndpoint(storageConfig);
+			assertEquals("http://10.0.0.1", endpoint);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// create() — error paths tested through the public API
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class CreateErrorPathTest {
+
+		@Test
+		void missingAuthUid_throwsIllegalConfigurationException() {
+			Config storageConfig = mock(Config.class);
+			when(storageConfig.stringVal("auth-uid"))
+							.thenThrow(new RuntimeException("no auth-uid"));
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			var ex = assertThrows(IllegalConfigurationException.class,
+							() -> factory.create("step-1", null, storageConfig, false, 1));
+			assertTrue(ex.getMessage().contains("auth"),
+							"Error message should mention auth, got: " + ex.getMessage());
+		}
+
+		@Test
+		void missingAuthSecret_throwsIllegalConfigurationException() {
+			Config storageConfig = mock(Config.class);
+			when(storageConfig.stringVal("auth-uid")).thenReturn("access");
+			when(storageConfig.stringVal("auth-secret"))
+							.thenThrow(new RuntimeException("no auth-secret"));
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			var ex = assertThrows(IllegalConfigurationException.class,
+							() -> factory.create("step-1", null, storageConfig, false, 1));
+			assertTrue(ex.getMessage().contains("auth"),
+							"Error message should mention auth, got: " + ex.getMessage());
+		}
+
+		@Test
+		void missingNetConfig_throwsIllegalConfigurationException() {
+			Config storageConfig = mock(Config.class);
+			when(storageConfig.stringVal("auth-uid")).thenReturn("access");
+			when(storageConfig.stringVal("auth-secret")).thenReturn("secret");
+			when(storageConfig.stringVal("region")).thenReturn("us-east-1");
+			when(storageConfig.configVal("net"))
+							.thenThrow(new RuntimeException("no net config"));
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			var ex = assertThrows(IllegalConfigurationException.class,
+							() -> factory.create("step-1", null, storageConfig, false, 1));
+			assertTrue(ex.getMessage().contains("endpoint") || ex.getMessage().contains("addrs"),
+							"Error message should mention endpoint/addrs, got: " + ex.getMessage());
+		}
 	}
 }

@@ -96,47 +96,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		//   storage.net.node.port   (shared port when addrs are bare hostnames)
 		//   storage.net.ssl.enabled (scheme selection)
 		// ---------------------------
-		String endpoint = null;
-		boolean sslEnabled = false;
-
-		try {
-			final Config netConfig = storageConfig.configVal("net");
-			final Config nodeConfig = netConfig.configVal("node");
-			final List<String> addrs = nodeConfig.listVal("addrs");
-
-			// Read port (same field the netty driver uses)
-			int port = 0;
-			try {
-				port = nodeConfig.intVal("port");
-			} catch (Exception ignored) { }
-
-			// Read SSL flag for scheme selection
-			try {
-				sslEnabled = netConfig.configVal("ssl").boolVal("enabled");
-			} catch (Exception ignored) { }
-
-			if (addrs != null && !addrs.isEmpty()) {
-				final String addr = addrs.get(0);
-				final String scheme = sslEnabled ? "https" : "http";
-
-				if (addr.startsWith("http://") || addr.startsWith("https://")) {
-					// Address already includes scheme (and presumably port)
-					endpoint = addr;
-				} else if (!addr.contains(":") && port > 0) {
-					// Bare hostname — append the shared port
-					endpoint = scheme + "://" + addr + ":" + port;
-				} else {
-					// host:port pair (non-uniform ports) or port is unknown
-					endpoint = scheme + "://" + addr;
-				}
-			}
-		} catch (Exception ignored) { }
-
-		if (endpoint == null) {
-			throw new IllegalConfigurationException(
-							"Missing required config: storage.net.node.addrs " +
-											"(S3 endpoint address)");
-		}
+		final String endpoint = resolveEndpoint(storageConfig);
 
 		// Path-style access — S3-compatible stores (SeaweedFS, MinIO) require this.
 		// Default to true since this driver targets non-AWS endpoints.
@@ -183,6 +143,55 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						verifyFlag,
 						batchSize,
 						s3Client);
+	}
+
+	/**
+	 * Resolve the S3 endpoint URL from storage config, mirroring the netty
+	 * driver's config paths: storage.net.node.addrs, storage.net.node.port,
+	 * and storage.net.ssl.enabled.
+	 *
+	 * @return fully-qualified endpoint URL (e.g. "http://10.0.0.1:8333")
+	 * @throws IllegalConfigurationException if no endpoint can be resolved
+	 */
+	static String resolveEndpoint(final Config storageConfig)
+					throws IllegalConfigurationException {
+		String endpoint = null;
+		boolean sslEnabled = false;
+
+		try {
+			final Config netConfig = storageConfig.configVal("net");
+			final Config nodeConfig = netConfig.configVal("node");
+			final List<String> addrs = nodeConfig.listVal("addrs");
+
+			int port = 0;
+			try {
+				port = nodeConfig.intVal("port");
+			} catch (Exception ignored) { }
+
+			try {
+				sslEnabled = netConfig.configVal("ssl").boolVal("enabled");
+			} catch (Exception ignored) { }
+
+			if (addrs != null && !addrs.isEmpty()) {
+				final String addr = addrs.get(0);
+				final String scheme = sslEnabled ? "https" : "http";
+
+				if (addr.startsWith("http://") || addr.startsWith("https://")) {
+					endpoint = addr;
+				} else if (!addr.contains(":") && port > 0) {
+					endpoint = scheme + "://" + addr + ":" + port;
+				} else {
+					endpoint = scheme + "://" + addr;
+				}
+			}
+		} catch (Exception ignored) { }
+
+		if (endpoint == null) {
+			throw new IllegalConfigurationException(
+							"Missing required config: storage.net.node.addrs " +
+											"(S3 endpoint address)");
+		}
+		return endpoint;
 	}
 
 	@Override

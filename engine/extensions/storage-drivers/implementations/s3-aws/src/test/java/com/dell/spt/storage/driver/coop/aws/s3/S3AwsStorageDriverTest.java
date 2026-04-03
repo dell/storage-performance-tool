@@ -8,6 +8,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.github.akurilov.confuse.Config;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -25,7 +26,6 @@ import software.amazon.awssdk.services.s3.model.*;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
@@ -116,80 +116,78 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// resolveBucketAndKey — private, tested via reflection
+	// resolveBucketAndKey — package-visible, tested directly
 	// -----------------------------------------------------------------------
 
 	@Nested
 	class ResolveBucketAndKeyTest {
 
 		@SuppressWarnings("unchecked")
-		private String[] invokeResolve(Operation<Item> op) throws Exception {
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("resolveBucketAndKey", Operation.class);
-			m.setAccessible(true);
-			return (String[]) m.invoke(drv, op);
-		}
-
 		@Test
-		void withDstPath_simpleBucket() throws Exception {
+		void withDstPath_simpleBucket() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.dstPath()).thenReturn("/large");
 			when(item.name()).thenReturn("mkk0lurmliru");
 			when(op.item()).thenReturn(item);
 
-			String[] bk = invokeResolve(op);
+			String[] bk = drv.resolveBucketAndKey(op);
 			assertEquals("large", bk[0]);
 			assertEquals("mkk0lurmliru", bk[1]);
 		}
 
+		@SuppressWarnings("unchecked")
 		@Test
-		void withDstPath_nestedPrefix() throws Exception {
+		void withDstPath_nestedPrefix() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.dstPath()).thenReturn("/bucket/prefix");
 			when(item.name()).thenReturn("mykey");
 			when(op.item()).thenReturn(item);
 
-			String[] bk = invokeResolve(op);
+			String[] bk = drv.resolveBucketAndKey(op);
 			assertEquals("bucket", bk[0]);
 			assertEquals("prefix/mykey", bk[1]);
 		}
 
+		@SuppressWarnings("unchecked")
 		@Test
-		void withDstPath_itemNameHasLeadingSlash() throws Exception {
+		void withDstPath_itemNameHasLeadingSlash() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.dstPath()).thenReturn("/mybucket");
 			when(item.name()).thenReturn("/somekey");
 			when(op.item()).thenReturn(item);
 
-			String[] bk = invokeResolve(op);
+			String[] bk = drv.resolveBucketAndKey(op);
 			assertEquals("mybucket", bk[0]);
 			assertEquals("somekey", bk[1]);
 		}
 
+		@SuppressWarnings("unchecked")
 		@Test
-		void noDstPath_fallsBackToParseBucketAndKey() throws Exception {
+		void noDstPath_fallsBackToParseBucketAndKey() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.dstPath()).thenReturn(null);
 			when(item.name()).thenReturn("/fallback-bucket/fallback-key");
 			when(op.item()).thenReturn(item);
 
-			String[] bk = invokeResolve(op);
+			String[] bk = drv.resolveBucketAndKey(op);
 			assertEquals("fallback-bucket", bk[0]);
 			assertEquals("fallback-key", bk[1]);
 		}
 
+		@SuppressWarnings("unchecked")
 		@Test
-		void emptyDstPath_fallsBackToParseBucketAndKey() throws Exception {
+		void emptyDstPath_fallsBackToParseBucketAndKey() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.dstPath()).thenReturn("");
 			when(item.name()).thenReturn("/b/k");
 			when(op.item()).thenReturn(item);
 
-			String[] bk = invokeResolve(op);
+			String[] bk = drv.resolveBucketAndKey(op);
 			assertEquals("b", bk[0]);
 			assertEquals("k", bk[1]);
 		}
@@ -593,7 +591,7 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// deleteObject — tested via reflection of execute()
+	// deleteObject — tested via execute() (now package-visible)
 	// -----------------------------------------------------------------------
 
 	@Nested
@@ -609,9 +607,7 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("mykey.dat");
 			when(op.item()).thenReturn(item);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-			exec.invoke(drv, op);
+			drv.execute(op);
 
 			ArgumentCaptor<DeleteObjectRequest> cap = ArgumentCaptor.forClass(DeleteObjectRequest.class);
 			verify(mockS3Client).deleteObject(cap.capture());
@@ -621,7 +617,7 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// putObject — tested via reflection of execute()
+	// putObject — tested via execute() (now package-visible)
 	// -----------------------------------------------------------------------
 
 	@Nested
@@ -639,9 +635,7 @@ public class S3AwsStorageDriverTest {
 			when(op.dstPath()).thenReturn("/upload-bucket");
 			when(op.item()).thenReturn((Item) dataItem);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-			exec.invoke(drv, op);
+			drv.execute(op);
 
 			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
 			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
@@ -661,16 +655,14 @@ public class S3AwsStorageDriverTest {
 			when(op.dstPath()).thenReturn("/bucket");
 			when(op.item()).thenReturn((Item) dataItem);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-			exec.invoke(drv, op);
+			drv.execute(op);
 
 			verify(mockS3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
 		}
 	}
 
 	// -----------------------------------------------------------------------
-	// readObject — tested via reflection of execute()
+	// readObject — tested via execute() (now package-visible)
 	// -----------------------------------------------------------------------
 
 	@Nested
@@ -693,9 +685,7 @@ public class S3AwsStorageDriverTest {
 							getResp, new ByteArrayInputStream(new byte[0]));
 			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-			exec.invoke(drv, op);
+			drv.execute(op);
 
 			ArgumentCaptor<GetObjectRequest> cap = ArgumentCaptor.forClass(GetObjectRequest.class);
 			verify(mockS3Client).getObject(cap.capture());
@@ -705,7 +695,7 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// execute() dispatch — unsupported type
+	// execute() dispatch — unsupported type + NOOP
 	// -----------------------------------------------------------------------
 
 	@Nested
@@ -713,36 +703,40 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void unsupportedOpType_throwsUnsupportedOperationException() throws Exception {
+		void unsupportedOpType_throwsUnsupportedOperationException() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.type()).thenReturn(OpType.LIST);
 			when(op.item()).thenReturn(item);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
+			assertThrows(UnsupportedOperationException.class, () -> drv.execute(op));
+		}
 
-			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
-							() -> exec.invoke(drv, op));
-			assertInstanceOf(UnsupportedOperationException.class, ex.getCause());
+		@SuppressWarnings("unchecked")
+		@Test
+		void noopOperation_doesNotCallS3() throws Exception {
+			Operation<Item> op = mock(Operation.class);
+			when(op.type()).thenReturn(OpType.NOOP);
+
+			drv.execute(op);
+
+			verifyNoInteractions(mockS3Client);
 		}
 	}
 
 	// -----------------------------------------------------------------------
-	// requestNewPath
+	// requestNewPath — protected, callable from same package
 	// -----------------------------------------------------------------------
 
 	@Nested
 	class RequestNewPathTest {
 
 		@Test
-		void extractsBucketPath_withSlash() throws Exception {
+		void extractsBucketPath_withSlash() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenReturn(HeadBucketResponse.builder().build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-			String result = (String) m.invoke(drv, "/large/prefix");
+			String result = drv.requestNewPath("/large/prefix");
 			assertEquals("/large", result);
 
 			// Verify headBucket was called with the bucket from path, not this.bucketName
@@ -752,26 +746,22 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void extractsBucketPath_noSubpath() throws Exception {
+		void extractsBucketPath_noSubpath() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenReturn(HeadBucketResponse.builder().build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-			String result = (String) m.invoke(drv, "/mybucket");
+			String result = drv.requestNewPath("/mybucket");
 			assertEquals("/mybucket", result);
 		}
 
 		@Test
-		void missingBucket_createsIt() throws Exception {
+		void missingBucket_createsIt() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
 			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
 							.thenReturn(CreateBucketResponse.builder().build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-			String result = (String) m.invoke(drv, "/newbucket");
+			String result = drv.requestNewPath("/newbucket");
 			assertEquals("/newbucket", result);
 
 			ArgumentCaptor<CreateBucketRequest> cap = ArgumentCaptor.forClass(CreateBucketRequest.class);
@@ -780,45 +770,31 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void headBucketFailure_nonNoSuchBucket_throwsRuntimeException() throws Exception {
+		void headBucketFailure_nonNoSuchBucket_throwsRuntimeException() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenThrow(S3Exception.builder().message("access denied").build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-
-			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
-							() -> m.invoke(drv, "/nonexistent"));
-			assertInstanceOf(RuntimeException.class, ex.getCause());
+			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/nonexistent"));
 		}
 
 		@Test
-		void createBucketFailure_throwsRuntimeException() throws Exception {
+		void createBucketFailure_throwsRuntimeException() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenThrow(NoSuchBucketException.builder().message("no bucket").build());
 			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
 							.thenThrow(S3Exception.builder().message("create failed").build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-
-			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
-							() -> m.invoke(drv, "/failbucket"));
-			assertInstanceOf(RuntimeException.class, ex.getCause());
+			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/failbucket"));
 		}
 	}
 
 	// -----------------------------------------------------------------------
-	// requestNewAuthToken
+	// requestNewAuthToken — protected, callable from same package
 	// -----------------------------------------------------------------------
 
 	@Test
-	void requestNewAuthToken_returnsNull() throws Exception {
-		Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewAuthToken",
-						com.dell.spt.base.storage.Credential.class);
-		m.setAccessible(true);
-		Object result = m.invoke(drv, (Object) null);
-		assertNull(result);
+	void requestNewAuthToken_returnsNull() {
+		assertNull(drv.requestNewAuthToken(null));
 	}
 
 	// -----------------------------------------------------------------------
@@ -848,7 +824,7 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void successfulDelete_callsFinishOperation() throws Exception {
+		void successfulDelete_callsFinishOperation() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.type()).thenReturn(OpType.DELETE);
@@ -856,9 +832,7 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("key");
 			when(op.item()).thenReturn(item);
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("invokeNio", Operation.class);
-			m.setAccessible(true);
-			m.invoke(drv, op);
+			drv.invokeNio(op);
 
 			verify(mockS3Client).deleteObject(any(DeleteObjectRequest.class));
 			// finishOperation calls startResponse, finishResponse, and status(SUCC)
@@ -867,7 +841,7 @@ public class S3AwsStorageDriverTest {
 			verify(op).status(Operation.Status.SUCC);
 		}
 
-		@SuppressWarnings("unchecked")
+		@SuppressWarnings({"unchecked", "rawtypes"})
 		@Test
 		void successfulRead_withDataItem_countsBytesDone() throws Exception {
 			DataItem dataItem = mock(DataItem.class);
@@ -885,9 +859,7 @@ public class S3AwsStorageDriverTest {
 							getResp, new ByteArrayInputStream(new byte[0]));
 			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("invokeNio", Operation.class);
-			m.setAccessible(true);
-			m.invoke(drv, dataOp);
+			drv.invokeNio((Operation) dataOp);
 
 			// readObject calls countBytesDone, then invokeNio calls it again for metrics
 			verify(dataOp, atLeast(1)).countBytesDone(anyLong());
@@ -896,7 +868,7 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void failedOperation_setsStatusToFailUnknown() throws Exception {
+		void failedOperation_setsStatusToFailUnknown() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.type()).thenReturn(OpType.READ);
@@ -908,16 +880,14 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.getObject(any(GetObjectRequest.class)))
 							.thenThrow(NoSuchKeyException.builder().message("not found").build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("invokeNio", Operation.class);
-			m.setAccessible(true);
-			m.invoke(drv, op);
+			drv.invokeNio(op);
 
 			verify(op).status(Operation.Status.FAIL_UNKNOWN);
 		}
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void failedOperation_handlesTimingErrors() throws Exception {
+		void failedOperation_handlesTimingErrors() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class);
 			when(op.type()).thenReturn(OpType.READ);
@@ -930,16 +900,14 @@ public class S3AwsStorageDriverTest {
 			// Make startResponse throw too, to exercise the inner catch
 			doThrow(new IllegalStateException("already started")).when(op).startResponse();
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("invokeNio", Operation.class);
-			m.setAccessible(true);
 			// Should not throw despite double failure
-			assertDoesNotThrow(() -> m.invoke(drv, op));
+			assertDoesNotThrow(() -> drv.invokeNio(op));
 			verify(op).status(Operation.Status.FAIL_UNKNOWN);
 		}
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void successfulDelete_nonDataItem_skipsCountBytesDone() throws Exception {
+		void successfulDelete_nonDataItem_skipsCountBytesDone() {
 			Operation<Item> op = mock(Operation.class);
 			Item item = mock(Item.class); // plain Item, not DataItem
 			when(op.type()).thenReturn(OpType.DELETE);
@@ -947,12 +915,29 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("key");
 			when(op.item()).thenReturn(item);
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("invokeNio", Operation.class);
-			m.setAccessible(true);
-			m.invoke(drv, op);
+			drv.invokeNio(op);
 
 			// Should succeed without attempting countBytesDone
 			verify(op).status(Operation.Status.SUCC);
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"})
+		@Test
+		void successfulCreate_dataItem_countsBytesDone() throws Exception {
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj");
+			when(dataItem.size()).thenReturn(2048L);
+
+			DataOperation<DataItem> dataOp = mock(DataOperation.class);
+			when(dataOp.type()).thenReturn(OpType.CREATE);
+			when(dataOp.dstPath()).thenReturn("/bucket");
+			when(dataOp.item()).thenReturn(dataItem);
+
+			drv.invokeNio((Operation) dataOp);
+
+			// invokeNio calls countBytesDone(dataItem.size()) for non-READ DataItem ops
+			verify(dataOp).countBytesDone(2048L);
+			verify(dataOp).status(Operation.Status.SUCC);
 		}
 	}
 
@@ -965,7 +950,7 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void unsupportedItemType_throwsUnsupportedOperationException() throws Exception {
+		void unsupportedItemType_throwsUnsupportedOperationException() {
 			Item plainItem = mock(Item.class); // not DataItem, not PathItem
 			when(plainItem.name()).thenReturn("plain");
 
@@ -974,13 +959,8 @@ public class S3AwsStorageDriverTest {
 			when(op.dstPath()).thenReturn("/bucket");
 			when(op.item()).thenReturn(plainItem);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-
-			var ex = assertThrows(java.lang.reflect.InvocationTargetException.class,
-							() -> exec.invoke(drv, op));
-			assertInstanceOf(UnsupportedOperationException.class, ex.getCause());
-			assertTrue(ex.getCause().getMessage().contains("DataItem or PathItem"));
+			var ex = assertThrows(UnsupportedOperationException.class, () -> drv.execute(op));
+			assertTrue(ex.getMessage().contains("DataItem or PathItem"));
 		}
 	}
 
@@ -991,8 +971,7 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class ReadObjectDataOperationTest {
 
-		@SuppressWarnings({"unchecked", "rawtypes"
-		})
+		@SuppressWarnings({"unchecked", "rawtypes"})
 		@Test
 		void readsDataAndCountsBytes() throws Exception {
 			DataItem dataItem = mock(DataItem.class);
@@ -1009,9 +988,7 @@ public class S3AwsStorageDriverTest {
 							getResp, new ByteArrayInputStream(content));
 			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
-			exec.invoke(drv, dataOp);
+			drv.execute((Operation) dataOp);
 
 			// readObject should count the 4096 bytes read
 			verify(dataOp).countBytesDone(4096L);
@@ -1033,10 +1010,8 @@ public class S3AwsStorageDriverTest {
 							getResp, new ByteArrayInputStream(new byte[100]));
 			when(mockS3Client.getObject(any(GetObjectRequest.class))).thenReturn(ris);
 
-			Method exec = S3AwsStorageDriver.class.getDeclaredMethod("execute", Operation.class);
-			exec.setAccessible(true);
 			// Should not throw - just doesn't call countBytesDone
-			assertDoesNotThrow(() -> exec.invoke(drv, op));
+			assertDoesNotThrow(() -> drv.execute(op));
 		}
 	}
 
@@ -1048,14 +1023,94 @@ public class S3AwsStorageDriverTest {
 	class RequestNewPathEdgeCasesTest {
 
 		@Test
-		void pathWithoutLeadingSlash() throws Exception {
+		void pathWithoutLeadingSlash() {
 			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
 							.thenReturn(HeadBucketResponse.builder().build());
 
-			Method m = S3AwsStorageDriver.class.getDeclaredMethod("requestNewPath", String.class);
-			m.setAccessible(true);
-			String result = (String) m.invoke(drv, "nobucket");
+			String result = drv.requestNewPath("nobucket");
 			assertEquals("/nobucket", result);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// resolveBucketName — static, extracted from constructor
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveBucketNameTest {
+
+		@Test
+		void fromItemOutputPath() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			// storage-net-node-addrs always throws (confuse path mismatch in practice)
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/mybucket");
+
+			assertEquals("mybucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromItemInputPath_whenOutputPathNull() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn(null);
+			when(itemConfig.stringVal("input-path")).thenReturn("/readbucket");
+
+			assertEquals("readbucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromNodeAddrs_withSlash() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("addr/extra");
+
+			assertEquals("addr", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void fromNodeAddrs_noSlash() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("justaddr");
+
+			assertEquals("justaddr", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void allSourcesMissing_fallsBackToUsername() {
+			Config config = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
+
+			String result = S3AwsStorageDriver.resolveBucketName(config);
+			String expectedUser = System.getProperty("user.name", "spt");
+			assertEquals(expectedUser + "test", result);
+		}
+
+		@Test
+		void nodeAddrsEmpty_fallsThrough() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenReturn("");
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/frombucket");
+
+			assertEquals("frombucket", S3AwsStorageDriver.resolveBucketName(config));
+		}
+
+		@Test
+		void outputPathTooShort_fallsToInputPath() {
+			Config config = mock(Config.class);
+			Config itemConfig = mock(Config.class);
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
+			when(config.configVal("item")).thenReturn(itemConfig);
+			when(itemConfig.stringVal("output-path")).thenReturn("/"); // too short
+			when(itemConfig.stringVal("input-path")).thenReturn("/inputbucket");
+
+			assertEquals("inputbucket", S3AwsStorageDriver.resolveBucketName(config));
 		}
 	}
 }
