@@ -14,37 +14,37 @@ dependencies {
 	// Exclude Netty and SLF4J globally: the s3-aws driver uses the Apache HTTP
 	// client, not the Netty NIO client, and the AWS SDK BOM pulls in an older
 	// Netty (4.1.x) that conflicts with the engine's own Netty (4.2.x).
-	implementation('software.amazon.awssdk:s3:2.21.29') {
+	implementation(libs.aws.s3) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 		exclude group: 'io.netty'
 		exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
 	}
-	implementation('software.amazon.awssdk:auth:2.21.29') {
+	implementation(libs.aws.auth) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:regions:2.21.29') {
+	implementation(libs.aws.regions) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:aws-core:2.21.29') {
+	implementation(libs.aws.core) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:sts:2.21.29') {
+	implementation(libs.aws.sts) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:http-client-spi:2.21.29') {
+	implementation(libs.aws.http.client.spi) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:apache-client:2.21.29') {
+	implementation(libs.aws.apache.client) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 		exclude group: 'io.netty'
 	}
-	implementation('software.amazon.awssdk:sdk-core:2.21.29') {
+	implementation(libs.aws.sdk.core) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:utils:2.21.29') {
+	implementation(libs.aws.utils) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
-	implementation('software.amazon.awssdk:profiles:2.21.29') {
+	implementation(libs.aws.profiles) {
 		exclude group: 'org.slf4j', module: 'slf4j-api'
 	}
 
