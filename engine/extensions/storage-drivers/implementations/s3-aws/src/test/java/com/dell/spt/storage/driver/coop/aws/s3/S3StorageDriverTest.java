@@ -1,6 +1,5 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
-import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;

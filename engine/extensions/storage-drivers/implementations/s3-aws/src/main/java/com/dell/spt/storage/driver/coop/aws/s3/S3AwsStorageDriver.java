@@ -147,8 +147,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				op.startResponse();
 				op.finishResponse();
-			} catch (Exception ignored) {
-			}
+			} catch (Exception ignored) {}
 		}
 	}
 
@@ -211,9 +210,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			final var slashPos = rel.indexOf('/');
 			if (slashPos > 0) {
 				// Nested dstPath like "/bucket/prefix" — prepend prefix to key
-				return new String[]{rel.substring(0, slashPos), rel.substring(slashPos + 1) + "/" + key};
+				return new String[]{rel.substring(0, slashPos), rel.substring(slashPos + 1) + "/" + key
+				};
 			}
-			return new String[]{rel, key};
+			return new String[]{rel, key
+			};
 		}
 
 		// No dstPath — parse full path from item name
@@ -232,11 +233,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final var relPath = itemName.startsWith("/") ? itemName.substring(1) : itemName;
 		final var slashPos = relPath.indexOf('/');
 		if (slashPos > 0) {
-			return new String[]{relPath.substring(0, slashPos), relPath.substring(slashPos + 1)};
+			return new String[]{relPath.substring(0, slashPos), relPath.substring(slashPos + 1)
+			};
 		}
 		// No slash — entire relPath is the bucket, key is empty (shouldn't happen
 		// in normal operation but handle gracefully)
-		return new String[]{relPath, ""};
+		return new String[]{relPath, ""
+		};
 	}
 
 	private void putObject(final O op) throws Exception {
