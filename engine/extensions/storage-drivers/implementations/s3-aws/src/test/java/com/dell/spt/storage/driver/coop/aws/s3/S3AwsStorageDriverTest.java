@@ -1394,4 +1394,106 @@ public class S3AwsStorageDriverTest {
 			assertEquals("inputbucket", S3AwsStorageDriver.resolveBucketName(config));
 		}
 	}
+
+	@Nested
+	class ClassifyFailureTest {
+
+		@Test
+		void s3Exception_401_returnsRespFailAuth() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(401)
+							.message("Unauthorized")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_403_returnsRespFailAuth() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(403)
+							.message("Forbidden")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_404_returnsRespFailNotFound() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(404)
+							.message("Not Found")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_400_returnsRespFailClient() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(400)
+							.message("Bad Request")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_500_returnsRespFailSvc() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(500)
+							.message("Internal Server Error")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_503_returnsRespFailSvc() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(503)
+							.message("Service Unavailable")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void ioException_returnsFailIo() {
+			assertEquals(Operation.Status.FAIL_IO, S3AwsStorageDriver.classifyFailure(new IOException("connection reset")));
+		}
+
+		@Test
+		void sdkClientException_wrappingIo_returnsFailIo() {
+			var e = software.amazon.awssdk.core.exception.SdkClientException.builder()
+							.cause(new IOException("connection refused"))
+							.build();
+			assertEquals(Operation.Status.FAIL_IO, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void apiCallTimeoutException_returnsFailTimeout() {
+			var e = software.amazon.awssdk.core.exception.ApiCallTimeoutException.builder()
+							.message("timed out")
+							.build();
+			assertEquals(Operation.Status.FAIL_TIMEOUT, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void apiCallAttemptTimeoutException_returnsFailTimeout() {
+			var e = software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException.builder()
+							.message("attempt timed out")
+							.build();
+			assertEquals(Operation.Status.FAIL_TIMEOUT, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void genericException_returnsFailUnknown() {
+			assertEquals(
+							Operation.Status.FAIL_UNKNOWN,
+							S3AwsStorageDriver.classifyFailure(new RuntimeException("unexpected")));
+		}
+
+		@Test
+		void sdkClientException_nonIoCause_returnsFailUnknown() {
+			var e = software.amazon.awssdk.core.exception.SdkClientException.builder()
+							.cause(new IllegalStateException("bad state"))
+							.build();
+			assertEquals(Operation.Status.FAIL_UNKNOWN, S3AwsStorageDriver.classifyFailure(e));
+		}
+	}
 }

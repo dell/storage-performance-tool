@@ -25,9 +25,13 @@ import java.nio.file.Path;
 
 import java.io.IOException;
 import java.nio.channels.Channels;
+import java.util.concurrent.TimeoutException;
+import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
+import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
-import software.amazon.awssdk.core.sync.RequestBody;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -70,6 +74,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * 4. System username + "test" (fallback)
 	 */
 	static String resolveBucketName(final Config config) {
+		final Logger log = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 		String resolved = null;
 
 		try {
@@ -81,7 +86,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					resolved = nodeAddrs;
 				}
 			}
-		} catch (Exception ignored) {}
+		} catch (Exception e) {
+			log.debug("Could not read storage-net-node-addrs from config: {}", e.toString());
+		}
 
 		if (resolved == null) {
 			try {
@@ -96,10 +103,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
 								resolved = inputPath.substring(1);
 							}
-						} catch (Exception ignored) {}
+						} catch (Exception e) {
+							log.debug("Could not read item.input-path from config: {}", e.toString());
+						}
 					}
 				}
-			} catch (Exception ignored) {}
+			} catch (Exception e) {
+				log.debug("Could not read item config: {}", e.toString());
+			}
 		}
 
 		if (resolved == null || resolved.isEmpty()) {
@@ -126,16 +137,40 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			finishOperation(op);
 
 		} catch (Exception e) {
-			// For failed operations, still need to properly complete timing.
-			// finishOperation must NOT run here — it would mark the op as SUCC.
-			op.status(Status.FAIL_UNKNOWN);
+			op.status(classifyFailure(e));
+			LOG.debug("{} {} failed: {}", op.type(), op.item().name(), e.toString());
+			LOG.trace("{} {} stack trace", op.type(), op.item().name(), e);
 			try {
 				op.startResponse();
 				op.finishResponse();
-			} catch (Exception ignored) {
-				// Ignore timing errors on failed operations
+			} catch (Exception ignored) {}
+		}
+	}
+
+	/**
+	 * Map an exception to the most specific Operation.Status failure code.
+	 */
+	static Status classifyFailure(final Exception e) {
+		if (e instanceof S3Exception) {
+			final int statusCode = ((S3Exception) e).statusCode();
+			if (statusCode == 401 || statusCode == 403) {
+				return Status.RESP_FAIL_AUTH;
+			} else if (statusCode == 404) {
+				return Status.RESP_FAIL_NOT_FOUND;
+			} else if (statusCode >= 400 && statusCode < 500) {
+				return Status.RESP_FAIL_CLIENT;
+			} else if (statusCode >= 500) {
+				return Status.RESP_FAIL_SVC;
 			}
 		}
+		if (e instanceof ApiCallTimeoutException || e instanceof ApiCallAttemptTimeoutException
+						|| e instanceof TimeoutException) {
+			return Status.FAIL_TIMEOUT;
+		}
+		if (e instanceof IOException || (e instanceof SdkClientException && e.getCause() instanceof IOException)) {
+			return Status.FAIL_IO;
+		}
+		return Status.FAIL_UNKNOWN;
 	}
 
 	@Override
