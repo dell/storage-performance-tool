@@ -15,6 +15,7 @@ Options:
   --headless                 Run in headless mode (no TUI)
   --prefix VALUE             Optional prefix filter for listings
   --bucket NAME              Target bucket override (default uses S3_BUCKET env)
+  --s3-driver TYPE           Storage driver: default, aws, rdma (env: SPT_S3_DRIVER)
   --auto-terminate-seconds N Stop after N seconds (default: $AUTO_TERMINATE_SECONDS)
   -h, --help                 Show this help and exit
 EOF
@@ -25,6 +26,7 @@ PREFIX=${PREFIX:-""}
 BUCKET=${BUCKET:-${S3_BUCKET:-""}}
 THREADS=${THREADS:-""}
 AUTO_TERMINATE_SECONDS=${AUTO_TERMINATE_SECONDS:-120}
+S3_DRIVER=${SPT_S3_DRIVER:-"default"}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --auto-terminate-seconds)
       AUTO_TERMINATE_SECONDS="${2:-0}"
+      shift 2
+      ;;
+    --s3-driver)
+      S3_DRIVER="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -93,9 +99,15 @@ if [[ "$AUTO_TERMINATE_SECONDS" =~ ^[0-9]+$ ]] && [ "$AUTO_TERMINATE_SECONDS" -g
   CMD+=(--auto-terminate-seconds "$AUTO_TERMINATE_SECONDS")
 fi
 
+# Storage driver (only pass when non-default to avoid requiring the flag on older builds)
+if [[ "$S3_DRIVER" != "default" ]]; then
+  CMD+=(--s3-driver "$S3_DRIVER")
+fi
+
 [[ -n "$PREFIX" ]] && echo "Prefix: $PREFIX"
 [[ -n "$BUCKET" ]] && echo "Bucket: $BUCKET"
 [[ -n "$THREADS" ]] && echo "Threads: $THREADS"
+[[ "$S3_DRIVER" != "default" ]] && echo "S3 Driver: $S3_DRIVER"
 if [[ "$AUTO_TERMINATE_SECONDS" =~ ^[0-9]+$ ]] && [ "$AUTO_TERMINATE_SECONDS" -gt 0 ]; then
   echo "Auto-terminate: ${AUTO_TERMINATE_SECONDS}s"
 fi

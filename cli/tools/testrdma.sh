@@ -30,6 +30,9 @@ CLEANUP=${CLEANUP:-true}
 KEEP_SCENARIO=${KEEP_SCENARIO:-true}
 ATTACH_EXISTING=${ATTACH_EXISTING:-false}
 
+# Storage driver selection (default, netty, aws, rdma)
+S3_DRIVER=${SPT_S3_DRIVER:-"default"}
+
 # RDMA-specific settings (from env or defaults)
 RDMA_FALLBACK=${RDMA_FALLBACK_ENABLED:-false}
 RDMA_THRESHOLD=${RDMA_THRESHOLD_BYTES:-1048576}
@@ -62,6 +65,7 @@ while [ $# -gt 0 ]; do
     --no-keep-scenario) KEEP_SCENARIO=false; shift 1 ;;
     --attach-existing) ATTACH_EXISTING=true; shift 1 ;;
     --no-attach-existing) ATTACH_EXISTING=false; shift 1 ;;
+    --s3-driver) S3_DRIVER="${2:-}"; shift 2 ;;
     --rdma-fallback) RDMA_FALLBACK=true; shift 1 ;;
     --no-rdma-fallback) RDMA_FALLBACK=false; shift 1 ;;
     --rdma-threshold) RDMA_THRESHOLD="${2:-}"; shift 2 ;;
@@ -89,6 +93,9 @@ Workload:
   --duration DUR           e.g. 30s, 5m (default: $DURATION)
   --object-count N         Operations; only used if --duration is empty
   --min-hosts N            Minimum hosts required (default: $MIN_HOSTS)
+
+Driver:
+  --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
 
 RDMA:
   --[no-]rdma-fallback     Fall back to HTTP on RDMA failure (default: $RDMA_FALLBACK)
@@ -130,6 +137,9 @@ else
   RUN_SPEC="ObjectCount: ${OBJECT_COUNT:-1000}"
 fi
 echo "Threads: $THREADS  ObjectSize: $OBJECT_SIZE  $RUN_SPEC"
+if [ "$S3_DRIVER" != "default" ]; then
+  echo "S3 Driver: $S3_DRIVER"
+fi
 echo "RDMA: fallback=$RDMA_FALLBACK  threshold=$RDMA_THRESHOLD  device=$RDMA_DEVICE"
 echo
 
@@ -152,6 +162,11 @@ if [ -n "$S3_ENDPOINTS" ]; then
   cmd+=(--endpoints "$S3_ENDPOINTS")
 elif [ -n "$S3_ENDPOINT" ]; then
   cmd+=(--endpoint "$S3_ENDPOINT")
+fi
+
+# Storage driver (only pass when non-default to avoid requiring the flag on older builds)
+if [ "$S3_DRIVER" != "default" ]; then
+  cmd+=(--s3-driver "$S3_DRIVER")
 fi
 
 if [ -n "$DURATION" ]; then
