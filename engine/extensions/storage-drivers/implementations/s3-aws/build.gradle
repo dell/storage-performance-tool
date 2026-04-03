@@ -48,8 +48,8 @@ dependencies {
 	compileOnly(
 		project(':extensions:storage-drivers:implementations:s3'),
 		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:nio'),
 		project(':extensions:storage-drivers:primitives:netty'),
-		project(':extensions:storage-drivers:protocols:http'),
 	)
 
 	// Configuration / schema framework (used by the extension class)

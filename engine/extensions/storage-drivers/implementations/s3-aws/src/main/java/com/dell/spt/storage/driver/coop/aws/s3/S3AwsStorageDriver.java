@@ -13,7 +13,7 @@ import com.dell.spt.base.item.op.Operation.Status; // Added import for Operation
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
-import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
+import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
 import com.github.akurilov.confuse.Config;
 
 import java.nio.file.Files;
@@ -27,13 +27,12 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
-import java.util.concurrent.TimeUnit;
 
 /**
  * AWS SDK implementation of S3 Storage Driver for SPT
  * Comparable to the legacy REST implementation in com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver
  */
-public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends CoopStorageDriverBase<I, O>
+public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends NioStorageDriverBase<I, O>
 				implements ListDiscoveryProbe {
 
 	private final S3Client s3Client;
@@ -125,23 +124,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	@Override
-	protected boolean submit(final O op) throws IllegalStateException {
+	protected void invokeNio(final O op) {
 		try {
-			// Acquire concurrency permit
-			if (!concurrencyThrottle.tryAcquire()) {
-				return false;
-			}
-
-			// Start request timing
-			op.startRequest();
-
+			// Execute AWS SDK operation synchronously - NioStorageDriverBase handles threading
 			execute(op);
-
-			// Finish request timing
-			op.finishRequest();
-
-			// Set status to success for metrics counting
-			op.status(Status.SUCC);
 
 			// Set bytes transferred for metrics
 			if (op.item() instanceof DataItem) {
@@ -151,60 +137,35 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 
-			// Start response timing (before completion)
-			op.startResponse();
+			// Use finishOperation helper like FileStorageDriver does
+			finishOperation(op);
 
-			// Complete the operation (this will call finishResponse internally)
-			complete(op);
-
-			// Release concurrency permit
-			concurrencyThrottle.release();
-
-			return true;
 		} catch (Exception e) {
-			// Release permit on error
-			concurrencyThrottle.release();
-			throw new IllegalStateException("AWS S3 operation failed", e);
-		}
-	}
-
-	/**
-	 * Complete the operation following the legacy driver pattern
-	 */
-	private void complete(final O op) {
-		try {
-			// Finish response timing
-			op.finishResponse();
-		} catch (final IllegalStateException e) {
-			// Ignore invalid state exceptions
-		}
-
-		// Handle completion
-		handleCompleted(op);
-	}
-
-	@Override
-	protected int submit(final List<O> ops, final int from, final int to)
-					throws IllegalStateException {
-
-		int i = from;
-		for (; i < to; i++) {
-			submit(ops.get(i));
-		}
-		return i - from;
-	}
-
-	@Override
-	protected int submit(final List<O> ops)
-					throws IllegalStateException {
-
-		int count = 0;
-		for (O op : ops) {
-			if (submit(op)) {
-				count++;
+			// For failed operations, still need to properly complete timing
+			op.status(Status.FAIL_UNKNOWN);
+			try {
+				op.startResponse();
+				op.finishResponse();
+			} catch (Exception ignored) {
+				// Ignore timing errors on failed operations
 			}
 		}
-		return count;
+	}
+
+	@Override
+	protected String requestNewPath(final String path) {
+		// Return path as-is, AWS SDK handles bucket operations
+		return path;
+	}
+
+	@Override
+	protected String requestNewAuthToken(final Credential credential) {
+		// Return null, AWS SDK handles authentication
+		return null;
+	}
+
+	protected void adjustIoBuffers(final long avgTransferSize, final long avgDuration) {
+		// No-op, AWS SDK manages its own buffers
 	}
 
 	private void execute(final O op) throws Exception {
@@ -228,6 +189,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private void putObject(final O op) throws Exception {
+		// Use item name as the S3 key - remove leading slash if present
+		String s3Key = op.item().name();
+		if (s3Key.startsWith("/")) {
+			s3Key = s3Key.substring(1);
+		}
 
 		if (op.item() instanceof DataItem) {
 			// Handle in-memory data (DataItem) - always use streaming
@@ -235,7 +201,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			s3Client.putObject(
 							PutObjectRequest.builder()
 											.bucket(bucketName)
-											.key(op.dstPath())
+											.key(s3Key)
 											.build(),
 							RequestBody.fromInputStream(Channels.newInputStream(dataItem), dataItem.size()));
 		} else if (op.item() instanceof PathItem) {
@@ -247,7 +213,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			s3Client.putObject(
 							PutObjectRequest.builder()
 											.bucket(bucketName)
-											.key(op.dstPath())
+											.key(s3Key)
 											.build(),
 							RequestBody.fromInputStream(Files.newInputStream(path), size));
 		} else {
@@ -257,37 +223,47 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private void readObject(final O op) throws Exception {
-		long opStartTime = System.nanoTime();
+		// Use item name as the S3 key - remove leading slash if present
+		String s3Key = op.item().name();
+		if (s3Key.startsWith("/")) {
+			s3Key = s3Key.substring(1);
+		}
 
 		try (var response = s3Client.getObject(
 						GetObjectRequest.builder()
 										.bucket(bucketName)
-										.key(op.srcPath())
+										.key(s3Key)
 										.build())) {
-			// stream intentionally discarded
-		}
 
-		// Log timing for performance monitoring (only if debug enabled)
-		if (System.nanoTime() - startTime < TimeUnit.SECONDS.toNanos(10)) {
-			// Only log timing during first 10 seconds to avoid overhead
-			long duration = System.nanoTime() - opStartTime;
-			if (duration > TimeUnit.MILLISECONDS.toNanos(50)) {
-				// Log slow operations only
+			// Read and consume the stream to properly transfer data
+			var inputStream = response;
+			byte[] buffer = new byte[8192]; // 8KB buffer for reading
+			long bytesRead = 0;
+			int n;
+
+			while ((n = inputStream.read(buffer)) != -1) {
+				bytesRead += n;
+			}
+
+			// Count bytes transferred for metrics
+			if (op instanceof DataOperation) {
+				((DataOperation) op).countBytesDone(bytesRead);
 			}
 		}
 	}
 
 	private void deleteObject(final O op) {
+		// Use item name as the S3 key - remove leading slash if present
+		String s3Key = op.item().name();
+		if (s3Key.startsWith("/")) {
+			s3Key = s3Key.substring(1);
+		}
+
 		s3Client.deleteObject(
 						DeleteObjectRequest.builder()
 										.bucket(bucketName)
-										.key(op.srcPath())
+										.key(s3Key)
 										.build());
-	}
-
-	@Override
-	protected void doStop() {
-		s3Client.close();
 	}
 
 	@Override
@@ -310,26 +286,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
-	@Override
-	protected String requestNewPath(final String path) {
-		// For S3-AWS, we need to ensure the bucket exists before returning the path
-		try {
-			// Check if bucket exists, create if it doesn't (async for performance)
-			if (!s3Client.listBuckets().buckets().stream().anyMatch(b -> b.name().equals(bucketName))) {
-				s3Client.createBucket(CreateBucketRequest.builder().bucket(bucketName).build());
-			}
-		} catch (Exception e) {
-			// Continue anyway, the bucket might exist or the operation might fail later
-		}
-		return path;
-	}
-
-	@Override
-	protected String requestNewAuthToken(final Credential credential) {
-		// AWS SDK manages auth tokens internally
-		return null;
-	}
-
 	/**
 	 * List objects in the bucket with optional prefix and options.
 	 */
@@ -342,42 +298,56 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final int count,
 					final ListOptions options) throws IOException {
 		try {
-			// Extract bucket name from path - remove leading slash if present
-			String targetBucket = path;
-			if (path != null && path.startsWith("/")) {
-				targetBucket = path.substring(1);
-			}
-
-			// Use prefix for object filtering
-			String objectPrefix = prefix != null ? prefix : "";
+			// Use the driver's configured bucket name
+			// The prefix parameter is used for filtering objects, like S3 driver does
+			// The path parameter is the bucket path, not used for prefix filtering
 
 			// Optimize request size for better performance
 			int maxKeys = Math.min(Math.max(count, 1), 1000);
 
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
-							.bucket(targetBucket)
+							.bucket(bucketName)
 							.maxKeys(maxKeys);
-			if (!objectPrefix.isEmpty()) {
-				reqBuilder.prefix(objectPrefix);
+			// Use prefix parameter directly like S3 driver does
+			if (prefix != null && !prefix.isEmpty()) {
+				reqBuilder.prefix(prefix);
 			}
-			if (options != null && options.continuationToken() != null) {
+
+			// Handle pagination like S3 driver does
+			if (options != null && options.continuationToken() != null && !options.continuationToken().isEmpty()) {
 				reqBuilder.continuationToken(options.continuationToken());
+			} else if (lastPrevItem != null) {
+				// Use lastPrevItem name as startAfter for pagination
+				String startAfter = lastPrevItem.name();
+				if (startAfter.startsWith("/")) {
+					startAfter = startAfter.substring(1);
+				}
+				reqBuilder.startAfter(startAfter);
 			}
 
 			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
 
 			List<I> result = new ArrayList<>(maxKeys);
 			for (S3Object s3obj : resp.contents()) {
-				// Create items exactly like S3 driver: path + objectKey
-				String itemPath = path + s3obj.key();
+				// Use the S3 object key directly as the item name
+				// The key already contains the full path (e.g., "awstest1m16trmr271")
+				String itemName = "/" + s3obj.key();
+
 				// Parse offset from object key using idRadix like S3 driver does
 				long offset = 0;
 				try {
-					offset = Long.parseLong(s3obj.key(), idRadix);
+					// Try to parse the key as a number for offset
+					String keyWithoutPrefix = s3obj.key();
+					// Remove any path prefix to get just the numeric part
+					int lastSlash = keyWithoutPrefix.lastIndexOf('/');
+					if (lastSlash >= 0) {
+						keyWithoutPrefix = keyWithoutPrefix.substring(lastSlash + 1);
+					}
+					offset = Long.parseLong(keyWithoutPrefix, idRadix);
 				} catch (NumberFormatException e) {
 					offset = 0;
 				}
-				I item = itemFactory.getItem(itemPath, offset, s3obj.size());
+				I item = itemFactory.getItem(itemName, offset, s3obj.size());
 				result.add(item);
 			}
 
