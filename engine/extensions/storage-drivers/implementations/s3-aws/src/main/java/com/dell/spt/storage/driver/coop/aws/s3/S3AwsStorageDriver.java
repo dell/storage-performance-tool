@@ -193,12 +193,30 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		if (dstPath != null && !dstPath.isEmpty()) {
 			final var rel = dstPath.startsWith("/") ? dstPath.substring(1) : dstPath;
-			var key = itemName.startsWith("/") ? itemName.substring(1) : itemName;
+			// After a recycle cycle buildItemPath() prepends dstPath to the item
+			// name, e.g. "mkk0lurmliru" → "/spttest/mkk0lurmliru".  Strip the
+			// prefix so we recover the original key.
+			var key = itemName;
+			final var dstNorm = dstPath.endsWith("/") ? dstPath : dstPath + "/";
+			if (key.startsWith(dstNorm)) {
+				key = key.substring(dstNorm.length());
+			} else if (key.startsWith("/")) {
+				key = key.substring(1);
+			}
 			final var slashPos = rel.indexOf('/');
 			if (slashPos > 0) {
-				// Nested dstPath like "/bucket/prefix" — prepend prefix to key
-				return new String[]{rel.substring(0, slashPos), rel.substring(slashPos + 1) + "/" + key
+				final var bucket = rel.substring(0, slashPos);
+				final var prefix = rel.substring(slashPos + 1);
+				// Strip prefix too when buildItemPath already prepended it
+				if (key.startsWith(prefix + "/")) {
+					key = key.substring(prefix.length() + 1);
+				}
+				return new String[]{bucket, prefix + "/" + key
 				};
+			}
+			// Strip bucket name when buildItemPath already prepended it
+			if (key.startsWith(rel + "/")) {
+				key = key.substring(rel.length() + 1);
 			}
 			return new String[]{rel, key
 			};

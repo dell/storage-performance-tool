@@ -194,6 +194,106 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
+	// resolveBucketAndKey — recycled operations (buildItemPath mutates item name)
+	//
+	// After the first execution cycle the framework calls op.result() which
+	// invokes buildItemPath(item, dstPath).  This prepends dstPath to the
+	// item name, e.g. "mkk0lurmliru" → "/spttest/mkk0lurmliru".
+	// On the next recycle pass the same item (with the mutated name) is
+	// handed back to the driver.  resolveBucketAndKey must still resolve
+	// the *same* bucket and key it did on the first call.
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveBucketAndKeyRecycleTest {
+
+		/**
+		 * Simulate the exact sequence that happens during recycle:
+		 *   1st call: dstPath="/spttest", itemName="mkk0lurmliru"
+		 *             → expect ["spttest", "mkk0lurmliru"]
+		 *   buildItemPath mutates itemName → "/spttest/mkk0lurmliru"
+		 *   2nd call: dstPath="/spttest", itemName="/spttest/mkk0lurmliru"
+		 *             → must still return ["spttest", "mkk0lurmliru"]
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_simpleBucket_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/spttest");
+			when(item.name()).thenReturn("mkk0lurmliru");
+			when(op.item()).thenReturn(item);
+
+			// First call — pristine item name
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("spttest", first[0], "bucket on 1st call");
+			assertEquals("mkk0lurmliru", first[1], "key on 1st call");
+
+			// Simulate buildItemPath: dstPath + "/" + itemName
+			when(item.name()).thenReturn("/spttest/mkk0lurmliru");
+
+			// Second call — recycled item name
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("spttest", second[0], "bucket on recycled call");
+			assertEquals("mkk0lurmliru", second[1], "key on recycled call");
+		}
+
+		/**
+		 * Same scenario with a nested prefix: dstPath="/bucket/prefix"
+		 *   1st: itemName="mykey" → ["bucket", "prefix/mykey"]
+		 *   after buildItemPath: itemName="/bucket/prefix/mykey"
+		 *   2nd: → must still return ["bucket", "prefix/mykey"]
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_nestedPrefix_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/bucket/prefix");
+			when(item.name()).thenReturn("mykey");
+			when(op.item()).thenReturn(item);
+
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("bucket", first[0], "bucket on 1st call");
+			assertEquals("prefix/mykey", first[1], "key on 1st call");
+
+			// After buildItemPath: "/bucket/prefix" + "/" + "mykey"
+			when(item.name()).thenReturn("/bucket/prefix/mykey");
+
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("bucket", second[0], "bucket on recycled call");
+			assertEquals("prefix/mykey", second[1], "key on recycled call");
+		}
+
+		/**
+		 * Item name already has a leading slash on the first call (some
+		 * item input formats produce this).  After buildItemPath it may
+		 * become "/spttest/somekey" from an original "/somekey".
+		 */
+		@SuppressWarnings("unchecked")
+		@Test
+		void afterBuildItemPath_itemHadLeadingSlash_sameResult() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("/somekey");
+			when(op.item()).thenReturn(item);
+
+			String[] first = drv.resolveBucketAndKey(op);
+			assertEquals("mybucket", first[0]);
+			assertEquals("somekey", first[1]);
+
+			// After buildItemPath: itemName stays "/mybucket/somekey"
+			// (buildItemPath prepends dstPath when name doesn't start with it)
+			when(item.name()).thenReturn("/mybucket/somekey");
+
+			String[] second = drv.resolveBucketAndKey(op);
+			assertEquals("mybucket", second[0], "bucket on recycled call");
+			assertEquals("somekey", second[1], "key on recycled call");
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// list() — 7-arg variant
 	// -----------------------------------------------------------------------
 
