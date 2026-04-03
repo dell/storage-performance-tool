@@ -13,6 +13,7 @@ import com.dell.spt.base.item.op.Operation.Status; // Added import for Operation
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
 import com.github.akurilov.confuse.Config;
 
@@ -141,13 +142,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			finishOperation(op);
 
 		} catch (Exception e) {
-			// For failed operations, still need to properly complete timing
+			Loggers.ERR.warn("{} {}: {}", op.type(), op.item().name(), e.getMessage(), e);
 			op.status(Status.FAIL_UNKNOWN);
 			try {
 				op.startResponse();
 				op.finishResponse();
 			} catch (Exception ignored) {
-				// Ignore timing errors on failed operations
 			}
 		}
 	}
@@ -188,32 +188,77 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
-	private void putObject(final O op) throws Exception {
-		// Use item name as the S3 key - remove leading slash if present
-		String s3Key = op.item().name();
-		if (s3Key.startsWith("/")) {
-			s3Key = s3Key.substring(1);
+	/**
+	 * Resolve bucket name and object key from the operation context.
+	 *
+	 * The framework splits CSV item paths (e.g., "/large/mkk0lurmliru") into:
+	 *   op.dstPath() = "/large"  (bucket/prefix)
+	 *   op.item().name() = "mkk0lurmliru"  (key)
+	 *
+	 * When dstPath is available, bucket comes from dstPath and key from item name.
+	 * When dstPath is null/empty (e.g., items with full paths in their name),
+	 * falls back to parsing the full path from item.name().
+	 *
+	 * @return a two-element array: [0] = bucket, [1] = key
+	 */
+	private String[] resolveBucketAndKey(final O op) {
+		final var dstPath = op.dstPath();
+		final var itemName = op.item().name();
+
+		if (dstPath != null && !dstPath.isEmpty()) {
+			final var rel = dstPath.startsWith("/") ? dstPath.substring(1) : dstPath;
+			var key = itemName.startsWith("/") ? itemName.substring(1) : itemName;
+			final var slashPos = rel.indexOf('/');
+			if (slashPos > 0) {
+				// Nested dstPath like "/bucket/prefix" — prepend prefix to key
+				return new String[]{rel.substring(0, slashPos), rel.substring(slashPos + 1) + "/" + key};
+			}
+			return new String[]{rel, key};
 		}
 
+		// No dstPath — parse full path from item name
+		return parseBucketAndKey(itemName);
+	}
+
+	/**
+	 * Extract bucket name and object key from a full item name path.
+	 * Item names follow the pattern "/{bucket}/{key}" — the first path segment
+	 * is the bucket and the remainder is the object key. Used as a fallback
+	 * when op.dstPath() is not available.
+	 *
+	 * @return a two-element array: [0] = bucket, [1] = key
+	 */
+	static String[] parseBucketAndKey(final String itemName) {
+		final var relPath = itemName.startsWith("/") ? itemName.substring(1) : itemName;
+		final var slashPos = relPath.indexOf('/');
+		if (slashPos > 0) {
+			return new String[]{relPath.substring(0, slashPos), relPath.substring(slashPos + 1)};
+		}
+		// No slash — entire relPath is the bucket, key is empty (shouldn't happen
+		// in normal operation but handle gracefully)
+		return new String[]{relPath, ""};
+	}
+
+	private void putObject(final O op) throws Exception {
+		final var bk = resolveBucketAndKey(op);
+
 		if (op.item() instanceof DataItem) {
-			// Handle in-memory data (DataItem) - always use streaming
 			DataItem dataItem = (DataItem) op.item();
 			s3Client.putObject(
 							PutObjectRequest.builder()
-											.bucket(bucketName)
-											.key(s3Key)
+											.bucket(bk[0])
+											.key(bk[1])
 											.build(),
 							RequestBody.fromInputStream(Channels.newInputStream(dataItem), dataItem.size()));
 		} else if (op.item() instanceof PathItem) {
-			// Handle file-based data (PathItem) - always use streaming
 			PathItem pathItem = (PathItem) op.item();
 			Path path = Path.of(pathItem.name());
 
 			long size = Files.size(path);
 			s3Client.putObject(
 							PutObjectRequest.builder()
-											.bucket(bucketName)
-											.key(s3Key)
+											.bucket(bk[0])
+											.key(bk[1])
 											.build(),
 							RequestBody.fromInputStream(Files.newInputStream(path), size));
 		} else {
@@ -223,25 +268,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private void readObject(final O op) throws Exception {
-		// Use item name as the S3 key - remove leading slash if present
-		String s3Key = op.item().name();
-		if (s3Key.startsWith("/")) {
-			s3Key = s3Key.substring(1);
-		}
+		final var bk = resolveBucketAndKey(op);
 
 		try (var response = s3Client.getObject(
 						GetObjectRequest.builder()
-										.bucket(bucketName)
-										.key(s3Key)
+										.bucket(bk[0])
+										.key(bk[1])
 										.build())) {
 
 			// Read and consume the stream to properly transfer data
-			var inputStream = response;
-			byte[] buffer = new byte[8192]; // 8KB buffer for reading
+			byte[] buffer = new byte[8192];
 			long bytesRead = 0;
 			int n;
 
-			while ((n = inputStream.read(buffer)) != -1) {
+			while ((n = response.read(buffer)) != -1) {
 				bytesRead += n;
 			}
 
@@ -253,16 +293,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private void deleteObject(final O op) {
-		// Use item name as the S3 key - remove leading slash if present
-		String s3Key = op.item().name();
-		if (s3Key.startsWith("/")) {
-			s3Key = s3Key.substring(1);
-		}
+		final var bk = resolveBucketAndKey(op);
 
 		s3Client.deleteObject(
 						DeleteObjectRequest.builder()
-										.bucket(bucketName)
-										.key(s3Key)
+										.bucket(bk[0])
+										.key(bk[1])
 										.build());
 	}
 

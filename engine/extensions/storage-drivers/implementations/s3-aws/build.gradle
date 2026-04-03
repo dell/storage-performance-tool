@@ -58,6 +58,7 @@ dependencies {
 
 	// Shared logging API – do not bundle
 	compileOnly 'org.slf4j:slf4j-api:1.7.36'
+	compileOnly libs.log4j.api
 
 	// Tests
 	testImplementation 'junit:junit:4.13.2'
