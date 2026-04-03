@@ -166,11 +166,11 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			int port = 0;
 			try {
 				port = nodeConfig.intVal("port");
-			} catch (Exception ignored) { }
+			} catch (Exception ignored) {}
 
 			try {
 				sslEnabled = netConfig.configVal("ssl").boolVal("enabled");
-			} catch (Exception ignored) { }
+			} catch (Exception ignored) {}
 
 			if (addrs != null && !addrs.isEmpty()) {
 				final String addr = addrs.get(0);
@@ -184,7 +184,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					endpoint = scheme + "://" + addr;
 				}
 			}
-		} catch (Exception ignored) { }
+		} catch (Exception ignored) {}
 
 		if (endpoint == null) {
 			throw new IllegalConfigurationException(

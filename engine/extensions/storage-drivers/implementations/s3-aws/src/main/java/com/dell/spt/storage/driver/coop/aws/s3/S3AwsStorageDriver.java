@@ -80,7 +80,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					resolved = nodeAddrs;
 				}
 			}
-		} catch (Exception ignored) { }
+		} catch (Exception ignored) {}
 
 		if (resolved == null) {
 			try {
@@ -95,10 +95,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
 								resolved = inputPath.substring(1);
 							}
-						} catch (Exception ignored) { }
+						} catch (Exception ignored) {}
 					}
 				}
-			} catch (Exception ignored) { }
+			} catch (Exception ignored) {}
 		}
 
 		if (resolved == null || resolved.isEmpty()) {

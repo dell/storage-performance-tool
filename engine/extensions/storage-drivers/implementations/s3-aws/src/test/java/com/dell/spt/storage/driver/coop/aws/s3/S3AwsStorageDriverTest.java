@@ -841,7 +841,8 @@ public class S3AwsStorageDriverTest {
 			verify(op).status(Operation.Status.SUCC);
 		}
 
-		@SuppressWarnings({"unchecked", "rawtypes"})
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
 		@Test
 		void successfulRead_withDataItem_countsBytesDone() throws Exception {
 			DataItem dataItem = mock(DataItem.class);
@@ -921,7 +922,8 @@ public class S3AwsStorageDriverTest {
 			verify(op).status(Operation.Status.SUCC);
 		}
 
-		@SuppressWarnings({"unchecked", "rawtypes"})
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
 		@Test
 		void successfulCreate_dataItem_countsBytesDone() throws Exception {
 			DataItem dataItem = mock(DataItem.class);
@@ -971,7 +973,8 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class ReadObjectDataOperationTest {
 
-		@SuppressWarnings({"unchecked", "rawtypes"})
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
 		@Test
 		void readsDataAndCountsBytes() throws Exception {
 			DataItem dataItem = mock(DataItem.class);
