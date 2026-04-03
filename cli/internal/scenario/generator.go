@@ -39,10 +39,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 	ts := resolveTimestamp(params)
 
 	// Determine storage driver type
-	driverType := storageDriverTypeS3
-	if params.UseRdma {
-		driverType = storageDriverTypeS3Rdma
-	}
+	driverType := resolveStorageDriverType(params.S3Driver)
 
 	// Format strings as quoted JavaScript literals
 	data := map[string]interface{}{
@@ -108,10 +105,7 @@ func GenerateReadScenario(params Params) (string, error) {
 
 	ts := resolveTimestamp(params)
 
-	driverType := storageDriverTypeS3
-	if params.UseRdma {
-		driverType = storageDriverTypeS3Rdma
-	}
+	driverType := resolveStorageDriverType(params.S3Driver)
 
 	seedCount := params.SeedCount
 	if seedCount <= 0 {
@@ -209,6 +203,9 @@ func GenerateListScenario(params Params) (string, error) {
 
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	baseTS := resolveTimestamp(params)
+
+	driverType := resolveStorageDriverType(params.S3Driver)
+
 	opLimit := 0
 	if params.ObjectCount > 0 {
 		opLimit = params.ObjectCount
@@ -241,7 +238,7 @@ func GenerateListScenario(params Params) (string, error) {
 		templateKeyDuration:             durationValue,
 		templateKeyHasPrefix:            hasPrefix,
 		templateKeyPrefix:               prefixValue,
-		templateKeyStorageDriverType:    fmt.Sprintf(`"%s"`, escapeJSONString(storageDriverTypeS3)),
+		templateKeyStorageDriverType:    fmt.Sprintf(`"%s"`, escapeJSONString(driverType)),
 		templateKeyItemType:             fmt.Sprintf(`"%s"`, escapeJSONString(itemTypePath)),
 		templateKeyItemNamingType:       fmt.Sprintf(`"%s"`, escapeJSONString(itemNamingTypeRandom)),
 		templateKeyLoadOpType:           fmt.Sprintf(`"%s"`, escapeJSONString(loadOpTypeList)),
