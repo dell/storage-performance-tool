@@ -20,11 +20,10 @@ import com.github.akurilov.confuse.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 import java.io.IOException;
-import java.nio.channels.Channels;
+import com.dell.spt.base.item.io.DataItemInputStream;
 import java.util.concurrent.TimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
@@ -318,22 +317,22 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		if (op.item() instanceof DataItem) {
 			DataItem dataItem = (DataItem) op.item();
+			dataItem.position(0);
 			s3Client.putObject(
 							PutObjectRequest.builder()
 											.bucket(bk[0])
 											.key(bk[1])
 											.build(),
-							RequestBody.fromInputStream(Channels.newInputStream(dataItem), dataItem.size()));
+							RequestBody.fromInputStream(new DataItemInputStream(dataItem), dataItem.size()));
 		} else if (op.item() instanceof PathItem) {
 			PathItem pathItem = (PathItem) op.item();
 			Path path = Path.of(pathItem.name());
-			long size = Files.size(path);
 			s3Client.putObject(
 							PutObjectRequest.builder()
 											.bucket(bk[0])
 											.key(bk[1])
 											.build(),
-							RequestBody.fromInputStream(Files.newInputStream(path), size));
+							RequestBody.fromFile(path));
 		} else {
 			throw new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem");
 		}
