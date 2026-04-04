@@ -1453,6 +1453,24 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
+		void s3Exception_504_returnsFailTimeout() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(504)
+							.message("Gateway Timeout")
+							.build();
+			assertEquals(Operation.Status.FAIL_TIMEOUT, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
+		void s3Exception_507_returnsRespFailSpace() {
+			S3Exception e = (S3Exception) S3Exception.builder()
+							.statusCode(507)
+							.message("Insufficient Storage")
+							.build();
+			assertEquals(Operation.Status.RESP_FAIL_SPACE, S3AwsStorageDriver.classifyFailure(e));
+		}
+
+		@Test
 		void ioException_returnsFailIo() {
 			assertEquals(Operation.Status.FAIL_IO, S3AwsStorageDriver.classifyFailure(new IOException("connection reset")));
 		}

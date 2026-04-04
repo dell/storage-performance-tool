@@ -29,6 +29,10 @@ KEEP_SCENARIO=${KEEP_SCENARIO:-true}
 MOCK=${MOCK:-false}
 USE_RDMA=${USE_RDMA:-false}
 
+# Docker image override and pull control (env: SPT_IMAGE, SPT_SKIP_IMAGE_PULL)
+SPT_IMAGE=${SPT_IMAGE:-""}
+SKIP_IMAGE_PULL=${SPT_SKIP_IMAGE_PULL:-false}
+
 # Storage driver selection (default, netty, aws, rdma)
 S3_DRIVER=${SPT_S3_DRIVER:-"default"}
 
@@ -37,6 +41,8 @@ while [ $# -gt 0 ]; do
     --mock) MOCK=true; shift 1 ;;
     --use-rdma) USE_RDMA=true; shift 1 ;;
     --s3-driver) S3_DRIVER="${2:-}"; [ "$S3_DRIVER" = "rdma" ] && USE_RDMA=true; shift 2 ;;
+    --image) SPT_IMAGE="${2:-}"; shift 2 ;;
+    --skip-image-pull) SKIP_IMAGE_PULL=true; shift 1 ;;
     --s3-endpoint) S3_ENDPOINT="${2:-}"; shift 2 ;;
     --s3-endpoints) S3_ENDPOINTS="${2:-}"; shift 2 ;;
     --s3-access-key) S3_ACCESS_KEY="${2:-}"; shift 2 ;;
@@ -78,6 +84,7 @@ Environment:
   All --s3-* flags can be set via S3_* env vars or .env file.
   USE_RDMA=true is equivalent to --use-rdma.
   SPT_IMAGE overrides the Docker image (e.g. spt-rdma:dev).
+  SPT_SKIP_IMAGE_PULL=true skips pulling the image from the registry.
 EOF
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -111,9 +118,16 @@ if [ "$S3_DRIVER" != "default" ]; then
 fi
 if $USE_RDMA; then
   echo "RDMA:    enabled (SPT_RDMA=true)"
-  [[ -n "${SPT_IMAGE:-}" ]] && echo "Image:   $SPT_IMAGE"
 fi
+[ -n "$SPT_IMAGE" ] && echo "Image:   $SPT_IMAGE"
+[ "$SKIP_IMAGE_PULL" = true ] && echo "Skip image pull: true"
 echo
+
+# Export image settings so the spt CLI picks them up
+[ -n "$SPT_IMAGE" ] && export SPT_IMAGE
+if [ "$SKIP_IMAGE_PULL" = true ]; then
+  export SPT_SKIP_IMAGE_PULL=true
+fi
 
 if $MOCK; then
   cmd=("$ROOT_DIR"/spt --debug run mock \

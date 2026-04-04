@@ -119,6 +119,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 
 - **Unified Experience** -- SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
 - **Multi-Workload Support** -- write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
+- **Pluggable S3 Storage Drivers** -- choose the backend that fits your target: `default` (Netty), `aws` (AWS SDK v2), or `rdma` (hardware-accelerated). Select with `--s3-driver`.
 - **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
 - **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
@@ -128,6 +129,30 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
 - **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
 - **Logging & Trace Capture** – configurable logs plus optional trace files for deeper troubleshooting.
+
+---
+
+## Storage Drivers
+
+SPT supports multiple S3 storage driver backends. Use `--s3-driver` to select one:
+
+| Driver | Flag value | Description |
+|--------|-----------|-------------|
+| Netty (default) | `default` or `netty` | Custom Netty-based HTTP client. Battle-tested, highest throughput on most targets. |
+| AWS SDK | `aws` | AWS SDK for Java v2 with the Apache HTTP client. Broadest S3 compatibility, standard error handling. |
+| RDMA | `rdma` | Hardware-accelerated data path for compatible storage targets (e.g., Dell ECS). |
+
+Example:
+
+```bash
+# Use the AWS SDK driver for a read workload
+./spt run read --s3-driver aws \
+  --endpoints https://s3.example.com \
+  --bucket test-bucket \
+  --duration 2m --threads 8 --object-size 1MB
+```
+
+The driver flag works with all S3 workload types (write, read, list). See [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) for the full reference.
 
 ---
 
