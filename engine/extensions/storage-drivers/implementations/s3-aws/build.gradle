@@ -9,44 +9,26 @@ ext {
 	rootPkg = "com.dell.spt.storage.driver.coop.aws.s3"
 }
 
+configurations.implementation {
+	// The s3-aws driver uses the Apache HTTP client, not the Netty NIO client.
+	// Exclude netty-nio-client and all io.netty transitive deps globally so that
+	// no AWS SDK module (s3, sts, etc.) can pull them in.
+	exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
+	exclude group: 'io.netty'
+}
+
 dependencies {
 	// AWS SDK – extension-private, safe to bundle.
-	// Exclude Netty and SLF4J globally: the s3-aws driver uses the Apache HTTP
-	// client, not the Netty NIO client, and the AWS SDK BOM pulls in an older
-	// Netty (4.1.x) that conflicts with the engine's own Netty (4.2.x).
-	implementation(libs.aws.s3) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-		exclude group: 'io.netty'
-		exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
-	}
-	implementation(libs.aws.auth) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.regions) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.core) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.sts) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.http.client.spi) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.apache.client) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-		exclude group: 'io.netty'
-	}
-	implementation(libs.aws.sdk.core) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.utils) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
-	implementation(libs.aws.profiles) {
-		exclude group: 'org.slf4j', module: 'slf4j-api'
-	}
+	implementation libs.aws.s3
+	implementation libs.aws.auth
+	implementation libs.aws.regions
+	implementation libs.aws.core
+	implementation libs.aws.sts
+	implementation libs.aws.http.client.spi
+	implementation libs.aws.apache.client
+	implementation libs.aws.sdk.core
+	implementation libs.aws.utils
+	implementation libs.aws.profiles
 
 	// SPT framework APIs – provided by parent classloader
 	compileOnly project(':core:spt-base')

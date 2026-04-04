@@ -13,6 +13,7 @@ public final class DataItemInputStream extends InputStream {
 
 	private long doneSize = 0;
 	private long markPos = 0;
+	private long markDoneSize = 0;
 	private ByteBuffer buffWrapper = null;
 	private byte[] buff = null;
 
@@ -61,11 +62,13 @@ public final class DataItemInputStream extends InputStream {
 	@Override
 	public final void mark(final int readLimit) {
 		this.markPos = dataItem.position();
+		this.markDoneSize = doneSize;
 	}
 
 	@Override
 	public final void reset() throws IOException {
 		dataItem.position(markPos);
+		this.doneSize = markDoneSize;
 	}
 
 	@Override
