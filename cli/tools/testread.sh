@@ -29,6 +29,10 @@ CLEANUP=${CLEANUP:-true}
 KEEP_SCENARIO=${KEEP_SCENARIO:-true}
 ATTACH_EXISTING=${ATTACH_EXISTING:-false}
 
+# Docker image override and pull control (env: SPT_IMAGE, SPT_SKIP_IMAGE_PULL)
+SPT_IMAGE=${SPT_IMAGE:-""}
+SKIP_IMAGE_PULL=${SPT_SKIP_IMAGE_PULL:-false}
+
 # Storage driver selection (default, netty, aws, rdma)
 S3_DRIVER=${SPT_S3_DRIVER:-"default"}
 
@@ -67,6 +71,8 @@ while [ $# -gt 0 ]; do
     --attach-existing) ATTACH_EXISTING=true; shift 1 ;;
     --no-attach-existing) ATTACH_EXISTING=false; shift 1 ;;
     --s3-driver) S3_DRIVER="${2:-}"; [ "$S3_DRIVER" = "rdma" ] && USE_RDMA=true; shift 2 ;;
+    --image) SPT_IMAGE="${2:-}"; shift 2 ;;
+    --skip-image-pull) SKIP_IMAGE_PULL=true; shift 1 ;;
     --use-rdma) USE_RDMA=true; shift 1 ;;
     --no-rdma) USE_RDMA=false; shift 1 ;;
     --rdma-fallback) RDMA_FALLBACK=true; shift 1 ;;
@@ -101,6 +107,10 @@ Workload:
 
 Driver:
   --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
+
+Docker:
+  --image IMAGE            Override SPT Docker image (env: SPT_IMAGE)
+  --skip-image-pull        Use locally cached image, skip pull (env: SPT_SKIP_IMAGE_PULL)
 
 RDMA:
   --use-rdma               Enable RDMA-accelerated S3 driver (default: off)
@@ -154,7 +164,15 @@ if $USE_RDMA; then
 else
   echo "RDMA: disabled (pass --use-rdma to enable)"
 fi
+[ -n "$SPT_IMAGE" ] && echo "Image: $SPT_IMAGE"
+[ "$SKIP_IMAGE_PULL" = true ] && echo "Skip image pull: true"
 echo
+
+# Export image settings so the spt CLI picks them up
+[ -n "$SPT_IMAGE" ] && export SPT_IMAGE
+if [ "$SKIP_IMAGE_PULL" = true ]; then
+  export SPT_SKIP_IMAGE_PULL=true
+fi
 
 # Build command
 cmd=("$ROOT_DIR"/spt run read \

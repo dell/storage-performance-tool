@@ -159,6 +159,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				return Status.RESP_FAIL_NOT_FOUND;
 			} else if (statusCode >= 400 && statusCode < 500) {
 				return Status.RESP_FAIL_CLIENT;
+			} else if (statusCode == 504) {
+				return Status.FAIL_TIMEOUT;
+			} else if (statusCode == 507) {
+				return Status.RESP_FAIL_SPACE;
 			} else if (statusCode >= 500) {
 				return Status.RESP_FAIL_SVC;
 			}
