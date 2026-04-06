@@ -23,9 +23,10 @@ import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Queue;
 import java.util.Random;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
@@ -52,7 +53,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Lock inputLock = new ReentrantLock();
 	private final int batchSize;
 	private final long countLimit;
-	private final BlockingQueue<O> recycleQueue;
+	private final Queue<O> recycleQueue;
+	private final int recycleQueueCapacity;
+	private final AtomicInteger recycleQueueSize = new AtomicInteger();
 	private final boolean recycleFlag;
 	private final boolean shuffleFlag;
 	private final Random rnd;
@@ -83,7 +86,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		this.opOutput = opOutput;
 		this.batchSize = batchSize;
 		this.countLimit = countLimit > 0 ? countLimit : Long.MAX_VALUE;
-		this.recycleQueue = new ArrayBlockingQueue<>(recycleQueueSize, true);
+		this.recycleQueue = new ConcurrentLinkedQueue<>();
+		this.recycleQueueCapacity = recycleQueueSize;
 		this.recycleFlag = recycleFlag;
 		this.shuffleFlag = shuffleFlag;
 		this.rnd = shuffleFlag ? new Random() : null;
@@ -115,10 +119,38 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					if (!recycleFlag) { // never recycled -> recycling is not enabled
 						opInputFinishFlag = true; // allow shutdown
 					} else { // recycle the tasks if any
-						n = recycleQueue.drainTo(opBuff, n);
+						n = 0;
+						O recycledOp;
+						final var limit = batchSize - pendingOpCount;
+						// Spin-poll: try the lock-free queue, then spin-wait (PAUSE
+						// instruction, ~10ns) for up to ~1μs before falling back to
+						// parkNanos. This avoids the full futex/context-switch cost
+						// when ops return quickly from the server.
+						var spins = 0;
+						while (n < limit) {
+							recycledOp = recycleQueue.poll();
+							if (recycledOp != null) {
+								opBuff.add(recycledOp);
+								n++;
+								spins = 0;
+							} else if (spins < 128) {
+								Thread.onSpinWait();
+								spins++;
+							} else {
+								break;
+							}
+						}
 						if (n > 0) {
+							recycleQueueSize.addAndGet(-n);
 							pendingOpCount += n;
 							recycledOpCounter.add(n);
+						} else {
+							// Yield the virtual thread back to the ForkJoinPool so
+							// in-flight ops can complete. Thread.yield() is purely
+							// userspace on VTs — no futex/context-switch overhead
+							// unlike LockSupport.parkNanos() which triggers a full
+							// kernel round-trip even for parkNanos(1).
+							yieldThread();
 						}
 					}
 				} else {
@@ -282,6 +314,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return items;
 	}
 
+	@SuppressWarnings("ThreadPriorityCheck") // intentional: VT yield is userspace-only, no kernel cost
+	private static void yieldThread() {
+		Thread.yield();
+	}
+
 	// build new tasks for the corresponding items
 	private long buildOps(final List<I> items, final CircularBuffer<O> opBuff, final int n)
 					throws IOException {
@@ -310,11 +347,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final void recycle(final O op) {
-		if (!recycleQueue.offer(op)) {
-			if (!recycleQueueFullState && 0 == recycleQueue.remainingCapacity()) {
-				recycleQueueFullState = true;
-				Loggers.ERR.error("{}: cannot recycle the operation, queue is full", name);
-			}
+		recycleQueue.add(op);
+		final var size = recycleQueueSize.incrementAndGet();
+		if (!recycleQueueFullState && size > recycleQueueCapacity) {
+			recycleQueueFullState = true;
+			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
 		}
 	}
 
