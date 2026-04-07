@@ -84,6 +84,77 @@ class CoopStorageDriverBaseTest {
 		assertTrue(driver.isIdle(), "should be idle after release");
 	}
 
+	// ---------- Simple-op completion path (characterization for fast-recycle) ----------
+
+	@Test
+	void handleCompleted_simpleSuccessOpSendsResultToOutput() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		// A simple (non-composite, non-partial) op — this is the path fast-recycle targets
+		final Operation<Item> op = mock(Operation.class);
+		final Operation<Item> resultCopy = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(resultCopy);
+
+		boolean result = driver.handleCompleted(op);
+
+		assertTrue(result, "handleCompleted should return true for simple successful op");
+		// Verify the result copy (not the original) was sent to opResultOut
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		final Output<Operation<Item>> opResultOut = (Output<Operation<Item>>) outField.get(driver);
+		verify(opResultOut).put(resultCopy);
+	}
+
+	@Test
+	void handleCompleted_simpleOpDoesNotUseChildQueue() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		driver.handleCompleted(op);
+
+		final var queue = childQueueOf(driver);
+		assertTrue(queue.isEmpty(), "childOpQueue should remain empty for simple ops");
+	}
+
+	@Test
+	void handleCompleted_simpleOpIncrementsCompletedCount() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		assertEquals(0, driver.completedOpCount(), "precondition: count starts at 0");
+
+		driver.handleCompleted(op);
+
+		assertEquals(1, driver.completedOpCount(), "completedOpCount should be 1 after one completion");
+	}
+
+	@Test
+	void handleCompleted_returnsFalseWhenOutputFull() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		// Override opResultOut to reject (simulating queue full)
+		final Output<Operation<Item>> fullOutput = mock(Output.class);
+		when(fullOutput.put(any(Operation.class))).thenReturn(false);
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(driver, fullOutput);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		boolean result = driver.handleCompleted(op);
+
+		assertFalse(result, "should return false when opResultOut rejects the result");
+	}
+
 	// ---------- Part-level retry tests ----------
 
 	/** Set up a mock CoopStorageDriverBase with the fields needed by handleCompleted(). */
