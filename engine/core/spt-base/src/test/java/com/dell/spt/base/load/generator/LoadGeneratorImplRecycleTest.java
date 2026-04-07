@@ -144,20 +144,18 @@ class LoadGeneratorImplRecycleTest {
 	@Test
 	void concurrentRecycleDuringRunningGenerator() throws Exception {
 		final int opCount = 20;
-		final ConcurrentCollectingOutput<DataOperation<DataItem>> concurrentOutput =
-						new ConcurrentCollectingOutput<>(opCount);
+		final ConcurrentCollectingOutput<DataOperation<DataItem>> concurrentOutput = new ConcurrentCollectingOutput<>(opCount);
 
-		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> runningGen =
-						new LoadGeneratorImpl<>(
-										itemInput,
-										opsBuilder,
-										List.of(),
-										concurrentOutput,
-										BATCH_SIZE,
-										0,
-										1000,
-										true,
-										false);
+		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> runningGen = new LoadGeneratorImpl<>(
+						itemInput,
+						opsBuilder,
+						List.of(),
+						concurrentOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						true,
+						false);
 
 		try {
 			runningGen.start();
@@ -238,20 +236,18 @@ class LoadGeneratorImplRecycleTest {
 	@Test
 	void recycleUnparksQuiescedGenerator() throws Exception {
 		final int opCount = 10;
-		final ConcurrentCollectingOutput<DataOperation<DataItem>> concurrentOutput =
-						new ConcurrentCollectingOutput<>(opCount);
+		final ConcurrentCollectingOutput<DataOperation<DataItem>> concurrentOutput = new ConcurrentCollectingOutput<>(opCount);
 
-		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> quiescedGen =
-						new LoadGeneratorImpl<>(
-										itemInput,
-										opsBuilder,
-										List.of(),
-										concurrentOutput,
-										BATCH_SIZE,
-										0,
-										1000,
-										true,
-										false);
+		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> quiescedGen = new LoadGeneratorImpl<>(
+						itemInput,
+						opsBuilder,
+						List.of(),
+						concurrentOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						true,
+						false);
 		quiescedGen.enableFastRecycleQuiesce();
 
 		try {
