@@ -73,6 +73,20 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 
 	void adjustIoBuffers(final long avgTransferSize, final OpType opType);
 
+	/**
+	 * Enable the fast-recycle dispatch path.  When active and the current
+	 * active-op count is at or below {@code concurrencyThreshold}, the driver
+	 * will re-submit a successfully completed simple operation directly on the
+	 * I/O thread instead of returning it through the LoadGenerator recycle queue.
+	 * <p>
+	 * The default implementation is a no-op; subclasses that support the
+	 * optimisation (e.g. Netty-based drivers) override this.
+	 *
+	 * @param concurrencyThreshold maximum active-op count at which the
+	 *                             fast-recycle path is used (0 = disabled)
+	 */
+	default void enableFastRecycle(final int concurrencyThreshold) {}
+
 	@Override
 	AsyncRunnable stop();
 

@@ -40,6 +40,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final ReentrantLock dispatchLock = new ReentrantLock();
 	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask opDispatchTask;
+	protected volatile int fastRecycleConcurrencyThreshold = 0;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -233,6 +234,33 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} finally {
 			dispatchLock.unlock();
 		}
+	}
+
+	@Override
+	public void enableFastRecycle(final int concurrencyThreshold) {
+		this.fastRecycleConcurrencyThreshold = concurrencyThreshold;
+		Loggers.MSG.info("{}: fast-recycle enabled, concurrency threshold = {}", toString(), concurrencyThreshold);
+	}
+
+	/**
+	 * Check whether the given completed operation is eligible for the fast-recycle
+	 * short-circuit.  Returns {@code true} only when:
+	 * <ul>
+	 *   <li>fast-recycle has been enabled (threshold &gt; 0)</li>
+	 *   <li>the current active-op count is &le; the threshold</li>
+	 *   <li>the op finished successfully</li>
+	 *   <li>the op is a simple (non-composite, non-partial) operation</li>
+	 *   <li>the driver is still running</li>
+	 * </ul>
+	 */
+	protected boolean isFastRecycleEligible(final O op) {
+		final int threshold = fastRecycleConcurrencyThreshold;
+		return threshold > 0
+						&& activeOpCount() <= threshold
+						&& op.status() == Operation.Status.SUCC
+						&& !(op instanceof CompositeOperation)
+						&& !(op instanceof PartialOperation)
+						&& isStarted();
 	}
 
 	@Override

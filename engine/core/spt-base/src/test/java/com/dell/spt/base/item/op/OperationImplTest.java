@@ -141,4 +141,37 @@ class OperationImplTest {
 		assertTrue(op.latency() < MAX_SANE_LATENCY_MICROS,
 						"latency must not be epoch-scale in normal lifecycle");
 	}
+
+	// ---------- driverRecycled flag tests ----------
+
+	@Test
+	void driverRecycled_defaultIsFalse() {
+		final var op = new OperationImpl<>(0, OpType.READ, new ItemImpl("item"), null, null, null);
+		assertFalse(op.driverRecycled(), "driverRecycled should default to false");
+	}
+
+	@Test
+	void driverRecycled_setAndGet() {
+		final var op = new OperationImpl<>(0, OpType.READ, new ItemImpl("item"), null, null, null);
+		op.driverRecycled(true);
+		assertTrue(op.driverRecycled(), "driverRecycled should be true after setting");
+		op.driverRecycled(false);
+		assertFalse(op.driverRecycled(), "driverRecycled should be false after clearing");
+	}
+
+	@Test
+	void driverRecycled_copiedByResult() {
+		final var op = new OperationImpl<>(0, OpType.READ, new ItemImpl("item"), null, "/path", null);
+		op.driverRecycled(true);
+		final var copy = op.result();
+		assertTrue(copy.driverRecycled(), "driverRecycled should be preserved in result copy");
+	}
+
+	@Test
+	void driverRecycled_clearedByReset() {
+		final var op = new OperationImpl<>(0, OpType.READ, new ItemImpl("item"), null, "/path", null);
+		op.driverRecycled(true);
+		op.reset();
+		assertFalse(op.driverRecycled(), "driverRecycled should be cleared by reset()");
+	}
 }

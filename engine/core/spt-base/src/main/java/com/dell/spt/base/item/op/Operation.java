@@ -101,4 +101,14 @@ public interface Operation<I extends Item> {
 	Operation<I> result();
 
 	void reset();
+
+	/**
+	 * Returns {@code true} if the storage driver has already recycled this operation
+	 * via the fast-recycle path (re-submitted directly without going through the
+	 * LoadGenerator recycle queue).  When set, {@code LoadStepContextImpl} must
+	 * skip calling {@code generator.recycle()} to avoid double-recycling.
+	 */
+	boolean driverRecycled();
+
+	void driverRecycled(boolean flag);
 }

@@ -21,6 +21,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile long reqTimeDone;
 	protected volatile long respTimeStart;
 	protected volatile long respTimeDone;
+	protected volatile boolean driverRecycled;
 
 	public OperationImpl() {}
 
@@ -76,6 +77,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.reqTimeDone = other.reqTimeDone;
 		this.respTimeStart = other.respTimeStart;
 		this.respTimeDone = other.respTimeDone;
+		this.driverRecycled = other.driverRecycled;
 	}
 
 	@Override
@@ -90,6 +92,17 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		nodeAddr = null;
 		status = Status.PENDING;
 		reqTimeStart = reqTimeDone = respTimeStart = respTimeDone = 0;
+		driverRecycled = false;
+	}
+
+	@Override
+	public final boolean driverRecycled() {
+		return driverRecycled;
+	}
+
+	@Override
+	public final void driverRecycled(final boolean flag) {
+		this.driverRecycled = flag;
 	}
 
 	@Override
