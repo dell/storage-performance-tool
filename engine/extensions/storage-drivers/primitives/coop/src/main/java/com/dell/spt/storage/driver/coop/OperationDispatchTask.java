@@ -69,11 +69,14 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				if (buff.size() == 0) {
 					// Both queues empty — wait for signal from producer or completion callback.
 					// The VT unmounts during await(), freeing the carrier thread.
-					// The 1ms timeout is a safety net; normal wake-up is via signal().
+					// When fast-recycle is handling ops inline, extend the timeout to 100ms
+					// since no new ops are expected via the queues.  The normal 1ms timeout
+					// applies otherwise.  In both cases, signal() provides instant wake-up.
+					final long waitMs = storageDriver.isFastRecycleEnabled() ? 100 : 1;
 					dispatchLock.lock();
 					try {
 						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
-							dispatchReady.await(1, TimeUnit.MILLISECONDS);
+							dispatchReady.await(waitMs, TimeUnit.MILLISECONDS);
 						}
 					} finally {
 						dispatchLock.unlock();

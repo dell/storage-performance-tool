@@ -60,6 +60,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final boolean shuffleFlag;
 	private final Random rnd;
 	private final String name;
+	private volatile boolean fastRecycleQuiesce = false;
+	private volatile Thread generatorThread;
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
@@ -103,6 +105,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	protected void doInit() {
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+		generatorThread = Thread.currentThread();
 	}
 
 	@Override
@@ -145,12 +148,21 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							pendingOpCount += n;
 							recycledOpCounter.add(n);
 						} else {
-							// Yield the virtual thread back to the ForkJoinPool so
-							// in-flight ops can complete. Thread.yield() is purely
-							// userspace on VTs — no futex/context-switch overhead
-							// unlike LockSupport.parkNanos() which triggers a full
-							// kernel round-trip even for parkNanos(1).
-							yieldThread();
+							// No recycled ops available right now.
+							if (fastRecycleQuiesce) {
+								// Fast-recycle is handling ops inline in the driver;
+								// park this VT until recycle() unparks us or the
+								// timeout expires.  10ms keeps the VT off the carrier
+								// while still bounding wake-up latency for fallback ops.
+								LockSupport.parkNanos(10_000_000);
+							} else {
+								// Yield the virtual thread back to the ForkJoinPool so
+								// in-flight ops can complete. Thread.yield() is purely
+								// userspace on VTs — no futex/context-switch overhead
+								// unlike LockSupport.parkNanos() which triggers a full
+								// kernel round-trip even for parkNanos(1).
+								yieldThread();
+							}
 						}
 					}
 				} else {
@@ -353,11 +365,21 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			recycleQueueFullState = true;
 			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
 		}
+		// Wake the generator VT if it's parked in the quiesce state
+		if (fastRecycleQuiesce) {
+			LockSupport.unpark(generatorThread);
+		}
 	}
 
 	@Override
 	public final boolean isNothingToRecycle() {
 		return recycleQueue.isEmpty();
+	}
+
+	@Override
+	public void enableFastRecycleQuiesce() {
+		fastRecycleQuiesce = true;
+		Loggers.MSG.info("{}: fast-recycle quiesce enabled (generator VT will park when idle)", name);
 	}
 
 	private boolean isFinished() {

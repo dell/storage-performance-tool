@@ -218,4 +218,50 @@ class OperationDispatchTaskTest {
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
 	}
+
+	@Test
+	void fastRecycleEnabledExtendsIdleWait() throws Exception {
+		// Enable fast-recycle on the driver mock
+		when(driverMock.isFastRecycleEnabled()).thenReturn(true);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+
+		task.start();
+		Thread.sleep(100); // let the task enter the extended await (100ms vs 1ms)
+
+		// Even with the extended timeout, signal() still provides instant wake-up
+		inOpQueue.add(op);
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+
+		verify(driverMock, timeout(1000)).submit(any(Operation.class));
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
+
+	@Test
+	void fastRecycleDisabledUsesShortWait() throws Exception {
+		// Fast-recycle NOT enabled (default mock returns false)
+		when(driverMock.isFastRecycleEnabled()).thenReturn(false);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+
+		task.start();
+		Thread.sleep(50); // let the task enter await
+
+		// With 1ms timeout, the task wakes up quickly even without signal
+		inOpQueue.add(op);
+
+		verify(driverMock, timeout(500)).submit(any(Operation.class));
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
 }

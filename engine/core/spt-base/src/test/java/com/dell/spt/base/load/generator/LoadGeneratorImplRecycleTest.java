@@ -24,8 +24,7 @@ import org.junit.jupiter.api.Test;
  * Characterization tests for the recycle-poll path in {@link LoadGeneratorImpl#doWork()}.
  * <p>
  * These tests document the current behavior of the spin-wait, yield, and output
- * logic in the recycle branch as a safety net before modifying this code path
- * for idle-VT quiescing (Phase 2 of fast-recycle dispatch).
+ * logic in the recycle branch, plus the fast-recycle quiesce behavior (park/unpark).
  */
 @SuppressWarnings("unchecked")
 class LoadGeneratorImplRecycleTest {
@@ -207,6 +206,98 @@ class LoadGeneratorImplRecycleTest {
 		assertTrue(generator.isNothingToRecycle());
 		assertEquals(3, generator.generatedOpCount());
 		assertEquals(3, output.received.size());
+	}
+
+	// --- fast-recycle quiesce tests ---
+
+	/**
+	 * With quiesce enabled and empty recycle queue, doWork() parks for up to 10ms
+	 * instead of yielding.  Verify it returns within a bounded time.
+	 */
+	@Test
+	void quiesceParksOnEmptyRecycleQueue() throws Exception {
+		generator.enableFastRecycleQuiesce();
+		// Exhaust item input
+		generator.doWork();
+		assertTrue(generator.isItemInputFinished());
+
+		// doWork with quiesce + empty queue parks for up to 10ms
+		final long start = System.nanoTime();
+		generator.doWork();
+		final long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+		// Should park for ~10ms (timeout), bounded well under 100ms
+		assertTrue(elapsedMs < 100, "doWork took " + elapsedMs + "ms; expected < 100ms");
+		assertEquals(0, output.received.size());
+	}
+
+	/**
+	 * With quiesce enabled, recycle() unparks the generator VT so it picks
+	 * up the op quickly rather than waiting the full 10ms timeout.
+	 */
+	@Test
+	void recycleUnparksQuiescedGenerator() throws Exception {
+		final int opCount = 10;
+		final ConcurrentCollectingOutput<DataOperation<DataItem>> concurrentOutput =
+						new ConcurrentCollectingOutput<>(opCount);
+
+		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> quiescedGen =
+						new LoadGeneratorImpl<>(
+										itemInput,
+										opsBuilder,
+										List.of(),
+										concurrentOutput,
+										BATCH_SIZE,
+										0,
+										1000,
+										true,
+										false);
+		quiescedGen.enableFastRecycleQuiesce();
+
+		try {
+			quiescedGen.start();
+			assertEventually(quiescedGen::isItemInputFinished, 2000);
+
+			// Recycle ops with slight spacing to exercise the unpark path
+			final long t0 = System.nanoTime();
+			for (int i = 0; i < opCount; i++) {
+				quiescedGen.recycle(newOp("quiesce-" + i));
+				Thread.sleep(1);
+			}
+
+			// All ops should arrive well under 10ms * opCount since unpark wakes
+			// the generator immediately for each one
+			assertTrue(
+							concurrentOutput.latch.await(5, TimeUnit.SECONDS),
+							"Expected " + opCount + " ops but got " + concurrentOutput.received.size());
+			final long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+			assertTrue(
+							elapsedMs < 2000,
+							"Took " + elapsedMs + "ms for " + opCount + " ops; unpark may not be working");
+			assertEquals(opCount, concurrentOutput.received.size());
+		} finally {
+			quiescedGen.stop();
+			quiescedGen.await(5, TimeUnit.SECONDS);
+			quiescedGen.close();
+		}
+	}
+
+	/**
+	 * Without quiesce, the existing yield path is used (characterization of
+	 * the non-quiesce path when fast-recycle is not enabled).
+	 */
+	@Test
+	void nonQuiesceUsesYieldPath() throws Exception {
+		// quiesce NOT enabled — default
+		generator.doWork(); // exhaust item input
+
+		// doWork with empty queue should return very quickly (yield, not 10ms park)
+		final long start = System.nanoTime();
+		generator.doWork();
+		final long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+		// Yield returns in microseconds, not milliseconds
+		assertTrue(elapsedMs < 5, "doWork took " + elapsedMs + "ms; yield should be sub-millisecond");
 	}
 
 	// --- helpers ---

@@ -243,6 +243,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
+	 * Returns {@code true} when fast-recycle has been enabled on this driver.
+	 * Used by the dispatch task to extend its idle wait when the driver is
+	 * cycling ops inline and no new work is expected via the queues.
+	 */
+	protected boolean isFastRecycleEnabled() {
+		return fastRecycleConcurrencyThreshold > 0;
+	}
+
+	/**
 	 * Check whether the given completed operation is eligible for the fast-recycle
 	 * short-circuit.  Returns {@code true} only when:
 	 * <ul>

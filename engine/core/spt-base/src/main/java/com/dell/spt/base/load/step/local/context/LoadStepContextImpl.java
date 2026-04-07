@@ -164,6 +164,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final int driverConcurrency = this.driver.concurrencyLimit();
 			final int threshold = driverConcurrency > 0 ? Math.min(driverConcurrency, 8) : 8;
 			this.driver.enableFastRecycle(threshold);
+			this.generator.enableFastRecycleQuiesce();
 		}
 	}
 
