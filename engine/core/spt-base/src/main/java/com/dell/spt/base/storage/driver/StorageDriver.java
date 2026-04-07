@@ -87,6 +87,18 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	default void enableFastRecycle(final int concurrencyThreshold) {}
 
+	/**
+	 * Signal that the fast-recycle path is expected to handle most operations
+	 * and the dispatch/generator VTs may quiesce (park on long waits).  Only
+	 * called when the configured concurrency is low enough that fast-recycle
+	 * dominates; at higher concurrency the normal pipeline needs to stay
+	 * responsive.
+	 * <p>
+	 * Default is a no-op; cooperative drivers override to inform their
+	 * dispatch task.
+	 */
+	default void enableFastRecycleQuiesce() {}
+
 	@Override
 	AsyncRunnable stop();
 

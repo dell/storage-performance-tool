@@ -164,7 +164,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final int driverConcurrency = this.driver.concurrencyLimit();
 			final int threshold = driverConcurrency > 0 ? Math.min(driverConcurrency, 8) : 8;
 			this.driver.enableFastRecycle(threshold);
-			this.generator.enableFastRecycleQuiesce();
+			// Only quiesce when the configured concurrency is low enough that
+			// fast-recycle handles most operations inline.  At higher concurrency
+			// (T8+), fast-recycle rarely fires and the generator/dispatch VTs
+			// need to stay responsive — yield is faster than park+unpark when
+			// ops flow through the recycleQueue continuously.
+			if (driverConcurrency > 0 && driverConcurrency <= 4) {
+				this.generator.enableFastRecycleQuiesce();
+				this.driver.enableFastRecycleQuiesce();
+			}
 		}
 	}
 

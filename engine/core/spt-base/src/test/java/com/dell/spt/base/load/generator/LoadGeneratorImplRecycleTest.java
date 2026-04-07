@@ -296,6 +296,35 @@ class LoadGeneratorImplRecycleTest {
 		assertTrue(elapsedMs < 5, "doWork took " + elapsedMs + "ms; yield should be sub-millisecond");
 	}
 
+	/**
+	 * Verify the generatorParked flag guards against spurious unpark calls.
+	 * When quiesce is enabled but the generator is NOT parked (e.g. actively
+	 * processing ops), recycle() should still enqueue ops and they should be
+	 * picked up via the normal polling path in doWork().
+	 */
+	@Test
+	void recycleWithQuiesceEnabledButGeneratorNotParked() throws Exception {
+		// Enable quiesce, but we'll call doWork() manually so the generator
+		// VT is never actually parked (doWork returns after one spin).
+		generator.enableFastRecycleQuiesce();
+		generator.doWork(); // exhaust item input
+
+		// generatorParked should be false since we're not in the park path
+		final var parkedField = LoadGeneratorImpl.class.getDeclaredField("generatorParked");
+		parkedField.setAccessible(true);
+		assertFalse(parkedField.getBoolean(generator),
+						"generatorParked should be false when not in park path");
+
+		// Recycle an op while the generator is not parked
+		final DataOperation<DataItem> op = newOp("not-parked-1");
+		generator.recycle(op);
+
+		// doWork should still pick up the op via polling
+		generator.doWork();
+		assertEquals(1, output.received.size());
+		assertSame(op, output.received.get(0));
+	}
+
 	// --- helpers ---
 
 	private DataOperation<DataItem> newOp(final String name) {

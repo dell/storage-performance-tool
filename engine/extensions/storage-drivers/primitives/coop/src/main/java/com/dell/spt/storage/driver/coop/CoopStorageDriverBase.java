@@ -41,6 +41,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask opDispatchTask;
 	protected volatile int fastRecycleConcurrencyThreshold = 0;
+	private volatile boolean fastRecycleQuiesceActive = false;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -249,6 +250,21 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 */
 	protected boolean isFastRecycleEnabled() {
 		return fastRecycleConcurrencyThreshold > 0;
+	}
+
+	@Override
+	public void enableFastRecycleQuiesce() {
+		this.fastRecycleQuiesceActive = true;
+		Loggers.MSG.info("{}: fast-recycle quiesce active (dispatch task will extend idle wait)", toString());
+	}
+
+	/**
+	 * Returns {@code true} when quiesce mode is active — i.e. the configured
+	 * concurrency is low enough that fast-recycle handles most operations and
+	 * the dispatch/generator VTs may park on long waits.
+	 */
+	protected boolean isFastRecycleQuiesceActive() {
+		return fastRecycleQuiesceActive;
 	}
 
 	/**

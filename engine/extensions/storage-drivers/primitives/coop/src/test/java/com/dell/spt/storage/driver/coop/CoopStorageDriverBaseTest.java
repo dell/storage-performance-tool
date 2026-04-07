@@ -403,6 +403,28 @@ class CoopStorageDriverBaseTest {
 		sem.release(2);
 	}
 
+	// ---------- Fast-recycle quiesce tests ----------
+
+	@Test
+	void enableFastRecycleQuiesce_activatesQuiesceState() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		assertFalse(driver.isFastRecycleQuiesceActive(),
+						"quiesce should be inactive by default");
+
+		driver.enableFastRecycleQuiesce();
+
+		assertTrue(driver.isFastRecycleQuiesceActive(),
+						"quiesce should be active after enableFastRecycleQuiesce()");
+	}
+
+	@Test
+	void quiesceInactiveByDefault() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+		assertFalse(driver.isFastRecycleQuiesceActive(),
+						"quiesce must be inactive when only enableFastRecycle was called");
+	}
+
 	/** Set up a driver with fast-recycle infrastructure for eligibility tests. */
 	private CoopStorageDriverBase<Item, Operation<Item>> newFastRecycleDriver(int threshold) throws Exception {
 		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));

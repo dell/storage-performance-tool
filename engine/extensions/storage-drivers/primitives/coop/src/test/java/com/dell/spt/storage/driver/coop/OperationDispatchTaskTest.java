@@ -221,8 +221,9 @@ class OperationDispatchTaskTest {
 
 	@Test
 	void fastRecycleEnabledExtendsIdleWait() throws Exception {
-		// Enable fast-recycle on the driver mock
-		when(driverMock.isFastRecycleEnabled()).thenReturn(true);
+		// Enable fast-recycle quiesce on the driver mock — this signals that
+		// concurrency is low and the dispatch task may use the 100ms timeout
+		when(driverMock.isFastRecycleQuiesceActive()).thenReturn(true);
 
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);
@@ -247,8 +248,8 @@ class OperationDispatchTaskTest {
 
 	@Test
 	void fastRecycleDisabledUsesShortWait() throws Exception {
-		// Fast-recycle NOT enabled (default mock returns false)
-		when(driverMock.isFastRecycleEnabled()).thenReturn(false);
+		// Fast-recycle quiesce NOT active — dispatch task uses 1ms timeout
+		when(driverMock.isFastRecycleQuiesceActive()).thenReturn(false);
 
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);

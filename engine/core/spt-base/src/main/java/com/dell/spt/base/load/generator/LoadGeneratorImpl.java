@@ -61,6 +61,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Random rnd;
 	private final String name;
 	private volatile boolean fastRecycleQuiesce = false;
+	private volatile boolean generatorParked = false;
 	private volatile Thread generatorThread;
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
 	private final LongAdder builtTasksCounter = new LongAdder();
@@ -154,7 +155,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								// park this VT until recycle() unparks us or the
 								// timeout expires.  10ms keeps the VT off the carrier
 								// while still bounding wake-up latency for fallback ops.
+								generatorParked = true;
 								LockSupport.parkNanos(10_000_000);
+								generatorParked = false;
 							} else {
 								// Yield the virtual thread back to the ForkJoinPool so
 								// in-flight ops can complete. Thread.yield() is purely
@@ -365,8 +368,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			recycleQueueFullState = true;
 			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
 		}
-		// Wake the generator VT if it's parked in the quiesce state
-		if (fastRecycleQuiesce) {
+		// Wake the generator VT if it's actually parked in the quiesce state.
+		// Checking generatorParked avoids spurious unpark() calls when the
+		// generator is running (e.g. at higher concurrency where fast-recycle
+		// doesn't handle all ops).
+		if (fastRecycleQuiesce && generatorParked) {
 			LockSupport.unpark(generatorThread);
 		}
 	}

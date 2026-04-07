@@ -69,10 +69,12 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				if (buff.size() == 0) {
 					// Both queues empty — wait for signal from producer or completion callback.
 					// The VT unmounts during await(), freeing the carrier thread.
-					// When fast-recycle is handling ops inline, extend the timeout to 100ms
-					// since no new ops are expected via the queues.  The normal 1ms timeout
-					// applies otherwise.  In both cases, signal() provides instant wake-up.
-					final long waitMs = storageDriver.isFastRecycleEnabled() ? 100 : 1;
+					// When quiesce is active (low concurrency, fast-recycle handling most
+					// ops), extend the timeout to 100ms since few ops flow via the queues.
+					// At higher concurrency ops flow normally and the 1ms timeout keeps
+					// the dispatch task responsive.  In both cases, signal() provides
+					// instant wake-up.
+					final long waitMs = storageDriver.isFastRecycleQuiesceActive() ? 100 : 1;
 					dispatchLock.lock();
 					try {
 						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
