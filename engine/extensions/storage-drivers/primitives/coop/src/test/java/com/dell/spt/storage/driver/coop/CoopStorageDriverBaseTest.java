@@ -17,8 +17,12 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.Test;
 
@@ -448,5 +452,153 @@ class CoopStorageDriverBaseTest {
 		when(driver.isStarted()).thenReturn(true);
 
 		return driver;
+	}
+
+	// ---------- Output-full side-effect tests ----------
+
+	@Test
+	void handleCompleted_outputFullSkipsCompletedCountIncrement() throws Exception {
+		// When opResultOut.put() returns false (queue full), the base class
+		// handleCompleted returns false, so CoopStorageDriverBase should NOT
+		// increment completedOpCount.
+		final var driver = newRetryTestDriver();
+
+		// Override opResultOut to reject
+		final Output<Operation<Item>> fullOutput = mock(Output.class);
+		when(fullOutput.put(any(Operation.class))).thenReturn(false);
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(driver, fullOutput);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		assertEquals(0, driver.completedOpCount(), "precondition: count starts at 0");
+
+		driver.handleCompleted(op);
+
+		assertEquals(0, driver.completedOpCount(),
+						"completedOpCount must NOT be incremented when output rejects the result");
+	}
+
+	// ---------- Concurrent signalDispatch tests ----------
+
+	@Test
+	void signalDispatch_concurrentCompletionsDoNotLoseSignals() throws Exception {
+		// Multiple threads calling handleCompleted simultaneously. The dispatch
+		// task's Condition should receive at least one signal for every batch of
+		// completions. We verify by counting signals received.
+		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+
+		// childOpQueue
+		final var childQueueField = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
+		childQueueField.setAccessible(true);
+		childQueueField.set(driver, new ArrayBlockingQueue<>(100));
+
+		// completedOpCount
+		final var completedField = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
+		completedField.setAccessible(true);
+		completedField.set(driver, new LongAdder());
+
+		// Use a real lock/condition so we can observe signals
+		final var lock = new ReentrantLock();
+		final var condition = lock.newCondition();
+		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
+		lockField.setAccessible(true);
+		lockField.set(driver, lock);
+		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
+		condField.setAccessible(true);
+		condField.set(driver, condition);
+
+		// opResultOut accepts everything
+		final Output<Operation<Item>> output = mock(Output.class);
+		when(output.put(any(Operation.class))).thenReturn(true);
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(driver, output);
+
+		// Signal counter: a separate thread waits on the condition and counts signals
+		final AtomicInteger signalCount = new AtomicInteger(0);
+		final int completionCount = 32;
+		final var allCompleted = new CountDownLatch(completionCount);
+		final var listenerReady = new CountDownLatch(1);
+		final var listenerDone = new CountDownLatch(1);
+
+		// Listener thread: simulates the dispatch task waiting for signals
+		Thread.ofVirtual().start(() -> {
+			listenerReady.countDown();
+			try {
+				// Keep listening until all completions are done
+				while (!allCompleted.await(0, TimeUnit.MILLISECONDS)) {
+					lock.lock();
+					try {
+						if (condition.await(50, TimeUnit.MILLISECONDS)) {
+							signalCount.incrementAndGet();
+						}
+					} finally {
+						lock.unlock();
+					}
+				}
+				// Drain any remaining signals
+				lock.lock();
+				try {
+					while (condition.await(10, TimeUnit.MILLISECONDS)) {
+						signalCount.incrementAndGet();
+					}
+				} finally {
+					lock.unlock();
+				}
+			} catch (final InterruptedException ignored) {
+			}
+			listenerDone.countDown();
+		});
+
+		assertTrue(listenerReady.await(5, TimeUnit.SECONDS), "listener should be ready");
+
+		// Fire completions from multiple threads simultaneously
+		final var startLatch = new CountDownLatch(1);
+		for (int i = 0; i < completionCount; i++) {
+			Thread.ofVirtual().start(() -> {
+				try {
+					startLatch.await(5, TimeUnit.SECONDS);
+					final Operation<Item> op = mock(Operation.class);
+					when(op.status()).thenReturn(Operation.Status.SUCC);
+					when(op.result()).thenReturn(mock(Operation.class));
+					driver.handleCompleted(op);
+				} catch (final Exception ignored) {
+				} finally {
+					allCompleted.countDown();
+				}
+			});
+		}
+
+		startLatch.countDown(); // release all completion threads
+		assertTrue(allCompleted.await(10, TimeUnit.SECONDS), "all completions should finish");
+		assertTrue(listenerDone.await(5, TimeUnit.SECONDS), "listener should finish");
+
+		// We expect at least 1 signal (signals can coalesce), and all ops completed
+		assertTrue(signalCount.get() >= 1,
+						"at least one signal must be received by the dispatch listener");
+		assertEquals(completionCount, driver.completedOpCount(),
+						"all ops should be counted as completed");
+	}
+
+	@Test
+	void handleCompleted_returnsFalseWhenDriverStopped() throws Exception {
+		// When the driver is stopped, handleCompleted should return false
+		// (base class checks isStopped()).
+		final var driver = newRetryTestDriver();
+		when(driver.isStopped()).thenReturn(true);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		boolean result = driver.handleCompleted(op);
+
+		assertFalse(result, "handleCompleted should return false when driver is stopped");
+		assertEquals(0, driver.completedOpCount(),
+						"completedOpCount should not be incremented when driver is stopped");
 	}
 }

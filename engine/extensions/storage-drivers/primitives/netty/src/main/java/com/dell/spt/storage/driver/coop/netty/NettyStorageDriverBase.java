@@ -345,12 +345,18 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			} catch (final ConnectException e) {
 				LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
 				op.status(Operation.Status.FAIL_IO);
+				if (conn == null) {
+					concurrencyThrottle.release();
+				}
 				complete(conn, op);
 				return false;
 			} catch (final Throwable thrown) {
 				throwUncheckedIfInterrupted(thrown);
 				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
 				op.status(Operation.Status.FAIL_UNKNOWN);
+				if (conn == null) {
+					concurrencyThrottle.release();
+				}
 				complete(conn, op);
 				return false;
 			}
@@ -389,6 +395,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		var n = 0;
 		try {
 			while (n < permits && isStarted()) {
+				conn = null; // reset so a stale channel from a prior iteration is never used
 				nextOp = ops.get(from + n);
 				if (OpType.NOOP.equals(nextOp.type())) {
 					nextOp.startRequest();
@@ -414,6 +421,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		} catch (final ConnectException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
 			nextOp.status(Operation.Status.FAIL_IO);
+			if (conn == null) {
+				concurrencyThrottle.release();
+			}
 			complete(conn, nextOp);
 			if (permits - n > 1) {
 				concurrencyThrottle.release(permits - n - 1);
@@ -422,6 +432,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			throwUncheckedIfInterrupted(thrown);
 			LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operations");
 			nextOp.status(Operation.Status.FAIL_UNKNOWN);
+			if (conn == null) {
+				concurrencyThrottle.release();
+			}
 			complete(conn, nextOp);
 			if (permits - n > 1) {
 				concurrencyThrottle.release(permits - n - 1);
