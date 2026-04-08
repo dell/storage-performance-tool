@@ -383,6 +383,28 @@ public class S3StorageDriverTest {
 		assertEquals("a=1&b=two%20three&b=two%2Bthree&z=~", canonical);
 	}
 
+	// ---------- normalizeHeaderValue ----------
+
+	@Test
+	void normalizeHeaderValue_collapsesConsecutiveWhitespace() throws Exception {
+		Method m = S3StorageDriver.class.getDeclaredMethod("normalizeHeaderValue", String.class);
+		m.setAccessible(true);
+		assertEquals("foo bar", m.invoke(null, "foo   bar"));
+		assertEquals("a b c", m.invoke(null, "a  b  c"));
+		assertEquals("a b", m.invoke(null, "a \t b"));
+	}
+
+	@Test
+	void normalizeHeaderValue_trimsAndPassesThroughSimpleValues() throws Exception {
+		Method m = S3StorageDriver.class.getDeclaredMethod("normalizeHeaderValue", String.class);
+		m.setAccessible(true);
+		assertEquals("simple", m.invoke(null, "simple"));
+		assertEquals("no-collapse", m.invoke(null, "  no-collapse  "));
+		assertEquals("", m.invoke(null, (String) null));
+		assertEquals("", m.invoke(null, ""));
+		assertEquals("", m.invoke(null, "   "));
+	}
+
 	@Test
 	void canonical_headers_lowercasedAndTrimmed() throws Exception {
 		S3StorageDriver<Item, Operation<Item>> drv = newDriverMock();

@@ -132,8 +132,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						}
 					});
 
-	private static final Pattern HEADER_WHITESPACE = Pattern.compile("\\s+");
-
 	// Additional S3 checksums
 	// https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/s3-checksums.html
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
@@ -800,10 +798,37 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return "";
 		}
 		final var trimmed = value.trim();
-		if (trimmed.isEmpty()) {
+		final int len = trimmed.length();
+		if (len == 0) {
 			return "";
 		}
-		return HEADER_WHITESPACE.matcher(trimmed).replaceAll(" ");
+		// Fast path: check if any consecutive whitespace needs collapsing
+		boolean needsNormalization = false;
+		for (int i = 1; i < len; i++) {
+			if (Character.isWhitespace(trimmed.charAt(i)) && Character.isWhitespace(trimmed.charAt(i - 1))) {
+				needsNormalization = true;
+				break;
+			}
+		}
+		if (!needsNormalization) {
+			return trimmed;
+		}
+		// Collapse runs of whitespace into a single space
+		final var sb = new StringBuilder(len);
+		boolean prevWs = false;
+		for (int i = 0; i < len; i++) {
+			final char c = trimmed.charAt(i);
+			if (Character.isWhitespace(c)) {
+				if (!prevWs) {
+					sb.append(' ');
+					prevWs = true;
+				}
+			} else {
+				sb.append(c);
+				prevWs = false;
+			}
+		}
+		return sb.toString();
 	}
 
 	private static String decodeQueryComponent(final String value) {
