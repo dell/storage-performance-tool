@@ -25,7 +25,9 @@ if [ -z "$JAVA_OPTS" ]; then
     # - UseNUMA: NUMA-aware allocation for multi-socket servers
     # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
     # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
-    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2"
+    # - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
+    #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
+    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions"
 fi
 
 # Additional Java options that can be set via environment variables

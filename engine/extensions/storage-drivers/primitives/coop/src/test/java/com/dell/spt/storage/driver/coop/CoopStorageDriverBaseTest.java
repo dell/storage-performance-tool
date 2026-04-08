@@ -10,6 +10,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.commons.io.Output;
@@ -82,6 +83,77 @@ class CoopStorageDriverBaseTest {
 
 		sem.release(1);
 		assertTrue(driver.isIdle(), "should be idle after release");
+	}
+
+	// ---------- Simple-op completion path (characterization for fast-recycle) ----------
+
+	@Test
+	void handleCompleted_simpleSuccessOpSendsResultToOutput() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		// A simple (non-composite, non-partial) op — this is the path fast-recycle targets
+		final Operation<Item> op = mock(Operation.class);
+		final Operation<Item> resultCopy = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(resultCopy);
+
+		boolean result = driver.handleCompleted(op);
+
+		assertTrue(result, "handleCompleted should return true for simple successful op");
+		// Verify the result copy (not the original) was sent to opResultOut
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		final Output<Operation<Item>> opResultOut = (Output<Operation<Item>>) outField.get(driver);
+		verify(opResultOut).put(resultCopy);
+	}
+
+	@Test
+	void handleCompleted_simpleOpDoesNotUseChildQueue() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		driver.handleCompleted(op);
+
+		final var queue = childQueueOf(driver);
+		assertTrue(queue.isEmpty(), "childOpQueue should remain empty for simple ops");
+	}
+
+	@Test
+	void handleCompleted_simpleOpIncrementsCompletedCount() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		assertEquals(0, driver.completedOpCount(), "precondition: count starts at 0");
+
+		driver.handleCompleted(op);
+
+		assertEquals(1, driver.completedOpCount(), "completedOpCount should be 1 after one completion");
+	}
+
+	@Test
+	void handleCompleted_returnsFalseWhenOutputFull() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		// Override opResultOut to reject (simulating queue full)
+		final Output<Operation<Item>> fullOutput = mock(Output.class);
+		when(fullOutput.put(any(Operation.class))).thenReturn(false);
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(driver, fullOutput);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+
+		boolean result = driver.handleCompleted(op);
+
+		assertFalse(result, "should return false when opResultOut rejects the result");
 	}
 
 	// ---------- Part-level retry tests ----------
@@ -222,5 +294,159 @@ class CoopStorageDriverBaseTest {
 
 		final var queue = childQueueOf(driver);
 		assertTrue(queue.contains(parent), "parent should be re-enqueued when all parts done");
+	}
+
+	// ---------- Fast-recycle eligibility tests ----------
+
+	@Test
+	void enableFastRecycle_setsThreshold() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+		final var threshField = CoopStorageDriverBase.class.getDeclaredField("fastRecycleConcurrencyThreshold");
+		threshField.setAccessible(true);
+		assertEquals(4, threshField.getInt(driver), "threshold should be set by enableFastRecycle");
+	}
+
+	@Test
+	void isFastRecycleEligible_trueForSimpleSuccessUnderThreshold() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+
+		assertTrue(driver.isFastRecycleEligible(op),
+						"simple SUCC op under threshold should be eligible");
+	}
+
+	@Test
+	void isFastRecycleEligible_falseWhenDisabled() throws Exception {
+		// threshold = 0 means disabled
+		final var driver = newFastRecycleDriver(0);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+
+		assertFalse(driver.isFastRecycleEligible(op),
+						"should not be eligible when fast-recycle is disabled");
+	}
+
+	@Test
+	void isFastRecycleEligible_falseForFailedOp() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.FAIL_IO);
+
+		assertFalse(driver.isFastRecycleEligible(op),
+						"failed op should not be eligible for fast-recycle");
+	}
+
+	@Test
+	void isFastRecycleEligible_falseForCompositeOp() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		final var baseItem = new DataItemImpl("obj", 0, 4096);
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		final var compositeOp = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
+		compositeOp.status(Operation.Status.SUCC);
+
+		assertFalse(driver.isFastRecycleEligible((Operation<Item>) (Operation<?>) compositeOp),
+						"composite op should not be eligible for fast-recycle");
+	}
+
+	@Test
+	void isFastRecycleEligible_falseForPartialOp() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		final PartialOperation partialOp = mock(PartialOperation.class);
+		when(partialOp.status()).thenReturn(Operation.Status.SUCC);
+
+		assertFalse(driver.isFastRecycleEligible((Operation<Item>) partialOp),
+						"partial op should not be eligible for fast-recycle");
+	}
+
+	@Test
+	void isFastRecycleEligible_falseWhenActiveCountExceedsThreshold() throws Exception {
+		final var driver = newFastRecycleDriver(2);
+
+		// Acquire 3 permits to simulate 3 active ops (threshold=2)
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		final Semaphore sem = (Semaphore) semField.get(driver);
+		sem.acquire(3);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+
+		assertFalse(driver.isFastRecycleEligible(op),
+						"should not be eligible when active count exceeds threshold");
+
+		sem.release(3);
+	}
+
+	@Test
+	void isFastRecycleEligible_trueWhenActiveCountEqualsThreshold() throws Exception {
+		final var driver = newFastRecycleDriver(2);
+
+		// Acquire exactly 2 permits (threshold=2)
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		final Semaphore sem = (Semaphore) semField.get(driver);
+		sem.acquire(2);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+
+		assertTrue(driver.isFastRecycleEligible(op),
+						"should be eligible when active count equals threshold (boundary)");
+
+		sem.release(2);
+	}
+
+	// ---------- Fast-recycle quiesce tests ----------
+
+	@Test
+	void enableFastRecycleQuiesce_activatesQuiesceState() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+
+		assertFalse(driver.isFastRecycleQuiesceActive(),
+						"quiesce should be inactive by default");
+
+		driver.enableFastRecycleQuiesce();
+
+		assertTrue(driver.isFastRecycleQuiesceActive(),
+						"quiesce should be active after enableFastRecycleQuiesce()");
+	}
+
+	@Test
+	void quiesceInactiveByDefault() throws Exception {
+		final var driver = newFastRecycleDriver(4);
+		assertFalse(driver.isFastRecycleQuiesceActive(),
+						"quiesce must be inactive when only enableFastRecycle was called");
+	}
+
+	/** Set up a driver with fast-recycle infrastructure for eligibility tests. */
+	private CoopStorageDriverBase<Item, Operation<Item>> newFastRecycleDriver(int threshold) throws Exception {
+		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+
+		// concurrencyLimit
+		final var limitField = CoopStorageDriverBase.class.getSuperclass().getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 8);
+
+		// concurrencyThrottle
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, new Semaphore(8, true));
+
+		// fastRecycleConcurrencyThreshold
+		final var threshField = CoopStorageDriverBase.class.getDeclaredField("fastRecycleConcurrencyThreshold");
+		threshField.setAccessible(true);
+		threshField.set(driver, threshold);
+
+		// Mark as started so isStarted() returns true
+		when(driver.isStarted()).thenReturn(true);
+
+		return driver;
 	}
 }

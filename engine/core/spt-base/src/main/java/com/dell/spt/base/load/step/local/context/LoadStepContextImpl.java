@@ -155,6 +155,25 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
 							this.listShardMetricsRecorder);
 		}
+		// Enable fast-recycle on the driver when recycling simple data ops
+		// without content updates.  The threshold is the configured concurrency
+		// limit (or a cap of 8 for unlimited).  updateContents is excluded
+		// because the driver re-submits the original op directly and cannot
+		// safely mutate the shared DataItem offset concurrently with metrics.
+		if (this.recycleFlag && !this.updateContents && !this.listPathWorkload) {
+			final int driverConcurrency = this.driver.concurrencyLimit();
+			final int threshold = driverConcurrency > 0 ? Math.min(driverConcurrency, 8) : 8;
+			this.driver.enableFastRecycle(threshold);
+			// Only quiesce when the configured concurrency is low enough that
+			// fast-recycle handles most operations inline.  At higher concurrency
+			// (T8+), fast-recycle rarely fires and the generator/dispatch VTs
+			// need to stay responsive — yield is faster than park+unpark when
+			// ops flow through the recycleQueue continuously.
+			if (driverConcurrency > 0 && driverConcurrency <= 4) {
+				this.generator.enableFastRecycleQuiesce();
+				this.driver.enableFastRecycleQuiesce();
+			}
+		}
 	}
 
 	@Override
@@ -373,7 +392,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						// TODO: possible change: remove dataItem.offset() to improve perf and increase variability
 						dataItem.offset(dataItem.offset() + rand.get().nextLong());
 					}
-					generator.recycle(opResult);
+					// Skip generator.recycle() when the driver already re-submitted the
+					// original op via the fast-recycle path — calling recycle here would
+					// create a duplicate in-flight operation.
+					if (!opResult.driverRecycled()) {
+						generator.recycle(opResult);
+					}
 				}
 
 				// each recycled op's lat and dur should be written to file each time
@@ -494,7 +518,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								listShardMetricsRecorder.onRequeue(shardRef);
 							}
 						}
-						generator.recycle(opResult);
+						if (!opResult.driverRecycled()) {
+							generator.recycle(opResult);
+						}
 					}
 
 					// each recycled op's lat and dur should be written to file each time

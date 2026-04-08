@@ -596,8 +596,46 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			channel.close();
 		}
 
-		// Release permit + channel BEFORE handleCompleted so that child ops submitted
-		// by handleCompleted can re-acquire a permit without deadlocking.
+		// Fast-recycle path: keep the concurrency permit, release the channel,
+		// report metrics, then directly prepare + re-submit the original op.
+		// This avoids the VirtualThread scheduling overhead of the normal
+		// LoadGenerator recycleQueue → OperationDispatchTask path.
+		if (channel != null && isFastRecycleEligible(op)) {
+			if (!channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
+				connPool.release(channel);
+			}
+			// Mark BEFORE handleCompleted so the result copy carries the flag
+			op.driverRecycled(true);
+			handleCompleted(op);
+			// Prepare and re-submit directly (we still hold the concurrency permit)
+			prepare(op);
+			try {
+				final Channel conn = connPool.lease();
+				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+				if (!conn.isActive()) {
+					throw new ConnectException("Connection is not active");
+				}
+				conn.attr(ATTR_KEY_OPERATION).set(op);
+				op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
+				op.startRequest();
+				sendRequest(conn, op);
+			} catch (final ConnectException e) {
+				LogUtil.exception(Level.WARN, e, "Fast-recycle: failed to lease connection");
+				op.status(Operation.Status.FAIL_IO);
+				concurrencyThrottle.release();
+				handleCompleted(op);
+			} catch (final Throwable thrown) {
+				throwUncheckedIfInterrupted(thrown);
+				LogUtil.exception(Level.WARN, thrown, "Fast-recycle: failed to re-submit");
+				op.status(Operation.Status.FAIL_UNKNOWN);
+				concurrencyThrottle.release();
+				handleCompleted(op);
+			}
+			return;
+		}
+
+		// Normal path: release permit + channel, then let the LoadGenerator
+		// recycle queue handle re-dispatch.
 		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);

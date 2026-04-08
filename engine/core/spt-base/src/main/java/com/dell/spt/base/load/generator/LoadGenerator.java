@@ -22,4 +22,13 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 
 	/** Returns true when the recycle queue is currently empty. */
 	boolean isNothingToRecycle();
+
+	/**
+	 * Enable idle-VT quiescing for fast-recycle workloads.  When enabled, the
+	 * generator parks its VT (instead of spin-waiting/yielding) when the recycle
+	 * queue is empty, because the driver is handling recycling inline.  The
+	 * {@link #recycle} method will unpark the VT immediately if an op falls back
+	 * to the normal path.
+	 */
+	default void enableFastRecycleQuiesce() {}
 }
