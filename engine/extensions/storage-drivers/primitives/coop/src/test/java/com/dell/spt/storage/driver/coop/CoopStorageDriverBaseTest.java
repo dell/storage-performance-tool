@@ -22,7 +22,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.Test;
 
@@ -549,8 +548,7 @@ class CoopStorageDriverBaseTest {
 				} finally {
 					lock.unlock();
 				}
-			} catch (final InterruptedException ignored) {
-			}
+			} catch (final InterruptedException ignored) {}
 			listenerDone.countDown();
 		});
 
@@ -566,8 +564,7 @@ class CoopStorageDriverBaseTest {
 					when(op.status()).thenReturn(Operation.Status.SUCC);
 					when(op.result()).thenReturn(mock(Operation.class));
 					driver.handleCompleted(op);
-				} catch (final Exception ignored) {
-				} finally {
+				} catch (final Exception ignored) {} finally {
 					allCompleted.countDown();
 				}
 			});
