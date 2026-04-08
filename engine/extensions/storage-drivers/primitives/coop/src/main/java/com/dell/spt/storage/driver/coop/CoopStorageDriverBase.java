@@ -155,6 +155,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	/** Check if the concurrency throttle has available permits. Package-private —
+	 *  used by OperationDispatchTask to double-check before entering backpressure await. */
+	boolean hasAvailableDispatchCapacity() {
+		return concurrencyThrottle.availablePermits() > 0;
+	}
+
 	protected abstract boolean submit(final O op) throws IllegalStateException;
 
 	protected abstract int submit(final List<O> ops, final int from, final int to)

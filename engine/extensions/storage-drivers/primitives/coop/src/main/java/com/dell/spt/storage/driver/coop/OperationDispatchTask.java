@@ -107,12 +107,19 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 					}
 				}
 				// Backpressure: submit made no progress (no permits available).
-				// Wait for a completion to free capacity — handleCompleted calls
-				// signalDispatch() after releasing a permit, so untimed await is safe.
+				// Wait for a completion to free capacity.  The double-check
+				// inside the lock prevents a lost-signal race: a completion may
+				// release a permit AND call signalDispatch() between submit()
+				// returning false and this lock acquisition — the signal is lost
+				// because nobody is in await() yet.  Checking availablePermits
+				// under the lock detects that case (the permit release happened-
+				// before the lock acquisition), so we skip the await and retry.
 				if (!submitted) {
 					dispatchLock.lock();
 					try {
-						dispatchReady.await();
+						if (!storageDriver.hasAvailableDispatchCapacity()) {
+							dispatchReady.await();
+						}
 					} finally {
 						dispatchLock.unlock();
 					}

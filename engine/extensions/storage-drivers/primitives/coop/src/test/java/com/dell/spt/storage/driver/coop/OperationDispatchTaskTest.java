@@ -83,6 +83,7 @@ class OperationDispatchTaskTest {
 		when(driverMock.submit(any(Operation.class)))
 						.thenReturn(false)
 						.thenReturn(true);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
 
 		inOpQueue.add(op);
 
@@ -217,6 +218,7 @@ class OperationDispatchTaskTest {
 		when(driverMock.submit(any(Operation.class)))
 						.thenReturn(false)
 						.thenReturn(true);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
 
 		task.start();
 
