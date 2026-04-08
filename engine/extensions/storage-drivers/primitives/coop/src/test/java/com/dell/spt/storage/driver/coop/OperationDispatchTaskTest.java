@@ -83,12 +83,33 @@ class OperationDispatchTaskTest {
 		when(driverMock.submit(any(Operation.class)))
 						.thenReturn(false)
 						.thenReturn(true);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
 
 		inOpQueue.add(op);
-		task.doWork(); // submit returns false — op stays buffered
 
+		// doWork() will submit (fail), then block on untimed backpressure await.
+		// Run it on a background thread and signal after a brief delay.
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(50); // let it reach the await
+
+		// First submit attempt should have happened
 		verify(driverMock, times(1)).submit(any(Operation.class));
 		assertTrue(inOpQueue.isEmpty(), "op should have been drained from the queue");
+
+		// Signal to release the backpressure await so doWork() returns
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+		worker.join(5000);
 
 		task.doWork(); // retry succeeds — buffer clears
 
@@ -155,11 +176,17 @@ class OperationDispatchTaskTest {
 
 	@Test
 	void emptyQueuesDoNotSubmit() throws Exception {
-		task.doWork(); // both queues empty — should not call submit
+		// With untimed await, doWork() blocks when queues are empty.
+		// Run the task, wait, then verify no submit calls were made.
+		task.start();
+		Thread.sleep(100); // let the task enter await()
 
 		verify(driverMock, never()).submit(any(Operation.class));
 		verify(driverMock, never()).submit(anyList(), anyInt(), anyInt());
 		verify(driverMock, never()).submit(anyList());
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
 	}
 
 	@Test
@@ -191,6 +218,7 @@ class OperationDispatchTaskTest {
 		when(driverMock.submit(any(Operation.class)))
 						.thenReturn(false)
 						.thenReturn(true);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
 
 		task.start();
 
@@ -220,18 +248,18 @@ class OperationDispatchTaskTest {
 	}
 
 	@Test
-	void fastRecycleEnabledExtendsIdleWait() throws Exception {
-		// Enable fast-recycle quiesce on the driver mock — this signals that
-		// concurrency is low and the dispatch task may use the 100ms timeout
+	void untimedAwaitWakesOnSignal() throws Exception {
+		// The dispatch task uses untimed await() — verify it still wakes
+		// promptly when signaled, regardless of fast-recycle quiesce state.
 		when(driverMock.isFastRecycleQuiesceActive()).thenReturn(true);
 
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);
 
 		task.start();
-		Thread.sleep(100); // let the task enter the extended await (100ms vs 1ms)
+		Thread.sleep(100); // let the task enter await()
 
-		// Even with the extended timeout, signal() still provides instant wake-up
+		// Signal should wake the untimed await instantly
 		inOpQueue.add(op);
 		dispatchLock.lock();
 		try {
@@ -241,26 +269,6 @@ class OperationDispatchTaskTest {
 		}
 
 		verify(driverMock, timeout(1000)).submit(any(Operation.class));
-
-		task.stop();
-		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
-	}
-
-	@Test
-	void fastRecycleDisabledUsesShortWait() throws Exception {
-		// Fast-recycle quiesce NOT active — dispatch task uses 1ms timeout
-		when(driverMock.isFastRecycleQuiesceActive()).thenReturn(false);
-
-		final Operation<Item> op = mock(Operation.class);
-		when(driverMock.submit(any(Operation.class))).thenReturn(true);
-
-		task.start();
-		Thread.sleep(50); // let the task enter await
-
-		// With 1ms timeout, the task wakes up quickly even without signal
-		inOpQueue.add(op);
-
-		verify(driverMock, timeout(500)).submit(any(Operation.class));
 
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");

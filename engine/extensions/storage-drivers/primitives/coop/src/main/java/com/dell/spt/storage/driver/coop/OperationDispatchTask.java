@@ -10,7 +10,6 @@ import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 
@@ -67,18 +66,17 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			if (buff.size() == 0) {
 				inOpQueue.drainTo(buff, batchSize);
 				if (buff.size() == 0) {
-					// Both queues empty — wait for signal from producer or completion callback.
-					// The VT unmounts during await(), freeing the carrier thread.
-					// When quiesce is active (low concurrency, fast-recycle handling most
-					// ops), extend the timeout to 100ms since few ops flow via the queues.
-					// At higher concurrency ops flow normally and the 1ms timeout keeps
-					// the dispatch task responsive.  In both cases, signal() provides
-					// instant wake-up.
-					final long waitMs = storageDriver.isFastRecycleQuiesceActive() ? 100 : 1;
+					// Both queues empty — wait for signal from producer or completion
+					// callback.  All code paths that enqueue ops (put methods) or free
+					// capacity (handleCompleted) call signalDispatch(), so an untimed
+					// await is safe — the signal will always arrive.  Removing the timed
+					// variant eliminates per-park ScheduledFutureTask allocation and the
+					// corresponding VT-unparker thread work that was consuming 22-27% of
+					// CPU in profiling.
 					dispatchLock.lock();
 					try {
 						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
-							dispatchReady.await(waitMs, TimeUnit.MILLISECONDS);
+							dispatchReady.await();
 						}
 					} finally {
 						dispatchLock.unlock();
@@ -108,12 +106,20 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						buff.removeFirst(m);
 					}
 				}
-				// Backpressure: if submit made no progress, wait for a completion signal.
-				// A completion callback releases a semaphore permit and signals us.
+				// Backpressure: submit made no progress (no permits available).
+				// Wait for a completion to free capacity.  The double-check
+				// inside the lock prevents a lost-signal race: a completion may
+				// release a permit AND call signalDispatch() between submit()
+				// returning false and this lock acquisition — the signal is lost
+				// because nobody is in await() yet.  Checking availablePermits
+				// under the lock detects that case (the permit release happened-
+				// before the lock acquisition), so we skip the await and retry.
 				if (!submitted) {
 					dispatchLock.lock();
 					try {
-						dispatchReady.await(1, TimeUnit.MILLISECONDS);
+						if (!storageDriver.hasAvailableDispatchCapacity()) {
+							dispatchReady.await();
+						}
 					} finally {
 						dispatchLock.unlock();
 					}
