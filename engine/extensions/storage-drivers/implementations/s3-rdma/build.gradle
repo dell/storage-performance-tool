@@ -24,8 +24,14 @@ def cmakeAvailable = {
 
 // Helper to check if native build prerequisites are met (libibverbs, libmlx5, librdmacm)
 def canBuildNative = {
-	if (!cmakeAvailable()) return false
-	if (!file("${nativeDir}/CMakeLists.txt").exists()) return false
+	if (!cmakeAvailable()) {
+		logger.warn("S3-RDMA: native build skipped — cmake not found")
+		return false
+	}
+	if (!file("${nativeDir}/CMakeLists.txt").exists()) {
+		logger.warn("S3-RDMA: native build skipped — CMakeLists.txt not found")
+		return false
+	}
 
 	// Check for libibverbs headers (from rdma-core-devel)
 	def hasVerbs = file("/usr/include/infiniband/verbs.h").exists() ||
@@ -35,7 +41,16 @@ def canBuildNative = {
 	def hasRdmaCm = file("/usr/include/rdma/rdma_cma.h").exists() ||
 					file("/usr/local/include/rdma/rdma_cma.h").exists()
 
-	return hasVerbs && hasMlx5dv && hasRdmaCm
+	def missing = []
+	if (!hasVerbs) missing << "verbs.h (libibverbs-dev)"
+	if (!hasMlx5dv) missing << "mlx5dv.h (libmlx5-dev)"
+	if (!hasRdmaCm) missing << "rdma_cma.h (librdmacm-dev)"
+
+	if (!missing.isEmpty()) {
+		logger.warn("S3-RDMA: native build skipped — missing headers: ${missing.join(', ')}")
+		return false
+	}
+	return true
 }
 
 // Task to configure CMake build
@@ -128,6 +143,18 @@ shadowJar {
 tasks.named('shadowJar') {
 	if (canBuildNative()) {
 		dependsOn buildNative
+	}
+	doLast {
+		def jarFile = archiveFile.get().asFile
+		def found = false
+		new java.util.zip.ZipFile(jarFile).withCloseable { zip ->
+			found = zip.getEntry('native/linux-amd64/libspt_rdma.so') != null
+		}
+		if (found) {
+			logger.lifecycle("S3-RDMA: libspt_rdma.so packaged in shadow JAR")
+		} else {
+			logger.warn("S3-RDMA: libspt_rdma.so NOT found in shadow JAR — RDMA will run in stub mode")
+		}
 	}
 }
 
