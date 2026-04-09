@@ -21,6 +21,15 @@ const (
 	// S3DriverRdma selects the RDMA-accelerated S3 driver.
 	S3DriverRdma = "rdma"
 
+	// ChecksumCRC32 selects CRC-32 checksum validation.
+	ChecksumCRC32 = "crc32"
+	// ChecksumCRC32C selects CRC-32C checksum validation.
+	ChecksumCRC32C = "crc32c"
+	// ChecksumSHA1 selects SHA-1 checksum validation.
+	ChecksumSHA1 = "sha1"
+	// ChecksumSHA256 selects SHA-256 checksum validation.
+	ChecksumSHA256 = "sha256"
+
 	itemTypeData         = "data"
 	itemTypePath         = "path"
 	itemNamingTypeRandom = "random"

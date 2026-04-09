@@ -28,7 +28,7 @@ final class S3ResponseHandlerListTest {
 
 	@BeforeEach
 	void setUp() {
-		handler = new S3ResponseHandler<>(null, false, false);
+		handler = new S3ResponseHandler<>(null, false, false, null);
 		content = Unpooled.copiedBuffer(LIST_V2_RESPONSE, StandardCharsets.UTF_8);
 	}
 

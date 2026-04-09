@@ -847,6 +847,130 @@ func TestGenerateDefaults(t *testing.T) {
 		tests = append(tests, tt)
 	}
 
+	// Checksum test cases
+	checksumCases := []struct {
+		name        string
+		params      Params
+		wantErr     bool
+		checkOutput func(t *testing.T, data []byte)
+	}{
+		{
+			name: "checksum crc32 enables checksum section",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				Checksum:     "crc32",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum == nil {
+					t.Fatal("Expected storage.checksum section to be present")
+				}
+				if !config.Storage.Checksum.Enabled {
+					t.Error("Expected checksum.enabled to be true")
+				}
+				if config.Storage.Checksum.Algorithm != "crc32" {
+					t.Errorf("Expected algorithm 'crc32', got %q", config.Storage.Checksum.Algorithm)
+				}
+			},
+		},
+		{
+			name: "checksum sha256",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				Checksum:     "sha256",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum == nil {
+					t.Fatal("Expected storage.checksum section")
+				}
+				if config.Storage.Checksum.Algorithm != "sha256" {
+					t.Errorf("Expected algorithm 'sha256', got %q", config.Storage.Checksum.Algorithm)
+				}
+			},
+		},
+		{
+			name: "no checksum omits checksum section",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum != nil {
+					t.Error("Expected no storage.checksum section when checksum is empty")
+				}
+				if strings.Contains(string(data), "checksum:") {
+					t.Error("Raw YAML should not contain 'checksum:' when disabled")
+				}
+			},
+		},
+		{
+			name: "checksum with RDMA both present",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://s3.example.com",
+				AccessKey:          "key",
+				SecretKey:          "secret",
+				Bucket:             "bucket",
+				Threads:            4,
+				S3Driver:           S3DriverRdma,
+				RdmaThresholdBytes: 0,
+				RdmaTimeoutMs:      30000,
+				Checksum:           "crc32c",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum == nil {
+					t.Fatal("Expected checksum section with RDMA")
+				}
+				if config.Storage.Checksum.Algorithm != "crc32c" {
+					t.Errorf("Expected algorithm 'crc32c', got %q", config.Storage.Checksum.Algorithm)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected RDMA section with checksum")
+				}
+			},
+		},
+	}
+	for _, tt := range checksumCases {
+		tests = append(tests, tt)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := GenerateDefaults(tt.params)

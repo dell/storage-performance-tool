@@ -628,6 +628,114 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void mpu_init_includesChecksumAlgorithmHeaderWhenEnabled() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc32c", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		Item item = new ItemImpl("/bucket/obj");
+		Operation<Item> op = new OperationImpl<>(1, OpType.CREATE, item, null, "/bucket", TEST_CRED);
+		HttpRequest req = drv.initMultipartUploadRequest(op, "s3.us-east-1.amazonaws.com");
+		assertEquals("CRC32C", req.headers().get(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER),
+						"InitiateMultipartUpload should include x-amz-checksum-algorithm when checksums enabled");
+	}
+
+	@Test
+	void mpu_init_noChecksumAlgorithmHeaderWhenDisabled() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		Item item = new ItemImpl("/bucket/obj");
+		Operation<Item> op = new OperationImpl<>(1, OpType.CREATE, item, null, "/bucket", TEST_CRED);
+		HttpRequest req = drv.initMultipartUploadRequest(op, "s3.us-east-1.amazonaws.com");
+		assertNull(req.headers().get(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER),
+						"InitiateMultipartUpload should not include x-amz-checksum-algorithm when checksums disabled");
+	}
+
+	@Test
+	void mpu_complete_includesPerPartChecksums() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc32c", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-complete-checksum");
+		parent.put("1", "\"etag-1\"");
+		parent.put("2", "\"etag-2\"");
+		parent.put(S3Api.KEY_PART_CHECKSUM_PREFIX + "1", "AAAAAA==");
+		parent.put(S3Api.KEY_PART_CHECKSUM_PREFIX + "2", "BBBBBB==");
+		final var req = drv.completeMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+		final String body = req.content().toString(java.nio.charset.StandardCharsets.UTF_8);
+		assertTrue(body.contains("<ChecksumCRC32C>AAAAAA==</ChecksumCRC32C>"),
+						"CompleteMultipartUpload XML should include part 1 checksum: " + body);
+		assertTrue(body.contains("<ChecksumCRC32C>BBBBBB==</ChecksumCRC32C>"),
+						"CompleteMultipartUpload XML should include part 2 checksum: " + body);
+		assertTrue(body.contains("<ETag>\"etag-1\"</ETag>"), "XML should still include ETags: " + body);
+	}
+
+	@Test
+	void mpu_complete_noChecksumElementsWhenDisabled() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-complete-nochecksum");
+		parent.put("1", "\"etag-1\"");
+		parent.put("2", "\"etag-2\"");
+		final var req = drv.completeMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+		final String body = req.content().toString(java.nio.charset.StandardCharsets.UTF_8);
+		assertFalse(body.contains("Checksum"),
+						"CompleteMultipartUpload XML should not include checksum elements when disabled: " + body);
+		assertTrue(body.contains("<ETag>\"etag-1\"</ETag>"), "XML should include ETags: " + body);
+	}
+
+	@Test
+	void responseHandler_capturesPartChecksum() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc32c", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-resp-checksum");
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		final var handler = new S3ResponseHandler<>(drv, false, false, "crc32c");
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.ETAG, "\"etag-part1\"");
+		headers.set("x-amz-checksum-crc32c", "XYZABC==");
+		Method m = S3ResponseHandler.class.getDeclaredMethod(
+						"handleResponseHeaders", Channel.class, Operation.class, HttpHeaders.class);
+		m.setAccessible(true);
+		m.invoke(handler, null, partOp, headers);
+		assertEquals("\"etag-part1\"", parent.get("1"), "ETag should be captured");
+		assertEquals("XYZABC==", parent.get(S3Api.KEY_PART_CHECKSUM_PREFIX + "1"),
+						"Per-part checksum should be captured from response header");
+	}
+
+	@Test
+	void responseHandler_noChecksumCaptureWhenDisabled() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-resp-nochecksum");
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		final var handler = new S3ResponseHandler<>(drv, false, false, null);
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.ETAG, "\"etag-part1\"");
+		headers.set("x-amz-checksum-crc32c", "XYZABC==");
+		Method m = S3ResponseHandler.class.getDeclaredMethod(
+						"handleResponseHeaders", Channel.class, Operation.class, HttpHeaders.class);
+		m.setAccessible(true);
+		m.invoke(handler, null, partOp, headers);
+		assertEquals("\"etag-part1\"", parent.get("1"), "ETag should still be captured");
+		assertNull(parent.get(S3Api.KEY_PART_CHECKSUM_PREFIX + "1"),
+						"Per-part checksum should NOT be captured when checksums disabled");
+	}
+
+	@Test
 	void mpu_abort_sendsDeleteWithUploadId() throws Exception {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
@@ -782,7 +890,7 @@ public class S3StorageDriverTest {
 		final var partItem = base.slice(0, 1024);
 		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
-		final var handler = new S3ResponseHandler<>(drv, false, false);
+		final var handler = new S3ResponseHandler<>(drv, false, false, null);
 		final var headers = new DefaultHttpHeaders();
 		headers.set(HttpHeaderNames.ETAG, "\"abc123\"");
 		// Use reflection to call protected handleResponseHeaders
@@ -805,7 +913,7 @@ public class S3StorageDriverTest {
 		final var partItem = base.slice(0, 1024);
 		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, partItem, "/bucket", null, TEST_CRED, 0, parent);
-		final var handler = new S3ResponseHandler<>(drv, false, false);
+		final var handler = new S3ResponseHandler<>(drv, false, false, null);
 		final var headers = new DefaultHttpHeaders();
 		headers.set(HttpHeaderNames.ETAG, "\"def456\"");
 		Method m = S3ResponseHandler.class.getDeclaredMethod(

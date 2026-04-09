@@ -57,6 +57,7 @@ All AWS SDK v2 dependencies are now included for comprehensive S3 feature suppor
 | Copy Operations | ✅ | ✅ | Complete |
 | Bulk Operations | ✅ | ✅ | Complete |
 | Metadata Operations | ✅ | ✅ | Complete |
+| Checksum Validation | ✅ | ✅ | Complete (CRC32, CRC32C, SHA1, SHA256; MD5 N/A for AWS SDK flexible checksums) |
 
 ## Key Implementation Details
 

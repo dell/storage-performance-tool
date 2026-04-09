@@ -39,6 +39,9 @@ type Params struct {
 	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
 
+	// Checksum validation
+	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256 (empty = disabled)
+
 	// Stable timestamp for step IDs.  When set, all Generate*Scenario
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
