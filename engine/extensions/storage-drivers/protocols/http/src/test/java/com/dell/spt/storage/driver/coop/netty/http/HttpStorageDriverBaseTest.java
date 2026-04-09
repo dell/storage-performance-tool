@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemImpl;
@@ -9,15 +10,18 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
+import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -87,14 +91,24 @@ class HttpStorageDriverBaseTest {
 			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false), storage.configVal("storage"), false, 1024);
 		}
 
-		// Expose dataUriPath for testing
+		TestHttpDriver(final Config storage, final boolean readMetaOnly) throws Exception {
+			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false), storage.configVal("storage"), false, 1024);
+		}
+
 		String exposeDataUriPath(final DataItemImpl item, final String src, final String dst, final OpType t) {
 			return dataUriPath(item, src, dst, t);
 		}
 
-		// Expose sendRequest for testing
 		void exposeSendRequest(final io.netty.channel.Channel ch, final DataOperation<DataItemImpl> op) {
 			sendRequest(ch, op);
+		}
+
+		HttpMethod exposeDataHttpMethod(final OpType opType) {
+			return dataHttpMethod(opType);
+		}
+
+		void exposeApplyRangesHeaders(final HttpHeaders headers, final DataOperation<?> dataOp) {
+			applyRangesHeaders(headers, dataOp);
 		}
 
 		@Override
@@ -224,5 +238,132 @@ class HttpStorageDriverBaseTest {
 		assertNotNull(second);
 		assertNotNull(third);
 		ch.finishAndReleaseAll();
+	}
+
+	// --- dataHttpMethod tests ---
+
+	@Test
+	void dataHttpMethod_read_returnsGet() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		assertEquals(HttpMethod.GET, drv.exposeDataHttpMethod(OpType.READ));
+	}
+
+	@Test
+	void dataHttpMethod_readMetadataOnly_returnsHead() throws Exception {
+		final var cfg = baseConfig();
+		cfg.val("storage-net-http-read-metadata-only", true);
+		final var drv = new TestHttpDriver(cfg, true);
+		assertEquals(HttpMethod.HEAD, drv.exposeDataHttpMethod(OpType.READ));
+	}
+
+	@Test
+	void dataHttpMethod_delete_returnsDelete() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		assertEquals(HttpMethod.DELETE, drv.exposeDataHttpMethod(OpType.DELETE));
+	}
+
+	@Test
+	void dataHttpMethod_create_returnsPut() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		assertEquals(HttpMethod.PUT, drv.exposeDataHttpMethod(OpType.CREATE));
+	}
+
+	// --- dataUriPath edge cases ---
+
+	@Test
+	void dataUriPath_bothPathsNull_returnsItemNameOnly() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("object.dat", 0, 64);
+		assertEquals("/object.dat", drv.exposeDataUriPath(item, null, null, OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_itemNameStartsWithSlash_noDoubleSlash() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("/already/slashed", 0, 64);
+		assertEquals("/bucket/already/slashed", drv.exposeDataUriPath(item, "/bucket", null, OpType.READ));
+	}
+
+	@Test
+	void dataUriPath_itemNameStartsWithPathPrefix_noDuplication() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		// Item name starts with the bucket path — should not duplicate
+		final var item = new DataItemImpl("/bucket/sub/file.dat", 0, 64);
+		assertEquals("/bucket/sub/file.dat", drv.exposeDataUriPath(item, "/bucket", null, OpType.READ));
+	}
+
+	@Test
+	void dataUriPath_dstPathWithLeadingSlash_noDoubleSlash() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("file.dat", 0, 64);
+		assertEquals("/dst/file.dat", drv.exposeDataUriPath(item, "/src", "/dst", OpType.CREATE));
+	}
+
+	// --- applyRangesHeaders + rangeListToStringBuff tests ---
+
+	@Test
+	void applyRangesHeaders_emptyBitSets_noRangeHeader() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final HttpHeaders headers = new DefaultHttpHeaders();
+
+		final var item = new DataItemImpl("emptyRange", 0, 4096);
+		@SuppressWarnings("unchecked")
+		final DataOperation<DataItemImpl> op = mock(DataOperation.class);
+		when(op.item()).thenReturn(item);
+		when(op.fixedRanges()).thenReturn(null);
+		when(op.markedRangesMaskPair()).thenReturn(new BitSet[]{new BitSet(), new BitSet()
+		});
+
+		drv.exposeApplyRangesHeaders(headers, op);
+		assertNull(headers.get(HttpHeaderNames.RANGE), "Empty BitSets should not produce a Range header");
+	}
+
+	@Test
+	void applyRangesHeaders_singleBitSetRange_producesCorrectHeader() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final HttpHeaders headers = new DefaultHttpHeaders();
+
+		// Item size 4MB = 4194304 bytes. Range 0 in rangeOffset scheme = bytes 0..1048575 (1MB range)
+		final var item = new DataItemImpl("rangeItem", 0, 4_194_304);
+		@SuppressWarnings("unchecked")
+		final DataOperation<DataItemImpl> op = mock(DataOperation.class);
+		when(op.item()).thenReturn(item);
+		when(op.fixedRanges()).thenReturn(null);
+		final BitSet current = new BitSet();
+		current.set(0); // first range
+		when(op.markedRangesMaskPair()).thenReturn(new BitSet[]{current, new BitSet()
+		});
+
+		drv.exposeApplyRangesHeaders(headers, op);
+		final String range = headers.get(HttpHeaderNames.RANGE);
+		assertNotNull(range, "Single set bit should produce a Range header");
+		assertTrue(range.startsWith("bytes="), "Range header must start with 'bytes='");
+	}
+
+	@Test
+	void rangeListToStringBuff_singleRangeWithExplicitSize_appendsBaseLength() {
+		// When size != -1, the code writes baseLength + "-" (append semantics)
+		final var range = new Range(0, 99, 100);
+		final StringBuilder sb = new StringBuilder();
+		HttpStorageDriverBase.rangeListToStringBuff(List.of(range), 1024, sb);
+		assertEquals("1024-", sb.toString());
+	}
+
+	@Test
+	void rangeListToStringBuff_singleRangeNoSize_usesToString() {
+		// When size == -1, the code uses range.toString() for the beg-end format
+		final var range = new Range(0, 99, -1);
+		final StringBuilder sb = new StringBuilder();
+		HttpStorageDriverBase.rangeListToStringBuff(List.of(range), 1024, sb);
+		assertEquals(range.toString(), sb.toString());
+	}
+
+	@Test
+	void rangeListToStringBuff_multipleRanges_commaSeparated() {
+		final var r1 = new Range(0, 99, -1);
+		final var r2 = new Range(200, 299, -1);
+		final StringBuilder sb = new StringBuilder();
+		HttpStorageDriverBase.rangeListToStringBuff(List.of(r1, r2), 1024, sb);
+		assertTrue(sb.toString().contains(","), "Multiple ranges should be comma-separated");
 	}
 }
