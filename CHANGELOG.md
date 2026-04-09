@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-04-09
+
+### Changed
+
+- **Docker runtime upgraded from JDK 21 to JDK 25** — enables compact object headers (JEP 519) and improved virtual thread scheduling for better small-object throughput. (PR #76)
+- **Read throughput optimization** — replace `ArrayBlockingQueue` with lock-free `ConcurrentLinkedQueue` for operation recycling, reducing contention at high concurrency. (PR #73)
+- **Fast-recycle dispatch** — short-circuit dispatch path for low-concurrency workloads; gate VT quiesce on concurrency level to avoid T8/T32 regression. (PR #74)
+- **Write throughput optimization** — replace timed dispatch awaits with untimed to reduce VT-unparker overhead, eliminate per-request `Matcher` allocation in S3 header normalization, add JVM tuning flag `-XX:-DoJVMTIVirtualThreadTransitions`. (PR #75)
+
+### Fixed
+
+- **Backpressure signal-loss race** — fix `await()` signal-loss race condition in dispatch task that could cause stalls under sustained load. (PR #75)
+- **Connection failure permit leak** — fix semaphore permit leak when Netty connections fail during setup. (PR #75)
+- **RDMA native library not packaged in release artifacts** — release workflow was missing RDMA build dependencies, so `libspt_rdma.so` was never compiled into the shadow JAR. Added build-time logging when the native build is skipped. (PR #79)
+
+### Tests
+
+- **Netty and HTTP driver test coverage** — add unit tests covering HTTP response status mapping, data URI path generation, range-header serialization, exception-to-status mapping, and chunked NIO streams. HTTP module line coverage 23% to 43%, Netty module 30% to 38%. (PR #77)
+
 ## [5.6.0] - 2026-04-04
 
 ### Added
