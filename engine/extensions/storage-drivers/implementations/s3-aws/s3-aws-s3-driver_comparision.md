@@ -151,7 +151,7 @@ List<S3Object> objects = resp.contents();
 | **Multipart Upload** | ✅ Manual MPU protocol | ✅ SDK MPU | AWS (easier) |
 | **Object Tagging** | ✅ Custom XML generation | ✅ SDK tagging | AWS (type-safe) |
 | **Versioning** | ✅ Manual version handling | ✅ SDK versioning | AWS (automatic) |
-| **Checksums** | ✅ Multiple algorithms | ✅ SDK checksums | REST (more options) |
+| **Checksums** | ✅ Multiple algorithms | ✅ SDK checksums | Tie (both support CRC32, CRC32C, SHA1, SHA256; REST also supports MD5) |
 | **Auth Versions** | ✅ v2 and v4 | ✅ v4 only | REST (flexibility) |
 | **Custom Endpoints** | ✅ Full control | ✅ Endpoint override | Tie |
 | **Error Handling** | ⚠️ Manual parsing | ✅ Typed exceptions | AWS (better) |
@@ -225,7 +225,7 @@ List<S3Object> objects = resp.contents();
 ### 10. Advanced Features
 
 #### S3 REST Driver Unique Features
-1. **Custom Checksum Algorithms**: MD5, CRC32, CRC32C, SHA1, SHA256
+1. **Custom Checksum Algorithms**: MD5, CRC32, CRC32C, SHA1, SHA256 (MD5 is only available in the REST driver)
 2. **AWS Signature v2 Support**: For legacy systems
 3. **Fine-grained HTTP Control**: Direct access to Netty
 4. **Custom Expression Tagging**: Dynamic tag generation
@@ -236,7 +236,8 @@ List<S3Object> objects = resp.contents();
 2. **Automatic Retry Logic**: Exponential backoff with jitter
 3. **Request Metrics**: Built-in CloudWatch integration
 4. **Type Safety**: Compile-time validation
-5. **Future AWS Features**: Automatic support for new S3 features
+5. **Flexible Checksums**: CRC32, CRC32C, SHA1, SHA256 via AWS SDK flexible checksum API
+6. **Future AWS Features**: Automatic support for new S3 features
 
 ### 11. Error Handling
 
@@ -386,7 +387,7 @@ s3Client.putObject(req, RequestBody.fromInputStream(data, length));
 
 **Keep S3 REST Driver** if:
 - Need Signature v2 support
-- Require custom checksum algorithms
+- Need MD5 checksum algorithm specifically
 - Need maximum HTTP control
 - Working with non-AWS S3 storage
 

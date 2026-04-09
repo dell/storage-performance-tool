@@ -40,6 +40,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
+- **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
@@ -93,6 +94,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
+| `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
 | `--items-file` | | `""` | Path to a saved `items.csv` for `read` (skips seed phase) |
 
@@ -444,6 +446,40 @@ spt run write \
     --cleanup
 ```
 
+### Checksum Validation
+
+Enable per-object (or per-part, when using multipart upload) checksum validation with `--checksum`:
+
+```bash
+# Write with CRC32C checksums
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --checksum crc32c \
+    --cleanup
+```
+
+```bash
+# Multipart upload with per-part SHA-256 checksums
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1GB \
+    --part-size 64MB \
+    --object-count 50 \
+    --checksum sha256
+```
+
+Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`. The flag works with both the default Netty driver and the AWS SDK driver (`--s3-driver aws`).
+
 ### Distributed / Attach Mode
 
 If operators have already started SPT worker containers, `spt` can attach to those workers and only launch the entry node:
@@ -619,6 +655,7 @@ Node status (port 9999)
 | Post-test cleanup (`--cleanup`) | Implemented |
 | Auto-results retrieval | Implemented |
 | Save/reuse item lists (`--save-items` / `--items-file`) | Implemented |
+| Checksum validation (`--checksum`) | Implemented |
 | RDMA acceleration | Implemented |
 | TUI live dashboard | Implemented |
 | Headless / CI mode | Implemented |

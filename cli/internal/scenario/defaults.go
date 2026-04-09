@@ -24,10 +24,17 @@ type DefaultsConfig struct {
 
 // StorageConfig represents storage configuration
 type StorageConfig struct {
-	Driver DriverConfig `yaml:"driver,omitempty"`
-	Net    NetConfig    `yaml:"net,omitempty"`
-	Auth   AuthConfig   `yaml:"auth,omitempty"`
-	Rdma   *RdmaConfig  `yaml:"rdma,omitempty"` // pointer so omitted when nil
+	Driver   DriverConfig    `yaml:"driver,omitempty"`
+	Net      NetConfig       `yaml:"net,omitempty"`
+	Auth     AuthConfig      `yaml:"auth,omitempty"`
+	Checksum *ChecksumConfig `yaml:"checksum,omitempty"` // pointer so omitted when nil
+	Rdma     *RdmaConfig     `yaml:"rdma,omitempty"`     // pointer so omitted when nil
+}
+
+// ChecksumConfig represents storage checksum configuration
+type ChecksumConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Algorithm string `yaml:"algorithm"`
 }
 
 // RdmaConfig represents RDMA acceleration configuration for the s3-rdma driver
@@ -327,6 +334,14 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				LocalIP:   params.RdmaLocalIP,
 				LogLevel:  logLevel,
 				TimeoutMs: timeoutMs,
+			}
+		}
+
+		// Checksum validation: populate checksum config when algorithm is specified
+		if params.Checksum != "" {
+			config.Storage.Checksum = &ChecksumConfig{
+				Enabled:   true,
+				Algorithm: params.Checksum,
 			}
 		}
 

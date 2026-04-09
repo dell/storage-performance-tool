@@ -41,11 +41,15 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
 	private final boolean versioningEnabled;
+	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
-					final boolean versioningEnabled) {
+					final boolean versioningEnabled, final String checksumAlgorithm) {
 		super(driver, verifyFlag);
 		this.versioningEnabled = versioningEnabled;
+		this.checksumHeader = checksumAlgorithm != null
+						? S3Api.AMZ_CHECKSUM_PREFIX + checksumAlgorithm.toLowerCase(java.util.Locale.ROOT)
+						: null;
 	}
 
 	@Override
@@ -55,7 +59,15 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			final PartialDataOperation subTask = (PartialDataOperation) op;
 			final String eTag = respHeaders.get(HttpHeaderNames.ETAG);
 			final CompositeDataOperation mpuTask = subTask.parent();
-			mpuTask.put(Integer.toString(subTask.partNumber() + 1), eTag);
+			final int partNum = subTask.partNumber() + 1;
+			mpuTask.put(Integer.toString(partNum), eTag);
+			// Capture per-part checksum value if the server echoed one back
+			if (checksumHeader != null) {
+				final String checksumVal = respHeaders.get(checksumHeader);
+				if (checksumVal != null) {
+					mpuTask.put(S3Api.KEY_PART_CHECKSUM_PREFIX + partNum, checksumVal);
+				}
+			}
 		}
 		if (versioningEnabled) {
 			op.item().name(op.item().name() + "~" + respHeaders.get("x-amz-version-id"));

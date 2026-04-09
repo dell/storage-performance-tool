@@ -1013,6 +1013,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		}
 		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		if (checksumAlgorithm != null) {
+			httpHeaders.set(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER, checksumAlgorithm.toUpperCase(Locale.ROOT));
+		}
 		final var httpMethod = HttpMethod.POST;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
 		applyMetaDataHeaders(httpHeaders);
@@ -1104,6 +1107,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(S3Api.COMPLETE_MPU_PART_NUM_END)
 							.append(nextEtag)
 							.append(S3Api.COMPLETE_MPU_PART_ETAG_END);
+			if (checksumAlgorithm != null) {
+				final var partChecksum = mpuTask.get(
+								S3Api.KEY_PART_CHECKSUM_PREFIX + nextPartNum);
+				if (partChecksum != null) {
+					final var xmlElem = AMZChecksum.valueOf(
+									checksumAlgorithm.toUpperCase(Locale.ROOT)).xmlElementName();
+					content.append("\n\t\t<").append(xmlElem).append('>')
+									.append(partChecksum)
+									.append("</").append(xmlElem).append('>');
+				}
+			}
+			content.append(S3Api.COMPLETE_MPU_PART_CLOSE);
 		}
 		content.append(S3Api.COMPLETE_MPU_FOOTER);
 		final var srcPath = mpuTask.srcPath();
@@ -1374,7 +1389,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected void appendHandlers(final Channel channel) {
 		super.appendHandlers(channel);
-		channel.pipeline().addLast(new S3ResponseHandler<>(this, verifyFlag, versioning));
+		channel.pipeline().addLast(new S3ResponseHandler<>(this, verifyFlag, versioning, checksumAlgorithm));
 	}
 
 	@Override

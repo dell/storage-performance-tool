@@ -121,6 +121,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **Multi-Workload Support** -- write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
 - **Pluggable S3 Storage Drivers** -- choose the backend that fits your target: `default` (Netty), `aws` (AWS SDK v2), or `rdma` (hardware-accelerated). Select with `--s3-driver`.
 - **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
+- **S3 Checksum Validation** -- compute and send checksums on write requests with `--checksum` (`crc32`, `crc32c`, `sha1`, `sha256`). When combined with multipart upload, checksums are applied per part. Supported by both the Netty and AWS SDK drivers.
 - **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.

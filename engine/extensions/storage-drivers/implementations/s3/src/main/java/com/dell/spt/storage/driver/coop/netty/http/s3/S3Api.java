@@ -64,7 +64,8 @@ public interface S3Api {
 	String COMPLETE_MPU_HEADER = "<CompleteMultipartUpload>\n";
 	String COMPLETE_MPU_PART_NUM_START = "\t<Part>\n\t\t<PartNumber>";
 	String COMPLETE_MPU_PART_NUM_END = "</PartNumber>\n\t\t<ETag>";
-	String COMPLETE_MPU_PART_ETAG_END = "</ETag>\n\t</Part>\n";
+	String COMPLETE_MPU_PART_ETAG_END = "</ETag>";
+	String COMPLETE_MPU_PART_CLOSE = "\n\t</Part>\n";
 	String COMPLETE_MPU_FOOTER = "</CompleteMultipartUpload>";
 
 	String TAGGING_HEADER = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
@@ -90,9 +91,24 @@ public interface S3Api {
 	String QNAME_NEXT_VERSION_ID_MARKER = "NextVersionIdMarker";
 
 	String AMZ_CHECKSUM_PREFIX = "x-amz-checksum-";
+	String AMZ_CHECKSUM_ALGORITHM_HEADER = "x-amz-checksum-algorithm";
+
+	/** Key prefix used to store per-part checksum values in the MPU context map. */
+	String KEY_PART_CHECKSUM_PREFIX = "checksum-";
 
 	enum AMZChecksum {
 		MD5, CRC32, CRC32C, SHA1, SHA256;
+
+		/** Returns the XML element name used inside CompleteMultipartUpload, e.g. "ChecksumCRC32C". */
+		String xmlElementName() {
+			return switch (this) {
+			case CRC32 -> "ChecksumCRC32";
+			case CRC32C -> "ChecksumCRC32C";
+			case SHA1 -> "ChecksumSHA1";
+			case SHA256 -> "ChecksumSHA256";
+			case MD5 -> "ChecksumMD5";
+			};
+		}
 	}
 
 	static String amzChecksumRegex() {

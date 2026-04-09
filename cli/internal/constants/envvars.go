@@ -17,6 +17,9 @@ const (
 	// Multipart upload configuration
 	EnvPartSize = "SPT_PART_SIZE"
 
+	// Checksum configuration
+	EnvChecksum = "SPT_CHECKSUM"
+
 	// RDMA configuration environment variables
 	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"
 	EnvRdmaThreshold = "RDMA_THRESHOLD_BYTES"

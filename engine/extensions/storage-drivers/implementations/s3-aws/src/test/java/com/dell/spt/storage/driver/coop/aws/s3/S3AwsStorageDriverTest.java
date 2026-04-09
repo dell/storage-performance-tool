@@ -24,6 +24,7 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
+import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -59,6 +60,18 @@ public class S3AwsStorageDriverTest {
 		Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3Client");
 		clientField.setAccessible(true);
 		clientField.set(driver, s3Client);
+	}
+
+	private void setChecksumFields(
+					S3AwsStorageDriver<Item, Operation<Item>> driver,
+					boolean enabled,
+					ChecksumAlgorithm algorithm) throws Exception {
+		Field enabledField = S3AwsStorageDriver.class.getDeclaredField("checksumEnabled");
+		enabledField.setAccessible(true);
+		enabledField.set(driver, enabled);
+		Field algoField = S3AwsStorageDriver.class.getDeclaredField("checksumAlgorithm");
+		algoField.setAccessible(true);
+		algoField.set(driver, algorithm);
 	}
 
 	@BeforeEach
@@ -1512,6 +1525,154 @@ public class S3AwsStorageDriverTest {
 							.cause(new IllegalStateException("bad state"))
 							.build();
 			assertEquals(Operation.Status.FAIL_UNKNOWN, S3AwsStorageDriver.classifyFailure(e));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// resolveChecksumAlgorithm — static, maps config string to SDK enum
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ResolveChecksumAlgorithmTest {
+
+		@Test
+		void crc32() {
+			assertEquals(ChecksumAlgorithm.CRC32, S3AwsStorageDriver.resolveChecksumAlgorithm("crc32"));
+		}
+
+		@Test
+		void crc32c() {
+			assertEquals(ChecksumAlgorithm.CRC32_C, S3AwsStorageDriver.resolveChecksumAlgorithm("crc32c"));
+		}
+
+		@Test
+		void sha1() {
+			assertEquals(ChecksumAlgorithm.SHA1, S3AwsStorageDriver.resolveChecksumAlgorithm("sha1"));
+		}
+
+		@Test
+		void sha256() {
+			assertEquals(ChecksumAlgorithm.SHA256, S3AwsStorageDriver.resolveChecksumAlgorithm("sha256"));
+		}
+
+		@Test
+		void caseInsensitive() {
+			assertEquals(ChecksumAlgorithm.CRC32, S3AwsStorageDriver.resolveChecksumAlgorithm("CRC32"));
+			assertEquals(ChecksumAlgorithm.CRC32_C, S3AwsStorageDriver.resolveChecksumAlgorithm("CRC32C"));
+			assertEquals(ChecksumAlgorithm.SHA1, S3AwsStorageDriver.resolveChecksumAlgorithm("SHA1"));
+			assertEquals(ChecksumAlgorithm.SHA256, S3AwsStorageDriver.resolveChecksumAlgorithm("SHA256"));
+		}
+
+		@Test
+		void md5_returnsNull() {
+			assertNull(S3AwsStorageDriver.resolveChecksumAlgorithm("md5"));
+		}
+
+		@Test
+		void nullInput_returnsNull() {
+			assertNull(S3AwsStorageDriver.resolveChecksumAlgorithm(null));
+		}
+
+		@Test
+		void emptyInput_returnsNull() {
+			assertNull(S3AwsStorageDriver.resolveChecksumAlgorithm(""));
+		}
+
+		@Test
+		void unknownAlgorithm_returnsNull() {
+			assertNull(S3AwsStorageDriver.resolveChecksumAlgorithm("blake2b"));
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// putObject checksum integration — verifies checksumAlgorithm on request
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class PutObjectChecksumTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void putObject_setsChecksumAlgorithm_whenEnabled() throws Exception {
+			setChecksumFields(drv, true, ChecksumAlgorithm.CRC32);
+
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj.bin");
+			when(dataItem.size()).thenReturn(1024L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
+			assertEquals(ChecksumAlgorithm.CRC32, cap.getValue().checksumAlgorithm());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void putObject_noChecksumAlgorithm_whenDisabled() throws Exception {
+			setChecksumFields(drv, false, null);
+
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj.bin");
+			when(dataItem.size()).thenReturn(1024L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
+			assertNull(cap.getValue().checksumAlgorithm());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void putObject_sha256Checksum() throws Exception {
+			setChecksumFields(drv, true, ChecksumAlgorithm.SHA256);
+
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("obj.bin");
+			when(dataItem.size()).thenReturn(512L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
+			assertEquals(ChecksumAlgorithm.SHA256, cap.getValue().checksumAlgorithm());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void putObject_update_setsChecksumAlgorithm() throws Exception {
+			setChecksumFields(drv, true, ChecksumAlgorithm.CRC32_C);
+
+			DataItem dataItem = mock(DataItem.class);
+			when(dataItem.name()).thenReturn("upd.bin");
+			when(dataItem.size()).thenReturn(256L);
+
+			Operation<Item> op = mock(Operation.class, Mockito.withSettings().extraInterfaces(DataOperation.class));
+			when(op.type()).thenReturn(OpType.UPDATE);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn((Item) dataItem);
+
+			drv.execute(op);
+
+			ArgumentCaptor<PutObjectRequest> cap = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(cap.capture(), any(RequestBody.class));
+			assertEquals(ChecksumAlgorithm.CRC32_C, cap.getValue().checksumAlgorithm());
 		}
 	}
 }

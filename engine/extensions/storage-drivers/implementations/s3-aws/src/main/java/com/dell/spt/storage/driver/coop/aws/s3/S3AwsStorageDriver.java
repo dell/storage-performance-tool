@@ -31,6 +31,7 @@ import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
+import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -46,6 +47,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private final S3Client s3Client;
 	private final String bucketName;
+	private final boolean checksumEnabled;
+	private final ChecksumAlgorithm checksumAlgorithm;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -63,6 +66,51 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.s3Client = s3Client;
 
 		this.bucketName = resolveBucketName(config);
+
+		boolean ckEnabled = false;
+		ChecksumAlgorithm ckAlgo = null;
+		try {
+			ckEnabled = config.boolVal("checksum-enabled");
+		} catch (Exception e) {
+			LOG.debug("Could not read checksum-enabled from config: {}", e.toString());
+		}
+		if (ckEnabled) {
+			try {
+				final String algo = config.stringVal("checksum-algorithm");
+				ckAlgo = resolveChecksumAlgorithm(algo);
+				if (ckAlgo == null) {
+					LOG.warn("Unsupported checksum algorithm '{}' for s3-aws driver; checksums will not be applied", algo);
+					ckEnabled = false;
+				}
+			} catch (Exception e) {
+				LOG.warn("Could not read checksum-algorithm from config: {}", e.toString());
+				ckEnabled = false;
+			}
+		}
+		this.checksumEnabled = ckEnabled;
+		this.checksumAlgorithm = ckAlgo;
+	}
+
+	/**
+	 * Map a config algorithm name to the AWS SDK ChecksumAlgorithm enum.
+	 * Returns null for unsupported algorithms (e.g. MD5 — use Content-MD5 header instead).
+	 */
+	static ChecksumAlgorithm resolveChecksumAlgorithm(final String algorithm) {
+		if (algorithm == null || algorithm.isEmpty()) {
+			return null;
+		}
+		switch (algorithm.toLowerCase()) {
+		case "crc32":
+			return ChecksumAlgorithm.CRC32;
+		case "crc32c":
+			return ChecksumAlgorithm.CRC32_C;
+		case "sha1":
+			return ChecksumAlgorithm.SHA1;
+		case "sha256":
+			return ChecksumAlgorithm.SHA256;
+		default:
+			return null;
+		}
 	}
 
 	/**
@@ -314,24 +362,24 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private void putObject(final O op) throws Exception {
 		final var bk = resolveBucketAndKey(op);
+		var reqBuilder = PutObjectRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1]);
+		if (checksumEnabled && checksumAlgorithm != null) {
+			reqBuilder.checksumAlgorithm(checksumAlgorithm);
+		}
 
 		if (op.item() instanceof DataItem) {
 			DataItem dataItem = (DataItem) op.item();
 			dataItem.position(0);
 			s3Client.putObject(
-							PutObjectRequest.builder()
-											.bucket(bk[0])
-											.key(bk[1])
-											.build(),
+							reqBuilder.build(),
 							RequestBody.fromInputStream(new DataItemInputStream(dataItem), dataItem.size()));
 		} else if (op.item() instanceof PathItem) {
 			PathItem pathItem = (PathItem) op.item();
 			Path path = Path.of(pathItem.name());
 			s3Client.putObject(
-							PutObjectRequest.builder()
-											.bucket(bk[0])
-											.key(bk[1])
-											.build(),
+							reqBuilder.build(),
 							RequestBody.fromFile(path));
 		} else {
 			throw new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem");

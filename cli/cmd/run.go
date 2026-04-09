@@ -915,6 +915,11 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
 	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
 
+	// Checksum Options
+	runCmd.Flags().String("checksum", "",
+		`Enable checksum validation with the specified algorithm: crc32, crc32c, sha1, sha256.
+Omit to disable checksums. (env: SPT_CHECKSUM)`)
+
 	// S3 Tables Options
 	runCmd.Flags().String("test-vector", "tps", "Tables test vector: tps | compaction | catalog")
 	runCmd.Flags().String("table-bucket", "spt-tables", "S3 Table bucket name")
@@ -1137,6 +1142,20 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")
 		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
 		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout-ms")
+	}
+
+	// Checksum validation
+	checksumAlgo, _ := cmd.Flags().GetString("checksum")
+	if checksumAlgo != "" {
+		checksumAlgo = strings.ToLower(strings.TrimSpace(checksumAlgo))
+		switch checksumAlgo {
+		case scenario.ChecksumCRC32, scenario.ChecksumCRC32C,
+			scenario.ChecksumSHA1, scenario.ChecksumSHA256:
+			// valid
+		default:
+			return params, fmt.Errorf("invalid --checksum value %q: must be one of: crc32, crc32c, sha1, sha256", checksumAlgo)
+		}
+		params.Checksum = checksumAlgo
 	}
 
 	// TUI layout
