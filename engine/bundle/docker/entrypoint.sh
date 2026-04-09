@@ -16,7 +16,7 @@ set -eu
 # Use parameter expansion to handle unset JAVA_OPTS safely
 JAVA_OPTS="${JAVA_OPTS:-}"
 if [ -z "$JAVA_OPTS" ]; then
-    # Default Java options for Spt (JDK 21+)
+    # Default Java options for Spt (JDK 25 LTS Docker image)
     # - ZGC: sub-millisecond GC pauses; avoids GC jitter in latency measurements
     # - Xmx 4g: bounded heap for Java objects (GC works best with a defined ceiling)
     # - MaxDirectMemorySize 64g: separate ceiling for off-heap ByteBuffers (RDMA/NIO);
@@ -27,7 +27,9 @@ if [ -z "$JAVA_OPTS" ]; then
     # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
     # - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
     #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
-    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions"
+    # - UseCompactObjectHeaders (JEP 519): 64-bit object headers instead of 128-bit;
+    #   reduces heap footprint and GC pressure for high-rate short-lived objects
+    export JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders"
 fi
 
 # Additional Java options that can be set via environment variables
