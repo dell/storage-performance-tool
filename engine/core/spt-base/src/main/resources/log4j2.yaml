@@ -125,6 +125,24 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      - name: extResultsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}result.xml"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "<result>\n"
+          pattern: "%m</result>\n"
+          noConsoleNoAnsi: true
+      - name: extThresholdResultsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}result-threshold.xml"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "<result-with-threshold>\n"
+          pattern: "%m</result-with-threshold>\n"
+          noConsoleNoAnsi: true
   Loggers:
     root:
       Level: INFO
@@ -187,6 +205,16 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: metricsThresholdFileTotal
+        additivity: false
+      - name: com.dell.spt.base.logging.metrics.ExtResultsFile
+        level: INFO
+        AppenderRef:
+          ref: extResultsFile
+        additivity: false
+      - name: com.dell.spt.base.logging.metrics.threshold.ExtResultsFile
+        level: INFO
+        AppenderRef:
+          ref: extThresholdResultsFile
         additivity: false
       - name: com.dell.spt.base.logging.Messages
         level: DEBUG

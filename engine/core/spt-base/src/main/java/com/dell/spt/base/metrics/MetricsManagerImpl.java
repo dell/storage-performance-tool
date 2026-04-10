@@ -15,6 +15,7 @@ import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
+import com.dell.spt.base.logging.ExtResultsXmlLogMessage;
 import com.dell.spt.base.logging.MetricsCsvLogMessage;
 import com.dell.spt.base.logging.MetricsTotalCsvLogMessage;
 import com.dell.spt.base.logging.StepResultsMetricsLogMessage;
@@ -268,6 +269,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							Loggers.ERR.warn("Metrics snapshot is empty. No metrics were recorded apparently.");
 						}
 
+						// XML results file output (result.xml)
+						if (null != aggregSnapshot && metricsCtx.sumPersistEnabled()) {
+							Loggers.METRICS_EXT_RESULTS_FILE.info(
+											new ExtResultsXmlLogMessage(metricsCtx, aggregSnapshot));
+						}
+
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
 						if (null != exporter) {
 							CollectorRegistry.defaultRegistry.unregister((Collector) exporter);
@@ -344,6 +351,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		if (lastThresholdMetrics.sumPersistEnabled()) {
 			Loggers.METRICS_THRESHOLD_FILE_TOTAL.info(
 							new MetricsCsvLogMessage(snapshot, metricsCtx.opType(), metricsCtx.concurrencyLimit()));
+			Loggers.METRICS_THRESHOLD_EXT_RESULTS_FILE.info(
+							new ExtResultsXmlLogMessage(metricsCtx, snapshot));
 		}
 		metricsCtx.exitThresholdState();
 	}
