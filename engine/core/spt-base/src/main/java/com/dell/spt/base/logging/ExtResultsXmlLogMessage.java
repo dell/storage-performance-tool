@@ -5,7 +5,6 @@ import static com.dell.spt.base.Constants.MIB;
 
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
-import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
@@ -49,7 +48,6 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 
 		final TimingMetricSnapshot durationSnapshot = snapshot.durationSnapshot();
 		final TimingMetricSnapshot latencySnapshot = snapshot.latencySnapshot();
-		final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
 		final RateMetricSnapshot successSnapshot = snapshot.successSnapshot();
 		final RateMetricSnapshot byteSnapshot = snapshot.byteSnapshot();
 
@@ -133,7 +131,7 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append(durationSnapshot.max())
 						.append('"');
 
-		strb.append(" />\n");
+		strb.append(" />");
 	}
 
 	private static String escapeXml(final String text) {

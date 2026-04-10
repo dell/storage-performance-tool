@@ -42,6 +42,9 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"TablesMetrics"}, Suffix: constants.ResultsArtifactSuffixTablesMetrics, Required: false},
 	// Items CSV (only present when --save-items is used on write workloads)
 	{Loggers: []string{"items.csv"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
+	// Ext results XML (Mongoose 3.6 compatible result.xml)
+	{Loggers: []string{"metrics.ExtResultsFile"}, Suffix: constants.ResultsArtifactSuffixExtResults, Required: false},
+	{Loggers: []string{"metrics.threshold.ExtResultsFile"}, Suffix: constants.ResultsArtifactSuffixExtResultsThreshold, Required: false},
 }
 
 // FileStatus records outcome for a single artifact.
