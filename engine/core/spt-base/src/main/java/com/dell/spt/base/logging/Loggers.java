@@ -15,9 +15,11 @@ public interface Loggers {
 	Logger CONFIG = LogManager.getLogger(BASE + "Config");
 	Logger ERR = LogManager.getLogger(BASE + "Errors");
 	Logger OP_TRACES = LogManager.getLogger(BASE + "OpTraces");
+	Logger METRICS_EXT_RESULTS_FILE = LogManager.getLogger(BASE_METRICS + "ExtResultsFile");
 	Logger METRICS_FILE = LogManager.getLogger(BASE_METRICS + "File");
 	Logger METRICS_FILE_TOTAL = LogManager.getLogger(BASE_METRICS + "FileTotal");
 	Logger METRICS_STD_OUT = LogManager.getLogger(BASE_METRICS + "StdOut");
+	Logger METRICS_THRESHOLD_EXT_RESULTS_FILE = LogManager.getLogger(BASE_METRICS_THRESHOLD + "ExtResultsFile");
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
@@ -30,8 +32,12 @@ public interface Loggers {
 					Map.entry(CONFIG.getName().substring(BASE.length()), "Base config"),
 					Map.entry(ERR.getName().substring(BASE.length()), "Errors"),
 					Map.entry(OP_TRACES.getName().substring(BASE.length()), "Operation Traces"),
+					Map.entry(METRICS_EXT_RESULTS_FILE.getName().substring(BASE.length()), "Ext Results XML"),
 					Map.entry(METRICS_FILE.getName().substring(BASE.length()), "Metrics"),
 					Map.entry(METRICS_FILE_TOTAL.getName().substring(BASE.length()), "Metrics Total"),
+					Map.entry(
+									METRICS_THRESHOLD_EXT_RESULTS_FILE.getName().substring(BASE.length()),
+									"Threshold Ext Results XML"),
 					Map.entry(
 									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
 									"Threshold Metrics Total"),
