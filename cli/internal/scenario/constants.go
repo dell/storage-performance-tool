@@ -3,6 +3,7 @@ package scenario
 const (
 	workloadTypeWrite  = "write"
 	workloadTypeRead   = "read"
+	workloadTypeMixed  = "mixed"
 	workloadTypeMock   = "mock"
 	workloadTypeList   = "list"
 	workloadTypeTables = "tables"
@@ -84,6 +85,7 @@ const (
 	stepOpRead   = "read"
 	stepOpSeed   = "seed"
 	stepOpDelete = "delete"
+	stepOpMixed  = "mixed"
 )
 
 // Tables opMode constants
@@ -135,4 +137,30 @@ const (
 	WorkloadTypeList   = workloadTypeList
 	WorkloadTypeRead   = workloadTypeRead
 	WorkloadTypeTables = workloadTypeTables
+	WorkloadTypeMixed  = workloadTypeMixed
+)
+
+// Mixed workload template keys
+const (
+	templateKeyGetDistrib       = "GetDistrib"
+	templateKeyPutDistrib       = "PutDistrib"
+	templateKeyDeleteDistrib    = "DeleteDistrib"
+	templateKeyHasGetDistrib    = "HasGetDistrib"
+	templateKeyHasPutDistrib    = "HasPutDistrib"
+	templateKeyHasDeleteDistrib = "HasDeleteDistrib"
+	templateKeyStepIDMixed      = "StepIDMixed"
+	templateKeyStepIDSeedClean  = "StepIDSeedCleanup"
+	templateKeyStepIDPutClean   = "StepIDPutCleanup"
+	templateKeyReadItemsFile    = "ReadItemsFile"
+	templateKeyDeleteItemsFile  = "DeleteItemsFile"
+	templateKeyHasDeleteItems   = "HasDeleteItemsFile"
+	templateKeyHasReadItems     = "HasReadItemsFile"
+)
+
+// Mixed workload defaults
+const (
+	MixedDefaultGetDistrib    = 60
+	MixedDefaultPutDistrib    = 25
+	MixedDefaultDeleteDistrib = 15
+	MixedDefaultSeedCount     = 2500
 )

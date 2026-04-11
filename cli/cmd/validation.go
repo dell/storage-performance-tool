@@ -77,6 +77,71 @@ func ValidateDurationOrCount(cmd *cobra.Command) error {
 	return nil
 }
 
+// ValidateMixedFlags validates flags specific to the mixed workload.
+func ValidateMixedFlags(cmd *cobra.Command) error {
+	get, _ := cmd.Flags().GetInt("get-distrib")
+	put, _ := cmd.Flags().GetInt("put-distrib")
+	del, _ := cmd.Flags().GetInt("delete-distrib")
+	stat, _ := cmd.Flags().GetInt("stat-distrib")
+	readItems, _ := cmd.Flags().GetString("read-items-file")
+	deleteItems, _ := cmd.Flags().GetString("delete-items-file")
+	duration, _ := cmd.Flags().GetString("duration")
+	seedObjects, _ := cmd.Flags().GetInt("seed-objects")
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
+
+	// Reject negative values before any sum check
+	for name, v := range map[string]int{"get": get, "put": put, "delete": del, "stat": stat} {
+		if v < 0 {
+			return fmt.Errorf("negative distribution value for --%s-distrib (%d)", name, v)
+		}
+	}
+
+	// --stat-distrib must be 0 — HEAD/STAT engine support is not yet implemented
+	if stat != 0 {
+		return fmt.Errorf("--stat-distrib must be 0: STAT (HEAD) engine support is not yet implemented")
+	}
+
+	// Distribution must sum to exactly 100
+	sum := get + put + del + stat
+	if sum != 100 {
+		return fmt.Errorf("distribution percentages sum to %d, must equal 100 (got: --get-distrib %d --put-distrib %d --delete-distrib %d --stat-distrib %d)",
+			sum, get, put, del, stat)
+	}
+
+	// At least two non-zero distributions required
+	nonZero := 0
+	for _, v := range []int{get, put, del, stat} {
+		if v > 0 {
+			nonZero++
+		}
+	}
+	if nonZero < 2 {
+		return errors.New("at least two operation types must have a non-zero distribution")
+	}
+
+	// delete-distrib <= put-distrib unless an external delete seed file is provided
+	if del > put && deleteItems == "" {
+		return fmt.Errorf("delete-distrib (%d) exceeds put-distrib (%d): PUT must sustain the DELETE queue (use --delete-items-file to relax this constraint)", del, put)
+	}
+
+	// Duration is required — mixed workloads are time-based only
+	if strings.TrimSpace(duration) == "" {
+		return errors.New("--duration is required for mixed workload (e.g. --duration 2m)")
+	}
+
+	// Seed objects required unless an external read items file is provided
+	if readItems == "" && seedObjects <= 0 {
+		return errors.New("--seed-objects must be > 0 when --read-items-file is not provided")
+	}
+
+	// --cleanup is incompatible with external item files (we didn't create them)
+	if cleanup && (readItems != "" || deleteItems != "") {
+		return errors.New("--cleanup cannot be used with --read-items-file or --delete-items-file: spt did not create those objects")
+	}
+
+	return nil
+}
+
 // ValidateRunCommand performs all validation for the run command
 func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	workloadType := args[0]
@@ -95,6 +160,13 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 
 	if workloadType == WorkloadTypeList {
 		if err := validateListFlagCompatibility(cmd); err != nil {
+			cmd.SilenceUsage = false
+			return err
+		}
+	}
+
+	if workloadType == WorkloadTypeMixed {
+		if err := ValidateMixedFlags(cmd); err != nil {
 			cmd.SilenceUsage = false
 			return err
 		}

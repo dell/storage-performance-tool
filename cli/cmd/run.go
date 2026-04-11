@@ -861,6 +861,14 @@ func init() {
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+
+	// Mixed Workload Distribution Options
+	runCmd.Flags().Int("get-distrib", scenario.MixedDefaultGetDistrib, "Percentage of GET (read) operations for mixed workload (default: 45)")
+	runCmd.Flags().Int("put-distrib", scenario.MixedDefaultPutDistrib, "Percentage of PUT (write) operations for mixed workload (default: 15)")
+	runCmd.Flags().Int("delete-distrib", scenario.MixedDefaultDeleteDistrib, "Percentage of DELETE operations for mixed workload (default: 10)")
+	runCmd.Flags().Int("stat-distrib", 0, "Percentage of STAT (HEAD) operations for mixed workload (not yet supported, must be 0)")
+	runCmd.Flags().String("read-items-file", "", "Items file for mixed workload READ pool (skips seed phase; --cleanup not allowed)")
+	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
@@ -1165,6 +1173,16 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	// Set defaults (tables workload has no object size concept)
 	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
+	}
+
+	// Mixed workload distribution and seed file parameters
+	if workloadType == WorkloadTypeMixed {
+		params.GetDistrib, _ = cmd.Flags().GetInt("get-distrib")
+		params.PutDistrib, _ = cmd.Flags().GetInt("put-distrib")
+		params.DeleteDistrib, _ = cmd.Flags().GetInt("delete-distrib")
+		params.StatDistrib, _ = cmd.Flags().GetInt("stat-distrib")
+		params.ReadItemsFile, _ = cmd.Flags().GetString("read-items-file")
+		params.DeleteItemsFile, _ = cmd.Flags().GetString("delete-items-file")
 	}
 
 	return params, nil
