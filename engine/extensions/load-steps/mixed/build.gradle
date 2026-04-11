@@ -1,0 +1,33 @@
+plugins {
+	id 'spt.java-extension'
+	alias(libs.plugins.shadow)
+}
+
+version = "1.0.0"
+
+ext {
+	rootPkg = "com.dell.spt.load.step.mixed"
+}
+
+dependencies {
+	// Extension-specific dependencies
+	implementation(
+		libs.confuse,
+		libs.confuse.io.yaml,
+		libs.java.commons,
+		libs.log4j.api,
+		libs.log4j.core,
+	)
+
+	// Testing utilities
+	testImplementation(
+		libs.mockito.core,
+	)
+
+	testRuntimeOnly(
+		libs.commons.codec,
+		libs.confuse.io.yaml,
+		libs.disruptor,
+		libs.netty.transport.native.epoll,
+	)
+}

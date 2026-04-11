@@ -6,6 +6,7 @@ include 'core:spt-base'
 // Load steps
 include 'extensions:load-steps:pipeline'
 include 'extensions:load-steps:weighted'
+include 'extensions:load-steps:mixed'
 
 // Storage drivers - primitives
 include 'extensions:storage-drivers:primitives:coop'

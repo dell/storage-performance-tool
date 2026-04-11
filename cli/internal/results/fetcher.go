@@ -42,6 +42,8 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"TablesMetrics"}, Suffix: constants.ResultsArtifactSuffixTablesMetrics, Required: false},
 	// Items CSV (only present when --save-items is used on write workloads)
 	{Loggers: []string{"items.csv"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
+	// PUT-remaining CSV (only present on mixed workloads; lists objects created by PUT that may need cleanup)
+	{Loggers: []string{"put-remaining.csv"}, Suffix: constants.ResultsArtifactSuffixPutRemaining, Required: false},
 	// Ext results XML (Mongoose 3.6 compatible result.xml)
 	{Loggers: []string{"metrics.ExtResultsFile"}, Suffix: constants.ResultsArtifactSuffixExtResults, Required: false},
 	{Loggers: []string{"metrics.threshold.ExtResultsFile"}, Suffix: constants.ResultsArtifactSuffixExtResultsThreshold, Required: false},

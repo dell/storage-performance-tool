@@ -28,6 +28,7 @@ const (
 	ResultsArtifactSuffixMultipart           = "multipart.csv"
 	ResultsArtifactSuffixTablesMetrics       = "tables.metrics.log"
 	ResultsArtifactSuffixItems               = "items.csv"
+	ResultsArtifactSuffixPutRemaining        = "put-remaining.csv"
 	ResultsArtifactSuffixExtResults          = "result.xml"
 	ResultsArtifactSuffixExtResultsThreshold = "result-threshold.xml"
 )
