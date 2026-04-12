@@ -7,6 +7,9 @@ load:
       get: 60
       put: 25
       delete: 15
+      stat: 0
     delete:
       input:
         file: ""
+      queue:
+        capacity: 1000000

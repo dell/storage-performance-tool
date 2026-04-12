@@ -7,6 +7,9 @@ load:
       get: int
       put: int
       delete: int
+      stat: int
     delete:
       input:
         file: string
+      queue:
+        capacity: int

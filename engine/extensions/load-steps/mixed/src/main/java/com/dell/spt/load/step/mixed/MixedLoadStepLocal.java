@@ -21,7 +21,6 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
-import com.github.akurilov.commons.concurrent.throttle.SequentialWeightsThrottle;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -131,24 +130,30 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final int getWeight = mergedConfig.intVal("load-op-weight-get");
 		final int putWeight = mergedConfig.intVal("load-op-weight-put");
 		final int deleteWeight = mergedConfig.intVal("load-op-weight-delete");
+		final int statWeight = mergedConfig.intVal("load-op-weight-stat");
 
-		if ((getWeight > 0 ? 1 : 0) + (putWeight > 0 ? 1 : 0) + (deleteWeight > 0 ? 1 : 0) < 2) {
+		final int nonZero = (getWeight > 0 ? 1 : 0) + (putWeight > 0 ? 1 : 0)
+						+ (deleteWeight > 0 ? 1 : 0) + (statWeight > 0 ? 1 : 0);
+		if (nonZero < 2) {
 			throw new IllegalStateException("MixedLoad requires at least 2 non-zero op weights");
 		}
 
-		// Build the weights array in the same order we create generators (GET → PUT → DELETE)
-		final List<Integer> weightList = new ArrayList<>(3);
+		// Build the weights array in the same order we create generators (GET → PUT → DELETE → STAT)
+		final List<Integer> weightList = new ArrayList<>(4);
 		if (getWeight > 0)
 			weightList.add(getWeight);
 		if (putWeight > 0)
 			weightList.add(putWeight);
 		if (deleteWeight > 0)
 			weightList.add(deleteWeight);
+		if (statWeight > 0)
+			weightList.add(statWeight);
 		final int[] weights = weightList.stream().mapToInt(Integer::intValue).toArray();
-		final IndexThrottle weightThrottle = new SequentialWeightsThrottle(weights);
+		final IndexThrottle weightThrottle = new WeightedRandomThrottle(weights);
 
 		// ── 5. Shared PUT→DELETE item queue ────────────────────────────────
-		final LinkedBlockingQueue sharedQueue = new LinkedBlockingQueue();
+		final int deleteQueueCapacity = mergedConfig.intVal("load-op-delete-queue-capacity");
+		final LinkedBlockingQueue sharedQueue = new LinkedBlockingQueue(deleteQueueCapacity);
 
 		// Pre-populate the queue from an explicit delete-items-file if provided
 		final String deleteItemsFile = resolveDeleteItemsFile(mergedConfig);
