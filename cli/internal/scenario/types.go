@@ -55,9 +55,9 @@ type Params struct {
 
 	// Mixed workload distribution (integer percentages, must sum to 100)
 	GetDistrib    int // Percentage of GET (read) operations (default: 45)
-	PutDistrib    int // Percentage of PUT (create) operations (default: 15)
-	DeleteDistrib int // Percentage of DELETE operations (default: 10)
-	StatDistrib   int // Percentage of STAT (HEAD) operations; must be 0 — HEAD not yet supported
+	PutDistrib    int // Percentage of PUT (create) operations (default: 30)
+	DeleteDistrib int // Percentage of DELETE operations (default: 15)
+	StatDistrib   int // Percentage of STAT (HEAD) operations (default: 10)
 
 	// External item files for mixed workload (optional)
 	ReadItemsFile   string // Pre-created items for the READ+STAT pool (skips seed phase)

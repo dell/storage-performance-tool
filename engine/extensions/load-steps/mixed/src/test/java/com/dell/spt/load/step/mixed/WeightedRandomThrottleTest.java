@@ -16,7 +16,8 @@ class WeightedRandomThrottleTest {
 	@Test
 	@DisplayName("Distribution converges within 1% margin for weights {70, 20, 10}")
 	void distributionConvergesWithinMargin() {
-		final int[] weights = {70, 20, 10};
+		final int[] weights = {70, 20, 10
+		};
 		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(weights);
 		final int trials = 1_000_000;
 		final int[] wins = new int[weights.length];
@@ -30,7 +31,8 @@ class WeightedRandomThrottleTest {
 		}
 
 		final double totalWeight = 70 + 20 + 10;
-		final double[] expected = {70 / totalWeight, 20 / totalWeight, 10 / totalWeight};
+		final double[] expected = {70 / totalWeight, 20 / totalWeight, 10 / totalWeight
+		};
 		for (int i = 0; i < weights.length; i++) {
 			final double observed = (double) wins[i] / trials;
 			assertEquals(expected[i], observed, 0.01,
@@ -41,7 +43,8 @@ class WeightedRandomThrottleTest {
 	@Test
 	@DisplayName("Batch acquire returns all permits or zero — never a partial value")
 	void batchAcquireReturnsAllOrNothing() {
-		final int[] weights = {50, 50};
+		final int[] weights = {50, 50
+		};
 		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(weights);
 		final int permits = 17;
 
@@ -55,7 +58,8 @@ class WeightedRandomThrottleTest {
 	@Test
 	@DisplayName("Zero-weight index is never granted")
 	void zeroWeightNeverGranted() {
-		final int[] weights = {50, 0, 50};
+		final int[] weights = {50, 0, 50
+		};
 		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(weights);
 
 		for (int t = 0; t < 100_000; t++) {
@@ -67,7 +71,8 @@ class WeightedRandomThrottleTest {
 	@Test
 	@DisplayName("Out-of-bounds index returns false / 0")
 	void outOfBoundsIndexReturnsFalse() {
-		final int[] weights = {50, 50};
+		final int[] weights = {50, 50
+		};
 		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(weights);
 
 		assertFalse(throttle.tryAcquire(-1));
@@ -83,16 +88,19 @@ class WeightedRandomThrottleTest {
 						"null array should be rejected");
 		assertThrows(IllegalArgumentException.class, () -> new WeightedRandomThrottle(new int[0]),
 						"empty array should be rejected");
-		assertThrows(IllegalArgumentException.class, () -> new WeightedRandomThrottle(new int[]{0, 0, 0}),
+		assertThrows(IllegalArgumentException.class, () -> new WeightedRandomThrottle(new int[]{0, 0, 0
+		}),
 						"all-zero weights should be rejected");
-		assertThrows(IllegalArgumentException.class, () -> new WeightedRandomThrottle(new int[]{10, -5, 20}),
+		assertThrows(IllegalArgumentException.class, () -> new WeightedRandomThrottle(new int[]{10, -5, 20
+		}),
 						"negative weight should be rejected");
 	}
 
 	@Test
 	@DisplayName("Single weight always grants")
 	void singleWeightAlwaysGranted() {
-		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(new int[]{100});
+		final WeightedRandomThrottle throttle = new WeightedRandomThrottle(new int[]{100
+		});
 
 		for (int t = 0; t < 10_000; t++) {
 			assertTrue(throttle.tryAcquire(0),

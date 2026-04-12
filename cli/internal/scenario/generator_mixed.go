@@ -111,7 +111,10 @@ MixedLoad
                     "put": {{.PutDistrib}},
                     {{- end}}
                     {{- if .HasDeleteDistrib}}
-                    "delete": {{.DeleteDistrib}}
+                    "delete": {{.DeleteDistrib}},
+                    {{- end}}
+                    {{- if .HasStatDistrib}}
+                    "stat": {{.StatDistrib}}
                     {{- end}}
                 }
             }
@@ -228,9 +231,11 @@ func GenerateMixedScenario(params Params) (string, error) {
 		templateKeyGetDistrib:       params.GetDistrib,
 		templateKeyPutDistrib:       params.PutDistrib,
 		templateKeyDeleteDistrib:    params.DeleteDistrib,
+		templateKeyStatDistrib:      params.StatDistrib,
 		templateKeyHasGetDistrib:    params.GetDistrib > 0,
 		templateKeyHasPutDistrib:    params.PutDistrib > 0,
 		templateKeyHasDeleteDistrib: params.DeleteDistrib > 0,
+		templateKeyHasStatDistrib:   params.StatDistrib > 0,
 
 		// External item files
 		templateKeyHasReadItems:    params.ReadItemsFile != "",

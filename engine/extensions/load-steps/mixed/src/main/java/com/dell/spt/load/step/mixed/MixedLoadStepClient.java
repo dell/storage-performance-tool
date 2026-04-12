@@ -49,6 +49,7 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		final int getWeight = config.intVal("load-op-weight-get");
 		final int putWeight = config.intVal("load-op-weight-put");
 		final int deleteWeight = config.intVal("load-op-weight-delete");
+		final int statWeight = config.intVal("load-op-weight-stat");
 
 		final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
 		final Config outputConfig = config.configVal("output");
@@ -72,6 +73,9 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		}
 		if (deleteWeight > 0) {
 			initMetrics(originIndex++, OpType.DELETE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+		}
+		if (statWeight > 0) {
+			initMetrics(originIndex++, OpType.STAT, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
 		}
 	}
 }

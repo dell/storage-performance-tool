@@ -55,18 +55,23 @@ func TestValidateMixedFlags(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:    "valid default distribution",
-			get:     45, put: 55, del: 0, stat: 0,
+			name:    "valid default distribution (4-op)",
+			get:     45, put: 30, del: 15, stat: 10,
 			duration: dur, seedObjects: seed,
 		},
 		{
-			name:    "valid distribution with delete put sustains",
-			get:     45, put: 45, del: 10, stat: 0,
+			name:    "valid 3-op distribution GET+PUT+DELETE",
+			get:     45, put: 40, del: 15, stat: 0,
 			duration: dur, seedObjects: seed,
 		},
 		{
 			name:    "valid two-op distribution GET+PUT",
 			get:     70, put: 30, del: 0, stat: 0,
+			duration: dur, seedObjects: seed,
+		},
+		{
+			name:    "valid distribution with STAT only (GET+STAT)",
+			get:     60, put: 0, del: 0, stat: 40,
 			duration: dur, seedObjects: seed,
 		},
 		{
@@ -92,23 +97,21 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "delete exceeds put without seed file",
-			get:         70, put: 10, del: 20, stat: 0,
+			get:         50, put: 10, del: 20, stat: 20,
 			duration:    dur, seedObjects: seed,
 			wantErr:     true,
 			errContains: "delete-distrib (20) exceeds put-distrib (10)",
 		},
 		{
 			name:        "delete exceeds put with seed file - constraint relaxed",
-			get:         70, put: 10, del: 20, stat: 0,
+			get:         50, put: 10, del: 20, stat: 20,
 			deleteItems: "/some/path/items.csv",
 			duration:    dur, seedObjects: seed,
 		},
 		{
-			name:        "stat-distrib non-zero rejected",
-			get:         40, put: 30, del: 0, stat: 30,
-			duration:    dur, seedObjects: seed,
-			wantErr:     true,
-			errContains: "--stat-distrib",
+			name:    "stat-distrib non-zero accepted with valid sum",
+			get:     40, put: 20, del: 10, stat: 30,
+			duration: dur, seedObjects: seed,
 		},
 		{
 			name:        "only one non-zero distribution",
@@ -119,27 +122,27 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "duration required",
-			get:         45, put: 55, del: 0, stat: 0,
+			get:         45, put: 30, del: 15, stat: 10,
 			duration:    "", seedObjects: seed,
 			wantErr:     true,
 			errContains: "--duration",
 		},
 		{
 			name:        "seed-objects required without read-items-file",
-			get:         45, put: 55, del: 0, stat: 0,
+			get:         45, put: 30, del: 15, stat: 10,
 			duration:    dur, seedObjects: 0,
 			wantErr:     true,
 			errContains: "--seed-objects",
 		},
 		{
 			name:      "seed-objects not required with read-items-file",
-			get:       45, put: 55, del: 0, stat: 0,
+			get:       45, put: 30, del: 15, stat: 10,
 			readItems: "/some/path/items.csv",
 			duration:  dur, seedObjects: 0,
 		},
 		{
 			name:        "cleanup with read-items-file is an error",
-			get:         45, put: 55, del: 0, stat: 0,
+			get:         45, put: 30, del: 15, stat: 10,
 			readItems:   "/some/path/items.csv",
 			duration:    dur, seedObjects: 0, cleanup: true,
 			wantErr:     true,
@@ -147,7 +150,7 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "cleanup with delete-items-file is an error",
-			get:         45, put: 30, del: 25, stat: 0,
+			get:         45, put: 30, del: 15, stat: 10,
 			deleteItems: "/some/path/items.csv",
 			duration:    dur, seedObjects: seed, cleanup: true,
 			wantErr:     true,
@@ -155,14 +158,14 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "zero PUT with nonzero DELETE and no seed file",
-			get:         70, put: 0, del: 30, stat: 0,
+			get:         50, put: 0, del: 30, stat: 20,
 			duration:    dur, seedObjects: seed,
 			wantErr:     true,
 			errContains: "delete-distrib (30) exceeds put-distrib (0)",
 		},
 		{
 			name:        "zero PUT with nonzero DELETE and seed file - ok",
-			get:         70, put: 0, del: 30, stat: 0,
+			get:         50, put: 0, del: 30, stat: 20,
 			deleteItems: "/some/path/items.csv",
 			duration:    dur, seedObjects: seed,
 		},

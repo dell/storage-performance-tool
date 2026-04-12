@@ -96,11 +96,6 @@ func ValidateMixedFlags(cmd *cobra.Command) error {
 		}
 	}
 
-	// --stat-distrib must be 0 — HEAD/STAT engine support is not yet implemented
-	if stat != 0 {
-		return fmt.Errorf("--stat-distrib must be 0: STAT (HEAD) engine support is not yet implemented")
-	}
-
 	// Distribution must sum to exactly 100
 	sum := get + put + del + stat
 	if sum != 100 {

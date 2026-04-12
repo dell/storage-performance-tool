@@ -134,9 +134,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		// pipeline transfer buffer is not resettable
 		if (!(itemInput instanceof TransferConvertBuffer)) {
 			final var opType = OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase(Locale.ROOT));
-			// DELETE transfers 0 bytes — skip size estimation (also avoids blocking on
+			// DELETE and STAT transfer 0 bytes — skip size estimation (also avoids blocking on
 			// queue-backed inputs that are empty at init time, e.g. MixedLoad's DELETE queue)
-			if (OpType.DELETE != opType) {
+			if (OpType.DELETE != opType && OpType.STAT != opType) {
 				sizeEstimate = estimateTransferSize(null, opType, (Input<DataItem>) itemInput);
 			}
 		}

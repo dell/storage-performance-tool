@@ -76,16 +76,17 @@ COMMON_FLAGS=(
 )
 
 # ── Test 1: Default distribution with cleanup ───────────────────────────────
-echo "=== Test 1: Default distribution (60/25/15) with seed + cleanup ==="
+echo "=== Test 1: Default distribution (45/30/15/10) with seed + cleanup ==="
 SCENARIO_OUT="$WORKDIR/test1.out"
 (cd "$WORKDIR" && "$SPT" run mixed \
   "${COMMON_FLAGS[@]}" \
   --duration 15s \
   --seed-objects 100 \
   --cleanup \
-  --put-distrib 25 \
-  --get-distrib 60 \
+  --put-distrib 30 \
+  --get-distrib 45 \
   --delete-distrib 15 \
+  --stat-distrib 10 \
 ) > "$SCENARIO_OUT" 2>&1 || true
 
 # Scenario content is printed to stdout by --generate-only
@@ -95,22 +96,28 @@ else
   fail "Test1: MixedLoad not found in scenario output"
 fi
 
-if grep -q '"get": 60' "$SCENARIO_OUT"; then
-  pass "Test1: GET weight is 60"
+if grep -q '"get": 45' "$SCENARIO_OUT"; then
+  pass "Test1: GET weight is 45"
 else
-  fail "Test1: GET weight 60 not found"
+  fail "Test1: GET weight 45 not found"
 fi
 
-if grep -q '"put": 25' "$SCENARIO_OUT"; then
-  pass "Test1: PUT weight is 25"
+if grep -q '"put": 30' "$SCENARIO_OUT"; then
+  pass "Test1: PUT weight is 30"
 else
-  fail "Test1: PUT weight 25 not found"
+  fail "Test1: PUT weight 30 not found"
 fi
 
 if grep -q '"delete": 15' "$SCENARIO_OUT"; then
   pass "Test1: DELETE weight is 15"
 else
   fail "Test1: DELETE weight 15 not found"
+fi
+
+if grep -q '"stat": 10' "$SCENARIO_OUT"; then
+  pass "Test1: STAT weight is 10"
+else
+  fail "Test1: STAT weight 10 not found"
 fi
 
 if grep -q "PreconditionLoad" "$SCENARIO_OUT"; then
@@ -198,6 +205,7 @@ SCENARIO_OUT3="$WORKDIR/test3.out"
   --put-distrib 50 \
   --get-distrib 50 \
   --delete-distrib 0 \
+  --stat-distrib 0 \
 ) > "$SCENARIO_OUT3" 2>&1 || true
 
 if grep -q "PreconditionLoad" "$SCENARIO_OUT3"; then

@@ -8,4 +8,5 @@ public enum OpType {
 	UPDATE, // 3
 	DELETE, // 4
 	LIST, // 5
+	STAT, // 6
 }

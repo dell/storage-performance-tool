@@ -145,9 +145,11 @@ const (
 	templateKeyGetDistrib       = "GetDistrib"
 	templateKeyPutDistrib       = "PutDistrib"
 	templateKeyDeleteDistrib    = "DeleteDistrib"
+	templateKeyStatDistrib      = "StatDistrib"
 	templateKeyHasGetDistrib    = "HasGetDistrib"
 	templateKeyHasPutDistrib    = "HasPutDistrib"
 	templateKeyHasDeleteDistrib = "HasDeleteDistrib"
+	templateKeyHasStatDistrib   = "HasStatDistrib"
 	templateKeyStepIDMixed      = "StepIDMixed"
 	templateKeyStepIDSeedClean  = "StepIDSeedCleanup"
 	templateKeyStepIDPutClean   = "StepIDPutCleanup"
@@ -159,8 +161,9 @@ const (
 
 // Mixed workload defaults
 const (
-	MixedDefaultGetDistrib    = 60
-	MixedDefaultPutDistrib    = 25
+	MixedDefaultGetDistrib    = 45
+	MixedDefaultPutDistrib    = 30
 	MixedDefaultDeleteDistrib = 15
+	MixedDefaultStatDistrib   = 10
 	MixedDefaultSeedCount     = 2500
 )

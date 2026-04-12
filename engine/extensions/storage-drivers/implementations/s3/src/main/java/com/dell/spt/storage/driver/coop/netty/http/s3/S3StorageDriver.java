@@ -895,6 +895,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			throw new AssertionError("Not implemented yet");
 		case READ:
 			return HttpMethod.GET;
+		case STAT:
+			return HttpMethod.HEAD;
 		case LIST:
 			return HttpMethod.GET;
 		case DELETE:

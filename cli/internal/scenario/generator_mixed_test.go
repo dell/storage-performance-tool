@@ -16,9 +16,10 @@ func TestGenerateMixedScenario(t *testing.T) {
 		ObjectSize:    "100MB",
 		Duration:      "5m",
 		SeedCount:     2500,
-		GetDistrib:    60,
-		PutDistrib:    25,
+		GetDistrib:    45,
+		PutDistrib:    30,
 		DeleteDistrib: 15,
+		StatDistrib:   10,
 		BaseTimestamp: "20260411.120000.000",
 	}
 
@@ -30,7 +31,7 @@ func TestGenerateMixedScenario(t *testing.T) {
 		mustAbsent  []string
 	}{
 		{
-			name:   "standard 3-phase: seed + mixed + no cleanup",
+			name:   "standard 4-op: seed + mixed + no cleanup",
 			params: baseParams,
 			mustContain: []string{
 				`var concurrency = 80`,
@@ -40,9 +41,10 @@ func TestGenerateMixedScenario(t *testing.T) {
 				`PreconditionLoad`,
 				`"count": seedCount`,
 				`MixedLoad`,
-				`"get": 60`,
-				`"put": 25`,
+				`"get": 45`,
+				`"put": 30`,
 				`"delete": 15`,
+				`"stat": 10`,
 				`"time": duration`,
 				`mt-001-20260411.120000.000-seed`,
 				`mt-002-20260411.120000.000-mixed`,
@@ -103,6 +105,7 @@ func TestGenerateMixedScenario(t *testing.T) {
 				p.GetDistrib = 75
 				p.PutDistrib = 25
 				p.DeleteDistrib = 0
+				p.StatDistrib = 0
 				return p
 			}(),
 			mustContain: []string{
@@ -110,6 +113,26 @@ func TestGenerateMixedScenario(t *testing.T) {
 				`"put": 25`,
 			},
 			mustAbsent: []string{
+				`"delete"`,
+				`"stat"`,
+			},
+		},
+		{
+			name: "stat-only scenario (GET+STAT, no PUT/DELETE)",
+			params: func() Params {
+				p := baseParams
+				p.GetDistrib = 60
+				p.PutDistrib = 0
+				p.DeleteDistrib = 0
+				p.StatDistrib = 40
+				return p
+			}(),
+			mustContain: []string{
+				`"get": 60`,
+				`"stat": 40`,
+			},
+			mustAbsent: []string{
+				`"put"`,
 				`"delete"`,
 			},
 		},
@@ -150,9 +173,10 @@ func TestGenerateMixedScenarioPlanParseable(t *testing.T) {
 		ObjectSize:    "1MB",
 		Duration:      "2m",
 		SeedCount:     100,
-		GetDistrib:    60,
-		PutDistrib:    25,
+		GetDistrib:    45,
+		PutDistrib:    30,
 		DeleteDistrib: 15,
+		StatDistrib:   10,
 		Cleanup:       true,
 		BaseTimestamp: "20260411.120000.000",
 	}

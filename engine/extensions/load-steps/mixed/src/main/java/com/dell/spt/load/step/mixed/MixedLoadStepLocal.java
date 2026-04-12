@@ -195,6 +195,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			initMetrics(originIdx++, OpType.CREATE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
 		if (deleteWeight > 0)
 			initMetrics(originIdx++, OpType.DELETE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+		if (statWeight > 0)
+			initMetrics(originIdx++, OpType.STAT, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
 
 		// ── 9. Create generators ───────────────────────────────────────────
 		originIdx = 0;
@@ -222,6 +224,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			final QueueItemInput queueInput = new QueueItemInput(sharedQueue);
 			buildContext(originIdx++, stepId, OpType.DELETE, delSubConfig, itemType, itemFactory,
 							dataInput, batchSize, tracePersist, weightThrottle, null, queueInput, null);
+		}
+
+		// STAT: reads seed items continuously (recycle enabled), issues HEAD requests
+		if (statWeight > 0) {
+			final Config statSubConfig = makeSub(mergedConfig, "stat");
+			statSubConfig.val("load-op-recycle-mode", true);
+			buildContext(originIdx++, stepId, OpType.STAT, statSubConfig, itemType, itemFactory,
+							dataInput, batchSize, tracePersist, weightThrottle, null, null, null);
 		}
 	}
 

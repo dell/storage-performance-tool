@@ -238,6 +238,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		case DELETE:
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			break;
+		case STAT:
+			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+			break;
 		}
 		applyChecksum(httpHeaders, op);
 		applyMetaDataHeaders(httpHeaders);
@@ -251,6 +254,8 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		switch (opType) {
 		case READ:
 			return readMetadataOnly ? HttpMethod.HEAD : HttpMethod.GET;
+		case STAT:
+			return HttpMethod.HEAD;
 		case DELETE:
 			return HttpMethod.DELETE;
 		default:
