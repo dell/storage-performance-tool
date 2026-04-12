@@ -1074,7 +1074,8 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 					apiReachable = true
 				} else {
 					apiReachable = true
-					metrics, err = h.APIClient.ParseJSONMetrics(jsonData)
+					var allMetrics []*PerformanceMetric
+					allMetrics, err = h.APIClient.ParseJSONMetrics(jsonData)
 					if err != nil {
 						kind = classifyPollError(err)
 						if m.logJSONBodies {
@@ -1088,6 +1089,9 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 								m.logVerboseMetrics(nodeID, h.APIClient, err)
 							}
 						}
+					} else if len(allMetrics) > 0 {
+						// Use the first (latest) metric for the existing per-node pipeline.
+						metrics = allMetrics[0]
 					}
 				}
 			} else {

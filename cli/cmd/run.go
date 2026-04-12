@@ -862,10 +862,10 @@ func init() {
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
 
-	// Mixed Workload Distribution Options
-	runCmd.Flags().Int("get-distrib", scenario.MixedDefaultGetDistrib, "Percentage of GET (read) operations for mixed workload (default: 45)")
-	runCmd.Flags().Int("put-distrib", scenario.MixedDefaultPutDistrib, "Percentage of PUT (write) operations for mixed workload (default: 15)")
-	runCmd.Flags().Int("delete-distrib", scenario.MixedDefaultDeleteDistrib, "Percentage of DELETE operations for mixed workload (default: 10)")
+	// Mixed Workload Distribution Options (defaults are STAT-excluded: 60/25/15 renormalized from 45/15/10 + STAT 30)
+	runCmd.Flags().Int("get-distrib", scenario.MixedDefaultGetDistrib, "Percentage of GET (read) operations for mixed workload (default: 60)")
+	runCmd.Flags().Int("put-distrib", scenario.MixedDefaultPutDistrib, "Percentage of PUT (write) operations for mixed workload (default: 25)")
+	runCmd.Flags().Int("delete-distrib", scenario.MixedDefaultDeleteDistrib, "Percentage of DELETE operations for mixed workload (default: 15)")
 	runCmd.Flags().Int("stat-distrib", 0, "Percentage of STAT (HEAD) operations for mixed workload (not yet supported, must be 0)")
 	runCmd.Flags().String("read-items-file", "", "Items file for mixed workload READ pool (skips seed phase; --cleanup not allowed)")
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")

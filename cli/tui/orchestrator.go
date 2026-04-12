@@ -305,8 +305,8 @@ func (o *TestOrchestrator) tryJSONMetrics() (*PerformanceMetric, string, error) 
 		return nil, "", err
 	}
 
-	metric, parseErr := o.apiClient.ParseJSONMetrics(jsonData)
-	if parseErr != nil || metric == nil {
+	metrics, parseErr := o.apiClient.ParseJSONMetrics(jsonData)
+	if parseErr != nil || len(metrics) == 0 {
 		if parseErr != nil {
 			if o.logJSONBodies {
 				o.logVerboseMetrics(parseErr)
@@ -320,7 +320,9 @@ func (o *TestOrchestrator) tryJSONMetrics() (*PerformanceMetric, string, error) 
 		return nil, "", parseErr
 	}
 
-	return metric, "JSON", nil
+	// Use the first (latest) metric for the single-node orchestrator.
+	// The full slice is available for mixed-workload consumers in future phases.
+	return metrics[0], "JSON", nil
 }
 
 func (o *TestOrchestrator) logVerboseMetrics(parseErr error) {
