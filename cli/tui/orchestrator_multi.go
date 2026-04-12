@@ -995,28 +995,48 @@ func (m *MultiHostTestOrchestrator) collectAllMetrics(ctx context.Context) *Mult
 	// Poll all nodes concurrently
 	results := m.pollNodesConcurrently(ctx, readyHosts)
 
-	// Aggregate the metrics
+	// Aggregate the per-node primary metrics (existing behavior)
 	aggregated := m.aggregator.Aggregate(results.Metrics)
+
+	// Aggregate per-op-type across all nodes: collect every metric from every node
+	// into a single slice so AggregateByOpType can group by OpType.
+	var allMetrics []*PerformanceMetric
+	for _, nodeMetrics := range results.AllMetrics {
+		allMetrics = append(allMetrics, nodeMetrics...)
+	}
+	var perOpType map[string]*PerformanceMetric
+	if len(allMetrics) > 0 {
+		combined, perOp := AggregateByOpType(allMetrics)
+		perOpType = perOp
+		// If AggregateByOpType produced a combined metric (MIXED), use it as the
+		// aggregated metric instead so the headline numbers reflect all op types.
+		if combined != nil && len(perOp) > 1 {
+			aggregated = combined
+		}
+	}
 
 	return &MultiNodeMetricsUpdate{
 		Timestamp:  time.Now(),
 		Aggregated: aggregated,
 		PerNode:    results.Metrics,
+		PerOpType:  perOpType,
 		NodeStatus: results.Status,
 	}
 }
 
 // PollResults holds the results of concurrent node polling
 type PollResults struct {
-	Metrics map[string]*PerformanceMetric
-	Status  map[string]NodeConnectionStatus
+	Metrics    map[string]*PerformanceMetric
+	AllMetrics map[string][]*PerformanceMetric // All op-type metrics per node
+	Status     map[string]NodeConnectionStatus
 }
 
 // pollNodesConcurrently polls metrics from all hosts in parallel
 func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, hosts []*HostConnection) PollResults {
 	results := PollResults{
-		Metrics: make(map[string]*PerformanceMetric),
-		Status:  make(map[string]NodeConnectionStatus),
+		Metrics:    make(map[string]*PerformanceMetric),
+		AllMetrics: make(map[string][]*PerformanceMetric),
+		Status:     make(map[string]NodeConnectionStatus),
 	}
 
 	if len(hosts) == 0 {
@@ -1029,6 +1049,7 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 	type nodeResult struct {
 		nodeID       string
 		metrics      *PerformanceMetric
+		allMetrics   []*PerformanceMetric
 		err          error
 		skipped      bool
 		apiReachable bool
@@ -1056,6 +1077,7 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 		go func(h *HostConnection, st *nodePollState, nodeID string) {
 			var (
 				metrics      *PerformanceMetric
+				allMetrics   []*PerformanceMetric
 				err          error
 				apiReachable bool
 				phase        = h.GetPhase()
@@ -1074,7 +1096,6 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 					apiReachable = true
 				} else {
 					apiReachable = true
-					var allMetrics []*PerformanceMetric
 					allMetrics, err = h.APIClient.ParseJSONMetrics(jsonData)
 					if err != nil {
 						kind = classifyPollError(err)
@@ -1131,6 +1152,7 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 			resultsChan <- nodeResult{
 				nodeID:       nodeID,
 				metrics:      metrics,
+				allMetrics:   allMetrics,
 				err:          err,
 				skipped:      false,
 				apiReachable: apiReachable,
@@ -1163,6 +1185,9 @@ collectLoop:
 			if result.err == nil && result.metrics != nil {
 				isActive := result.metrics.TestState == constants.TestStateRunning
 				results.Metrics[result.nodeID] = result.metrics
+				if len(result.allMetrics) > 0 {
+					results.AllMetrics[result.nodeID] = result.allMetrics
+				}
 				results.Status[result.nodeID] = NodeConnectionStatus{
 					LastSeen:    now,
 					IsConnected: true,

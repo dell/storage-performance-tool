@@ -88,8 +88,9 @@ type NodeConnectionStatus struct {
 // MultiNodeMetricsUpdate contains all metrics data for multi-node tests
 type MultiNodeMetricsUpdate struct {
 	Timestamp  time.Time
-	Aggregated *PerformanceMetric              // Aggregated metrics for charts
-	PerNode    map[string]*PerformanceMetric   // Individual node metrics
+	Aggregated *PerformanceMetric              // Aggregated metrics for charts (sum of all op types)
+	PerNode    map[string]*PerformanceMetric   // Individual node metrics (primary/first metric per node)
+	PerOpType  map[string]*PerformanceMetric   // Per-operation-type aggregates (e.g. "CREATE", "READ", "DELETE")
 	NodeStatus map[string]NodeConnectionStatus // Connection health per node
 }
 

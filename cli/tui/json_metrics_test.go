@@ -447,14 +447,14 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 			orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 			// Call the optimized metrics method
-			metric, source, err := orchestrator.getMetricsWithOptimizedFallback()
+			metrics, source, err := orchestrator.getMetricsWithOptimizedFallback()
 
 			// Validate results
 			if tt.expectNilMetric {
 				if err == nil {
 					t.Error("Expected error when JSON endpoint fails")
 				}
-				if metric != nil {
+				if metrics != nil {
 					t.Error("Expected nil metric when JSON endpoint fails")
 				}
 				if source != "" {
@@ -466,8 +466,8 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if metric == nil {
-				t.Error("Expected non-nil metric when JSON endpoint works")
+			if len(metrics) == 0 {
+				t.Error("Expected non-empty metrics when JSON endpoint works")
 			}
 			if source != tt.expectedSource {
 				t.Errorf("Expected source %q, got %q", tt.expectedSource, source)
@@ -475,6 +475,7 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 
 			// Verify metric contains expected JSON data
 			if source == "JSON" {
+				metric := metrics[0]
 				if metric.StepID != "json_test" {
 					t.Errorf("Expected JSON StepID 'json_test', got %q", metric.StepID)
 				}
