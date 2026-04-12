@@ -5,7 +5,6 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
-import com.dell.spt.base.item.io.CsvFileItemInput;
 import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.io.ItemTimingMetricsFileOutput;
 import com.dell.spt.base.item.op.Operation;
@@ -17,7 +16,6 @@ import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.logging.LogUtil;
-import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
@@ -34,14 +32,12 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.LinkedBlockingQueue;
 
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
@@ -51,12 +47,9 @@ import static com.github.akurilov.confuse.Config.deepToMap;
  * Local (single-node) implementation of the mixed workload load step.
  *
  * <p>Creates one {@link LoadGenerator} per enabled operation type (GET/PUT/DELETE), weighted by
- * a {@link SequentialWeightsThrottle}. PUT-created items are:
- * <ol>
- *   <li>Written to {@code put-remaining.csv} so the cleanup phase can delete them.
- *   <li>Pushed into a shared {@link LinkedBlockingQueue} that feeds the DELETE generator, so
- *       freshly-written objects are eligible for deletion in the same run.
- * </ol>
+ * a {@link SequentialWeightsThrottle}. PUT-created items are written to {@code put-remaining.csv}
+ * so the cleanup phase can delete them. GET and DELETE both read from the scattered seed items
+ * file; DELETE exhausts the seed once (no recycle) while GET recycles continuously.
  */
 @SuppressWarnings({"unchecked", "rawtypes"
 })
@@ -147,16 +140,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final int[] weights = weightList.stream().mapToInt(Integer::intValue).toArray();
 		final IndexThrottle weightThrottle = new SequentialWeightsThrottle(weights);
 
-		// ── 5. Shared PUT→DELETE item queue ────────────────────────────────
-		final LinkedBlockingQueue sharedQueue = new LinkedBlockingQueue();
-
-		// Pre-populate the queue from an explicit delete-items-file if provided
-		final String deleteItemsFile = resolveDeleteItemsFile(mergedConfig);
-		if (deleteItemsFile != null && !deleteItemsFile.isEmpty()) {
-			populateQueueFromFile(deleteItemsFile, sharedQueue, itemFactory);
-		}
-
-		// ── 6. Initialise DataInput ────────────────────────────────────────
+		// ── 5. Initialise DataInput ────────────────────────────────────────
 		final DataInput dataInput;
 		try {
 			final Object dataLayerSizeRaw = dataLayerConfig.val("size");
@@ -173,7 +157,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			throw new IllegalStateException("Failed to initialize the data input", e);
 		}
 
-		// ── 7. put-remaining.csv path ──────────────────────────────────────
+		// ── 6. put-remaining.csv path ──────────────────────────────────────
 		final String homeDir = ThreadContext.get("home_dir");
 		final Path putRemainingFilePath;
 		if (homeDir != null && !homeDir.isEmpty()) {
@@ -182,7 +166,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			putRemainingFilePath = Paths.get(System.getProperty("user.dir"), "put-remaining-" + stepId + ".csv");
 		}
 
-		// ── 8. Register metrics (must precede generator creation) ──────────
+		// ── 7. Register metrics (must precede generator creation) ──────────
 		int originIdx = 0;
 		if (getWeight > 0)
 			initMetrics(originIdx++, OpType.READ, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
@@ -191,7 +175,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (deleteWeight > 0)
 			initMetrics(originIdx++, OpType.DELETE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
 
-		// ── 9. Create generators ───────────────────────────────────────────
+		// ── 8. Create generators ───────────────────────────────────────────
 		originIdx = 0;
 
 		// GET: reads seed items continuously (recycle enabled)
@@ -199,24 +183,22 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			final Config getSubConfig = makeSub(mergedConfig, "read");
 			getSubConfig.val("load-op-recycle-mode", true);
 			buildContext(originIdx++, stepId, OpType.READ, getSubConfig, itemType, itemFactory,
-							dataInput, batchSize, tracePersist, weightThrottle, null, null, null);
+							dataInput, batchSize, tracePersist, weightThrottle, null);
 		}
 
-		// PUT: creates new objects; tees results to file and queue
+		// PUT: creates new objects; writes results to put-remaining.csv for cleanup
 		if (putWeight > 0) {
 			final Config putSubConfig = makeSub(mergedConfig, "create");
 			putSubConfig.val("item-input-file", ""); // generate new items, don't read existing
 			buildContext(originIdx++, stepId, OpType.CREATE, putSubConfig, itemType, itemFactory,
-							dataInput, batchSize, tracePersist, weightThrottle, sharedQueue, null,
-							putRemainingFilePath);
+							dataInput, batchSize, tracePersist, weightThrottle, putRemainingFilePath);
 		}
 
-		// DELETE: consumes from the shared queue
+		// DELETE: reads from the scattered seed items file (no recycle); exhausts seed items once
 		if (deleteWeight > 0) {
 			final Config delSubConfig = makeSub(mergedConfig, "delete");
-			final QueueItemInput queueInput = new QueueItemInput(sharedQueue);
 			buildContext(originIdx++, stepId, OpType.DELETE, delSubConfig, itemType, itemFactory,
-							dataInput, batchSize, tracePersist, weightThrottle, null, queueInput, null);
+							dataInput, batchSize, tracePersist, weightThrottle, null);
 		}
 	}
 
@@ -239,9 +221,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	 * Builds a {@link LoadGenerator} + {@link LoadStepContext}, adds the context to
 	 * {@link #stepContexts}, and wires any optional item output.
 	 *
-	 * @param putQueue   when non-null, pushed with items from successful PUT results
-	 * @param itemInput  when non-null, replaces the default item source
-	 * @param putRemPath when non-null, successful PUT items are written to this CSV
+	 * @param putRemPath when non-null, successful PUT items are written to this CSV for cleanup
 	 */
 	private void buildContext(
 					final int originIndex,
@@ -254,8 +234,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final int batchSize,
 					final boolean tracePersist,
 					final IndexThrottle weightThrottle,
-					final LinkedBlockingQueue putQueue,
-					final Input itemInput,
 					final Path putRemPath) {
 
 		final Config storageConfig = subConfig.configVal("storage");
@@ -278,10 +256,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 							.originIndex(originIndex)
 							.addThrottle(weightThrottle);
 
-			if (itemInput != null) {
-				generatorBuilder.itemInput(itemInput);
-			}
-
 			final LoadGenerator generator = generatorBuilder.build();
 			final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 
@@ -293,17 +267,13 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 							shardMetrics);
 			stepContexts.add(stepCtx);
 
-			// ── Wire PUT tee output (file + queue) ─────────────────────────
-			if (putQueue != null || putRemPath != null) {
+			// ── Wire PUT tee output (put-remaining.csv) ─────────────────────
+			if (putRemPath != null) {
 				final ItemInfoFileOutput fileOut;
-				if (putRemPath != null) {
-					try {
-						fileOut = new ItemInfoFileOutput<>(putRemPath);
-					} catch (final IOException e) {
-						throw new IllegalStateException("Failed to open put-remaining.csv: " + putRemPath, e);
-					}
-				} else {
-					fileOut = null;
+				try {
+					fileOut = new ItemInfoFileOutput<>(putRemPath);
+				} catch (final IOException e) {
+					throw new IllegalStateException("Failed to open put-remaining.csv: " + putRemPath, e);
 				}
 
 				stepCtx.operationsResultsOutput(new Output() {
@@ -311,24 +281,17 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					public boolean put(final Object op) {
 						if (op == null) {
 							// null sentinel → close the file
-							if (fileOut != null) {
-								try {
-									fileOut.close();
-								} catch (final Exception e) {
-									LogUtil.exception(Level.WARN, e, "Failed to close put-remaining output");
-								}
+							try {
+								fileOut.close();
+							} catch (final Exception e) {
+								LogUtil.exception(Level.WARN, e, "Failed to close put-remaining output");
 							}
 							return true;
 						}
 						if (op instanceof Operation) {
 							final Operation o = (Operation) op;
 							if (Operation.Status.SUCC.equals(o.status())) {
-								if (fileOut != null) {
-									fileOut.put(op);
-								}
-								if (putQueue != null) {
-									putQueue.offer(o.item());
-								}
+								fileOut.put(op);
 							}
 						}
 						return true;
@@ -385,37 +348,4 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		}
 	}
 
-	/** Reads {@code load.op.delete.input.file} from the merged config. */
-	private static String resolveDeleteItemsFile(final Config cfg) {
-		try {
-			return cfg.stringVal("load-op-delete-input-file");
-		} catch (final Exception e) {
-			return null;
-		}
-	}
-
-	/** Loads items from a CSV file into the queue before the run starts. */
-	private static void populateQueueFromFile(
-					final String filePath,
-					final LinkedBlockingQueue queue,
-					final ItemFactory factory) {
-		final Path path = Paths.get(filePath);
-		if (!Files.exists(path)) {
-			Loggers.ERR.warn("MixedLoad: delete-items-file not found: {}", filePath);
-			return;
-		}
-		try {
-			final CsvFileItemInput fileInput = new CsvFileItemInput<>(path, factory);
-			Object item;
-			int count = 0;
-			while ((item = fileInput.get()) != null) {
-				queue.offer(item);
-				count++;
-			}
-			fileInput.close();
-			Loggers.MSG.info("MixedLoad: pre-populated DELETE queue with {} items from {}", count, filePath);
-		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "MixedLoad: failed to populate DELETE queue from {}", filePath);
-		}
-	}
 }
