@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
-- **`result.xml` use footer-based closing tag** — the per-entry `</result>` pattern from 5.7.2 broke multi-operation steps (e.g., mixed workloads) by closing the wrapper after the first entry. Switch to a log4j2 footer so the `</result>` closing tag is written once at the end of the file, producing valid XML for both single-op and multi-op steps.
+- **`result.xml` fix closing tag placement** — remove log4j2 header/footer from the engine's result.xml appender and move XML wrapping to the CLI. The engine now emits bare `<result .../>` entries; the CLI's artifact fetcher strips any stale wrapper tags and re-wraps them in a clean `<result>...</result>` root element. This eliminates the timing bug where log4j2's async rollover wrote `</result>` before the entries, producing malformed XML.
 
 ## [5.7.2] - 2026-04-13
 
