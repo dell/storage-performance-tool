@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.7.2] - 2026-04-13
+
+### Fixed
+
+- **`result.xml` format restored** — revert incorrect 5.7.1 change that collapsed per-entry `<result>` wrappers into a single document-level wrapper. Each metrics entry is again wrapped individually as `<result><result .../></result>`, matching the original Mongoose v3-compatible format.
+
 ## [5.7.1] - 2026-04-13
 
 ### Added
