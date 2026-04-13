@@ -810,6 +810,50 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
+	// headObject — tested via execute() (now package-visible)
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class HeadObjectTest {
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void statsWithCorrectBucketAndKey() throws Exception {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.STAT);
+			when(op.dstPath()).thenReturn("/stat-bucket");
+			when(item.name()).thenReturn("stat-me.dat");
+			when(op.item()).thenReturn(item);
+
+			drv.execute(op);
+
+			ArgumentCaptor<HeadObjectRequest> cap = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).headObject(cap.capture());
+			assertEquals("stat-bucket", cap.getValue().bucket());
+			assertEquals("stat-me.dat", cap.getValue().key());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void statsWithNestedPrefix() throws Exception {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.type()).thenReturn(OpType.STAT);
+			when(op.dstPath()).thenReturn("/bucket/prefix");
+			when(item.name()).thenReturn("mykey");
+			when(op.item()).thenReturn(item);
+
+			drv.execute(op);
+
+			ArgumentCaptor<HeadObjectRequest> cap = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).headObject(cap.capture());
+			assertEquals("bucket", cap.getValue().bucket());
+			assertEquals("prefix/mykey", cap.getValue().key());
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// execute() dispatch — unsupported type + NOOP
 	// -----------------------------------------------------------------------
 

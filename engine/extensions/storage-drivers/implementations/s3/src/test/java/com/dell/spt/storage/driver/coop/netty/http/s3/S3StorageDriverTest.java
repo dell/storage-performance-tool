@@ -876,6 +876,36 @@ public class S3StorageDriverTest {
 		assertThrows(AssertionError.class, () -> drv.httpRequest(compositeOp, "s3.us-east-1.amazonaws.com"));
 	}
 
+	// ---------- STAT (HEAD) request tests ----------
+
+	@Test
+	void httpRequest_stat_usesHeadMethod() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "127.0.0.1:8080");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var item = new com.dell.spt.base.item.DataItemImpl("/bucket/stat-key", 0, 1024);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) new OperationImpl<>(0, OpType.STAT, item, null, "/bucket", TEST_CRED);
+		final var req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
+		assertEquals(HttpMethod.HEAD, req.method());
+		assertTrue(req.uri().contains("/bucket/stat-key"));
+		assertEquals("0", req.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	void httpRequest_stat_withAuth_v2() throws Exception {
+		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1:8080");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var item = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 512);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) new OperationImpl<>(0, OpType.STAT, item, null, "/bucket", TEST_CRED);
+		final var req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
+		assertEquals(HttpMethod.HEAD, req.method());
+		String authHeader = req.headers().get(HttpHeaderNames.AUTHORIZATION);
+		assertNotNull(authHeader);
+		assertTrue(authHeader.startsWith("AWS "), "v2 auth must start with 'AWS '");
+	}
+
 	// ---------- S3ResponseHandler ETag guard tests ----------
 
 	@Test

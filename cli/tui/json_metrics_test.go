@@ -870,6 +870,101 @@ func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 	}
 }
 
+// TestAggregateByOpType_FourOps verifies that AggregateByOpType correctly handles
+// a 4-operation mixed workload (READ, CREATE, DELETE, STAT) and that STAT counts
+// are not dropped during aggregation.
+func TestAggregateByOpType_FourOps(t *testing.T) {
+	metrics := []*PerformanceMetric{
+		{
+			OpType: "READ", OpsPerSec: 4000, MBPerSec: 4,
+			MeanLatency: 900, MeanDuration: 950,
+			SuccessCount: 240000, FailedCount: 2,
+			ConcurrencyCurrent: 5, ConcurrencyMean: 4.5,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "CREATE", OpsPerSec: 20, MBPerSec: 1,
+			MeanLatency: 2500, MeanDuration: 2800,
+			SuccessCount: 1200, FailedCount: 0,
+			ConcurrencyCurrent: 1, ConcurrencyMean: 0.1,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "DELETE", OpsPerSec: 18, MBPerSec: 0,
+			MeanLatency: 1300, MeanDuration: 1500,
+			SuccessCount: 1080, FailedCount: 0,
+			ConcurrencyCurrent: 1, ConcurrencyMean: 0.04,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "STAT", OpsPerSec: 1400, MBPerSec: 0,
+			MeanLatency: 1500, MeanDuration: 1650,
+			SuccessCount: 84000, FailedCount: 5,
+			ConcurrencyCurrent: 2, ConcurrencyMean: 1.4,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+	}
+
+	combined, perOp := AggregateByOpType(metrics)
+	if combined == nil {
+		t.Fatal("combined aggregate must not be nil")
+	}
+	if combined.OpType != "MIXED" {
+		t.Errorf("expected OpType 'MIXED', got %q", combined.OpType)
+	}
+
+	// Additive fields
+	wantOps := int64(4000 + 20 + 18 + 1400)
+	if combined.OpsPerSec != wantOps {
+		t.Errorf("OpsPerSec: want %d, got %d", wantOps, combined.OpsPerSec)
+	}
+	wantSuccess := int64(240000 + 1200 + 1080 + 84000)
+	if combined.SuccessCount != wantSuccess {
+		t.Errorf("SuccessCount: want %d, got %d", wantSuccess, combined.SuccessCount)
+	}
+	wantFailed := int64(2 + 0 + 0 + 5)
+	if combined.FailedCount != wantFailed {
+		t.Errorf("FailedCount: want %d, got %d", wantFailed, combined.FailedCount)
+	}
+	wantMB := int64(4 + 1 + 0 + 0)
+	if combined.MBPerSec != wantMB {
+		t.Errorf("MBPerSec: want %d, got %d", wantMB, combined.MBPerSec)
+	}
+
+	// Per-op map must contain all 4 types
+	if len(perOp) != 4 {
+		t.Fatalf("expected 4 entries in perOp map, got %d", len(perOp))
+	}
+	for _, opType := range []string{"READ", "CREATE", "DELETE", "STAT"} {
+		m, ok := perOp[opType]
+		if !ok {
+			t.Errorf("perOp map missing key %q", opType)
+			continue
+		}
+		if m.OpType != opType {
+			t.Errorf("perOp[%q].OpType = %q", opType, m.OpType)
+		}
+	}
+
+	// STAT-specific checks: counts must not be zeroed or merged into another type
+	statMetric := perOp["STAT"]
+	if statMetric.SuccessCount != 84000 {
+		t.Errorf("STAT SuccessCount: want 84000, got %d", statMetric.SuccessCount)
+	}
+	if statMetric.OpsPerSec != 1400 {
+		t.Errorf("STAT OpsPerSec: want 1400, got %d", statMetric.OpsPerSec)
+	}
+	if statMetric.FailedCount != 5 {
+		t.Errorf("STAT FailedCount: want 5, got %d", statMetric.FailedCount)
+	}
+
+	// Weighted latency: (4000*900 + 20*2500 + 18*1300 + 1400*1500) / (4000+20+18+1400) = ~1045
+	// Just verify it's between the min and max input latencies.
+	if combined.MeanLatency < 900 || combined.MeanLatency > 2500 {
+		t.Errorf("weighted MeanLatency %d outside expected range [900, 2500]", combined.MeanLatency)
+	}
+}
+
 // TestParseJSONMetricsMixedOpTypes verifies that a mixed workload step with
 // multiple op-types sharing the same step_id returns all entries.
 func TestParseJSONMetricsMixedOpTypes(t *testing.T) {

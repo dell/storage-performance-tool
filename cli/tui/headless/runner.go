@@ -348,6 +348,17 @@ func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image strin
 					r.outputMetrics(*metric)
 				}
 
+				// Show per-op breakdown when multiple op types are present
+				if len(update.PerOpType) > 1 {
+					for _, opMetric := range update.PerOpType {
+						if r.jsonMode {
+							r.outputMetricsJSON(*opMetric)
+						} else {
+							r.outputMetrics(*opMetric)
+						}
+					}
+				}
+
 				// Log successful parsing
 				logging.LogMetricsParsing("received API metrics in headless mode",
 					"success", true,

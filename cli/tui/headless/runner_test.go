@@ -233,6 +233,185 @@ func TestHeadlessRunner_MetricsOutput(t *testing.T) {
 	runner.outputMetricsJSON(testMetric)
 }
 
+func TestHeadlessRunner_MixedMetricsPerOpOutput(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+
+	// Use a trace file so we can inspect what was written
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "metrics_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	// Simulate a mixed workload metrics update with 4 op types
+	update := &tui.MultiNodeMetricsUpdate{
+		Aggregated: &tui.PerformanceMetric{
+			OpsPerSec:       1000,
+			MeanLatency:     1500,
+			OpType:          "MIXED",
+			SuccessCount:    50000,
+			FailedCount:     3,
+			ConcurrencyMean: 10.0,
+		},
+		PerOpType: map[string]*tui.PerformanceMetric{
+			"READ": {
+				OpsPerSec:       450,
+				MeanLatency:     900,
+				OpType:          "READ",
+				SuccessCount:    22000,
+				ConcurrencyMean: 4.5,
+			},
+			"CREATE": {
+				OpsPerSec:       300,
+				MeanLatency:     2100,
+				OpType:          "CREATE",
+				SuccessCount:    15000,
+				ConcurrencyMean: 3.0,
+			},
+			"DELETE": {
+				OpsPerSec:       150,
+				MeanLatency:     1300,
+				OpType:          "DELETE",
+				SuccessCount:    7500,
+				ConcurrencyMean: 1.5,
+			},
+			"STAT": {
+				OpsPerSec:       100,
+				MeanLatency:     800,
+				OpType:          "STAT",
+				SuccessCount:    5500,
+				ConcurrencyMean: 1.0,
+			},
+		},
+	}
+
+	// Invoke the metrics callback logic directly
+	metric := update.Aggregated
+	runner.outputMetrics(*metric)
+	for _, opMetric := range update.PerOpType {
+		runner.outputMetrics(*opMetric)
+	}
+
+	// Read trace file and verify all op types appear
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	trace := string(content)
+
+	for _, opType := range []string{"MIXED", "READ", "CREATE", "DELETE", "STAT"} {
+		if !strings.Contains(trace, "type="+opType) {
+			t.Errorf("trace output missing per-op metric for type=%s", opType)
+		}
+	}
+}
+
+func TestHeadlessRunner_MixedMetricsPerOpJSON(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "json_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{
+		TraceFile: traceFile,
+		JSONMode:  true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	update := &tui.MultiNodeMetricsUpdate{
+		Aggregated: &tui.PerformanceMetric{
+			OpsPerSec:       500,
+			MeanLatency:     1200,
+			OpType:          "MIXED",
+			SuccessCount:    25000,
+			ConcurrencyMean: 8.0,
+		},
+		PerOpType: map[string]*tui.PerformanceMetric{
+			"READ": {
+				OpsPerSec: 300, MeanLatency: 1000, OpType: "READ",
+				SuccessCount: 15000, ConcurrencyMean: 5.0,
+			},
+			"STAT": {
+				OpsPerSec: 200, MeanLatency: 800, OpType: "STAT",
+				SuccessCount: 10000, ConcurrencyMean: 3.0,
+			},
+		},
+	}
+
+	// Output aggregated + per-op
+	runner.outputMetricsJSON(*update.Aggregated)
+	for _, opMetric := range update.PerOpType {
+		runner.outputMetricsJSON(*opMetric)
+	}
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	trace := string(content)
+
+	for _, opType := range []string{"MIXED", "READ", "STAT"} {
+		needle := `"operation_type":"` + opType + `"`
+		if !strings.Contains(trace, needle) {
+			t.Errorf("JSON trace output missing operation_type %q", opType)
+		}
+	}
+}
+
+func TestHeadlessRunner_SingleOpNoPerOpLines(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "single_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	// Single-op update: PerOpType has only one entry → no per-op lines emitted
+	update := &tui.MultiNodeMetricsUpdate{
+		Aggregated: &tui.PerformanceMetric{
+			OpsPerSec: 500, MeanLatency: 900, OpType: "READ",
+			SuccessCount: 10000, ConcurrencyMean: 5.0,
+		},
+		PerOpType: map[string]*tui.PerformanceMetric{
+			"READ": {
+				OpsPerSec: 500, MeanLatency: 900, OpType: "READ",
+				SuccessCount: 10000, ConcurrencyMean: 5.0,
+			},
+		},
+	}
+
+	// Replicate the callback logic
+	metric := update.Aggregated
+	runner.outputMetrics(*metric)
+	if len(update.PerOpType) > 1 {
+		for _, opMetric := range update.PerOpType {
+			runner.outputMetrics(*opMetric)
+		}
+	}
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	trace := string(content)
+
+	// Should have exactly one METRICS line (aggregated only, no per-op duplication)
+	count := strings.Count(trace, "[METRICS]")
+	if count != 1 {
+		t.Errorf("expected exactly 1 METRICS line for single-op workload, got %d", count)
+	}
+}
+
 func TestHeadlessOptions_AllFields(t *testing.T) {
 	// Test that all option fields can be set and retrieved
 	options := HeadlessOptions{
