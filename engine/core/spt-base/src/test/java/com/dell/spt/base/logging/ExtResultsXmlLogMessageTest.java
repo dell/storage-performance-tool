@@ -27,7 +27,7 @@ class ExtResultsXmlLogMessageTest {
 		String xml = buf.toString();
 
 		assertTrue(xml.startsWith("<result id=\"step-1\""), "Should start with <result id=...");
-		assertTrue(xml.endsWith(" />"), "Should end with self-closing tag");
+		assertTrue(xml.endsWith(" />\n"), "Should end with self-closing tag and newline");
 	}
 
 	@Test
