@@ -58,11 +58,10 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	private final Set<MetricsContext> selectedMetrics = new TreeSet<>();
 	private final ReentrantLock outputLock = new ReentrantLock();
 
-	// Tracks which step IDs have an open <result> wrapper tag in the result XML files.
+	// Tracks which step IDs have an open <result> wrapper tag in result.xml.
 	// Used to emit opening/closing wrapper tags as explicit log events so that both
 	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
 	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
-	private final Set<String> openThresholdResultXmlSteps = ConcurrentHashMap.newKeySet();
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
@@ -356,7 +355,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 	}
 
-	private void exitMetricsThresholdState(final MetricsContext<?> metricsCtx) {
+	private static void exitMetricsThresholdState(final MetricsContext<?> metricsCtx) {
 		Loggers.MSG.info(
 						"{}: the active load operations count is below the threshold of {}, stopping the additional metrics "
 										+ "accounting",
@@ -367,19 +366,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		if (lastThresholdMetrics.sumPersistEnabled()) {
 			Loggers.METRICS_THRESHOLD_FILE_TOTAL.info(
 							new MetricsCsvLogMessage(snapshot, metricsCtx.opType(), metricsCtx.concurrencyLimit()));
-			if (openThresholdResultXmlSteps.add(metricsCtx.loadStepId())) {
-				Loggers.METRICS_THRESHOLD_EXT_RESULTS_FILE.info("<result>");
-			}
 			Loggers.METRICS_THRESHOLD_EXT_RESULTS_FILE.info(
 							new ExtResultsXmlLogMessage(metricsCtx, snapshot));
-		}
-		// Close threshold XML wrapper if no more threshold-eligible contexts remain for this step
-		if (openThresholdResultXmlSteps.contains(metricsCtx.loadStepId())
-						&& allMetrics.stream().noneMatch(
-										ctx -> metricsCtx.loadStepId().equals(ctx.loadStepId())
-														&& ctx.thresholdStateEntered() && !ctx.thresholdStateExited())) {
-			Loggers.METRICS_THRESHOLD_EXT_RESULTS_FILE.info("</result>");
-			openThresholdResultXmlSteps.remove(metricsCtx.loadStepId());
 		}
 		metricsCtx.exitThresholdState();
 	}
@@ -433,17 +421,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	@Override
 	protected final void doClose() {
-		// Close any open result XML wrapper tags (safety net for abnormal shutdown)
+		// Close any open result.xml wrapper tags (safety net for abnormal shutdown)
 		openResultXmlSteps.forEach(stepId -> {
 			ThreadContext.put(KEY_STEP_ID, stepId);
 			Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
 		});
 		openResultXmlSteps.clear();
-		openThresholdResultXmlSteps.forEach(stepId -> {
-			ThreadContext.put(KEY_STEP_ID, stepId);
-			Loggers.METRICS_THRESHOLD_EXT_RESULTS_FILE.info("</result>");
-		});
-		openThresholdResultXmlSteps.clear();
 		allMetrics.forEach(MetricsContext::close);
 		allMetrics.clear();
 		distributedMetrics.clear();

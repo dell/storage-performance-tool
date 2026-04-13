@@ -233,7 +233,7 @@ var errNotFound = errors.New("not found")
 // This makes the CLI the single owner of XML structure, independent of log4j2
 // header/footer timing.  Returns the new file size, or the original size on error.
 func normalizeResultXML(filePath, rootTag string) int64 {
-	raw, err := os.ReadFile(filePath)
+	raw, err := os.ReadFile(filePath) // #nosec G304 -- path constructed internally from results directory
 	if err != nil {
 		return 0
 	}
@@ -262,7 +262,7 @@ func normalizeResultXML(filePath, rootTag string) int64 {
 	buf.WriteByte('\n')
 
 	out := buf.String()
-	if err := os.WriteFile(filePath, []byte(out), 0o644); err != nil {
+	if err := os.WriteFile(filePath, []byte(out), 0o600); err != nil {
 		return int64(len(raw))
 	}
 	return int64(len(out))

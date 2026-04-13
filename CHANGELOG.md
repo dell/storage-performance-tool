@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
-- **`result.xml` fix closing tag placement** — remove log4j2 header/footer from the engine's result.xml appender and move XML wrapping to the CLI. The engine now emits bare `<result .../>` entries; the CLI's artifact fetcher strips any stale wrapper tags and re-wraps them in a clean `<result>...</result>` root element. This eliminates the timing bug where log4j2's async rollover wrote `</result>` before the entries, producing malformed XML.
+- **`result.xml` well-formedness fix** — replace log4j2 header/footer with explicit wrapper-tag management in `MetricsManagerImpl`. The engine now logs `<result>` and `</result>` tags at step lifecycle boundaries, with safety cleanup in `doClose()` for abnormal shutdowns. The CLI's artifact fetcher includes a `normalizeResultXML()` safety net that strips stale wrappers and re-wraps entries. This eliminates the timing bug where log4j2's async rollover wrote `</result>` before the entries, producing malformed XML.
 
 ## [5.7.2] - 2026-04-13
 
