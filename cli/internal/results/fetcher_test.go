@@ -345,3 +345,114 @@ func TestFetcher_UsesIndexJsonForDiscovery(t *testing.T) {
 	}
 	_ = man
 }
+
+func TestNormalizeResultXML_BrokenHeaderFooterFirst(t *testing.T) {
+	// Reproduces the real bug: log4j2 writes <result>\n</result>\n before the entries.
+	input := "<result>\n</result>\n" +
+		`<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		`<result id="step-1" operation="CREATE" tps="50" />` + "\n"
+	want := "<result>\n" +
+		`<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		`<result id="step-1" operation="CREATE" tps="50" />` + "\n" +
+		"</result>\n"
+
+	f := filepath.Join(t.TempDir(), "result.xml")
+	if err := os.WriteFile(f, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	size := normalizeResultXML(f, "result")
+	got, _ := os.ReadFile(f)
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML mismatch:\ngot:  %q\nwant: %q", string(got), want)
+	}
+	if size != int64(len(want)) {
+		t.Fatalf("size mismatch: got %d, want %d", size, len(want))
+	}
+}
+
+func TestNormalizeResultXML_AlreadyCorrect(t *testing.T) {
+	// Content that's already properly wrapped (e.g. from a future fixed engine).
+	input := "<result>\n" +
+		`<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		"</result>\n"
+	want := input
+
+	f := filepath.Join(t.TempDir(), "result.xml")
+	if err := os.WriteFile(f, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalizeResultXML(f, "result")
+	got, _ := os.ReadFile(f)
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML changed correct input:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+func TestNormalizeResultXML_RawEntriesNoWrapper(t *testing.T) {
+	// New engine: no header/footer at all, just bare entries.
+	input := `<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		`<result id="step-1" operation="CREATE" tps="50" />` + "\n"
+	want := "<result>\n" +
+		`<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		`<result id="step-1" operation="CREATE" tps="50" />` + "\n" +
+		"</result>\n"
+
+	f := filepath.Join(t.TempDir(), "result.xml")
+	if err := os.WriteFile(f, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalizeResultXML(f, "result")
+	got, _ := os.ReadFile(f)
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML mismatch:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+func TestNormalizeResultXML_ThresholdRootTag(t *testing.T) {
+	input := "<result-with-threshold>\n</result-with-threshold>\n" +
+		`<result id="step-1" operation="READ" />` + "\n"
+	want := "<result-with-threshold>\n" +
+		`<result id="step-1" operation="READ" />` + "\n" +
+		"</result-with-threshold>\n"
+
+	f := filepath.Join(t.TempDir(), "result-threshold.xml")
+	if err := os.WriteFile(f, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalizeResultXML(f, "result-with-threshold")
+	got, _ := os.ReadFile(f)
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML mismatch:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+func TestNormalizeResultXML_SingleEntry(t *testing.T) {
+	// Single-op step: one entry, no wrapper from engine.
+	input := `<result id="step-1" operation="READ" tps="100" />` + "\n"
+	want := "<result>\n" +
+		`<result id="step-1" operation="READ" tps="100" />` + "\n" +
+		"</result>\n"
+
+	f := filepath.Join(t.TempDir(), "result.xml")
+	if err := os.WriteFile(f, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalizeResultXML(f, "result")
+	got, _ := os.ReadFile(f)
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML mismatch:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}
+
+func TestNormalizeResultXML_EmptyFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "result.xml")
+	if err := os.WriteFile(f, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	normalizeResultXML(f, "result")
+	got, _ := os.ReadFile(f)
+	want := "<result>\n</result>\n"
+	if string(got) != want {
+		t.Fatalf("normalizeResultXML empty mismatch:\ngot:  %q\nwant: %q", string(got), want)
+	}
+}

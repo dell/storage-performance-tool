@@ -204,7 +204,8 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 			}
 		}
 		idxItem := indexMap[selected]
-		size, err := f.downloadOne(ctx, stepID, selected, filepath.Join(f.OutputDir, name))
+		outPath := filepath.Join(f.OutputDir, name)
+		size, err := f.downloadOne(ctx, stepID, selected, outPath)
 		if err != nil {
 			status := "missing"
 			if !errors.Is(err, errNotFound) {
@@ -213,12 +214,59 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 			sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: status, Error: err.Error()})
 			continue
 		}
+		// Normalize result XML: strip stale wrappers and re-wrap in a clean root element.
+		switch a.Suffix {
+		case constants.ResultsArtifactSuffixExtResults:
+			size = normalizeResultXML(outPath, "result")
+		case constants.ResultsArtifactSuffixExtResultsThreshold:
+			size = normalizeResultXML(outPath, "result-with-threshold")
+		}
 		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: "ok", Modified: idxItem.Modified, ContentType: idxItem.ContentType})
 	}
 	return sm
 }
 
 var errNotFound = errors.New("not found")
+
+// normalizeResultXML strips any stale wrapper tags from the downloaded file and
+// re-wraps the self-closing <result .../> entries in a clean root element.
+// This makes the CLI the single owner of XML structure, independent of log4j2
+// header/footer timing.  Returns the new file size, or the original size on error.
+func normalizeResultXML(filePath, rootTag string) int64 {
+	raw, err := os.ReadFile(filePath) // #nosec G304 -- path constructed internally from results directory
+	if err != nil {
+		return 0
+	}
+
+	openTag := "<" + rootTag + ">"
+	closeTag := "</" + rootTag + ">"
+
+	// Collect only lines that are actual result entries (self-closing XML elements).
+	var entries []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == openTag || trimmed == closeTag {
+			continue
+		}
+		entries = append(entries, trimmed)
+	}
+
+	var buf strings.Builder
+	buf.WriteString(openTag)
+	buf.WriteByte('\n')
+	for _, e := range entries {
+		buf.WriteString(e)
+		buf.WriteByte('\n')
+	}
+	buf.WriteString(closeTag)
+	buf.WriteByte('\n')
+
+	out := buf.String()
+	if err := os.WriteFile(filePath, []byte(out), 0o600); err != nil {
+		return int64(len(raw))
+	}
+	return int64(len(out))
+}
 
 func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath string) (int64, error) {
 	u, err := url.Parse(f.BaseURL)

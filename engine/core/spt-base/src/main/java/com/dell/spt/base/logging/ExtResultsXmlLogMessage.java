@@ -131,7 +131,7 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append(durationSnapshot.max())
 						.append('"');
 
-		strb.append(" />\n");
+		strb.append(" />");
 	}
 
 	private static String escapeXml(final String text) {

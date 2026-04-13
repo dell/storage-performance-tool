@@ -58,6 +58,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	private final Set<MetricsContext> selectedMetrics = new TreeSet<>();
 	private final ReentrantLock outputLock = new ReentrantLock();
 
+	// Tracks which step IDs have an open <result> wrapper tag in result.xml.
+	// Used to emit opening/closing wrapper tags as explicit log events so that both
+	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
+	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
+
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
 	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
@@ -271,8 +276,18 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 						// XML results file output (result.xml)
 						if (null != aggregSnapshot && metricsCtx.sumPersistEnabled()) {
+							if (openResultXmlSteps.add(metricsCtx.loadStepId())) {
+								Loggers.METRICS_EXT_RESULTS_FILE.info("<result>");
+							}
 							Loggers.METRICS_EXT_RESULTS_FILE.info(
 											new ExtResultsXmlLogMessage(metricsCtx, aggregSnapshot));
+						}
+						// Close XML wrapper when this is the last context for the step
+						if (openResultXmlSteps.contains(metricsCtx.loadStepId())
+										&& allMetrics.stream().noneMatch(
+														ctx -> metricsCtx.loadStepId().equals(ctx.loadStepId()))) {
+							Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
+							openResultXmlSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
@@ -406,6 +421,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	@Override
 	protected final void doClose() {
+		// Close any open result.xml wrapper tags (safety net for abnormal shutdown)
+		openResultXmlSteps.forEach(stepId -> {
+			ThreadContext.put(KEY_STEP_ID, stepId);
+			Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
+		});
+		openResultXmlSteps.clear();
 		allMetrics.forEach(MetricsContext::close);
 		allMetrics.clear();
 		distributedMetrics.clear();

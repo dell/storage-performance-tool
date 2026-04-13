@@ -131,8 +131,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "<result>\n"
-          pattern: "%m</result>\n"
+          pattern: "%m%n"
           noConsoleNoAnsi: true
       - name: extThresholdResultsFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}result-threshold.xml"
@@ -140,8 +139,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "<result-with-threshold>\n"
-          pattern: "%m</result-with-threshold>\n"
+          pattern: "%m%n"
           noConsoleNoAnsi: true
   Loggers:
     root:
