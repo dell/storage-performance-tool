@@ -217,6 +217,8 @@ These flags apply only to the `mixed` workload type.
 - `--seed-objects` must be > 0 unless `--read-items-file` is provided.
 - `--cleanup` cannot be combined with `--read-items-file` or `--delete-items-file`.
 
+**Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means per-node DELETE throughput is bounded by that node's PUT throughput, and cross-node deletion is not supported.
+
 Set any operation weight to `0` to exclude it. For example, `--get-distrib 60 --put-distrib 40 --delete-distrib 0 --stat-distrib 0` runs a GET/PUT-only mix.
 
 #### 10. TUI / Headless Options
@@ -566,7 +568,7 @@ spt run mixed \
 **How it works:**
 
 1. **Seed phase** — writes `--seed-objects` objects to populate the read/delete pools. Skipped when `--read-items-file` is provided.
-2. **Mixed benchmark** — runs for `--duration`, issuing operations at the specified weights. The engine's `MixedLoad` step draws from the item set for GETs, STATs, and DELETEs while PUTs create new objects.
+2. **Mixed benchmark** — runs for `--duration`, issuing operations at the specified weights. The engine's `MixedLoad` step draws from the item set for GETs, STATs, and DELETEs while PUTs create new objects. Objects created by PUT that are not consumed by DELETE during the benchmark are tracked in a `put-remaining.csv` artifact (fetched to the results directory), giving you an exact inventory of objects left behind.
 3. **Cleanup** (optional, `--cleanup`) — deletes the seed objects and any objects created by PUT operations during the benchmark.
 
 ### Distributed / Attach Mode
