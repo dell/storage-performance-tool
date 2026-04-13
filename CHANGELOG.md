@@ -6,11 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.7.1] - 2026-04-13
+
 ### Added
 
-- **`--checksum` CLI flag** — enable per-object (and per-part for MPU) checksum validation with `crc32`, `crc32c`, `sha1`, or `sha256`. Environment variable: `SPT_CHECKSUM`. Works with both the Netty and AWS SDK S3 drivers.
-- **S3-AWS driver checksum support** — the `s3-aws` driver now reads `storage.checksum.enabled` / `storage.checksum.algorithm` from config and sets the corresponding `ChecksumAlgorithm` on `PutObjectRequest` via the AWS SDK flexible checksum API. Supported algorithms: CRC32, CRC32C, SHA1, SHA256.
-- **Netty S3 driver MPU checksum completeness** — multipart upload init requests now include the `x-amz-checksum-algorithm` header, the response handler captures per-part checksum headers, and the complete-upload XML body includes per-part checksum elements.
+- **`--checksum` CLI flag** — enable per-object (and per-part for MPU) checksum validation with `crc32`, `crc32c`, `sha1`, or `sha256`. Environment variable: `SPT_CHECKSUM`. Works with both the Netty and AWS SDK S3 drivers. (PR #80)
+- **S3-AWS driver checksum support** — the `s3-aws` driver now reads `storage.checksum.enabled` / `storage.checksum.algorithm` from config and sets the corresponding `ChecksumAlgorithm` on `PutObjectRequest` via the AWS SDK flexible checksum API. Supported algorithms: CRC32, CRC32C, SHA1, SHA256. (PR #80)
+- **Netty S3 driver MPU checksum completeness** — multipart upload init requests now include the `x-amz-checksum-algorithm` header, the response handler captures per-part checksum headers, and the complete-upload XML body includes per-part checksum elements. (PR #80)
+- **`result.xml` output** — engine now generates a `result.xml` artifact with per-operation metrics in a format compatible with Mongoose v3, including duration, latency, concurrency, byte counts, and success/fail tallies. The CLI fetches `result.xml` and `result-threshold.xml` automatically. (PR #81)
+
+### Fixed
+
+- **`result.xml` well-formedness** — closing XML tags moved from the log4j2 pattern to the appender footer so the output is always valid XML. (PR #81)
+
+### Changed
+
+- **Bump `actions/github-script` from 8 to 9** in the `github-actions` dependency group. (PR #82)
 
 ## [5.7.0] - 2026-04-09
 
