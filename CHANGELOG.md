@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.7.3] - 2026-04-13
+
+### Fixed
+
+- **`result.xml` use footer-based closing tag** — the per-entry `</result>` pattern from 5.7.2 broke multi-operation steps (e.g., mixed workloads) by closing the wrapper after the first entry. Switch to a log4j2 footer so the `</result>` closing tag is written once at the end of the file, producing valid XML for both single-op and multi-op steps.
+
 ## [5.7.2] - 2026-04-13
 
 ### Fixed
