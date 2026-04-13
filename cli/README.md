@@ -61,7 +61,7 @@ Authentication defaults to Signature Version 4. Add `--auth-version 2` only when
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt results`)
-- **Multiple Workload Types**: Support for write, list, and mock operations today; read, mixed, and delete benchmarking remain on the roadmap
+- **Multiple Workload Types**: Support for write, read, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
@@ -336,8 +336,8 @@ Executes a benchmark test with the specified workload type.
 **Workload Types:**
 
 - `write`: Write-only test, creating new objects
-- `read`: Read-only test on pre-existing objects (coming soon)
-- `mixed`: Test with a mix of read and write operations (coming soon)
+- `read`: Read-only test on pre-existing objects
+- `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
 - `delete`: Test to measure object deletion performance (coming soon)
 - `mock`: Run tests with dummy-mock driver (no S3 endpoint required)
 

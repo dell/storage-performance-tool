@@ -99,6 +99,23 @@ Run an S3 write workload:
   --auto-terminate-seconds 180
 ```
 
+Run a mixed workload (concurrent GET/PUT/DELETE/STAT):
+
+```bash
+./spt run mixed \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket test-bucket \
+  --duration 5m \
+  --threads 16 \
+  --object-size 1MB \
+  --seed-objects 5000 \
+  --auto-terminate-seconds 600
+```
+
+The default distribution is GET 45% / PUT 30% / DELETE 15% / STAT 10%. Use `--get-distrib`, `--put-distrib`, `--delete-distrib`, and `--stat-distrib` to customize (must sum to 100).
+
 > ✅ Tip: Always set `--auto-terminate-seconds` for unattended runs to prevent long-lived containers from hanging CI jobs.
 
 ### TUI Navigation Highlights
@@ -118,7 +135,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 ## Features
 
 - **Unified Experience** -- SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** -- write, read, list, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
+- **Multi-Workload Support** -- write, read, list, mixed, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
 - **Pluggable S3 Storage Drivers** -- choose the backend that fits your target: `default` (Netty), `aws` (AWS SDK v2), or `rdma` (hardware-accelerated). Select with `--s3-driver`.
 - **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
 - **S3 Checksum Validation** -- compute and send checksums on write requests with `--checksum` (`crc32`, `crc32c`, `sha1`, `sha256`). When combined with multipart upload, checksums are applied per part. Supported by both the Netty and AWS SDK drivers.
@@ -126,6 +143,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.
+- **Mixed Workloads** – run GET, PUT, DELETE, and STAT operations concurrently with configurable weights (`spt run mixed`). Seed objects automatically, tune the operation distribution, and optionally clean up when done.
 - **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
 - **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
 - **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
@@ -153,7 +171,7 @@ Example:
   --duration 2m --threads 8 --object-size 1MB
 ```
 
-The driver flag works with all S3 workload types (write, read, list). See [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) for the full reference.
+The driver flag works with all S3 workload types (write, read, list, mixed). See [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) for the full reference.
 
 ---
 
@@ -200,7 +218,6 @@ make build-cli        # produces ./cli/spt
 
 ## Roadmap Snapshot
 
-- Add mixed workload templates combining read/write/delete in configurable ratios.
 - Continue expanding CI/CD pipeline: automated release publishing of `spt` binaries and versioned Docker images to GitHub Releases and GHCR.
 - Streamline documentation so contributors and users find SPT-first concepts across CLI and engine guides.
 
