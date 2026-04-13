@@ -56,7 +56,7 @@ func TestValidateMixedFlags(t *testing.T) {
 	}{
 		{
 			name:    "valid default distribution (4-op)",
-			get:     45, put: 30, del: 15, stat: 10,
+			get:     45, put: 15, del: 10, stat: 30,
 			duration: dur, seedObjects: seed,
 		},
 		{
@@ -122,27 +122,27 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "duration required",
-			get:         45, put: 30, del: 15, stat: 10,
+			get:         45, put: 15, del: 10, stat: 30,
 			duration:    "", seedObjects: seed,
 			wantErr:     true,
 			errContains: "--duration",
 		},
 		{
 			name:        "seed-objects required without read-items-file",
-			get:         45, put: 30, del: 15, stat: 10,
+			get:         45, put: 15, del: 10, stat: 30,
 			duration:    dur, seedObjects: 0,
 			wantErr:     true,
 			errContains: "--seed-objects",
 		},
 		{
 			name:      "seed-objects not required with read-items-file",
-			get:       45, put: 30, del: 15, stat: 10,
+			get:       45, put: 15, del: 10, stat: 30,
 			readItems: "/some/path/items.csv",
 			duration:  dur, seedObjects: 0,
 		},
 		{
 			name:        "cleanup with read-items-file is an error",
-			get:         45, put: 30, del: 15, stat: 10,
+			get:         45, put: 15, del: 10, stat: 30,
 			readItems:   "/some/path/items.csv",
 			duration:    dur, seedObjects: 0, cleanup: true,
 			wantErr:     true,
@@ -150,7 +150,7 @@ func TestValidateMixedFlags(t *testing.T) {
 		},
 		{
 			name:        "cleanup with delete-items-file is an error",
-			get:         45, put: 30, del: 15, stat: 10,
+			get:         45, put: 15, del: 10, stat: 30,
 			deleteItems: "/some/path/items.csv",
 			duration:    dur, seedObjects: seed, cleanup: true,
 			wantErr:     true,

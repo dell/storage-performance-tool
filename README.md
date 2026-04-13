@@ -114,7 +114,7 @@ Run a mixed workload (concurrent GET/PUT/DELETE/STAT):
   --auto-terminate-seconds 600
 ```
 
-The default distribution is GET 45% / PUT 30% / DELETE 15% / STAT 10%. Use `--get-distrib`, `--put-distrib`, `--delete-distrib`, and `--stat-distrib` to customize (must sum to 100).
+The default distribution is GET 45% / STAT 30% / PUT 15% / DELETE 10%. Use `--get-distrib`, `--put-distrib`, `--delete-distrib`, and `--stat-distrib` to customize (must sum to 100).
 
 > ✅ Tip: Always set `--auto-terminate-seconds` for unattended runs to prevent long-lived containers from hanging CI jobs.
 

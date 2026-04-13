@@ -201,9 +201,9 @@ These flags apply only to the `mixed` workload type.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--get-distrib` | `45` | Percentage of GET (read) operations |
-| `--put-distrib` | `30` | Percentage of PUT (write) operations |
-| `--delete-distrib` | `15` | Percentage of DELETE operations |
-| `--stat-distrib` | `10` | Percentage of STAT (HEAD) operations |
+| `--stat-distrib` | `30` | Percentage of STAT (HEAD) operations |
+| `--put-distrib` | `15` | Percentage of PUT (write) operations |
+| `--delete-distrib` | `10` | Percentage of DELETE operations |
 | `--seed-objects` | `2500` | Objects to pre-create before the mixed benchmark |
 | `--read-items-file` | `""` | Items file for the READ pool (skips seed phase) |
 | `--delete-items-file` | `""` | Items file to pre-populate the DELETE queue |
@@ -512,7 +512,7 @@ Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`. The flag works with b
 The `mixed` workload runs GET, PUT, DELETE, and STAT operations concurrently with configurable weights. A seed phase pre-creates objects, then the benchmark phase issues operations at the specified distribution for the given duration.
 
 ```bash
-# Default 4-op mix (GET 45% / PUT 30% / DELETE 15% / STAT 10%) for 5 minutes
+# Default 4-op mix (GET 45% / STAT 30% / PUT 15% / DELETE 10%) for 5 minutes
 spt run mixed \
     --endpoints https://s3.example.com \
     --access-key "$S3_ACCESS_KEY" \

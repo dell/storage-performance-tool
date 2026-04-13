@@ -162,8 +162,8 @@ const (
 // Mixed workload defaults
 const (
 	MixedDefaultGetDistrib    = 45
-	MixedDefaultPutDistrib    = 30
-	MixedDefaultDeleteDistrib = 15
-	MixedDefaultStatDistrib   = 10
+	MixedDefaultStatDistrib   = 30
+	MixedDefaultPutDistrib    = 15
+	MixedDefaultDeleteDistrib = 10
 	MixedDefaultSeedCount     = 2500
 )

@@ -83,10 +83,10 @@ SCENARIO_OUT="$WORKDIR/test1.out"
   --duration 15s \
   --seed-objects 100 \
   --cleanup \
-  --put-distrib 30 \
+  --put-distrib 15 \
   --get-distrib 45 \
-  --delete-distrib 15 \
-  --stat-distrib 10 \
+  --delete-distrib 10 \
+  --stat-distrib 30 \
 ) > "$SCENARIO_OUT" 2>&1 || true
 
 # Scenario content is printed to stdout by --generate-only
@@ -102,22 +102,22 @@ else
   fail "Test1: GET weight 45 not found"
 fi
 
-if grep -q '"put": 30' "$SCENARIO_OUT"; then
-  pass "Test1: PUT weight is 30"
+if grep -q '"put": 15' "$SCENARIO_OUT"; then
+  pass "Test1: PUT weight is 15"
 else
-  fail "Test1: PUT weight 30 not found"
+  fail "Test1: PUT weight 15 not found"
 fi
 
-if grep -q '"delete": 15' "$SCENARIO_OUT"; then
-  pass "Test1: DELETE weight is 15"
+if grep -q '"delete": 10' "$SCENARIO_OUT"; then
+  pass "Test1: DELETE weight is 10"
 else
-  fail "Test1: DELETE weight 15 not found"
+  fail "Test1: DELETE weight 10 not found"
 fi
 
-if grep -q '"stat": 10' "$SCENARIO_OUT"; then
-  pass "Test1: STAT weight is 10"
+if grep -q '"stat": 30' "$SCENARIO_OUT"; then
+  pass "Test1: STAT weight is 30"
 else
-  fail "Test1: STAT weight 10 not found"
+  fail "Test1: STAT weight 30 not found"
 fi
 
 if grep -q "PreconditionLoad" "$SCENARIO_OUT"; then
