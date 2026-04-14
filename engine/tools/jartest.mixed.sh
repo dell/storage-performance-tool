@@ -66,9 +66,9 @@ unset _caller_env _v
 
 # Distribution weights (must sum to 100)
 : "${MIXED_GET:=45}"
-: "${MIXED_PUT:=30}"
-: "${MIXED_DELETE:=15}"
-: "${MIXED_STAT:=10}"
+: "${MIXED_STAT:=30}"
+: "${MIXED_PUT:=15}"
+: "${MIXED_DELETE:=10}"
 
 : "${MIXED_CLEANUP:=false}"
 
@@ -278,7 +278,7 @@ echo "== Results: ${RESULTS_DIR} =="
   --storage-auth-version="${S3_AUTH_VERSION}" \
   --storage-auth-uid="${S3_ACCESS_KEY}" \
   --storage-auth-secret="${S3_SECRET_KEY}" \
-  -f "${SCENARIO_FILE}" \
+  --run-scenario="${SCENARIO_FILE}" \
   "$@" 2>&1 | tee "${RESULTS_DIR}/output.log"
 
 echo "== Results saved to: ${RESULTS_DIR} =="
