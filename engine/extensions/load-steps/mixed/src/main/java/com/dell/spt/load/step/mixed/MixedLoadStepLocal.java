@@ -138,6 +138,13 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			throw new IllegalStateException("MixedLoad requires at least 2 non-zero op weights");
 		}
 
+		// ── 4a. Divide concurrency among active generators ─────────────────
+		// The user's --threads flag sets a single concurrency limit; split it
+		// across the N active operation types so total S3 connections ≈ limit.
+		final int perOpConcurrency = Math.max(1, concurrencyLimit / nonZero);
+		Loggers.MSG.info("MixedLoad: {} active ops, concurrency {} → {} per op type",
+						nonZero, concurrencyLimit, perOpConcurrency);
+
 		// Build the weights array in the same order we create generators (GET → PUT → DELETE → STAT)
 		final List<Integer> weightList = new ArrayList<>(4);
 		if (getWeight > 0)
@@ -190,13 +197,13 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// ── 8. Register metrics (must precede generator creation) ──────────
 		int originIdx = 0;
 		if (getWeight > 0)
-			initMetrics(originIdx++, OpType.READ, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+			initMetrics(originIdx++, OpType.READ, perOpConcurrency, metricsConfig, itemDataSize, colorFlag);
 		if (putWeight > 0)
-			initMetrics(originIdx++, OpType.CREATE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+			initMetrics(originIdx++, OpType.CREATE, perOpConcurrency, metricsConfig, itemDataSize, colorFlag);
 		if (deleteWeight > 0)
-			initMetrics(originIdx++, OpType.DELETE, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+			initMetrics(originIdx++, OpType.DELETE, perOpConcurrency, metricsConfig, itemDataSize, colorFlag);
 		if (statWeight > 0)
-			initMetrics(originIdx++, OpType.STAT, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+			initMetrics(originIdx++, OpType.STAT, perOpConcurrency, metricsConfig, itemDataSize, colorFlag);
 
 		// ── 9. Create generators ───────────────────────────────────────────
 		originIdx = 0;
@@ -205,6 +212,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (getWeight > 0) {
 			final Config getSubConfig = makeSub(mergedConfig, "read");
 			getSubConfig.val("load-op-recycle-mode", true);
+			getSubConfig.val("storage-driver-limit-concurrency", perOpConcurrency);
 			buildContext(originIdx++, stepId, OpType.READ, getSubConfig, itemType, itemFactory,
 							dataInput, batchSize, tracePersist, weightThrottle, null, null, null);
 		}
@@ -213,6 +221,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (putWeight > 0) {
 			final Config putSubConfig = makeSub(mergedConfig, "create");
 			putSubConfig.val("item-input-file", ""); // generate new items, don't read existing
+			putSubConfig.val("storage-driver-limit-concurrency", perOpConcurrency);
 			buildContext(originIdx++, stepId, OpType.CREATE, putSubConfig, itemType, itemFactory,
 							dataInput, batchSize, tracePersist, weightThrottle, sharedQueue, null,
 							putRemainingFilePath);
@@ -221,6 +230,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// DELETE: consumes from the shared queue
 		if (deleteWeight > 0) {
 			final Config delSubConfig = makeSub(mergedConfig, "delete");
+			delSubConfig.val("storage-driver-limit-concurrency", perOpConcurrency);
 			final QueueItemInput queueInput = new QueueItemInput(sharedQueue);
 			buildContext(originIdx++, stepId, OpType.DELETE, delSubConfig, itemType, itemFactory,
 							dataInput, batchSize, tracePersist, weightThrottle, null, queueInput, null);
@@ -230,6 +240,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (statWeight > 0) {
 			final Config statSubConfig = makeSub(mergedConfig, "stat");
 			statSubConfig.val("load-op-recycle-mode", true);
+			statSubConfig.val("storage-driver-limit-concurrency", perOpConcurrency);
 			buildContext(originIdx++, stepId, OpType.STAT, statSubConfig, itemType, itemFactory,
 							dataInput, batchSize, tracePersist, weightThrottle, null, null, null);
 		}

@@ -104,18 +104,10 @@ MixedLoad
             },
             "op": {
                 "weight": {
-                    {{- if .HasGetDistrib}}
                     "get": {{.GetDistrib}},
-                    {{- end}}
-                    {{- if .HasPutDistrib}}
                     "put": {{.PutDistrib}},
-                    {{- end}}
-                    {{- if .HasDeleteDistrib}}
                     "delete": {{.DeleteDistrib}},
-                    {{- end}}
-                    {{- if .HasStatDistrib}}
                     "stat": {{.StatDistrib}}
-                    {{- end}}
                 }
             }
         }
