@@ -140,4 +140,49 @@ class ResponseHandlerBaseTest {
 		// Verify the channel is still usable (no crash)
 		ch.finishAndReleaseAll();
 	}
+
+	@Test
+	void channelRead0_nonOperationAttribute_skipsWithoutCrash() {
+		// When a non-Operation object (e.g., a plain String) is stored in ATTR_KEY_OPERATION,
+		// channelRead0 should return early without calling handle() or throwing ClassCastException.
+		final var driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
+		final var handler = newHandler(driver);
+		final var ch = new EmbeddedChannel(handler);
+
+		// Store a non-Operation object in the attribute (raw type bypasses generic check)
+		@SuppressWarnings("rawtypes")
+		final io.netty.util.Attribute rawAttr = ch.attr(NettyStorageDriver.ATTR_KEY_OPERATION);
+		rawAttr.set("not-an-operation");
+
+		// Write an inbound message — this triggers channelRead0
+		ch.writeInbound(new Object());
+
+		// The handler should have returned early — no crash, no driver interaction
+		verify(driver, never()).complete(any(), any());
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void exceptionCaught_nonOperationAttribute_skipsWithoutCrash() {
+		// When a non-Operation object is in ATTR_KEY_OPERATION, exceptionCaught
+		// should return early — no status change, no driver.complete().
+		final var driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		final var handler = newHandler(driver);
+		final var ch = new EmbeddedChannel(handler);
+
+		// Store a non-Operation object (raw type bypasses generic check)
+		@SuppressWarnings("rawtypes")
+		final io.netty.util.Attribute rawAttr = ch.attr(NettyStorageDriver.ATTR_KEY_OPERATION);
+		rawAttr.set("not-an-operation");
+
+		// Fire an exception through the pipeline
+		ch.pipeline().fireExceptionCaught(new IOException("test exception"));
+
+		// Should NOT have called complete — the guard returned early
+		verify(driver, never()).complete(any(), any());
+		ch.finishAndReleaseAll();
+	}
 }

@@ -9,7 +9,9 @@ import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -33,6 +35,15 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SuppressWarnings({"unchecked", "rawtypes"})
 class MixedLoadGeneratorTest {
+
+	@BeforeAll
+	static void initLog4j() {
+		// Force Log4j initialization before any test starts a generator.
+		// Without this, the generator's doInit() triggers lazy Log4j init in a virtual thread,
+		// and gen.stop() can interrupt that thread mid-init, permanently corrupting Log4j.
+		ThreadContext.put("test", "init");
+		ThreadContext.remove("test");
+	}
 
 	private VirtualThreadExecutor executor;
 
