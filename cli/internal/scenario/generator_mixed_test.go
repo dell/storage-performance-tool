@@ -99,7 +99,7 @@ func TestGenerateMixedScenario(t *testing.T) {
 			},
 		},
 		{
-			name: "zero-weight op omitted from scenario",
+			name: "zero-weight ops still emitted with value 0",
 			params: func() Params {
 				p := baseParams
 				p.GetDistrib = 75
@@ -111,14 +111,12 @@ func TestGenerateMixedScenario(t *testing.T) {
 			mustContain: []string{
 				`"get": 75`,
 				`"put": 25`,
-			},
-			mustAbsent: []string{
-				`"delete"`,
-				`"stat"`,
+				`"delete": 0`,
+				`"stat": 0`,
 			},
 		},
 		{
-			name: "stat-only scenario (GET+STAT, no PUT/DELETE)",
+			name: "GET+STAT scenario (no PUT/DELETE)",
 			params: func() Params {
 				p := baseParams
 				p.GetDistrib = 60
@@ -130,10 +128,8 @@ func TestGenerateMixedScenario(t *testing.T) {
 			mustContain: []string{
 				`"get": 60`,
 				`"stat": 40`,
-			},
-			mustAbsent: []string{
-				`"put"`,
-				`"delete"`,
+				`"put": 0`,
+				`"delete": 0`,
 			},
 		},
 	}

@@ -438,7 +438,14 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		} catch (final ExecutionException | TimeoutException e) {
 			final var cause = e.getCause();
 			LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to send the request");
-			final var op = future.channel().attr(ATTR_KEY_OPERATION).get();
+			final Object rawOp = future.channel().attr(ATTR_KEY_OPERATION).get();
+			if (rawOp != null && !(rawOp instanceof Operation)) {
+				LogUtil.trace(Loggers.ERR, Level.ERROR, cause,
+								"sendHttpRequestComplete: ATTR_KEY_OPERATION contains {} instead of Operation",
+								rawOp.getClass().getName());
+				return;
+			}
+			final var op = (Operation) rawOp;
 			op.status(Status.FAIL_IO);
 			complete(future.channel(), (O) op);
 		} catch (final InterruptedException e) {

@@ -4,10 +4,10 @@
 load:
   op:
     weight:
-      get: 60
-      put: 25
-      delete: 15
-      stat: 0
+      get: 45
+      stat: 30
+      put: 15
+      delete: 10
     delete:
       input:
         file: ""

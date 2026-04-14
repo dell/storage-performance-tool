@@ -154,6 +154,7 @@ SCENARIO_OUT2="$WORKDIR/test2.out"
   --put-distrib 30 \
   --get-distrib 40 \
   --delete-distrib 30 \
+  --stat-distrib 0 \
 ) > "$SCENARIO_OUT2" 2>&1 || true
 
 if grep -q "MixedLoad" "$SCENARIO_OUT2"; then
@@ -261,6 +262,7 @@ set +e
   --put-distrib 10 \
   --get-distrib 10 \
   --delete-distrib 80 \
+  --stat-distrib 0 \
 ) > "$SCENARIO_OUT5" 2>&1
 EXIT_CODE=$?
 set -e
@@ -282,6 +284,7 @@ set +e
   --put-distrib 25 \
   --get-distrib 60 \
   --delete-distrib 15 \
+  --stat-distrib 0 \
 ) > "$SCENARIO_OUT6" 2>&1
 EXIT_CODE=$?
 set -e
@@ -304,6 +307,7 @@ set +e
   --put-distrib 0 \
   --get-distrib 100 \
   --delete-distrib 0 \
+  --stat-distrib 0 \
 ) > "$SCENARIO_OUT7" 2>&1
 EXIT_CODE=$?
 set -e
@@ -326,6 +330,7 @@ set +e
   --put-distrib 40 \
   --get-distrib 60 \
   --delete-distrib 0 \
+  --stat-distrib 0 \
   --cleanup \
 ) > "$SCENARIO_OUT8" 2>&1
 EXIT_CODE=$?
