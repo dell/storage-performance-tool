@@ -16,7 +16,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -33,7 +32,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>Tests verify schedule-driven dispatch, DELETE re-roll, PUT→DELETE queue flow,
  * and proper result routing through the generator's single-driver architecture.
  */
-@SuppressWarnings({"unchecked", "rawtypes"})
+@SuppressWarnings({"unchecked", "rawtypes"
+})
 class MixedLoadGeneratorTest {
 
 	@BeforeAll
@@ -382,14 +382,46 @@ class MixedLoadGeneratorTest {
 		return new OperationsBuilder<>() {
 			private OpType type = opType;
 
-			@Override public int originIndex() { return 0; }
-			@Override public OpType opType() { return type; }
-			@Override public OperationsBuilder<Item, Operation<Item>> opType(final OpType t) { type = t; return this; }
-			@Override public String inputPath() { return ""; }
-			@Override public OperationsBuilder<Item, Operation<Item>> inputPath(final String p) { return this; }
-			@Override public OperationsBuilder<Item, Operation<Item>> outputPathInput(final Input<String> i) { return this; }
-			@Override public OperationsBuilder<Item, Operation<Item>> credentialInput(final Input i) { return this; }
-			@Override public OperationsBuilder<Item, Operation<Item>> credentialsByPath(final Map m) { return this; }
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return type;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> opType(final OpType t) {
+				type = t;
+				return this;
+			}
+
+			@Override
+			public String inputPath() {
+				return "";
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> inputPath(final String p) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> outputPathInput(final Input<String> i) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> credentialInput(final Input i) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> credentialsByPath(final Map m) {
+				return this;
+			}
 
 			@Override
 			public Operation<Item> buildOp(final Item item) {
@@ -402,11 +434,16 @@ class MixedLoadGeneratorTest {
 			@Override
 			public void buildOps(final List<Item> items, final List<Operation<Item>> buff) {
 				for (final Item item : items) {
-					try { buff.add(buildOp(item)); } catch (final Exception e) { throw new RuntimeException(e); }
+					try {
+						buff.add(buildOp(item));
+					} catch (final Exception e) {
+						throw new RuntimeException(e);
+					}
 				}
 			}
 
-			@Override public void close() {}
+			@Override
+			public void close() {}
 		};
 	}
 

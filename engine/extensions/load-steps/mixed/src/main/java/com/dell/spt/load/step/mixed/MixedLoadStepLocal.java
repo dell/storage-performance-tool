@@ -64,7 +64,8 @@ import static com.github.akurilov.confuse.Config.deepToMap;
  *       are eligible for deletion in the same run.
  * </ol>
  */
-@SuppressWarnings({"unchecked", "rawtypes"})
+@SuppressWarnings({"unchecked", "rawtypes"
+})
 public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	public MixedLoadStepLocal(
@@ -144,10 +145,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		}
 
 		final Map<OpType, Integer> weightMap = new EnumMap<>(OpType.class);
-		if (getWeight > 0) weightMap.put(OpType.READ, getWeight);
-		if (putWeight > 0) weightMap.put(OpType.CREATE, putWeight);
-		if (deleteWeight > 0) weightMap.put(OpType.DELETE, deleteWeight);
-		if (statWeight > 0) weightMap.put(OpType.STAT, statWeight);
+		if (getWeight > 0)
+			weightMap.put(OpType.READ, getWeight);
+		if (putWeight > 0)
+			weightMap.put(OpType.CREATE, putWeight);
+		if (deleteWeight > 0)
+			weightMap.put(OpType.DELETE, deleteWeight);
+		if (statWeight > 0)
+			weightMap.put(OpType.STAT, statWeight);
 		final OpSchedule schedule = new OpSchedule(weightMap);
 
 		Loggers.MSG.info("MixedLoad: {} active ops, concurrency {}, schedule {}",
@@ -212,7 +217,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final var uid = authConfig.stringVal("uid");
 		final var secret = authConfig.stringVal("secret");
 		final Credential cred = (uid == null && secret == null)
-						? Credential.NONE : Credential.getInstance(uid, secret);
+						? Credential.NONE
+						: Credential.getInstance(uid, secret);
 		final Input credInput = new ConstantValueInputImpl(cred);
 
 		final var inputConfig = itemConfig.configVal("input");
@@ -270,10 +276,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// Build the per-op MetricsContext map for result routing
 		final Map<OpType, MetricsContext> metricsCtxByOpType = new EnumMap<>(OpType.class);
 		originIdx = 0;
-		if (getWeight > 0) metricsCtxByOpType.put(OpType.READ, metricsContexts.get(originIdx++));
-		if (putWeight > 0) metricsCtxByOpType.put(OpType.CREATE, metricsContexts.get(originIdx++));
-		if (deleteWeight > 0) metricsCtxByOpType.put(OpType.DELETE, metricsContexts.get(originIdx++));
-		if (statWeight > 0) metricsCtxByOpType.put(OpType.STAT, metricsContexts.get(originIdx++));
+		if (getWeight > 0)
+			metricsCtxByOpType.put(OpType.READ, metricsContexts.get(originIdx++));
+		if (putWeight > 0)
+			metricsCtxByOpType.put(OpType.CREATE, metricsContexts.get(originIdx++));
+		if (deleteWeight > 0)
+			metricsCtxByOpType.put(OpType.DELETE, metricsContexts.get(originIdx++));
+		if (statWeight > 0)
+			metricsCtxByOpType.put(OpType.STAT, metricsContexts.get(originIdx++));
 
 		// ── 12. Wire put-remaining.csv output for PUT completions ──────────
 		final ItemInfoFileOutput putRemainingFileOut;
@@ -310,22 +320,27 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 				@Override
 				public int put(final List ops, final int from, final int to) {
-					for (int i = from; i < to; i++) put(ops.get(i));
+					for (int i = from; i < to; i++)
+						put(ops.get(i));
 					return to - from;
 				}
 
 				@Override
 				public int put(final List ops) {
-					for (final Object op : ops) put(op);
+					for (final Object op : ops)
+						put(op);
 					return ops.size();
 				}
 
 				@Override
-				public Input getInput() { return null; }
+				public Input getInput() {
+					return null;
+				}
 
 				@Override
 				public void close() throws Exception {
-					if (putRemainingFileOut != null) putRemainingFileOut.close();
+					if (putRemainingFileOut != null)
+						putRemainingFileOut.close();
 				}
 			};
 		} else {
@@ -374,7 +389,9 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			}
 
 			@Override
-			public Input getInput() { return stepCtx.getInput(); }
+			public Input getInput() {
+				return stepCtx.getInput();
+			}
 
 			@Override
 			public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
@@ -420,22 +437,27 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 			@Override
 			public int put(final List ops, final int from, final int to) {
-				for (int i = from; i < to; i++) put(ops.get(i));
+				for (int i = from; i < to; i++)
+					put(ops.get(i));
 				return to - from;
 			}
 
 			@Override
 			public int put(final List ops) {
-				for (final Object op : ops) put(op);
+				for (final Object op : ops)
+					put(op);
 				return ops.size();
 			}
 
 			@Override
-			public Input getInput() { return null; }
+			public Input getInput() {
+				return null;
+			}
 
 			@Override
 			public void close() throws Exception {
-				if (putRemainingFileOut != null) putRemainingFileOut.close();
+				if (putRemainingFileOut != null)
+					putRemainingFileOut.close();
 			}
 		});
 

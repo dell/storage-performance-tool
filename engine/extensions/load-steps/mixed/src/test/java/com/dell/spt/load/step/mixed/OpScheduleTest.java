@@ -195,8 +195,10 @@ class OpScheduleTest {
 		int deleteCount = 0;
 		for (int i = 0; i < totalOps; i++) {
 			final OpType op = schedule.next();
-			if (op == OpType.CREATE) createCount++;
-			else if (op == OpType.DELETE) deleteCount++;
+			if (op == OpType.CREATE)
+				createCount++;
+			else if (op == OpType.DELETE)
+				deleteCount++;
 		}
 
 		assertEquals(600 * cycles, createCount);
@@ -231,12 +233,15 @@ class OpScheduleTest {
 				}
 			});
 		}
-		for (final Thread t : threads) t.start();
-		for (final Thread t : threads) t.join();
+		for (final Thread t : threads)
+			t.start();
+		for (final Thread t : threads)
+			t.join();
 
 		final int total = threadCount * opsPerThread;
 		int sum = 0;
-		for (final int c : totalCounts) sum += c;
+		for (final int c : totalCounts)
+			sum += c;
 		assertEquals(total, sum, "Total ops dispatched should equal threadCount * opsPerThread");
 
 		// With 50/50 weights, both types should be well-represented (within 5% of 50%)

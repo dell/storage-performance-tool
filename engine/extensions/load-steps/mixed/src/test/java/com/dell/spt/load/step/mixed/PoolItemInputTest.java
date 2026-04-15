@@ -56,7 +56,8 @@ class PoolItemInputTest {
 		final List<Item> seeds = makeItems(10);
 		final PoolItemInput<Item> pool = new PoolItemInput<>(seeds);
 		final Set<String> seedNames = new HashSet<>();
-		for (final Item s : seeds) seedNames.add(s.name());
+		for (final Item s : seeds)
+			seedNames.add(s.name());
 
 		for (int i = 0; i < 100; i++) {
 			final Item item = pool.randomItem();
@@ -89,7 +90,8 @@ class PoolItemInputTest {
 		final int threadCount = 8;
 		final int callsPerThread = 10_000;
 		final Thread[] threads = new Thread[threadCount];
-		final boolean[] errors = {false};
+		final boolean[] errors = {false
+		};
 
 		for (int t = 0; t < threadCount; t++) {
 			threads[t] = new Thread(() -> {
@@ -102,8 +104,10 @@ class PoolItemInputTest {
 				}
 			});
 		}
-		for (final Thread t : threads) t.start();
-		for (final Thread t : threads) t.join();
+		for (final Thread t : threads)
+			t.start();
+		for (final Thread t : threads)
+			t.join();
 		assertFalse(errors[0], "randomItem returned null during concurrent access");
 	}
 
@@ -196,10 +200,14 @@ class PoolItemInputTest {
 			});
 		}
 
-		for (final Thread t : producers) t.start();
-		for (final Thread t : consumers) t.start();
-		for (final Thread t : producers) t.join();
-		for (final Thread t : consumers) t.join();
+		for (final Thread t : producers)
+			t.start();
+		for (final Thread t : consumers)
+			t.start();
+		for (final Thread t : producers)
+			t.join();
+		for (final Thread t : consumers)
+			t.join();
 
 		// All produced items should have been consumed (queue should be drained)
 		// Allow for some remaining in queue due to timing
