@@ -1,5 +1,7 @@
 package com.dell.spt.load.step.mixed;
 
+import static com.dell.spt.base.config.el.Language.withLanguage;
+import com.github.akurilov.commons.io.el.ExpressionInput;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -501,7 +503,19 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		try {
 			seed = TypeUtil.typeConvert(seedRaw, long.class);
 		} catch (final ClassCastException | NumberFormatException e) {
-			LogUtil.exception(Level.WARN, e, "Item naming seed conversion failed, using 0");
+			if (seedRaw instanceof String) {
+				try (
+								final var in = withLanguage(ExpressionInput.builder())
+												.expression((String) seedRaw)
+												.<ExpressionInput<Long>> build()) {
+					seed = in.get();
+				} catch (final Exception ee) {
+					LogUtil.exception(Level.WARN, e, "Item naming seed expression (\"{}\") failure", seedRaw);
+				}
+			} else {
+				throw new IllegalStateException(
+								"Item naming seed (" + seedRaw + ") should be an integer either an expression");
+			}
 		}
 		final var prefix = namingConfig.stringVal("prefix");
 		final var radix = namingConfig.intVal("radix");
