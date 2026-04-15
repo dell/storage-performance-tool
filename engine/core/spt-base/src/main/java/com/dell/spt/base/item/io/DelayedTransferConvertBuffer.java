@@ -15,7 +15,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** Created by kurila on 16.01.17. */
@@ -68,7 +67,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 					lock.unlock();
 				}
 			}
-			LockSupport.parkNanos(1);
+			Thread.yield();
 		}
 	}
 
@@ -109,7 +108,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 					lock.unlock();
 				}
 			}
-			LockSupport.parkNanos(1);
+			Thread.yield();
 		}
 		return to - from;
 	}
