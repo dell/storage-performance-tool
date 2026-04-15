@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.LockSupport;
 
 /**
  * A schedule-driven load generator for mixed workloads.
@@ -115,10 +114,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		// Acquire a concurrency permit before generating the next op.
 		// This prevents the generator from flooding the driver's input queue
 		// faster than the driver can process operations.
-		if (!concurrencyThrottle.tryAcquire()) {
-			LockSupport.parkNanos(1_000);
-			return;
-		}
+		concurrencyThrottle.acquire();
 
 		try {
 			OpType opType = schedule.next();
@@ -149,7 +145,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			if (item == null) {
 				itemInputFinished = true;
 				concurrencyThrottle.release();
-				LockSupport.parkNanos(1_000);
+				Thread.yield();
 				return;
 			}
 		} else {
@@ -160,7 +156,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		final O op = builders.get(opType).buildOp(item);
 		if (!opOutput.put(op)) {
 			concurrencyThrottle.release();
-			LockSupport.parkNanos(1_000);
+			Thread.yield();
 			return;
 		}
 		generatedCount.increment();
@@ -172,7 +168,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			// Put item back if driver rejected — avoid item loss
 			pool.addDeleteItem(item);
 			concurrencyThrottle.release();
-			LockSupport.parkNanos(1_000);
+			Thread.yield();
 			return;
 		}
 		generatedCount.increment();
