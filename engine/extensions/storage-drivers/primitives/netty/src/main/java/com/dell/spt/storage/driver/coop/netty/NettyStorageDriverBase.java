@@ -311,6 +311,18 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		}
 	}
 
+	private Channel leaseActiveConnection() throws ConnectException {
+		while (true) {
+			final Channel conn = connPool.lease();
+			if (conn.isActive()) {
+				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+				return conn;
+			}
+			conn.close();
+			connPool.release(conn);
+		}
+	}
+
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
 
@@ -332,11 +344,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 					op.startResponse();
 					complete(null, op);
 				} else {
-					conn = connPool.lease();
-					conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-					if (!conn.isActive()) {
-						throw new ConnectException("Connection is not active");
-					}
+					conn = leaseActiveConnection();
 					conn.attr(ATTR_KEY_OPERATION).set(op);
 					op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
 					op.startRequest();
@@ -406,11 +414,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 					nextOp.startResponse();
 					complete(null, nextOp);
 				} else {
-					conn = connPool.lease();
-					conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-					if (!conn.isActive()) {
-						throw new ConnectException("Connection is not active");
-					}
+					conn = leaseActiveConnection();
 					conn.attr(ATTR_KEY_OPERATION).set(nextOp);
 					nextOp.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
 					nextOp.startRequest();
@@ -623,11 +627,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			// Prepare and re-submit directly (we still hold the concurrency permit)
 			prepare(op);
 			try {
-				final Channel conn = connPool.lease();
-				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-				if (!conn.isActive()) {
-					throw new ConnectException("Connection is not active");
-				}
+				final Channel conn = leaseActiveConnection();
 				conn.attr(ATTR_KEY_OPERATION).set(op);
 				op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
 				op.startRequest();
