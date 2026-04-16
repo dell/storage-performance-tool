@@ -236,8 +236,8 @@ func GenerateMixedScenario(params Params) (string, error) {
 		templateKeyDeleteItemsFile: fmt.Sprintf(`"%s"`, escapeJSONString(params.DeleteItemsFile)),
 
 		// Step IDs
-		templateKeyStepIDSeed:   stepIDSeed,
-		templateKeyStepIDMixed:  stepIDMixed,
+		templateKeyStepIDSeed:      stepIDSeed,
+		templateKeyStepIDMixed:     stepIDMixed,
 		templateKeyStepIDSeedClean: stepIDSeedCleanup,
 		templateKeyStepIDPutClean:  stepIDPutCleanup,
 
