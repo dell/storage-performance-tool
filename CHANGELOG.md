@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.7.4] - 2026-04-16
+
+### Fixed
+
+- **Netty connection pool exhaustion failure** — resolved a `ConnectException: Connection is not active` bug where the `s3` (Netty) driver aggressively failed entire load operations if handed a stale/idle connection by the pool. The driver now automatically closes the inactive channel and loops to lease a fresh active connection without disrupting the request stream.
+
 ## [5.7.3] - 2026-04-13
 
 ### Fixed
