@@ -246,6 +246,10 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				Loggers.MSG.info("Adjust input buffer size: {}", SizeInBytes.formatFixedSize(size));
 				bootstrap.option(ChannelOption.SO_RCVBUF, size);
 				bootstrap.option(ChannelOption.SO_SNDBUF, BUFF_SIZE_MIN);
+			} else if (OpType.NOOP.equals(opType)) {
+				Loggers.MSG.info("Adjust I/O buffer sizes: {}", SizeInBytes.formatFixedSize(size));
+				bootstrap.option(ChannelOption.SO_RCVBUF, size);
+				bootstrap.option(ChannelOption.SO_SNDBUF, size);
 			} else {
 				bootstrap.option(ChannelOption.SO_RCVBUF, BUFF_SIZE_MIN);
 				bootstrap.option(ChannelOption.SO_SNDBUF, BUFF_SIZE_MIN);

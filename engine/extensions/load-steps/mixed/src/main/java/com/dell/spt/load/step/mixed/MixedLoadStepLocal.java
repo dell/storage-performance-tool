@@ -210,6 +210,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			driver = StorageDriver.instance(
 							extensions, storageConfig, dataInput,
 							dataConfig.boolVal("verify"), batchSize, stepId);
+			driver.adjustIoBuffers(itemDataSize.get(), OpType.NOOP);
 		} catch (final IllegalConfigurationException | InterruptedException e) {
 			throw new IllegalStateException("Failed to initialize storage driver", e);
 		}
