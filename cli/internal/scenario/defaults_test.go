@@ -47,6 +47,8 @@ func TestGenerateDefaults(t *testing.T) {
 				SecretKey:    "testsecret",
 				Bucket:       "testbucket",
 				Threads:      4,
+				MpuObjects:   2,
+				MpuParts:     3,
 			},
 			wantErr: false,
 			checkOutput: func(t *testing.T, data []byte) {
@@ -72,6 +74,18 @@ func TestGenerateDefaults(t *testing.T) {
 				}
 				if config.Storage.Net.SSL.Enabled {
 					t.Error("Expected SSL to be disabled for HTTP")
+				}
+				if config.Storage.Driver.Limit.Concurrency != 4 {
+					t.Errorf("Expected concurrency 4, got %d", config.Storage.Driver.Limit.Concurrency)
+				}
+				if config.Storage.Driver.Limit.Multipart == nil {
+					t.Fatal("Expected multipart limits to be set, got nil")
+				}
+				if config.Storage.Driver.Limit.Multipart.Objects != 2 {
+					t.Errorf("Expected MPU objects 2, got %d", config.Storage.Driver.Limit.Multipart.Objects)
+				}
+				if config.Storage.Driver.Limit.Multipart.Parts != 3 {
+					t.Errorf("Expected MPU parts 3, got %d", config.Storage.Driver.Limit.Multipart.Parts)
 				}
 			},
 		},
