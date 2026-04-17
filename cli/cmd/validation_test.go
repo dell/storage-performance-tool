@@ -610,7 +610,6 @@ func TestValidatePartSize(t *testing.T) {
 			mpuObjects: 0,
 			mpuParts:   0,
 		},
-
 	}
 
 	for _, tt := range tests {
