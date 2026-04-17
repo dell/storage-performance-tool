@@ -91,6 +91,8 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MB`, `256KB`, `4GB`). Ignored for `list` |
 | `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). When set, `load.batch.size` is automatically forced to `1`. Applies to `write` workloads and `read` seed phases |
+| `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
+| `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
@@ -309,6 +311,13 @@ When `--part-size` is set, each object goes through a four-phase lifecycle:
 
 - Individual parts are retried up to **3 times** before the upload is considered failed. This means a transient network error on one part does not waste the successfully uploaded parts immediately.
 - If all retries for a part are exhausted, the engine automatically sends an `AbortMultipartUpload` request to clean up the incomplete upload. This prevents orphaned parts from accumulating on the storage target.
+
+**Concurrency Controls:**
+
+- By default, all parts from all active multipart objects compete freely for the global `--threads` pool.
+- Use `--mpu-concurrent-objects N` to restrict how many top-level objects can be in the "in-flight" uploading state simultaneously.
+- Use `--mpu-concurrent-parts N` to restrict how many parts of a *single* object can be uploading simultaneously (creating a sliding window of parts).
+- These limits operate *within* the global `--threads` limit and are useful for preventing connection pool exhaustion or excessive memory pressure when testing with high concurrency.
 
 **Checksums:**
 

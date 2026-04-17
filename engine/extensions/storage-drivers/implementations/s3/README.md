@@ -418,19 +418,27 @@ Each multipart upload proceeds through four phases:
 3. **Complete** -- `POST /<bucket>/<key>?uploadId=ID` with an XML body listing all part numbers and ETags.
 4. **Abort** (on failure) -- `DELETE /<bucket>/<key>?uploadId=ID` cleans up incomplete uploads when part retries are exhausted.
 
-#### 4.4.3. Part-Level Retry
+#### 4.4.3. Concurrency Limits
+
+The maximum concurrency of multipart uploads can be restricted at the storage driver level via the `storage-driver-limit-multipart` configuration:
+- `storage-driver-limit-multipart-objects`: Restricts how many top-level multipart objects can be active simultaneously (0 = unlimited).
+- `storage-driver-limit-multipart-parts`: Restricts how many parts of a *single* object can be uploading simultaneously, creating a sliding window of parts (0 = unlimited).
+
+These limits operate *within* the global `storage-driver-limit-concurrency` pool and are useful for preventing connection pool exhaustion when testing with high concurrency.
+
+#### 4.4.4. Part-Level Retry
 
 Individual parts are retried up to 3 times on failure. Only after all retries for a part are exhausted does the engine abort the entire multipart upload. This prevents a single transient network error from wasting all successfully uploaded parts.
 
-#### 4.4.4. Per-Part Checksums
+#### 4.4.5. Per-Part Checksums
 
 When `storage-checksum-enabled=true`, the selected checksum algorithm is applied to **each individual part upload**. The checksum is computed over the part's data slice and sent in the appropriate S3 header (`Content-MD5` for MD5, or `x-amz-checksum-<algorithm>` for CRC32/CRC32C/SHA1/SHA256).
 
-#### 4.4.5. Reporting
+#### 4.4.6. Reporting
 
 Completed multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with columns: `ItemPath`, `UploadId`, `RespLatency[us]`. Aborted uploads are also logged with an `abort` prefix.
 
-#### 4.4.6. Example: Scenario File (JAR users)
+#### 4.4.7. Example: Scenario File (JAR users)
 
 Users running the engine JAR directly can configure MPU in a JavaScript scenario file:
 
