@@ -211,7 +211,7 @@ class CoopStorageDriverBaseTest {
 		parent.subOperations(); // initializes pendingSubTasksCount = 4
 
 		// Grab first part and simulate a failed IO
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.FAIL_IO);
 		// Simulate finishResponse() having been called (decrements parent pending count)
 		parent.markSubTaskCompleted(); // pending = 3
@@ -240,7 +240,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		// Exhaust retries
 		for (int i = 0; i < CoopStorageDriverBase.MAX_PART_RETRIES; i++) {
 			part.incrementRetryCount();
@@ -265,7 +265,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
 		parent.markSubTaskCompleted(); // simulate finishResponse; pending = 1
 
@@ -289,7 +289,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 1
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
 		parent.markSubTaskCompleted(); // pending = 0, allSubOperationsDone() → true
 

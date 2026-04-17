@@ -10,6 +10,7 @@ import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
 import java.util.concurrent.BlockingQueue;
+import java.util.Queue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 
@@ -36,6 +37,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final Lock dispatchLock;
 	private final Condition dispatchReady;
 
+	private final Queue<O> deferredMpuQueue = new java.util.ArrayDeque<>();
+
 	public OperationDispatchTask(
 					final VirtualThreadExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
@@ -60,19 +63,20 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doWork() throws Exception {
 		try {
+			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty() && storageDriver.tryAcquireMpuObjectPermit()) {
+				buff.add(deferredMpuQueue.poll());
+			}
+			
 			// Drain child ops first (partial/composite completions have priority)
-			childOpQueue.drainTo(buff, batchSize - buff.size());
+			if (buff.size() < batchSize) {
+				childOpQueue.drainTo(buff, batchSize - buff.size());
+			}
+
 			// Then drain incoming ops
+			final java.util.List<O> tempInOps = new java.util.ArrayList<>(batchSize);
 			if (buff.size() == 0) {
-				inOpQueue.drainTo(buff, batchSize);
-				if (buff.size() == 0) {
-					// Both queues empty — wait for signal from producer or completion
-					// callback.  All code paths that enqueue ops (put methods) or free
-					// capacity (handleCompleted) call signalDispatch(), so an untimed
-					// await is safe — the signal will always arrive.  Removing the timed
-					// variant eliminates per-park ScheduledFutureTask allocation and the
-					// corresponding VT-unparker thread work that was consuming 22-27% of
-					// CPU in profiling.
+				inOpQueue.drainTo(tempInOps, batchSize);
+				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
 					dispatchLock.lock();
 					try {
 						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
@@ -82,14 +86,34 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						dispatchLock.unlock();
 					}
 					// Drain again after waking
-					childOpQueue.drainTo(buff, batchSize);
+					while (buff.size() < batchSize && !deferredMpuQueue.isEmpty() && storageDriver.tryAcquireMpuObjectPermit()) {
+						buff.add(deferredMpuQueue.poll());
+					}
 					if (buff.size() < batchSize) {
-						inOpQueue.drainTo(buff, batchSize - buff.size());
+						childOpQueue.drainTo(buff, batchSize - buff.size());
+					}
+					if (buff.size() < batchSize) {
+						inOpQueue.drainTo(tempInOps, batchSize - buff.size());
 					}
 				}
 			} else if (buff.size() < batchSize) {
-				inOpQueue.drainTo(buff, batchSize - buff.size());
+				inOpQueue.drainTo(tempInOps, batchSize - buff.size());
 			}
+
+			// Process new incoming ops to respect MPU object limits
+			for (int i = 0; i < tempInOps.size(); i++) {
+				O op = tempInOps.get(i);
+				if (storageDriver.isMpuInit(op)) {
+					if (storageDriver.tryAcquireMpuObjectPermit()) {
+						buff.add(op);
+					} else {
+						deferredMpuQueue.add(op);
+					}
+				} else {
+					buff.add(op);
+				}
+			}
+
 			// submit all buffered ops (including retries from prior iterations)
 			final int buffSize = buff.size();
 			if (buffSize > 0) {

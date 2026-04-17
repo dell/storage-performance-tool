@@ -71,6 +71,33 @@ class CompositeDataOperationImplTest {
 		assertTrue(op.allSubOperationsDone());
 	}
 
+	@Test
+	void nextSubOperations_returnsRequestedLimit() throws Exception {
+		var op = newCompositeOp(OpType.READ, 4096, 1024);
+		
+		var parts1 = op.nextSubOperations(2);
+		assertEquals(2, parts1.size());
+		
+		var parts2 = op.nextSubOperations(1);
+		assertEquals(1, parts2.size());
+		
+		var parts3 = op.nextSubOperations(5);
+		assertEquals(1, parts3.size(), "Should only return remaining parts (1)");
+		
+		var parts4 = op.nextSubOperations(1);
+		assertTrue(parts4.isEmpty(), "Should return empty list when exhausted");
+	}
+
+	@Test
+	void nextSubOperations_withZeroLimit_returnsAll() throws Exception {
+		var op = newCompositeOp(OpType.READ, 4096, 1024);
+		var parts = op.nextSubOperations(0);
+		assertEquals(4, parts.size());
+		
+		var partsAfter = op.nextSubOperations(1);
+		assertTrue(partsAfter.isEmpty());
+	}
+
 	// ---------- result() copy behavior (Fix #4: recycled ops) ----------
 
 	@Test
