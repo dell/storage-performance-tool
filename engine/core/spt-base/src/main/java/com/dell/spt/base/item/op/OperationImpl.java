@@ -88,6 +88,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	}
 
 	@Override
+	public void resetTiming() {
+		reqTimeStart = reqTimeDone = respTimeStart = respTimeDone = 0;
+	}
+
+	@Override
 	public void reset() {
 		item.reset();
 		nodeAddr = null;

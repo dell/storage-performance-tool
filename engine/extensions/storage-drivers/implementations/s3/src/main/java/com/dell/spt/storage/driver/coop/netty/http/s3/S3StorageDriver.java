@@ -668,8 +668,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			if (OpType.CREATE.equals(opType)) {
 				final var mpuOp = (CompositeDataOperation) op;
 				if (mpuOp.get(S3Api.KEY_MPU_ABORT) != null) {
+					mpuOp.resetTiming();
 					httpRequest = abortMultipartUploadRequest(mpuOp, nodeAddr);
 				} else if (mpuOp.allSubOperationsDone()) {
+					mpuOp.resetTiming();
 					httpRequest = completeMultipartUploadRequest(mpuOp, nodeAddr);
 				} else { // this is the initial state of the task
 					httpRequest = initMultipartUploadRequest(op, nodeAddr);
