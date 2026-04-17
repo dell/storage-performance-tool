@@ -185,7 +185,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	boolean isMpuInit(final O op) {
 		if (op instanceof CompositeOperation && OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeOperation) op;
-			return !compositeOp.allSubOperationsDone() && compositeOp.get("uploadId") == null;
+			return !compositeOp.allSubOperationsDone() && compositeOp.get("uploadId") == null && !OpType.NOOP.equals(op.type());
 		}
 		return false;
 	}

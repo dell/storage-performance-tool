@@ -1322,6 +1322,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			// Pre-super: extract upload ID from channel (channel may be released by super)
 			// and set failure status so super.complete() can close the channel if needed
 			if (compositeOp.get(S3Api.KEY_MPU_ABORT) == null
+							&& compositeOp.get(S3Api.KEY_UPLOAD_ID) == null
 							&& !compositeOp.allSubOperationsDone()) {
 				final var initUploadId = channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get();
 				if (initUploadId == null) {
