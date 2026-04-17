@@ -971,6 +971,195 @@ func TestGenerateDefaults(t *testing.T) {
 		tests = append(tests, tt)
 	}
 
+	// Mixed workload cases
+	mixedCases := []struct {
+		name        string
+		params      Params
+		wantErr     bool
+		checkOutput func(t *testing.T, data []byte)
+	}{
+		{
+			name: "mixed workload uses S3 driver and concurrency from threads",
+			params: Params{
+				WorkloadType: "mixed",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "testkey",
+				SecretKey:    "testsecret",
+				Bucket:       "testbucket",
+				Threads:      10,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Limit.Concurrency != 10 {
+					t.Errorf("Expected concurrency 10, got %d", config.Storage.Driver.Limit.Concurrency)
+				}
+				if config.Storage.Net.Node.Port != 9000 {
+					t.Errorf("Expected port 9000, got %d", config.Storage.Net.Node.Port)
+				}
+				if len(config.Storage.Net.Node.Addrs) != 1 || config.Storage.Net.Node.Addrs[0] != "minio" {
+					t.Errorf("Expected node address 'minio', got %v", config.Storage.Net.Node.Addrs)
+				}
+				if config.Storage.Auth.UID != "testkey" {
+					t.Errorf("Expected UID 'testkey', got %s", config.Storage.Auth.UID)
+				}
+				if config.Storage.Auth.Version != 4 {
+					t.Errorf("Expected auth version 4, got %d", config.Storage.Auth.Version)
+				}
+			},
+		},
+		{
+			name: "mixed workload with AWS driver sets s3-aws type",
+			params: Params{
+				WorkloadType: "mixed",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				S3Driver:     S3DriverAws,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-aws" {
+					t.Errorf("Expected driver type 's3-aws', got %q", config.Storage.Driver.Type)
+				}
+			},
+		},
+		{
+			name: "mixed workload with RDMA driver sets rdma config",
+			params: Params{
+				WorkloadType:       "mixed",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "key",
+				SecretKey:          "secret",
+				Bucket:             "bucket",
+				Threads:            8,
+				S3Driver:           S3DriverRdma,
+				RdmaFallback:       true,
+				RdmaThresholdBytes: 1048576,
+				RdmaTimeoutMs:      30000,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Driver.Type != "s3-rdma" {
+					t.Errorf("Expected driver type 's3-rdma', got %q", config.Storage.Driver.Type)
+				}
+				if config.Storage.Rdma == nil {
+					t.Fatal("Expected storage.rdma section for mixed+RDMA")
+				}
+				if !config.Storage.Rdma.Fallback {
+					t.Error("Expected RDMA fallback to be true")
+				}
+			},
+		},
+		{
+			name: "mixed workload with checksum sets checksum config",
+			params: Params{
+				WorkloadType: "mixed",
+				Endpoint:     "http://minio:9000",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				Checksum:     "crc32c",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum == nil {
+					t.Fatal("Expected checksum section for mixed workload")
+				}
+				if !config.Storage.Checksum.Enabled {
+					t.Error("Expected checksum.enabled to be true")
+				}
+				if config.Storage.Checksum.Algorithm != "crc32c" {
+					t.Errorf("Expected algorithm 'crc32c', got %q", config.Storage.Checksum.Algorithm)
+				}
+			},
+		},
+		{
+			name: "mixed workload with HTTPS enables SSL",
+			params: Params{
+				WorkloadType: "mixed",
+				Endpoint:     "https://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if !config.Storage.Net.SSL.Enabled {
+					t.Error("Expected SSL enabled for HTTPS endpoint")
+				}
+				if config.Storage.Net.Node.Port != 443 {
+					t.Errorf("Expected port 443, got %d", config.Storage.Net.Node.Port)
+				}
+			},
+		},
+		{
+			name: "mixed workload with multiple endpoints",
+			params: Params{
+				WorkloadType: "mixed",
+				Endpoints:    []string{"http://s3a:9000", "http://s3b:9000"},
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      8,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if len(config.Storage.Net.Node.Addrs) != 2 {
+					t.Fatalf("Expected 2 addrs, got %v", config.Storage.Net.Node.Addrs)
+				}
+				if config.Storage.Net.Node.Addrs[0] != "s3a" || config.Storage.Net.Node.Addrs[1] != "s3b" {
+					t.Errorf("Unexpected addrs: %v", config.Storage.Net.Node.Addrs)
+				}
+			},
+		},
+		{
+			name: "mixed workload without endpoint fails",
+			params: Params{
+				WorkloadType: "mixed",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range mixedCases {
+		tests = append(tests, tt)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := GenerateDefaults(tt.params)

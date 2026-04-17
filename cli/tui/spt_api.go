@@ -13,6 +13,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -441,8 +442,12 @@ func (c *SptAPIClient) getJSONMetrics(verbose bool) (string, error) {
 	return string(bodyData), nil
 }
 
-// ParseJSONMetrics parses JSON format metrics into PerformanceMetric
-func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error) {
+// ParseJSONMetrics parses JSON format metrics into a slice of PerformanceMetric.
+// For non-mixed workloads the slice contains a single element. For mixed workloads
+// the engine emits one entry per op-type (e.g. CREATE, READ, DELETE) sharing the
+// same step_id; all valid entries are returned. The slice is sorted by timestamp
+// descending so callers that only need a single metric can use [0].
+func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, error) {
 	var steps []JSONMetricsStep
 
 	if err := json.Unmarshal([]byte(data), &steps); err != nil {
@@ -453,15 +458,14 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error)
 		return nil, fmt.Errorf("no metrics steps found in JSON response: %w", ErrMetricsIncompatible)
 	}
 
-	type candidate struct {
-		step            *JSONMetricsStep
-		scope           string
+	type validated struct {
+		metric          *PerformanceMetric
+		timestamp       int64
 		sampleTimestamp time.Time
 	}
 
 	var (
-		best    candidate
-		found   bool
+		results []validated
 		lastErr error
 	)
 
@@ -496,30 +500,38 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error)
 			continue
 		}
 
-		if !found ||
-			step.Timestamp > best.step.Timestamp ||
-			(step.Timestamp == best.step.Timestamp && sampleTimestamp.After(best.sampleTimestamp)) {
-			best = candidate{
-				step:            step,
-				scope:           scope,
-				sampleTimestamp: sampleTimestamp,
-			}
-			found = true
-		}
+		metric := stepToMetric(step, scope, sampleTimestamp)
+		results = append(results, validated{
+			metric:          metric,
+			timestamp:       step.Timestamp,
+			sampleTimestamp: sampleTimestamp,
+		})
 	}
 
-	if !found {
+	if len(results) == 0 {
 		if lastErr != nil {
 			return nil, lastErr
 		}
 		return nil, fmt.Errorf("%w: no compatible node metrics", ErrMetricsIncompatible)
 	}
 
-	step := best.step
-	scope := best.scope
-	sampleTimestamp := best.sampleTimestamp
+	// Sort by timestamp descending, break ties by sample timestamp descending.
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].timestamp != results[j].timestamp {
+			return results[i].timestamp > results[j].timestamp
+		}
+		return results[i].sampleTimestamp.After(results[j].sampleTimestamp)
+	})
 
-	// Convert to our standard PerformanceMetric format
+	out := make([]*PerformanceMetric, len(results))
+	for i, v := range results {
+		out[i] = v.metric
+	}
+	return out, nil
+}
+
+// stepToMetric converts a validated JSONMetricsStep into a PerformanceMetric.
+func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time) *PerformanceMetric {
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
 		SampleTimestamp:          sampleTimestamp,
@@ -558,7 +570,7 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) (*PerformanceMetric, error)
 		metric.LimitTimeSec = step.Limit.TimeSec
 	}
 
-	return metric, nil
+	return metric
 }
 
 func parseSampleTimestamp(raw string) (time.Time, error) {

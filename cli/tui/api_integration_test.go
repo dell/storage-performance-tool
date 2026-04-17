@@ -460,13 +460,13 @@ func TestAPIIntegrationErrorHandling(t *testing.T) {
 
 			case "invalid JSON metrics format":
 				data, _ := client.GetJSONMetrics()
-				metric, err := client.ParseJSONMetrics(data)
+				metrics, err := client.ParseJSONMetrics(data)
 				// JSON parsing should return an error for invalid data
 				if err == nil {
 					t.Error("JSON parser should return error for invalid data")
 				}
-				if metric != nil {
-					t.Error("Should return nil metric when parsing fails")
+				if metrics != nil {
+					t.Error("Should return nil metrics when parsing fails")
 				}
 			}
 		})

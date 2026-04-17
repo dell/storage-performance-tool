@@ -347,6 +347,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			readObject(op);
 			break;
 
+		case STAT:
+			headObject(op);
+			break;
+
 		case DELETE:
 			deleteObject(op);
 			break;
@@ -414,6 +418,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		s3Client.deleteObject(
 						DeleteObjectRequest.builder()
+										.bucket(bk[0])
+										.key(bk[1])
+										.build());
+	}
+
+	private void headObject(final O op) {
+		final var bk = resolveBucketAndKey(op);
+
+		s3Client.headObject(
+						HeadObjectRequest.builder()
 										.bucket(bk[0])
 										.key(bk[1])
 										.build());

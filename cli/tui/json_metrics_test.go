@@ -230,15 +230,16 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 		name        string
 		jsonData    string
 		expectError bool
-		assert      func(t *testing.T, metric *PerformanceMetric)
+		assert      func(t *testing.T, metrics []*PerformanceMetric)
 	}{
 		{
 			name:     "valid node metrics",
 			jsonData: validJSON,
-			assert: func(t *testing.T, metric *PerformanceMetric) {
-				if metric == nil {
-					t.Fatal("expected metric to be non-nil")
+			assert: func(t *testing.T, metrics []*PerformanceMetric) {
+				if len(metrics) == 0 {
+					t.Fatal("expected at least one metric")
 				}
+				metric := metrics[0]
 				if metric.MetricsSchema != 2 {
 					t.Errorf("expected metrics schema 2, got %d", metric.MetricsSchema)
 				}
@@ -276,19 +277,23 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 		{
 			name:     "multiple steps uses latest sample",
 			jsonData: multipleStepsJSON,
-			assert: func(t *testing.T, metric *PerformanceMetric) {
-				if metric == nil || metric.StepID != secondStep.StepID {
-					t.Fatalf("expected latest step to be chosen")
+			assert: func(t *testing.T, metrics []*PerformanceMetric) {
+				if len(metrics) == 0 || metrics[0].StepID != secondStep.StepID {
+					t.Fatalf("expected latest step to be first")
+				}
+				if len(metrics) != 2 {
+					t.Fatalf("expected 2 metrics, got %d", len(metrics))
 				}
 			},
 		},
 		{
 			name:     "idle sample accepted",
 			jsonData: idleStepJSON,
-			assert: func(t *testing.T, metric *PerformanceMetric) {
-				if metric == nil {
-					t.Fatal("expected metric to be non-nil for idle sample")
+			assert: func(t *testing.T, metrics []*PerformanceMetric) {
+				if len(metrics) == 0 {
+					t.Fatal("expected at least one metric for idle sample")
 				}
+				metric := metrics[0]
 				if metric.RunID != "" {
 					t.Errorf("expected empty run id, got %q", metric.RunID)
 				}
@@ -309,10 +314,11 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 		{
 			name:     "RFC3339 sample timestamp without nanos",
 			jsonData: rfc3339JSON,
-			assert: func(t *testing.T, metric *PerformanceMetric) {
-				if metric == nil {
-					t.Fatal("expected metric to be non-nil for RFC3339 sample")
+			assert: func(t *testing.T, metrics []*PerformanceMetric) {
+				if len(metrics) == 0 {
+					t.Fatal("expected at least one metric for RFC3339 sample")
 				}
+				metric := metrics[0]
 				if !metric.SampleTimestamp.Equal(rfc3339SampleTime) {
 					t.Errorf("expected sample timestamp %v, got %v", rfc3339SampleTime, metric.SampleTimestamp)
 				}
@@ -368,7 +374,7 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := NewSptAPIClient("http://test")
-			metric, err := client.ParseJSONMetrics(tt.jsonData)
+			metrics, err := client.ParseJSONMetrics(tt.jsonData)
 
 			if tt.expectError {
 				if err == nil {
@@ -380,7 +386,7 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if tt.assert != nil {
-				tt.assert(t, metric)
+				tt.assert(t, metrics)
 			}
 		})
 	}
@@ -441,14 +447,14 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 			orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 			// Call the optimized metrics method
-			metric, source, err := orchestrator.getMetricsWithOptimizedFallback()
+			metrics, source, err := orchestrator.getMetricsWithOptimizedFallback()
 
 			// Validate results
 			if tt.expectNilMetric {
 				if err == nil {
 					t.Error("Expected error when JSON endpoint fails")
 				}
-				if metric != nil {
+				if metrics != nil {
 					t.Error("Expected nil metric when JSON endpoint fails")
 				}
 				if source != "" {
@@ -460,8 +466,8 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if metric == nil {
-				t.Error("Expected non-nil metric when JSON endpoint works")
+			if len(metrics) == 0 {
+				t.Error("Expected non-empty metrics when JSON endpoint works")
 			}
 			if source != tt.expectedSource {
 				t.Errorf("Expected source %q, got %q", tt.expectedSource, source)
@@ -469,6 +475,7 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 
 			// Verify metric contains expected JSON data
 			if source == "JSON" {
+				metric := metrics[0]
 				if metric.StepID != "json_test" {
 					t.Errorf("Expected JSON StepID 'json_test', got %q", metric.StepID)
 				}
@@ -523,14 +530,15 @@ func TestJSONMetricsTimestampConversion(t *testing.T) {
 			jsonData := marshalSteps(t, []JSONMetricsStep{step})
 
 			client := NewSptAPIClient("http://test")
-			metric, err := client.ParseJSONMetrics(jsonData)
+			metrics, err := client.ParseJSONMetrics(jsonData)
 
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
-			if metric == nil {
-				t.Fatal("Expected non-nil metric")
+			if len(metrics) == 0 {
+				t.Fatal("Expected at least one metric")
 			}
+			metric := metrics[0]
 			if !metric.Timestamp.Equal(tt.expectedTime) {
 				t.Errorf("Expected timestamp %v, got %v", tt.expectedTime, metric.Timestamp)
 			}
@@ -603,14 +611,15 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 			jsonData := marshalSteps(t, []JSONMetricsStep{step})
 
 			client := NewSptAPIClient("http://test")
-			metric, err := client.ParseJSONMetrics(jsonData)
+			metrics, err := client.ParseJSONMetrics(jsonData)
 
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
-			if metric == nil {
-				t.Fatal("Expected non-nil metric")
+			if len(metrics) == 0 {
+				t.Fatal("Expected at least one metric")
 			}
+			metric := metrics[0]
 
 			if metric.MBPerSec != tt.expectedMBPerSec {
 				t.Errorf("Expected MBPerSec %d, got %d", tt.expectedMBPerSec, metric.MBPerSec)
@@ -647,14 +656,15 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 	jsonData := marshalSteps(t, []JSONMetricsStep{step})
 
 	client := NewSptAPIClient("http://test")
-	metric, err := client.ParseJSONMetrics(jsonData)
+	metrics, err := client.ParseJSONMetrics(jsonData)
 
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if metric == nil {
-		t.Fatal("Expected non-nil metric")
+	if len(metrics) == 0 {
+		t.Fatal("Expected at least one metric")
 	}
+	metric := metrics[0]
 
 	// Verify all expected fields are populated and have correct types
 	expectedFields := map[string]interface{}{
@@ -825,13 +835,18 @@ func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 	payload := marshalSteps(t, []JSONMetricsStep{older, newer})
 
 	client := NewSptAPIClient("http://test")
-	metric, err := client.ParseJSONMetrics(payload)
+	metrics, err := client.ParseJSONMetrics(payload)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(metrics) == 0 {
+		t.Fatal("expected at least one metric")
+	}
 
+	// First element should be the latest (DELETE step has higher timestamp).
+	metric := metrics[0]
 	if metric.StepID != "delete-step" {
-		t.Fatalf("expected latest step to be selected, got %q", metric.StepID)
+		t.Fatalf("expected latest step to be first, got %q", metric.StepID)
 	}
 	if metric.SuccessCount != 1000 {
 		t.Fatalf("expected success count from latest step to be 1000, got %d", metric.SuccessCount)
@@ -844,5 +859,167 @@ func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 	}
 	if metric.SampleTimestamp.IsZero() || metric.SampleTimestamp.Format(time.RFC3339) != "2025-10-17T19:40:00Z" {
 		t.Fatalf("expected sample timestamp to match latest sample, got %s", metric.SampleTimestamp.Format(time.RFC3339))
+	}
+
+	// Both entries should be present.
+	if len(metrics) != 2 {
+		t.Fatalf("expected 2 metrics, got %d", len(metrics))
+	}
+	if metrics[1].StepID != "create-step" {
+		t.Fatalf("expected second metric to be the older step, got %q", metrics[1].StepID)
+	}
+}
+
+// TestAggregateByOpType_FourOps verifies that AggregateByOpType correctly handles
+// a 4-operation mixed workload (READ, CREATE, DELETE, STAT) and that STAT counts
+// are not dropped during aggregation.
+func TestAggregateByOpType_FourOps(t *testing.T) {
+	metrics := []*PerformanceMetric{
+		{
+			OpType: "READ", OpsPerSec: 4000, MBPerSec: 4,
+			MeanLatency: 900, MeanDuration: 950,
+			SuccessCount: 240000, FailedCount: 2,
+			ConcurrencyCurrent: 5, ConcurrencyMean: 4.5,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "CREATE", OpsPerSec: 20, MBPerSec: 1,
+			MeanLatency: 2500, MeanDuration: 2800,
+			SuccessCount: 1200, FailedCount: 0,
+			ConcurrencyCurrent: 1, ConcurrencyMean: 0.1,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "DELETE", OpsPerSec: 18, MBPerSec: 0,
+			MeanLatency: 1300, MeanDuration: 1500,
+			SuccessCount: 1080, FailedCount: 0,
+			ConcurrencyCurrent: 1, ConcurrencyMean: 0.04,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+		{
+			OpType: "STAT", OpsPerSec: 1400, MBPerSec: 0,
+			MeanLatency: 1500, MeanDuration: 1650,
+			SuccessCount: 84000, FailedCount: 5,
+			ConcurrencyCurrent: 2, ConcurrencyMean: 1.4,
+			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
+		},
+	}
+
+	combined, perOp := AggregateByOpType(metrics)
+	if combined == nil {
+		t.Fatal("combined aggregate must not be nil")
+	}
+	if combined.OpType != "MIXED" {
+		t.Errorf("expected OpType 'MIXED', got %q", combined.OpType)
+	}
+
+	// Additive fields
+	wantOps := int64(4000 + 20 + 18 + 1400)
+	if combined.OpsPerSec != wantOps {
+		t.Errorf("OpsPerSec: want %d, got %d", wantOps, combined.OpsPerSec)
+	}
+	wantSuccess := int64(240000 + 1200 + 1080 + 84000)
+	if combined.SuccessCount != wantSuccess {
+		t.Errorf("SuccessCount: want %d, got %d", wantSuccess, combined.SuccessCount)
+	}
+	wantFailed := int64(2 + 0 + 0 + 5)
+	if combined.FailedCount != wantFailed {
+		t.Errorf("FailedCount: want %d, got %d", wantFailed, combined.FailedCount)
+	}
+	wantMB := int64(4 + 1 + 0 + 0)
+	if combined.MBPerSec != wantMB {
+		t.Errorf("MBPerSec: want %d, got %d", wantMB, combined.MBPerSec)
+	}
+
+	// Per-op map must contain all 4 types
+	if len(perOp) != 4 {
+		t.Fatalf("expected 4 entries in perOp map, got %d", len(perOp))
+	}
+	for _, opType := range []string{"READ", "CREATE", "DELETE", "STAT"} {
+		m, ok := perOp[opType]
+		if !ok {
+			t.Errorf("perOp map missing key %q", opType)
+			continue
+		}
+		if m.OpType != opType {
+			t.Errorf("perOp[%q].OpType = %q", opType, m.OpType)
+		}
+	}
+
+	// STAT-specific checks: counts must not be zeroed or merged into another type
+	statMetric := perOp["STAT"]
+	if statMetric.SuccessCount != 84000 {
+		t.Errorf("STAT SuccessCount: want 84000, got %d", statMetric.SuccessCount)
+	}
+	if statMetric.OpsPerSec != 1400 {
+		t.Errorf("STAT OpsPerSec: want 1400, got %d", statMetric.OpsPerSec)
+	}
+	if statMetric.FailedCount != 5 {
+		t.Errorf("STAT FailedCount: want 5, got %d", statMetric.FailedCount)
+	}
+
+	// Weighted latency: (4000*900 + 20*2500 + 18*1300 + 1400*1500) / (4000+20+18+1400) = ~1045
+	// Just verify it's between the min and max input latencies.
+	if combined.MeanLatency < 900 || combined.MeanLatency > 2500 {
+		t.Errorf("weighted MeanLatency %d outside expected range [900, 2500]", combined.MeanLatency)
+	}
+}
+
+// TestParseJSONMetricsMixedOpTypes verifies that a mixed workload step with
+// multiple op-types sharing the same step_id returns all entries.
+func TestParseJSONMetricsMixedOpTypes(t *testing.T) {
+	ts := int64(1_700_000_000_000)
+	sampleTS := "2025-10-17T19:30:00Z"
+
+	createStep := newTestStep()
+	createStep.StepID = "mixed-step-1"
+	createStep.OpType = "CREATE"
+	createStep.Timestamp = ts
+	createStep.SampleTimestampRaw = sampleTS
+	createStep.Operations.SuccessCount = 5000
+	createStep.Operations.SuccessRateLast = 100.0
+	createStep.Bandwidth.BytesRateLast = 52_428_800.0
+
+	readStep := newTestStep()
+	readStep.StepID = "mixed-step-1"
+	readStep.OpType = "READ"
+	readStep.Timestamp = ts
+	readStep.SampleTimestampRaw = sampleTS
+	readStep.Operations.SuccessCount = 3000
+	readStep.Operations.SuccessRateLast = 60.0
+	readStep.Bandwidth.BytesRateLast = 31_457_280.0
+
+	deleteStep := newTestStep()
+	deleteStep.StepID = "mixed-step-1"
+	deleteStep.OpType = "DELETE"
+	deleteStep.Timestamp = ts
+	deleteStep.SampleTimestampRaw = sampleTS
+	deleteStep.Operations.SuccessCount = 1000
+	deleteStep.Operations.SuccessRateLast = 20.0
+	deleteStep.Bandwidth.BytesRateLast = 0
+
+	payload := marshalSteps(t, []JSONMetricsStep{createStep, readStep, deleteStep})
+
+	client := NewSptAPIClient("http://test")
+	metrics, err := client.ParseJSONMetrics(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(metrics) != 3 {
+		t.Fatalf("expected 3 metrics for mixed step, got %d", len(metrics))
+	}
+
+	// All entries share the same step_id and timestamp.
+	opTypes := make(map[string]bool)
+	for _, m := range metrics {
+		if m.StepID != "mixed-step-1" {
+			t.Errorf("expected step_id 'mixed-step-1', got %q", m.StepID)
+		}
+		opTypes[m.OpType] = true
+	}
+	for _, expected := range []string{"CREATE", "READ", "DELETE"} {
+		if !opTypes[expected] {
+			t.Errorf("missing op_type %q in metrics slice", expected)
+		}
 	}
 }

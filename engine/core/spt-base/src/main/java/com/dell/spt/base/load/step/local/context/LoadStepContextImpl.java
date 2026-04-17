@@ -41,6 +41,7 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -66,6 +67,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean listPathWorkload;
 	private final boolean retryFlag;
 	private final MetricsContext metricsCtx;
+	private final Map<OpType, MetricsContext> metricsCtxByOpType;
 	private final LongAdder counterResults = new LongAdder();
 	private final boolean tracePersistFlag;
 	private volatile Output<O> opsResultsOutput;
@@ -95,7 +97,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final Config loadConfig,
 					final boolean tracePersistFlag) {
 		this(
-						id, generator, driver, metricsCtx, loadConfig, tracePersistFlag, ListShardMetricsRecorder.NO_OP);
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, ListShardMetricsRecorder.NO_OP);
 	}
 
 	public LoadStepContextImpl(
@@ -106,11 +108,31 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final Config loadConfig,
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder) {
+		this(
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, shardMetricsRecorder);
+	}
+
+	/**
+	 * Constructor for mixed-mode workloads where per-op-type metrics routing is needed.
+	 *
+	 * @param metricsCtxByOpType per-op-type metrics contexts; when non-null, {@code markSucc}/{@code markFail}
+	 *                           calls are routed to the MetricsContext for the operation's type
+	 */
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder) {
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
 		this.driver.operationResultOutput(this);
 		this.metricsCtx = metricsCtx;
+		this.metricsCtxByOpType = metricsCtxByOpType;
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
 		final Config opConfig = loadConfig.configVal("op");
@@ -174,6 +196,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				this.driver.enableFastRecycleQuiesce();
 			}
 		}
+	}
+
+	/** Resolve the MetricsContext for a given operation type (mixed-mode routing). */
+	private MetricsContext resolveMetrics(final OpType opType) {
+		if (metricsCtxByOpType != null) {
+			final MetricsContext mc = metricsCtxByOpType.get(opType);
+			if (mc != null) {
+				return mc;
+			}
+		}
+		return metricsCtx;
 	}
 
 	@Override
@@ -370,7 +403,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				recycleEligible = recycleFlag;
 			}
 			if (opResult instanceof PartialOperation) {
-				metricsCtx.markPartSucc(countBytesDone, reqDuration, respLatency);
+				resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency);
 			} else {
 				if (!recycleEligible) {
 					// recycled ops should only appear in output.csv only once unless
@@ -406,7 +439,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				if (opResult instanceof ListOperation) {
 					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency);
 				} else {
-					metricsCtx.markSucc(countBytesDone, reqDuration, respLatency);
+					resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency);
 				}
 				counterResults.increment();
 			}
@@ -440,7 +473,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					generator.recycle(opResult);
 				} else {
 					Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
-					metricsCtx.markFail();
+					resolveMetrics(opResult.type()).markFail();
 					counterResults.increment();
 				}
 			}
@@ -490,7 +523,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			}
 			if (Status.SUCC.equals(status)) {
 				if (opResult instanceof PartialOperation) {
-					metricsCtx.markPartSucc(countBytesDone, reqDuration, respLatency);
+					resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency);
 				} else {
 					if (!recycleEligible) {
 						// recycled ops should only appear in output.csv only once unless
@@ -529,7 +562,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					if (listOpResult != null) {
 						markListSuccess(listOpResult, reqDuration, respLatency);
 					} else {
-						metricsCtx.markSucc(countBytesDone, reqDuration, respLatency);
+						resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency);
 					}
 					counterResults.increment();
 				}
@@ -563,7 +596,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						generator.recycle(opResult);
 					} else {
 						Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
-						metricsCtx.markFail();
+						resolveMetrics(opResult.type()).markFail();
 						counterResults.increment();
 					}
 				}

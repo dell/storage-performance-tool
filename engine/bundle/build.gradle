@@ -41,6 +41,7 @@ task assembleDist {
 	dependsOn ':core:spt-base:shadowJar'
 	dependsOn ':extensions:load-steps:pipeline:shadowJar'
 	dependsOn ':extensions:load-steps:weighted:shadowJar'
+	dependsOn ':extensions:load-steps:mixed:shadowJar'
 	dependsOn ':extensions:storage-drivers:primitives:coop:shadowJar'
 	dependsOn ':extensions:storage-drivers:primitives:netty:shadowJar'
 	dependsOn ':extensions:storage-drivers:primitives:nio:shadowJar'
@@ -60,6 +61,7 @@ task assembleDist {
 	def extensionProjectsMap = [
 		':extensions:load-steps:pipeline': project(':extensions:load-steps:pipeline'),
 		':extensions:load-steps:weighted': project(':extensions:load-steps:weighted'),
+		':extensions:load-steps:mixed': project(':extensions:load-steps:mixed'),
 		':extensions:storage-drivers:primitives:coop': project(':extensions:storage-drivers:primitives:coop'),
 		':extensions:storage-drivers:primitives:netty': project(':extensions:storage-drivers:primitives:netty'),
 		':extensions:storage-drivers:primitives:nio': project(':extensions:storage-drivers:primitives:nio'),

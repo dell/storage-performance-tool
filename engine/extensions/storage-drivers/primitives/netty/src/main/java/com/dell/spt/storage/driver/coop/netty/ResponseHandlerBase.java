@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.netty;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.item.op.Operation.Status.INTERRUPTED;
@@ -46,7 +47,15 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 
 		final Channel channel = ctx.channel();
-		final O op = (O) channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get();
+		final Object rawOp = channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get();
+		if (rawOp != null && !(rawOp instanceof Operation)) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, new ClassCastException(
+							"ATTR_KEY_OPERATION contains " + rawOp.getClass().getName()
+											+ " instead of Operation; value=" + rawOp),
+							"channelRead0: channel={}, msg class={}", channel, msg.getClass().getName());
+			return;
+		}
+		final O op = (O) rawOp;
 		handle(channel, op, msg);
 	}
 
@@ -58,7 +67,14 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 	public final void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause)
 					throws IOException {
 		final var channel = ctx.channel();
-		final var op = (O) channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get();
+		final Object rawOp = channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get();
+		if (rawOp != null && !(rawOp instanceof Operation)) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, cause,
+							"exceptionCaught: ATTR_KEY_OPERATION contains {} instead of Operation",
+							rawOp.getClass().getName());
+			return;
+		}
+		final var op = (O) rawOp;
 		if (op != null) {
 			if (driver.isStarted() || driver.isShutdown()) {
 				LogUtil.exception(Level.WARN, cause, "Premature channel closure");

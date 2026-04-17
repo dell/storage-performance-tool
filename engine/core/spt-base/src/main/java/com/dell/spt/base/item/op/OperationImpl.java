@@ -54,7 +54,8 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		if (dstPath == null) {
 			if (OpType.READ.equals(opType)
 							|| OpType.UPDATE.equals(opType)
-							|| OpType.DELETE.equals(opType)) {
+							|| OpType.DELETE.equals(opType)
+							|| OpType.STAT.equals(opType)) {
 				this.dstPath = this.srcPath;
 			}
 		} else {

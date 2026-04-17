@@ -18,6 +18,8 @@ func GenerateScenario(params Params) (string, error) {
 		return GenerateWriteScenario(params)
 	case workloadTypeRead:
 		return GenerateReadScenario(params)
+	case workloadTypeMixed:
+		return GenerateMixedScenario(params)
 	case workloadTypeMock:
 		return GenerateMockScenario(params)
 	case workloadTypeList:

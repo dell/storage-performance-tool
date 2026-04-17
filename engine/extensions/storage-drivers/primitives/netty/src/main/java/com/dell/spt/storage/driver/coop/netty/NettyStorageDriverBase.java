@@ -246,6 +246,10 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				Loggers.MSG.info("Adjust input buffer size: {}", SizeInBytes.formatFixedSize(size));
 				bootstrap.option(ChannelOption.SO_RCVBUF, size);
 				bootstrap.option(ChannelOption.SO_SNDBUF, BUFF_SIZE_MIN);
+			} else if (OpType.NOOP.equals(opType)) {
+				Loggers.MSG.info("Adjust I/O buffer sizes: {}", SizeInBytes.formatFixedSize(size));
+				bootstrap.option(ChannelOption.SO_RCVBUF, size);
+				bootstrap.option(ChannelOption.SO_SNDBUF, size);
 			} else {
 				bootstrap.option(ChannelOption.SO_RCVBUF, BUFF_SIZE_MIN);
 				bootstrap.option(ChannelOption.SO_SNDBUF, BUFF_SIZE_MIN);
@@ -589,7 +593,15 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	void sendFullRequestComplete(final ChannelFuture future) {
-		final var op = future.channel().attr(ATTR_KEY_OPERATION).get();
+		final Object rawOp = future.channel().attr(ATTR_KEY_OPERATION).get();
+		if (rawOp != null && !(rawOp instanceof Operation)) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, new ClassCastException(
+							"sendFullRequestComplete: ATTR_KEY_OPERATION contains "
+											+ rawOp.getClass().getName() + " instead of Operation"),
+							"channel={}", future.channel());
+			return;
+		}
+		final var op = (Operation) rawOp;
 		try {
 			op.finishRequest();
 		} catch (final IllegalStateException e) {

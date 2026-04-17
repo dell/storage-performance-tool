@@ -275,3 +275,88 @@ func clampPercentage(v float64) float64 {
 	}
 	return v
 }
+
+// AggregateByOpType groups a slice of metrics by OpType and produces a combined
+// aggregate plus a per-op-type map. For non-mixed workloads (single metric) the
+// aggregate is the metric itself and the map has one entry. For mixed workloads
+// the aggregate sums additive fields (ops/s, MB/s, counts) across op types and
+// uses ops-weighted averages for latency/duration.
+func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetric, perOp map[string]*PerformanceMetric) {
+	if len(metrics) == 0 {
+		return nil, nil
+	}
+	if len(metrics) == 1 {
+		m := metrics[0]
+		return m, map[string]*PerformanceMetric{m.OpType: m}
+	}
+
+	perOp = make(map[string]*PerformanceMetric, len(metrics))
+	for _, m := range metrics {
+		perOp[m.OpType] = m
+	}
+
+	// Build combined aggregate by summing additive fields.
+	var agg PerformanceMetric
+	var totalLatencyWeight, totalDurationWeight int64
+	first := metrics[0]
+
+	// Copy identity fields from the first (latest) metric.
+	agg.StepID = first.StepID
+	agg.OpType = "MIXED"
+	agg.Scope = first.Scope
+	agg.Role = first.Role
+	agg.RunID = first.RunID
+	agg.ClusterID = first.ClusterID
+	agg.NodeID = first.NodeID
+	agg.MetricsSchema = first.MetricsSchema
+	agg.NodesCount = first.NodesCount
+	agg.NodesPresent = append([]string(nil), first.NodesPresent...)
+	agg.Timestamp = first.Timestamp
+	agg.SampleTimestamp = first.SampleTimestamp
+	agg.SampleTimestampRaw = first.SampleTimestampRaw
+	agg.SptTimestamp = first.SptTimestamp
+
+	for _, m := range metrics {
+		agg.OpsPerSec += m.OpsPerSec
+		agg.MBPerSec += m.MBPerSec
+		agg.SuccessCount += m.SuccessCount
+		agg.FailedCount += m.FailedCount
+		agg.ConcurrencyCurrent += m.ConcurrencyCurrent
+		agg.ConcurrencyMean += m.ConcurrencyMean
+
+		w := m.OpsPerSec
+		if w <= 0 {
+			w = 1
+		}
+		agg.MeanLatency += m.MeanLatency * w
+		agg.MeanDuration += m.MeanDuration * w
+		totalLatencyWeight += w
+		totalDurationWeight += w
+
+		if m.TestState > agg.TestState {
+			agg.TestState = m.TestState
+		}
+		if m.StepTime > agg.StepTime {
+			agg.StepTime = m.StepTime
+		}
+		if m.HasLimit {
+			agg.HasLimit = true
+			agg.LimitType = m.LimitType
+			agg.LimitTimeSec = m.LimitTimeSec
+		}
+	}
+
+	if totalLatencyWeight > 0 {
+		agg.MeanLatency /= totalLatencyWeight
+		agg.MeanDuration /= totalDurationWeight
+	}
+
+	// Completion: use the first metric's values (all ops in a mixed step
+	// share the same time limit and overall completion).
+	agg.CompletionPercent = first.CompletionPercent
+	agg.OverallCompletionPercent = first.OverallCompletionPercent
+	agg.Unbounded = first.Unbounded
+	agg.OverallUnbounded = first.OverallUnbounded
+
+	return &agg, perOp
+}

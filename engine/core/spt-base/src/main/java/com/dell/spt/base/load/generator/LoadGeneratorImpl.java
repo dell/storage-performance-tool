@@ -289,11 +289,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					}
 					// Backpressure relief: if we had ops to send but made no output progress
 					// (either throttle denied permits or output queue was full), briefly
-					// park the VT to avoid a CPU-burning spin loop. 1μs is 1000x faster
-					// than the previous 1ms sleep; with the dispatch task's Condition-based
-					// signaling the output queue drains within microseconds.
+					// yield the VT to avoid a CPU-burning spin loop. Thread.yield() avoids
+					// the full kernel context-switch cost of LockSupport.parkNanos(1).
 					if (!outputProgress) {
-						LockSupport.parkNanos(1_000);
+						yieldThread();
 					}
 				}
 			} else { // operations count limit is reached

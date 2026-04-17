@@ -230,22 +230,25 @@ func (o *TestOrchestrator) monitorMetrics(ctx context.Context) {
 			return
 		case <-timer.C:
 			now := time.Now()
-			metric, source, err := o.getMetricsWithOptimizedFallback()
+			allMetrics, source, err := o.getMetricsWithOptimizedFallback()
 
-			if err == nil && metric != nil {
+			if err == nil && len(allMetrics) > 0 {
 				o.metricsState.recordSuccess(now)
 				o.updateMetricsSuccess(source)
 
 				if o.onMetrics != nil {
-					isActive := metric.TestState == constants.TestStateRunning
+					// Aggregate all op-type metrics into a combined view.
+					aggregated, perOpType := AggregateByOpType(allMetrics)
+					isActive := aggregated.TestState == constants.TestStateRunning
 					update := &MultiNodeMetricsUpdate{
-						Aggregated: metric,
+						Aggregated: aggregated,
 						PerNode: map[string]*PerformanceMetric{
-							"node-0": metric,
+							"node-0": aggregated,
 						},
+						PerOpType: perOpType,
 						NodeStatus: map[string]NodeConnectionStatus{
 							"node-0": {
-								LastSeen:    metric.Timestamp,
+								LastSeen:    aggregated.Timestamp,
 								IsConnected: true,
 								IsActive:    isActive,
 								Error:       nil,
@@ -286,16 +289,16 @@ func (o *TestOrchestrator) monitorMetrics(ctx context.Context) {
 }
 
 // getMetricsWithOptimizedFallback gets metrics from JSON endpoint only
-func (o *TestOrchestrator) getMetricsWithOptimizedFallback() (*PerformanceMetric, string, error) {
-	metric, source, err := o.tryJSONMetrics()
+func (o *TestOrchestrator) getMetricsWithOptimizedFallback() ([]*PerformanceMetric, string, error) {
+	metrics, source, err := o.tryJSONMetrics()
 	if err != nil {
 		return nil, source, err
 	}
-	return metric, source, nil
+	return metrics, source, nil
 }
 
 // tryJSONMetrics attempts to get metrics from JSON endpoint
-func (o *TestOrchestrator) tryJSONMetrics() (*PerformanceMetric, string, error) {
+func (o *TestOrchestrator) tryJSONMetrics() ([]*PerformanceMetric, string, error) {
 	if o.apiClient == nil {
 		return nil, "", fmt.Errorf("api client not initialized")
 	}
@@ -305,8 +308,8 @@ func (o *TestOrchestrator) tryJSONMetrics() (*PerformanceMetric, string, error) 
 		return nil, "", err
 	}
 
-	metric, parseErr := o.apiClient.ParseJSONMetrics(jsonData)
-	if parseErr != nil || metric == nil {
+	metrics, parseErr := o.apiClient.ParseJSONMetrics(jsonData)
+	if parseErr != nil || len(metrics) == 0 {
 		if parseErr != nil {
 			if o.logJSONBodies {
 				o.logVerboseMetrics(parseErr)
@@ -320,7 +323,7 @@ func (o *TestOrchestrator) tryJSONMetrics() (*PerformanceMetric, string, error) 
 		return nil, "", parseErr
 	}
 
-	return metric, "JSON", nil
+	return metrics, "JSON", nil
 }
 
 func (o *TestOrchestrator) logVerboseMetrics(parseErr error) {

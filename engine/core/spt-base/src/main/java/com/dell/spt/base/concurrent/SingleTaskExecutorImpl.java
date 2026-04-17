@@ -38,10 +38,13 @@ public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecuto
 	@Override
 	public final void run() {
 		Runnable task;
-		while (true) {
+		while (Thread.currentThread() == workerRef.get()) {
 			task = taskRef.get();
 			if (null == task) {
-				LockSupport.parkNanos(1);
+				LockSupport.park(); // Sleep until unparked or interrupted
+				if (Thread.interrupted()) {
+					// Clear interrupt status and continue
+				}
 			} else {
 				try {
 					task.run();
@@ -49,7 +52,7 @@ public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecuto
 					throwUncheckedIfInterrupted(cause);
 					LogUtil.trace(Loggers.ERR, Level.ERROR, cause, "Unexpected task execution failure");
 				} finally {
-					taskRef.set(null);
+					taskRef.compareAndSet(task, null);
 				}
 			}
 		}
@@ -59,6 +62,10 @@ public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecuto
 	public final void execute(final Runnable task) throws RejectedExecutionException {
 		if (!taskRef.compareAndSet(null, task)) {
 			throw new RejectedExecutionException();
+		}
+		final Thread worker = workerRef.get();
+		if (worker != null) {
+			LockSupport.unpark(worker);
 		}
 	}
 

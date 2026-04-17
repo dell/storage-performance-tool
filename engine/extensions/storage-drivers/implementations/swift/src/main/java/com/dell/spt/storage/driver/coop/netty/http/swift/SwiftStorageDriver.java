@@ -55,7 +55,6 @@ import java.net.ConnectException;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.locks.LockSupport;
 import org.apache.logging.log4j.Level;
 
 /** Created by andrey on 07.10.16. */
@@ -295,7 +294,7 @@ public class SwiftStorageDriver<I extends Item, O extends Operation<I>>
 				final List<O> subOps = compositeOp.subOperations();
 				final var n = subOps.size();
 				for (var i = 0; i < n; i += super.submit(subOps, i, n)) {
-					LockSupport.parkNanos(1);
+					Thread.yield();
 				}
 				return true;
 			}
@@ -326,7 +325,7 @@ public class SwiftStorageDriver<I extends Item, O extends Operation<I>>
 					if (n > 0) {
 						// NOTE: blocking sub-ops submission
 						while (!super.submit(subOps.get(0))) {
-							LockSupport.parkNanos(1);
+							Thread.yield();
 						}
 						try {
 							for (var j = 1; j < n; j++) {

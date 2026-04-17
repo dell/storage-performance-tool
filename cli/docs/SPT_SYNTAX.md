@@ -63,7 +63,7 @@ The `run` command executes a benchmark. Its structure is `spt run <type> [option
 | `read` | Implemented | Read pre-existing objects to measure read performance |
 | `mock` | Implemented | Exercise the CLI with in-memory drivers (no S3 required) |
 | `tables` | Implemented | Benchmark S3 Tables (Iceberg) operations — see [S3_TABLES.md](S3_TABLES.md) |
-| `mixed` | Planned | Test with a specified mix of read and write operations |
+| `mixed` | Implemented | Run a weighted mix of GET, PUT, DELETE, and STAT operations concurrently |
 | `delete` | Planned | Measure object deletion performance |
 
 ### Options (Flags)
@@ -194,7 +194,34 @@ These flags apply only to the `tables` workload type. See [S3_TABLES.md](S3_TABL
 | `--compaction-timeout` | `4h` | Max wait for compaction to complete |
 | `--no-provision` | `false` | Skip table bucket/namespace/table creation |
 
-#### 9. TUI / Headless Options
+#### 9. Mixed Workload Options
+
+These flags apply only to the `mixed` workload type.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--get-distrib` | `45` | Percentage of GET (read) operations |
+| `--stat-distrib` | `30` | Percentage of STAT (HEAD) operations |
+| `--put-distrib` | `15` | Percentage of PUT (write) operations |
+| `--delete-distrib` | `10` | Percentage of DELETE operations |
+| `--seed-objects` | `2500` | Objects to pre-create before the mixed benchmark |
+| `--read-items-file` | `""` | Items file for the READ pool (skips seed phase) |
+| `--delete-items-file` | `""` | Items file to pre-populate the DELETE queue |
+
+**Distribution rules:**
+
+- All four percentages must sum to exactly **100**.
+- At least **2** operation types must have a non-zero weight.
+- `--delete-distrib` must be ≤ `--put-distrib` unless `--delete-items-file` is provided (without an external seed, PUTs must sustain the DELETE queue).
+- `--duration` is required (mixed workloads are time-based only).
+- `--seed-objects` must be > 0 unless `--read-items-file` is provided.
+- `--cleanup` cannot be combined with `--read-items-file` or `--delete-items-file`.
+
+**Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means per-node DELETE throughput is bounded by that node's PUT throughput, and cross-node deletion is not supported.
+
+Set any operation weight to `0` to exclude it. For example, `--get-distrib 60 --put-distrib 40 --delete-distrib 0 --stat-distrib 0` runs a GET/PUT-only mix.
+
+#### 10. TUI / Headless Options
 
 By default, `spt run` launches an interactive TUI. Use `--headless` for CI or unattended runs.
 
@@ -480,6 +507,70 @@ spt run write \
 
 Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`. The flag works with both the default Netty driver and the AWS SDK driver (`--s3-driver aws`).
 
+### Mixed Workload
+
+The `mixed` workload runs GET, PUT, DELETE, and STAT operations concurrently with configurable weights. A seed phase pre-creates objects, then the benchmark phase issues operations at the specified distribution for the given duration.
+
+```bash
+# Default 4-op mix (GET 45% / STAT 30% / PUT 15% / DELETE 10%) for 5 minutes
+spt run mixed \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --seed-objects 5000
+```
+
+```bash
+# Heavy-read mix with cleanup
+spt run mixed \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 32 \
+    --object-size 256KB \
+    --duration 10m \
+    --get-distrib 70 --put-distrib 20 --delete-distrib 5 --stat-distrib 5 \
+    --cleanup
+```
+
+```bash
+# GET/PUT-only mix (no deletes or stats)
+spt run mixed \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --get-distrib 60 --put-distrib 40 --delete-distrib 0 --stat-distrib 0
+```
+
+```bash
+# Use a pre-existing item set (skip seed), with AWS SDK driver
+spt run mixed \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --read-items-file ./results/w-1mb-*/w-1mb-*.items.csv \
+    --s3-driver aws
+```
+
+**How it works:**
+
+1. **Seed phase** — writes `--seed-objects` objects to populate the read/delete pools. Skipped when `--read-items-file` is provided.
+2. **Mixed benchmark** — runs for `--duration`, issuing operations at the specified weights. The engine's `MixedLoad` step draws from the item set for GETs, STATs, and DELETEs while PUTs create new objects. Objects created by PUT that are not consumed by DELETE during the benchmark are tracked in a `put-remaining.csv` artifact (fetched to the results directory), giving you an exact inventory of objects left behind.
+3. **Cleanup** (optional, `--cleanup`) — deletes the seed objects and any objects created by PUT operations during the benchmark.
+
 ### Distributed / Attach Mode
 
 If operators have already started SPT worker containers, `spt` can attach to those workers and only launch the entry node:
@@ -660,6 +751,6 @@ Node status (port 9999)
 | TUI live dashboard | Implemented |
 | Headless / CI mode | Implemented |
 | Distributed multi-host orchestration | Implemented |
-| `mixed` workload | Planned |
+| `mixed` workload | Implemented |
 | `delete` workload | Planned |
 | `results` command | Planned (stub exists) |
