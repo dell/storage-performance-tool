@@ -12,6 +12,8 @@ type Params struct {
 	Threads      int
 	ObjectSize   string
 	PartSize     string // Multipart upload part size (e.g. "64MB"); empty = single PUT
+	MpuObjects   int    // Max concurrent multipart objects in flight (0 = unlimited)
+	MpuParts     int    // Max concurrent parts in flight per multipart object (0 = unlimited)
 	ObjectCount  int
 	Duration     string
 	AuthVersion  int

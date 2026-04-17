@@ -55,7 +55,14 @@ type DriverConfig struct {
 
 // DriverLimits represents driver limit configuration
 type DriverLimits struct {
-	Concurrency int `yaml:"concurrency,omitempty"`
+	Concurrency int              `yaml:"concurrency,omitempty"`
+	Multipart   *MultipartLimits `yaml:"multipart,omitempty"`
+}
+
+// MultipartLimits represents multipart upload concurrency limits
+type MultipartLimits struct {
+	Objects int `yaml:"objects"`
+	Parts   int `yaml:"parts"`
 }
 
 // NetConfig represents network configuration
@@ -288,9 +295,20 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			}
 		}
 
+		var multipartLimits *MultipartLimits
+		if params.MpuObjects > 0 || params.MpuParts > 0 {
+			multipartLimits = &MultipartLimits{
+				Objects: params.MpuObjects,
+				Parts:   params.MpuParts,
+			}
+		}
+
 		config.Storage = StorageConfig{
 			Driver: DriverConfig{
-				Limit: DriverLimits{Concurrency: params.Threads},
+				Limit: DriverLimits{
+					Concurrency: params.Threads,
+					Multipart:   multipartLimits,
+				},
 			},
 			Net: NetConfig{
 				Node: NodeConfig{
