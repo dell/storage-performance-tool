@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.8.0] - 2026-04-17
+
+### Added
+
+- **Mixed Workload Benchmarking Support** — added native support for testing mixed operations simultaneously (`READ`, `CREATE`, `DELETE`, `STAT`). The CLI now exposes a `spt run mixed` command and scenario builder, supporting dynamic percentage distributions (e.g., `GET=45%`, `PUT=15%`, `DELETE=10%`, `STAT=30%`).
+- **MixedLoad Engine Extension** — new native load step extension. Implements a single-generator, multi-operation state machine. Employs a non-blocking `deleteQueue` directly fed by `CREATE` completions, bounded spin locks, and re-rolls empty queues uniformly to prevent starvation or blocking.
+
+### Fixed
+
+- **Netty IO Buffer Sizing for Mixed Workloads** — fixed severe packet fragmentation and high context switching during mixed-object payloads. `MixedLoadStepLocal` now properly initializes socket buffers for `OpType.NOOP`, bringing `spt` mixed performance on par with competitive tools (e.g. Warp).
+
+### Changed
+
+- **Engine Threading Performance** — replaced busy `parkNanos` waits with cooperative thread `yield` across core engine queues and thread pools to reduce CPU waste during I/O stalls.
+- **Dependency Updates** — bumped `netty` to `4.1.132.Final` (addressing 5 CVEs), `guava` to `33.6.0-jre`, and rolled out safe minor upgrades to Go CLI packages.
+
 ## [5.7.4] - 2026-04-16
 
 ### Fixed
