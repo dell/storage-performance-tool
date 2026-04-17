@@ -58,17 +58,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
-		
+
 		int mpuObjects = 0;
 		int maxParts = 0;
 		try {
 			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
 			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
 		} catch (final Exception ignored) {}
-		
+
 		this.mpuMaxParts = maxParts;
 		this.mpuObjectThrottle = mpuObjects > 0 ? new Semaphore(mpuObjects, true) : null;
-		
+
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
 						dispatchLock, dispatchReady);
@@ -182,6 +182,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
+
 	boolean isMpuInit(final O op) {
 		if (op instanceof CompositeOperation && OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeOperation) op;
@@ -199,6 +200,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			mpuObjectThrottle.release();
 		}
 	}
+
 	private void safeReleaseMpuObjectPermit(final O op) {
 		if (OpType.CREATE.equals(op.type())) {
 			final CompositeOperation<?> parentOp;

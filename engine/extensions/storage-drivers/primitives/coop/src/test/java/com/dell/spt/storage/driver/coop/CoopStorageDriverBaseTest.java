@@ -602,14 +602,14 @@ class CoopStorageDriverBaseTest {
 	@Test
 	void handleCompleted_childOpQueueOverflowReleasesMpuObjectPermit() throws Exception {
 		final var driver = newRetryTestDriver();
-		
+
 		// Set up an MPU object throttle with 1 permit, and acquire it so 0 are available
 		final Semaphore mpuThrottle = new Semaphore(1, true);
 		mpuThrottle.acquire();
 		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
 		mpuField.setAccessible(true);
 		mpuField.set(driver, mpuThrottle);
-		
+
 		final var maxPartsField = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
 		maxPartsField.setAccessible(true);
 		maxPartsField.set(driver, 0);
@@ -626,7 +626,7 @@ class CoopStorageDriverBaseTest {
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
-		
+
 		// Act: complete the first part
 		final var part = (com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
@@ -644,7 +644,7 @@ class CoopStorageDriverBaseTest {
 	@Test
 	void handleCompleted_parentEnqueueOverflowReleasesMpuObjectPermit() throws Exception {
 		final var driver = newRetryTestDriver();
-		
+
 		final Semaphore mpuThrottle = new Semaphore(1, true);
 		mpuThrottle.acquire();
 		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
@@ -661,7 +661,7 @@ class CoopStorageDriverBaseTest {
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 1
-		
+
 		final var part = (com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
 		parent.markSubTaskCompleted(); // pending = 0, all done

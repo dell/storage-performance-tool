@@ -66,7 +66,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty() && storageDriver.tryAcquireMpuObjectPermit()) {
 				buff.add(deferredMpuQueue.poll());
 			}
-			
+
 			// Drain child ops first (partial/composite completions have priority)
 			if (buff.size() < batchSize) {
 				childOpQueue.drainTo(buff, batchSize - buff.size());
