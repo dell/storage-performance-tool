@@ -15,10 +15,10 @@ jackson = "2.19.4"  # Updated from 2.18.6
 
 # Networking
 jetty = "9.4.56.v20240826"  # Updated from 9.4.14 - security fixes, staying on 9.x for compatibility
-netty = "4.1.131.Final"  # Updated from 4.1.115 — fixes 5 CVEs
+netty = "4.1.132.Final"  # Updated from 4.1.131 — fixes 5 CVEs
 nettyConnectionPool = "1.2.1"
-nettyTcNative = "2.0.75.Final"  # Updated to match netty 4.1.131
-nettyIoUring = "0.0.26.Final"  # Updated to match netty 4.1.131
+nettyTcNative = "2.0.75.Final"  # Updated to match netty 4.1.132
+nettyIoUring = "0.0.26.Final"  # Updated to match netty 4.1.132
 
 # Spt internal libraries
 confuse = "1.2.1"
@@ -35,7 +35,7 @@ nashorn = "15.7"
 # Testing utilities
 commonsCsv = "1.14.1"  # Updated from 1.11.0
 commonsMath3 = "3.6.1"
-guava = "33.5.0-jre"  # Updated from 33.3.1-jre
+guava = "33.6.0-jre"  # Updated from 33.5.0-jre
 mockito = "5.23.0"  # Updated from 5.14.2
 
 # Parquet / Avro (S3 Tables data plane)
