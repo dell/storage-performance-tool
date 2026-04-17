@@ -102,6 +102,8 @@ public interface Operation<I extends Item> {
 
 	void reset();
 
+	void resetTiming();
+
 	/**
 	 * Returns {@code true} if the storage driver has already recycled this operation
 	 * via the fast-recycle path (re-submitted directly without going through the

@@ -22,6 +22,7 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 
 	private final Map<String, String> contextData = new HashMap<>();
 	private final List<PartialDataOperation<I>> subTasks = new ArrayList<>();
+	private final AtomicInteger subTaskYieldIndex = new AtomicInteger(0);
 
 	public CompositeDataOperationImpl() {
 		super();
@@ -86,6 +87,29 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		pendingSubTasksCount.set(subTasks.size());
 
 		return subTasks;
+	}
+
+	@Override
+	public final List<? extends PartialDataOperation<I>> nextSubOperations(int limit) {
+		final List<? extends PartialDataOperation<I>> allOps = subOperations();
+		if (limit <= 0 || limit >= allOps.size()) {
+			int current = subTaskYieldIndex.getAndSet(allOps.size());
+			if (current >= allOps.size()) {
+				return java.util.Collections.emptyList();
+			}
+			return allOps.subList(current, allOps.size());
+		}
+
+		while (true) {
+			int current = subTaskYieldIndex.get();
+			if (current >= allOps.size()) {
+				return java.util.Collections.emptyList();
+			}
+			int next = Math.min(current + limit, allOps.size());
+			if (subTaskYieldIndex.compareAndSet(current, next)) {
+				return allOps.subList(current, next);
+			}
+		}
 	}
 
 	@Override

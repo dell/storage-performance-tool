@@ -19,6 +19,15 @@ public interface CompositeOperation<I extends Item> extends Operation<I> {
 
 	List<? extends PartialOperation> subOperations();
 
+	/** 
+	 * Returns up to `limit` un-yielded sub-operations.
+	 * This method allows a driver to request sub-operations in batches. 
+	 * Calls to this method are stateful and drain the un-yielded sub-operations.
+	 */
+	default List<? extends PartialOperation> nextSubOperations(final int limit) {
+		return subOperations();
+	}
+
 	/** Should be invoked only after subOperations() * */
 	void markSubTaskCompleted();
 

@@ -249,6 +249,23 @@ func collectNormalizedEndpoints(cmd *cobra.Command) []string {
 // invalid values at runtime rather than blocking up front.
 func validatePartSize(cmd *cobra.Command) error {
 	partSize, _ := cmd.Flags().GetString("part-size")
+
+	mpuObjects, _ := cmd.Flags().GetInt("mpu-concurrent-objects")
+	if mpuObjects < 0 {
+		return fmt.Errorf("--mpu-concurrent-objects must be >= 0")
+	}
+	if mpuObjects > 0 && partSize == "" {
+		return fmt.Errorf("--mpu-concurrent-objects can only be used when --part-size is set")
+	}
+
+	mpuParts, _ := cmd.Flags().GetInt("mpu-concurrent-parts")
+	if mpuParts < 0 {
+		return fmt.Errorf("--mpu-concurrent-parts must be >= 0")
+	}
+	if mpuParts > 0 && partSize == "" {
+		return fmt.Errorf("--mpu-concurrent-parts can only be used when --part-size is set")
+	}
+
 	if partSize == "" {
 		return nil
 	}

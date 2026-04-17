@@ -848,6 +848,8 @@ func init() {
 
 	// Multipart Upload Options
 	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MB, 64MB, 256MB)")
+	runCmd.Flags().Int("mpu-concurrent-objects", 0, "Max concurrent multipart objects in flight (0 = unlimited)")
+	runCmd.Flags().Int("mpu-concurrent-parts", 0, "Max concurrent parts in flight per multipart object (0 = unlimited)")
 
 	// Test Behavior Options
 	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
@@ -1033,6 +1035,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	partSize, _ := cmd.Flags().GetString("part-size")
 	params.PartSize = partSize
+
+	mpuObjects, _ := cmd.Flags().GetInt("mpu-concurrent-objects")
+	params.MpuObjects = mpuObjects
+
+	mpuParts, _ := cmd.Flags().GetInt("mpu-concurrent-parts")
+	params.MpuParts = mpuParts
 
 	objectCount, _ := cmd.Flags().GetInt("object-count")
 	params.ObjectCount = objectCount

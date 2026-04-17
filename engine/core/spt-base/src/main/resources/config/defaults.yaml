@@ -137,6 +137,9 @@ storage:
   driver:
     limit:
       concurrency: 1
+      multipart:
+        objects: 0
+        parts: 0
       queue:
         input: 1000000
     threads: 0

@@ -211,7 +211,7 @@ class CoopStorageDriverBaseTest {
 		parent.subOperations(); // initializes pendingSubTasksCount = 4
 
 		// Grab first part and simulate a failed IO
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.FAIL_IO);
 		// Simulate finishResponse() having been called (decrements parent pending count)
 		parent.markSubTaskCompleted(); // pending = 3
@@ -240,7 +240,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		// Exhaust retries
 		for (int i = 0; i < CoopStorageDriverBase.MAX_PART_RETRIES; i++) {
 			part.incrementRetryCount();
@@ -265,7 +265,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
 		parent.markSubTaskCompleted(); // simulate finishResponse; pending = 1
 
@@ -289,7 +289,7 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 1
 
-		final var part = (PartialDataOperationImpl<DataItem>) parent.subOperations().get(0);
+		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
 		part.status(Operation.Status.SUCC);
 		parent.markSubTaskCompleted(); // pending = 0, allSubOperationsDone() → true
 
@@ -597,5 +597,84 @@ class CoopStorageDriverBaseTest {
 		assertFalse(result, "handleCompleted should return false when driver is stopped");
 		assertEquals(0, driver.completedOpCount(),
 						"completedOpCount should not be incremented when driver is stopped");
+	}
+
+	@Test
+	void handleCompleted_childOpQueueOverflowReleasesMpuObjectPermit() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		// Set up an MPU object throttle with 1 permit, and acquire it so 0 are available
+		final Semaphore mpuThrottle = new Semaphore(1, true);
+		mpuThrottle.acquire();
+		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
+		mpuField.setAccessible(true);
+		mpuField.set(driver, mpuThrottle);
+
+		final var maxPartsField = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
+		maxPartsField.setAccessible(true);
+		maxPartsField.set(driver, 0);
+
+		// Fill the childOpQueue to force an overflow
+		final var queue = childQueueOf(driver);
+		while (queue.remainingCapacity() > 0) {
+			queue.add(mock(Operation.class));
+		}
+
+		// Create a parent MPU operation
+		final var baseItem = new com.dell.spt.base.item.DataItemImpl("obj1", 0, 2048);
+		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
+		parent.subOperations(); // pendingSubTasksCount = 2
+
+		// Act: complete the first part
+		final var part = (com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>) parent.nextSubOperations(1).get(0);
+		part.status(Operation.Status.SUCC);
+		parent.markSubTaskCompleted(); // pending = 1
+
+		// driver.handleCompleted(part) will try to fetch the next part and push it to the queue.
+		// Since the queue is full, offer() will fail, it will log a warning, and it MUST release the MPU permit.
+		boolean result = driver.handleCompleted((Operation<Item>) (Operation<?>) part);
+
+		assertFalse(result, "handleCompleted should return false on overflow");
+		assertEquals(1, mpuThrottle.availablePermits(), "MPU object permit should be safely released on overflow");
+		assertEquals("true", parent.get("permitReleased"));
+	}
+
+	@Test
+	void handleCompleted_parentEnqueueOverflowReleasesMpuObjectPermit() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Semaphore mpuThrottle = new Semaphore(1, true);
+		mpuThrottle.acquire();
+		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
+		mpuField.setAccessible(true);
+		mpuField.set(driver, mpuThrottle);
+
+		final var maxPartsField = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
+		maxPartsField.setAccessible(true);
+		maxPartsField.set(driver, 0);
+
+		// Single part MPU
+		final var baseItem = new com.dell.spt.base.item.DataItemImpl("obj2", 0, 1024);
+		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
+		parent.subOperations(); // pendingSubTasksCount = 1
+
+		final var part = (com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>) parent.nextSubOperations(1).get(0);
+		part.status(Operation.Status.SUCC);
+		parent.markSubTaskCompleted(); // pending = 0, all done
+
+		// Fill the childOpQueue so the attempt to re-enqueue the parent fails
+		final var queue = childQueueOf(driver);
+		while (queue.remainingCapacity() > 0) {
+			queue.add(mock(Operation.class));
+		}
+
+		boolean result = driver.handleCompleted((Operation<Item>) (Operation<?>) part);
+
+		assertFalse(result, "handleCompleted should return false on overflow");
+		assertEquals(1, mpuThrottle.availablePermits(), "MPU object permit should be safely released on parent enqueue overflow");
 	}
 }

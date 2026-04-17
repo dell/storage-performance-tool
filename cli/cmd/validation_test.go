@@ -499,6 +499,8 @@ func TestValidatePartSize(t *testing.T) {
 		name        string
 		partSize    string
 		objectSize  string
+		mpuObjects  int
+		mpuParts    int
 		wantErr     bool
 		errContains string
 	}{
@@ -559,6 +561,55 @@ func TestValidatePartSize(t *testing.T) {
 			partSize: "64MB",
 			wantErr:  false,
 		},
+		{
+			name:        "mpu objects requires part size",
+			partSize:    "",
+			mpuObjects:  10,
+			wantErr:     true,
+			errContains: "--mpu-concurrent-objects can only be used when --part-size is set",
+		},
+		{
+			name:        "mpu parts requires part size",
+			partSize:    "",
+			mpuParts:    5,
+			wantErr:     true,
+			errContains: "--mpu-concurrent-parts can only be used when --part-size is set",
+		},
+		{
+			name:        "mpu objects negative",
+			partSize:    "5MB",
+			mpuObjects:  -1,
+			wantErr:     true,
+			errContains: "--mpu-concurrent-objects must be >= 0",
+		},
+		{
+			name:        "mpu parts negative",
+			partSize:    "5MB",
+			mpuParts:    -1,
+			wantErr:     true,
+			errContains: "--mpu-concurrent-parts must be >= 0",
+		},
+		{
+			name:       "valid mpu limits with part size",
+			partSize:   "5MB",
+			objectSize: "20MB",
+			mpuObjects: 5,
+			mpuParts:   10,
+		},
+		{
+			name:       "zero mpu limits are allowed with part size",
+			partSize:   "5MB",
+			objectSize: "20MB",
+			mpuObjects: 0,
+			mpuParts:   0,
+		},
+		{
+			name:       "zero mpu limits are allowed without part size",
+			partSize:   "",
+			objectSize: "20MB",
+			mpuObjects: 0,
+			mpuParts:   0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -566,6 +617,8 @@ func TestValidatePartSize(t *testing.T) {
 			cmd := &cobra.Command{}
 			cmd.Flags().String("part-size", tt.partSize, "")
 			cmd.Flags().String("object-size", tt.objectSize, "")
+			cmd.Flags().Int("mpu-concurrent-objects", tt.mpuObjects, "")
+			cmd.Flags().Int("mpu-concurrent-parts", tt.mpuParts, "")
 
 			err := validatePartSize(cmd)
 			if (err != nil) != tt.wantErr {

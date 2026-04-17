@@ -8,6 +8,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
@@ -33,6 +34,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	static final int MAX_PART_RETRIES = 3;
 
 	protected final Semaphore concurrencyThrottle;
+	protected final Semaphore mpuObjectThrottle;
+	protected final int mpuMaxParts;
 	protected final BlockingQueue<O> childOpQueue;
 	private final BlockingQueue<O> inOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
@@ -55,6 +58,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.concurrencyThrottle = new Semaphore(concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
+
+		int mpuObjects = 0;
+		int maxParts = 0;
+		try {
+			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
+			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
+		} catch (final Exception ignored) {}
+
+		this.mpuMaxParts = maxParts;
+		this.mpuObjectThrottle = mpuObjects > 0 ? new Semaphore(mpuObjects, true) : null;
+
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
 						dispatchLock, dispatchReady);
@@ -169,63 +183,134 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
 
+	boolean isMpuInit(final O op) {
+		if (op instanceof CompositeOperation && OpType.CREATE.equals(op.type())) {
+			final var compositeOp = (CompositeOperation) op;
+			return !compositeOp.allSubOperationsDone() && compositeOp.get("uploadId") == null && !OpType.NOOP.equals(op.type());
+		}
+		return false;
+	}
+
+	boolean tryAcquireMpuObjectPermit() {
+		return mpuObjectThrottle == null || mpuObjectThrottle.tryAcquire();
+	}
+
+	void releaseMpuObjectPermit() {
+		if (mpuObjectThrottle != null) {
+			mpuObjectThrottle.release();
+		}
+	}
+
+	private void safeReleaseMpuObjectPermit(final O op) {
+		if (OpType.CREATE.equals(op.type())) {
+			final CompositeOperation<?> parentOp;
+			if (op instanceof PartialOperation) {
+				parentOp = ((PartialOperation<?>) op).parent();
+			} else if (op instanceof CompositeOperation) {
+				parentOp = (CompositeOperation<?>) op;
+			} else {
+				return;
+			}
+			synchronized (parentOp) {
+				if (parentOp.get("permitReleased") == null) {
+					parentOp.put("permitReleased", "true");
+					if (mpuObjectThrottle != null) {
+						mpuObjectThrottle.release();
+					}
+				}
+			}
+		}
+	}
+
 	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op) {
-		if (super.handleCompleted(op)) {
-			completedOpCount.increment();
-			if (op instanceof CompositeOperation) {
-				final var parentOp = (CompositeOperation) op;
-				if (!parentOp.allSubOperationsDone()) {
-					final List<O> subOps = parentOp.subOperations();
+		final boolean accepted = super.handleCompleted(op);
+		if (!accepted) {
+			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
+				safeReleaseMpuObjectPermit(op);
+			}
+			return false;
+		}
+
+		completedOpCount.increment();
+		if (op instanceof CompositeOperation) {
+			final var parentOp = (CompositeOperation) op;
+			if (!parentOp.allSubOperationsDone()) {
+				if (op.status() == Operation.Status.SUCC) {
+					final List<O> subOps = (List<O>) parentOp.nextSubOperations(mpuMaxParts > 0 ? mpuMaxParts : Integer.MAX_VALUE);
 					for (final O nextSubOp : subOps) {
 						if (!childOpQueue.offer(nextSubOp)) {
 							Loggers.ERR.warn(
 											"{}: Child operations queue overflow, dropping the operation", toString());
+							safeReleaseMpuObjectPermit(op);
+							return false;
+						}
+					}
+				} else {
+					safeReleaseMpuObjectPermit(op);
+				}
+			} else {
+				safeReleaseMpuObjectPermit(op);
+			}
+		} else if (op instanceof PartialOperation) {
+			final var subOp = (PartialOperation) op;
+			final var parentOp = subOp.parent();
+			if (op.status() != Operation.Status.SUCC) {
+				if (subOp.retryCount() < MAX_PART_RETRIES) {
+					// retry the individual part instead of aborting the whole MPU
+					final var failStatus = op.status();
+					subOp.incrementRetryCount();
+					parentOp.undoMarkSubTaskCompleted();
+					op.status(Operation.Status.PENDING);
+					if (op.item() instanceof DataItem dataItem) {
+						dataItem.reset();
+					}
+					Loggers.ERR.warn(
+									"{}: part #{} failed ({}), retry {}/{}",
+									toString(), subOp.partNumber(), failStatus,
+									subOp.retryCount(), MAX_PART_RETRIES);
+					if (!childOpQueue.offer(op)) {
+						Loggers.ERR.warn(
+										"{}: Child operations queue overflow, dropping retry", toString());
+						safeReleaseMpuObjectPermit(op);
+					}
+				} else {
+					// retries exhausted — abort the MPU
+					synchronized (parentOp) {
+						parentOp.put("mpuAbort", "true");
+					}
+				}
+			} else {
+				boolean isAborted;
+				synchronized (parentOp) {
+					isAborted = parentOp.get("mpuAbort") != null;
+				}
+				if (!isAborted) {
+					// Part succeeded, fetch next part if any
+					final List<O> nextSubOps = (List<O>) parentOp.nextSubOperations(1);
+					for (final O nextSubOp : nextSubOps) {
+						if (!childOpQueue.offer(nextSubOp)) {
+							Loggers.ERR.warn(
+											"{}: Child operations queue overflow, dropping the operation", toString());
+							safeReleaseMpuObjectPermit(op);
 							return false;
 						}
 					}
 				}
-			} else if (op instanceof PartialOperation) {
-				final var subOp = (PartialOperation) op;
-				final var parentOp = subOp.parent();
-				if (op.status() != Operation.Status.SUCC) {
-					if (subOp.retryCount() < MAX_PART_RETRIES) {
-						// retry the individual part instead of aborting the whole MPU
-						final var failStatus = op.status();
-						subOp.incrementRetryCount();
-						parentOp.undoMarkSubTaskCompleted();
-						op.status(Operation.Status.PENDING);
-						if (op.item() instanceof DataItem dataItem) {
-							dataItem.reset();
-						}
-						Loggers.ERR.warn(
-										"{}: part #{} failed ({}), retry {}/{}",
-										toString(), subOp.partNumber(), failStatus,
-										subOp.retryCount(), MAX_PART_RETRIES);
-						if (!childOpQueue.offer(op)) {
-							Loggers.ERR.warn(
-											"{}: Child operations queue overflow, dropping retry", toString());
-						}
-					} else {
-						// retries exhausted — abort the MPU
-						parentOp.put("mpuAbort", "true");
-					}
-				}
-				if (parentOp.allSubOperationsDone()) {
-					// execute once again to finalize the things if necessary:
-					// complete the multipart upload, for example
-					if (!childOpQueue.offer((O) parentOp)) {
-						Loggers.ERR.warn(
-										"{}: Child operations queue overflow, dropping the operation", toString());
-						return false;
-					}
+			}
+			if (parentOp.allSubOperationsDone()) {
+				// execute once again to finalize the things if necessary:
+				// complete the multipart upload, for example
+				if (!childOpQueue.offer((O) parentOp)) {
+					Loggers.ERR.warn(
+									"{}: Child operations queue overflow, dropping the operation", toString());
+					safeReleaseMpuObjectPermit(op);
+					return false;
 				}
 			}
-			signalDispatch();
-			return true;
-		} else {
-			return false;
 		}
+		signalDispatch();
+		return true;
 	}
 
 	/**

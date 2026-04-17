@@ -127,6 +127,9 @@ storage:
   driver:
     limit:
       concurrency: int
+      multipart:
+        objects: int
+        parts: int
       queue:
         input: int
     threads: int
