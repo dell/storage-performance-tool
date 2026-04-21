@@ -3,6 +3,8 @@
 item:
   data:
     input:
+      compressible: double
+      dedupable: boolean
       file: string
       layer:
         cache: int

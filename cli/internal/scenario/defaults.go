@@ -17,9 +17,26 @@ const (
 
 // DefaultsConfig represents the Spt defaults configuration
 type DefaultsConfig struct {
+	Item    *ItemConfig   `yaml:"item,omitempty"`
 	Storage StorageConfig `yaml:"storage"`
 	Output  OutputConfig  `yaml:"output"`
 	Load    *LoadConfig   `yaml:"load,omitempty"` // pointer so omitted when nil
+}
+
+// ItemConfig represents item configuration
+type ItemConfig struct {
+	Data DataConfig `yaml:"data"`
+}
+
+// DataConfig represents data configuration
+type DataConfig struct {
+	Input DataInputConfig `yaml:"input"`
+}
+
+// DataInputConfig represents data input configuration
+type DataInputConfig struct {
+	Compressible float64 `yaml:"compressible"`
+	Dedupable    bool    `yaml:"dedupable"`
 }
 
 // StorageConfig represents storage configuration
@@ -124,6 +141,14 @@ type ServiceConfig struct {
 // GenerateDefaults creates a defaults.yaml configuration from scenario parameters
 func GenerateDefaults(params Params) ([]byte, error) {
 	config := DefaultsConfig{
+		Item: &ItemConfig{
+			Data: DataConfig{
+				Input: DataInputConfig{
+					Compressible: params.ObjectDataCompressibility,
+					Dedupable:    params.ObjectDataDedupable,
+				},
+			},
+		},
 		Output: OutputConfig{
 			Metrics: MetricsConfig{
 				Average: AverageConfig{

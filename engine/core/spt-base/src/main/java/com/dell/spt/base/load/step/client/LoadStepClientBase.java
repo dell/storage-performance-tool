@@ -188,6 +188,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final var itemDataInputSeed = itemDataInputConfig.stringVal("seed");
 		final var itemDataInputLayerCacheSize = itemDataInputLayerConfig.intVal("cache");
 		final var isInHeapMem = itemDataInputLayerConfig.boolVal("heap");
+		final var compressible = itemDataInputConfig.val("compressible");
+		final double compressibility = compressible instanceof String ? Double.parseDouble((String) compressible) : TypeUtil.typeConvert(compressible, double.class);
+		final var dedupable = itemDataInputConfig.boolVal("dedupable");
 		final var opConfig = loadConfig.configVal("op");
 		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
@@ -198,7 +201,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 		try (
 						final var dataInput = DataInput.instance(
-										itemDataInputFile, itemDataInputSeed, itemDataLayerSize, itemDataInputLayerCacheSize, isInHeapMem);
+										itemDataInputFile, itemDataInputSeed, itemDataLayerSize, itemDataInputLayerCacheSize, isInHeapMem, compressibility, dedupable);
 						final var storageDriver = StorageDriver.instance(
 										extensions, storageConfig, dataInput, verifyFlag, batchSize, loadStepId());
 						final var itemInput = skipScatter

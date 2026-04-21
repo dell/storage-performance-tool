@@ -185,12 +185,17 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			final SizeInBytes dataLayerSize = dataLayerSizeRaw instanceof String
 							? new SizeInBytes((String) dataLayerSizeRaw)
 							: new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
+			final var compressible = dataInputConfig.val("compressible");
+			final double compressibility = compressible instanceof String ? Double.parseDouble((String) compressible) : TypeUtil.typeConvert(compressible, double.class);
+			final var dedupable = dataInputConfig.boolVal("dedupable");
 			dataInput = DataInput.instance(
 							dataInputConfig.stringVal("file"),
 							dataInputConfig.stringVal("seed"),
 							dataLayerSize,
 							dataLayerConfig.intVal("cache"),
-							dataLayerConfig.boolVal("heap"));
+							dataLayerConfig.boolVal("heap"),
+							compressibility,
+							dedupable);
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to initialize the data input", e);
 		}

@@ -3,6 +3,8 @@
 item:
   data:
     input:
+      compressible: 0.0
+      dedupable: true
       file: null
       layer:
         cache: 16

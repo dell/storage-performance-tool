@@ -205,7 +205,7 @@ class CoopStorageDriverBaseTest {
 		final var driver = newRetryTestDriver();
 		// Build parent (4096 bytes, 1024-byte threshold → 4 parts)
 		final var baseItem = new DataItemImpl("obj1", 0, 4096);
-		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // initializes pendingSubTasksCount = 4
@@ -235,7 +235,7 @@ class CoopStorageDriverBaseTest {
 	void handleCompleted_abortsWhenRetriesExhausted() throws Exception {
 		final var driver = newRetryTestDriver();
 		final var baseItem = new DataItemImpl("obj2", 0, 2048);
-		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
@@ -260,7 +260,7 @@ class CoopStorageDriverBaseTest {
 	void handleCompleted_successfulPartDoesNotRetryOrAbort() throws Exception {
 		final var driver = newRetryTestDriver();
 		final var baseItem = new DataItemImpl("obj3", 0, 2048);
-		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
@@ -283,7 +283,7 @@ class CoopStorageDriverBaseTest {
 	void handleCompleted_reEnqueuesParentWhenAllPartsDone() throws Exception {
 		final var driver = newRetryTestDriver();
 		final var baseItem = new DataItemImpl("obj4", 0, 1024);
-		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		// Single part (1024-byte item, 1024-byte threshold → 1 part)
 		final var parent = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
@@ -348,7 +348,7 @@ class CoopStorageDriverBaseTest {
 		final var driver = newFastRecycleDriver(4);
 
 		final var baseItem = new DataItemImpl("obj", 0, 4096);
-		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var compositeOp = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		compositeOp.status(Operation.Status.SUCC);
@@ -622,7 +622,7 @@ class CoopStorageDriverBaseTest {
 
 		// Create a parent MPU operation
 		final var baseItem = new com.dell.spt.base.item.DataItemImpl("obj1", 0, 2048);
-		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
@@ -657,7 +657,7 @@ class CoopStorageDriverBaseTest {
 
 		// Single part MPU
 		final var baseItem = new com.dell.spt.base.item.DataItemImpl("obj2", 0, 1024);
-		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		baseItem.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, com.dell.spt.base.item.op.OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 1

@@ -50,6 +50,15 @@ public class CachedDataInput
 		return inputBuff.getLong(0);
 	}
 
+	protected double getCompressibility() {
+		return 0.0;
+	}
+
+	@Override
+	public boolean isDedupable() {
+		return true;
+	}
+
 	@Override
 	public final ByteBuffer getLayer(final int layerIndex)
 					throws OutOfMemoryError {
@@ -84,7 +93,7 @@ public class CachedDataInput
 			// generate the layer
 			layer = isInHeapMem ? allocate(layerSize) : allocateDirect(layerSize);
 			final var layerSeed = Long.reverseBytes((xorShift(getInitialSeed()) << layerIndex) ^ layerIndex);
-			generateData(layer, layerSeed);
+			generateData(layer, layerSeed, getCompressibility());
 			layersCache.put(layerIndex - 1, layer);
 		}
 		return layer;

@@ -115,9 +115,13 @@ public class PipelineLoadStepLocal
 					dataLayerSize = new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
 				}
 
+				final var compressible = dataInputConfig.val("compressible");
+				final double compressibility = compressible instanceof String ? Double.parseDouble((String) compressible) : TypeUtil.typeConvert(compressible, double.class);
+				final var dedupable = dataInputConfig.boolVal("dedupable");
+
 				final DataInput dataInput = DataInput.instance(
 								dataInputConfig.stringVal("file"), dataInputConfig.stringVal("seed"), dataLayerSize,
-								dataLayerConfig.intVal("cache"), dataLayerConfig.boolVal("heap"));
+								dataLayerConfig.intVal("cache"), dataLayerConfig.boolVal("heap"), compressibility, dedupable);
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
