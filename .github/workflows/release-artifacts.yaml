@@ -270,7 +270,7 @@ jobs:
 
       - name: Publish release
         if: ${{ !env.ACT }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare-version.outputs.tag }}
           prerelease: ${{ contains(needs.prepare-version.outputs.version, '-') }}
