@@ -185,17 +185,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			final SizeInBytes dataLayerSize = dataLayerSizeRaw instanceof String
 							? new SizeInBytes((String) dataLayerSizeRaw)
 							: new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
-			final var compressible = dataInputConfig.val("compressible");
-			final double compressibility = compressible instanceof String ? Double.parseDouble((String) compressible) : TypeUtil.typeConvert(compressible, double.class);
-			final var dedupable = dataInputConfig.boolVal("dedupable");
 			dataInput = DataInput.instance(
 							dataInputConfig.stringVal("file"),
 							dataInputConfig.stringVal("seed"),
 							dataLayerSize,
 							dataLayerConfig.intVal("cache"),
 							dataLayerConfig.boolVal("heap"),
-							compressibility,
-							dedupable);
+							dataInputConfig.doubleVal("compressibility"),
+							dataConfig.boolVal("dedupable"));
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to initialize the data input", e);
 		}
@@ -212,9 +209,11 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// ── 8. Create single StorageDriver ─────────────────────────────────
 		final StorageDriver driver;
 		try {
+			final boolean effectiveVerifyFlag = effectiveVerifyFlag(
+							dataConfig.boolVal("verify"), dataConfig.boolVal("dedupable"), stepId);
 			driver = StorageDriver.instance(
 							extensions, storageConfig, dataInput,
-							dataConfig.boolVal("verify"), batchSize, stepId);
+							effectiveVerifyFlag, batchSize, stepId);
 			driver.adjustIoBuffers(itemDataSize.get(), OpType.NOOP);
 		} catch (final IllegalConfigurationException | InterruptedException e) {
 			throw new IllegalStateException("Failed to initialize storage driver", e);

@@ -70,6 +70,23 @@ class LoadStepLocalBaseTest {
 		assertFalse(metadata.containsKey(MetricsConstants.METADATA_LIMIT_TIME_SEC));
 	}
 
+	@Test
+	void effectiveVerifyFlagDisablesVerifyForNonDedupableData() {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-verify");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), mockContext());
+		assertFalse(loadStep.effectiveVerifyFlagForTest(true, false, "step-verify"));
+	}
+
+	@Test
+	void effectiveVerifyFlagPreservesVerifyForDedupableData() {
+		final Config config = baseConfig();
+		config.val("load-step-id", "step-verify-ok");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), mockContext());
+		assertTrue(loadStep.effectiveVerifyFlagForTest(true, true, "step-verify-ok"));
+		assertFalse(loadStep.effectiveVerifyFlagForTest(false, false, "step-verify-ok"));
+	}
+
 	private static Config baseConfig() {
 		return TestConfigBuilder.config();
 	}
@@ -194,6 +211,11 @@ class LoadStepLocalBaseTest {
 
 		Map<String, Object> latestMetadata() {
 			return metricsContexts.get(metricsContexts.size() - 1).metadata();
+		}
+
+		boolean effectiveVerifyFlagForTest(
+						final boolean verifyFlag, final boolean dedupable, final String stepId) {
+			return effectiveVerifyFlag(verifyFlag, dedupable, stepId);
 		}
 
 		void startContextsForTest() {

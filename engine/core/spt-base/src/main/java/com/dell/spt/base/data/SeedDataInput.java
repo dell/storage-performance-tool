@@ -20,7 +20,19 @@ public final class SeedDataInput
 		this.dedupable = true;
 	}
 
-	public SeedDataInput(final long seed, final int size, final int cacheLimit, final boolean isInHeapMem, final double compressibility, final boolean dedupable) {
+	public SeedDataInput(final long seed, final int size, final int cacheLimit, final boolean isInHeapMem) {
+		this(seed, size, cacheLimit, isInHeapMem, 0.0, true);
+	}
+
+	public SeedDataInput(
+					final long seed, final int size, final int cacheLimit, final boolean isInHeapMem,
+					final double compressibility) {
+		this(seed, size, cacheLimit, isInHeapMem, compressibility, true);
+	}
+
+	public SeedDataInput(
+					final long seed, final int size, final int cacheLimit, final boolean isInHeapMem,
+					final double compressibility, final boolean dedupable) {
 		super(isInHeapMem ? allocate(size) : allocateDirect(size), cacheLimit, isInHeapMem);
 		this.compressibility = compressibility;
 		this.dedupable = dedupable;
@@ -32,12 +44,12 @@ public final class SeedDataInput
 		this.compressibility = other.compressibility;
 		this.dedupable = other.dedupable;
 	}
-	
+
 	@Override
 	public boolean isDedupable() {
 		return dedupable;
 	}
-	
+
 	@Override
 	protected double getCompressibility() {
 		return compressibility;

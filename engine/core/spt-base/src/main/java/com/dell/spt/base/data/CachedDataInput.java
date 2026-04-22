@@ -55,11 +55,6 @@ public class CachedDataInput
 	}
 
 	@Override
-	public boolean isDedupable() {
-		return true;
-	}
-
-	@Override
 	public final ByteBuffer getLayer(final int layerIndex)
 					throws OutOfMemoryError {
 		if (layerIndex == 0) {

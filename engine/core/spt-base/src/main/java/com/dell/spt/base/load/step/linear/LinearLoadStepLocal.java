@@ -93,21 +93,19 @@ public class LinearLoadStepLocal
 				dataLayerSize = new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
 			}
 
-			final var compressible = dataInputConfig.val("compressible");
-			final double compressibility = compressible instanceof String ? Double.parseDouble((String) compressible) : TypeUtil.typeConvert(compressible, double.class);
-			final var dedupable = dataInputConfig.boolVal("dedupable");
-
 			final DataInput dataInput = DataInput.instance(
 							dataInputConfig.stringVal("file"), dataInputConfig.stringVal("seed"), dataLayerSize,
 							dataLayerConfig.intVal("cache"), dataLayerConfig.boolVal("heap"),
-							compressibility, dedupable);
+							dataInputConfig.doubleVal("compressibility"), dataConfig.boolVal("dedupable"));
+			final boolean effectiveVerifyFlag = effectiveVerifyFlag(
+							dataConfig.boolVal("verify"), dataConfig.boolVal("dedupable"), testStepId);
 
 			final int batchSize = loadConfig.intVal("batch-size");
 
 			try {
 
 				final StorageDriver driver = StorageDriver.instance(
-								extensions, storageConfig, dataInput, dataConfig.boolVal("verify"), batchSize, testStepId);
+								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId);
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
