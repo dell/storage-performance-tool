@@ -608,6 +608,50 @@ func TestGenerateDefaults(t *testing.T) {
 			},
 		},
 		{
+			name: "ObjectDataCompressibility writes item.data.input.compressibility",
+			params: Params{
+				WorkloadType:              "write",
+				Endpoint:                  "http://minio:9000",
+				AccessKey:                 "testkey",
+				SecretKey:                 "testsecret",
+				Bucket:                    "testbucket",
+				Threads:                   4,
+				ObjectDataCompressibility: 72.5,
+				ObjectDataDedupable:       true,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				raw := string(data)
+				if !strings.Contains(raw, "item:") {
+					t.Error("expected item section in defaults output")
+				}
+				if !strings.Contains(raw, "compressibility: 72.5") {
+					t.Error("expected item.data.input.compressibility: 72.5")
+				}
+			},
+		},
+		{
+			name: "ObjectDataDedupable false writes item.data.dedupable false",
+			params: Params{
+				WorkloadType:        "write",
+				Endpoint:            "http://minio:9000",
+				AccessKey:           "testkey",
+				SecretKey:           "testsecret",
+				Bucket:              "testbucket",
+				Threads:             4,
+				ObjectDataDedupable: false,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				raw := string(data)
+				if !strings.Contains(raw, "dedupable: false") {
+					t.Error("expected item.data.dedupable: false")
+				}
+			},
+		},
+		{
 			name: "ServiceThreads zero omits load section",
 			params: Params{
 				WorkloadType:   "write",

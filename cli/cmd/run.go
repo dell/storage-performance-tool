@@ -843,6 +843,8 @@ func init() {
 	// Workload Definition Options
 	runCmd.Flags().IntP("threads", "t", 1, "Number of parallel client threads to run (e.g., 16)")
 	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MB, 256KB, 4GB)")
+	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
+	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 
@@ -960,7 +962,8 @@ Omit to disable checksums. (env: SPT_CHECKSUM)`)
 // buildScenarioParams builds scenario parameters from command flags
 func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Params, error) {
 	params := scenario.Params{
-		WorkloadType: workloadType,
+		WorkloadType:        workloadType,
+		ObjectDataDedupable: true,
 	}
 
 	// Get connection parameters (not required for mock)
@@ -1173,6 +1176,14 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 		params.Checksum = checksumAlgo
 	}
+
+	objectDataCompressibility, _ := cmd.Flags().GetFloat64("object-data-compressibility")
+	if objectDataCompressibility < 0.0 || objectDataCompressibility > 100.0 {
+		return params, fmt.Errorf("invalid --object-data-compressibility value %v: must be in range [0, 100]", objectDataCompressibility)
+	}
+	params.ObjectDataCompressibility = objectDataCompressibility
+	objectDataDedupable, _ := cmd.Flags().GetBool("object-data-dedupable")
+	params.ObjectDataDedupable = objectDataDedupable
 
 	// TUI layout
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")

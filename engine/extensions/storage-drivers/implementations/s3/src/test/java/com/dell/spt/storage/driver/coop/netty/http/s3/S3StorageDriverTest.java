@@ -216,7 +216,7 @@ public class S3StorageDriverTest {
 		private final ArrayDeque<FullHttpResponse> stubResponses = new ArrayDeque<>();
 
 		TestS3Driver(Config cfg) throws Exception {
-			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
+			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
 		}
 
 		void enqueueResponse(FullHttpResponse resp) {
@@ -340,7 +340,7 @@ public class S3StorageDriverTest {
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var item = new com.dell.spt.base.item.DataItemImpl("logs/AA/fileX", 0, 1024);
 		// Ensure the data item can produce bytes
-		item.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		item.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var op = new com.dell.spt.base.item.op.data.DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucketC", TEST_CRED, null, 0);
 		final var req = (HttpRequest) drv.httpRequest((Operation<Item>) (Operation<?>) op, "127.0.0.1");
 		assertEquals(HttpMethod.PUT, req.method());
@@ -564,7 +564,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		parent.put(S3Api.KEY_UPLOAD_ID, "u123");
 		final var partItem = base.slice(0, 1024);
@@ -596,7 +596,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, true, "crc32", "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		parent.put(S3Api.KEY_UPLOAD_ID, "u-checksum");
 		final var partItem = base.slice(0, 1024);
@@ -613,7 +613,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		parent.put(S3Api.KEY_UPLOAD_ID, "u-nochecksum");
 		final var partItem = base.slice(0, 1024);
@@ -798,7 +798,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		// partNumber=2 → rangeStart = 2 * 1024 = 2048, rangeEnd = 2048 + 1024 - 1 = 3071
@@ -819,7 +819,7 @@ public class S3StorageDriverTest {
 		TestS3Driver drv = new TestS3Driver(cfg);
 		// 100 bytes, threshold=30 → parts: 30, 30, 30, 10
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/tailtest", 0, 100);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 30);
 		// Tail part: partNumber=3, offset=90, size=10
@@ -835,7 +835,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 2048);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		final var partItem = base.slice(0, 1024);
@@ -850,7 +850,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		final var partItem = base.slice(0, 1024);
@@ -913,7 +913,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		parent.put(S3Api.KEY_UPLOAD_ID, "u-etag-test");
@@ -937,7 +937,7 @@ public class S3StorageDriverTest {
 		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
-		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.READ, base, "/bucket", null, TEST_CRED, null, 0, 1024);
 		final var partItem = base.slice(0, 1024);
@@ -975,7 +975,7 @@ public class S3StorageDriverTest {
 	private static com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem> newCompositeOp(OpType opType, long itemSize, long threshold) throws Exception {
 		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, itemSize);
 		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167",
-						new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false));
+						new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
 		return new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<>(
 						0, opType, base, "/bucket", null, TEST_CRED, null, 0, threshold);
 	}

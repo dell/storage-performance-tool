@@ -360,6 +360,8 @@ Executes a benchmark test with the specified workload type.
 - `--object-size, -o`: Size of each object (e.g., 1MB, 256KB, 4GB)
 - `--part-size`: Enable S3 multipart upload with the given part size (e.g., 5MB, 64MB). When set, `load.batch.size` is forced to `1`. The engine automatically retries individual parts (up to 3 times) and aborts incomplete uploads on failure. Per-part checksums are applied when checksum is enabled. See [`SPT_SYNTAX.md`](docs/SPT_SYNTAX.md) for details
 - `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
+- `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
+- `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--cleanup`: Delete all created objects after test completion
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
@@ -550,6 +552,7 @@ Environment configuration
 - S3 defaults: you can provide `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), plus `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, and (optionally) `S3_AUTH_VERSION` via environment or `.env`. `S3_AUTH_VERSION` defaults to `4`; set it to `2` only when targeting legacy services that cannot accept SigV4.
 - Image override (optional): set `SPT_IMAGE` to override the default Docker image spt uses for verify and run.
 - Image pull control: set `SPT_SKIP_IMAGE_PULL=1` to skip pulling the Spt image before each run (spt still pulls if the image is missing locally). Default behaviour is to pull `latest` every run.
+- Data shaping: `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0) sets target compressibility; `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true) controls anti-dedupe stamping.
 - Precedence: CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`. For authentication: CLI flag `--auth-version` overrides `S3_AUTH_VERSION`.
 - Quick start: copy `.env.example` to `.env` and edit placeholders for your environment.
 

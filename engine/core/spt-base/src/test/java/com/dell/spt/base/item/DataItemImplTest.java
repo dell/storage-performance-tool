@@ -3,30 +3,50 @@ package com.dell.spt.base.item;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousChannel;
+import java.nio.channels.CompletionHandler;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.data.DataCorruptionException;
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.item.io.AsyncChannel;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.google.common.base.Splitter;
-import java.util.List;
 
 public class DataItemImplTest {
+
+	private static final long FNV64_OFFSET_BASIS = 0xcbf29ce484222325L;
+	private static final long FNV64_PRIME = 0x100000001b3L;
+
+	private static long fnv1a64(final String value) {
+		long hash = FNV64_OFFSET_BASIS;
+		for (final byte b : value.getBytes(StandardCharsets.UTF_8)) {
+			hash ^= b & 0xFFL;
+			hash *= FNV64_PRIME;
+		}
+		return hash;
+	}
 
 	/*
 		Description: Verify that a new data instance can be read in human format with toString() method.
@@ -309,5 +329,169 @@ public class DataItemImplTest {
 		final byte[] expected = new byte[maxCount];
 		layer.slice().get(expected);
 		assertArrayEquals(expected, onDisk);
+	}
+
+	@Test
+	public void writeToSocketChannelDedupableFalseTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl item = new DataItemImpl("test-dedupe-item", 100L, 1_000_000L);
+		item.dataInput(dataInput);
+
+		final int maxCount = 8192;
+		final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+		final var chan = Channels.newChannel(baos);
+
+		final long written = item.writeToSocketChannel(chan, maxCount);
+		assertEquals(maxCount, written);
+		assertEquals(maxCount, item.position());
+		assertEquals(maxCount, baos.size());
+
+		final byte[] out = baos.toByteArray();
+		final ByteBuffer outBuff = ByteBuffer.wrap(out);
+
+		final long objectId = outBuff.getLong();
+		assertEquals(fnv1a64("test-dedupe-item"), objectId);
+		assertEquals(100L, outBuff.getLong());
+		outBuff.position(4096);
+		assertEquals(objectId, outBuff.getLong());
+		assertEquals(100L + 4096L, outBuff.getLong());
+	}
+
+	@Test
+	public void writeToSocketChannelDedupableFalseUses64BitObjectIdForJavaHashCollisionsTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl itemAa = new DataItemImpl("Aa", 100L, 1_000_000L);
+		final DataItemImpl itemBB = new DataItemImpl("BB", 100L, 1_000_000L);
+		itemAa.dataInput(dataInput);
+		itemBB.dataInput(dataInput);
+		assertEquals(itemAa.name().hashCode(), itemBB.name().hashCode());
+
+		final ByteArrayOutputStream aaOut = new ByteArrayOutputStream();
+		final ByteArrayOutputStream bbOut = new ByteArrayOutputStream();
+		final long aaWritten = itemAa.writeToSocketChannel(Channels.newChannel(aaOut), 16);
+		final long bbWritten = itemBB.writeToSocketChannel(Channels.newChannel(bbOut), 16);
+		assertEquals(16L, aaWritten);
+		assertEquals(16L, bbWritten);
+
+		final ByteBuffer aaBuff = ByteBuffer.wrap(aaOut.toByteArray());
+		final ByteBuffer bbBuff = ByteBuffer.wrap(bbOut.toByteArray());
+		final long aaObjectId = aaBuff.getLong();
+		final long bbObjectId = bbBuff.getLong();
+		assertNotEquals((long) itemAa.name().hashCode(), aaObjectId);
+		assertNotEquals((long) itemBB.name().hashCode(), bbObjectId);
+		assertEquals(fnv1a64(itemAa.name()), aaObjectId);
+		assertEquals(fnv1a64(itemBB.name()), bbObjectId);
+		assertNotEquals(aaObjectId, bbObjectId);
+		assertEquals(100L, aaBuff.getLong());
+		assertEquals(100L, bbBuff.getLong());
+	}
+
+	@Test
+	public void writeToSocketChannelDedupableFalseZeroProgressDoesNotLoopTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl item = new DataItemImpl("zero-progress-item", 0L, 1_000_000L);
+		item.dataInput(dataInput);
+		final WritableByteChannel zeroChan = new WritableByteChannel() {
+			@Override
+			public int write(final ByteBuffer src) {
+				return 0;
+			}
+
+			@Override
+			public boolean isOpen() {
+				return true;
+			}
+
+			@Override
+			public void close() {}
+		};
+		final long written = item.writeToSocketChannel(zeroChan, 4096);
+		assertEquals(0L, written);
+		assertEquals(0L, item.position());
+	}
+
+	@Test
+	public void readDedupableFalseStampsEachChunkTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl item = new DataItemImpl("read-dedupe-item", 200L, 1_000_000L);
+		item.dataInput(dataInput);
+		final ByteBuffer dst = ByteBuffer.allocate(8192);
+		final int n = item.read(dst);
+		assertEquals(8192, n);
+		assertEquals(8192, item.position());
+		dst.flip();
+		final long objectId = dst.getLong();
+		assertEquals(fnv1a64("read-dedupe-item"), objectId);
+		assertEquals(200L, dst.getLong());
+		dst.position(4096);
+		assertEquals(objectId, dst.getLong());
+		assertEquals(200L + 4096L, dst.getLong());
+	}
+
+	@Test
+	public void writeToAsyncChannelDedupableFalseUsesDistinctStampBuffersTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl item = new DataItemImpl("async-stamp-item", 100L, 1_000_000L);
+		item.dataInput(dataInput);
+		final CapturingAsyncChannel channel = new CapturingAsyncChannel();
+		final CompletionHandler<Integer, Object> handler = new CompletionHandler<Integer, Object>() {
+			@Override
+			public void completed(final Integer result, final Object attachment) {}
+
+			@Override
+			public void failed(final Throwable exc, final Object attachment) {}
+		};
+		item.position(0);
+		item.writeToAsyncChannel(channel, 0L, 16L, null, handler);
+		item.position(4096L);
+		item.writeToAsyncChannel(channel, 4096L, 16L, null, handler);
+		assertEquals(2, channel.writtenBuffers.size());
+		final ByteBuffer first = channel.writtenBuffers.get(0).duplicate();
+		final ByteBuffer second = channel.writtenBuffers.get(1).duplicate();
+		assertNotSame(channel.writtenBuffers.get(0), channel.writtenBuffers.get(1));
+		assertEquals(fnv1a64("async-stamp-item"), first.getLong());
+		assertEquals(100L, first.getLong());
+		assertEquals(fnv1a64("async-stamp-item"), second.getLong());
+		assertEquals(100L + 4096L, second.getLong());
+	}
+
+	private static final class CapturingAsyncChannel implements AsyncChannel {
+
+		private final List<ByteBuffer> writtenBuffers = new ArrayList<>();
+
+		@Override
+		public boolean isFileChannel() {
+			return false;
+		}
+
+		@Override
+		public AsynchronousChannel wrapped() {
+			return this;
+		}
+
+		@Override
+		public <A> void read(
+						final ByteBuffer dst, final long position, final A attach, final CompletionHandler<Integer, ? super A> handler) {
+			throw new UnsupportedOperationException("read not used in this test");
+		}
+
+		@Override
+		public <A> void write(
+						final ByteBuffer src, final long position, final A attach, final CompletionHandler<Integer, ? super A> handler) {
+			writtenBuffers.add(src);
+		}
+
+		@Override
+		public boolean isOpen() {
+			return true;
+		}
+
+		@Override
+		public void close() {}
 	}
 }

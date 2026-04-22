@@ -10,7 +10,9 @@ RUN_SCRIPT="$ENGINE_ROOT/bundle/build/dist/run.sh"
 # .env file (which uses plain assignments) does not clobber them.
 declare -A _caller_env
 for _v in S3_ENDPOINTS S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_AUTH_VERSION \
-          JARTEST_CONCURRENCY JARTEST_OBJECT_SIZE JARTEST_OP_LIMIT_COUNT; do
+          JARTEST_CONCURRENCY JARTEST_OBJECT_SIZE JARTEST_OP_LIMIT_COUNT \
+          JARTEST_DEDUPABLE JARTEST_COMPRESSIBILITY JARTEST_VERIFY \
+          JARTEST_READ_BACK JARTEST_READ_LIMIT_COUNT S3_DRIVER; do
   [[ -n "${!_v+set}" ]] && _caller_env[$_v]="${!_v}"
 done
 
@@ -37,9 +39,15 @@ unset _caller_env _v
 : "${S3_SECRET_KEY:=AWS_SECRET_ACCESS_KEY_EXAMPLE}"
 : "${S3_BUCKET:=testwrites}"
 : "${S3_AUTH_VERSION:=4}"
+: "${S3_DRIVER:=s3}"
 : "${JARTEST_CONCURRENCY:=4}"
 : "${JARTEST_OBJECT_SIZE:=1MB}"
 : "${JARTEST_OP_LIMIT_COUNT:=5000}"
+: "${JARTEST_DEDUPABLE:=true}"
+: "${JARTEST_COMPRESSIBILITY:=0}"
+: "${JARTEST_VERIFY:=false}"
+: "${JARTEST_READ_BACK:=false}"
+: "${JARTEST_READ_LIMIT_COUNT:=${JARTEST_OP_LIMIT_COUNT}}"
 
 # Convert comma-separated endpoints into host:port pairs expected by Spt.
 NODE_ADDRS="${S3_ENDPOINTS//http:\/\/}"
@@ -53,20 +61,55 @@ fi
 # ---- Results directory -----------------------------------------------------
 RESULTS_DIR="${SCRIPT_DIR}/results/jartest-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RESULTS_DIR"
+ITEMS_FILE="${RESULTS_DIR}/items.csv"
 
-echo "== jartest: ${JARTEST_OP_LIMIT_COUNT} × ${JARTEST_OBJECT_SIZE}, concurrency=${JARTEST_CONCURRENCY} =="
+is_true() {
+  case "${1,,}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+echo "== jartest: ${JARTEST_OP_LIMIT_COUNT} × ${JARTEST_OBJECT_SIZE}, concurrency=${JARTEST_CONCURRENCY}, dedupable=${JARTEST_DEDUPABLE}, compressibility=${JARTEST_COMPRESSIBILITY}, verify=${JARTEST_VERIFY} =="
 echo "== Results: ${RESULTS_DIR} =="
 
 "$RUN_SCRIPT" \
-  --storage-driver-type=s3 \
+  --storage-driver-type="${S3_DRIVER}" \
   --storage-net-node-addrs="${NODE_ADDRS}" \
   --storage-auth-version="${S3_AUTH_VERSION}" \
   --storage-auth-uid="${S3_ACCESS_KEY}" \
   --storage-auth-secret="${S3_SECRET_KEY}" \
   --item-output-path="/${S3_BUCKET}" \
   --storage-driver-limit-concurrency="${JARTEST_CONCURRENCY}" \
+  --item-data-dedupable="${JARTEST_DEDUPABLE}" \
+  --item-data-input-compressibility="${JARTEST_COMPRESSIBILITY}" \
+  --item-data-verify="${JARTEST_VERIFY}" \
   --item-data-size="${JARTEST_OBJECT_SIZE}" \
+  --item-output-file="${ITEMS_FILE}" \
+  --load-op-type=create \
+  --load-step-id=jartest-write \
   --load-op-limit-count="${JARTEST_OP_LIMIT_COUNT}" \
-  "$@" 2>&1 | tee "${RESULTS_DIR}/output.log"
+  "$@" 2>&1 | tee "${RESULTS_DIR}/write.log"
+
+if is_true "${JARTEST_READ_BACK}"; then
+  echo "== jartest read-back: limit-count=${JARTEST_READ_LIMIT_COUNT} =="
+  "$RUN_SCRIPT" \
+    --storage-driver-type="${S3_DRIVER}" \
+    --storage-net-node-addrs="${NODE_ADDRS}" \
+    --storage-auth-version="${S3_AUTH_VERSION}" \
+    --storage-auth-uid="${S3_ACCESS_KEY}" \
+    --storage-auth-secret="${S3_SECRET_KEY}" \
+    --item-output-path="/${S3_BUCKET}" \
+    --storage-driver-limit-concurrency="${JARTEST_CONCURRENCY}" \
+    --item-data-dedupable="${JARTEST_DEDUPABLE}" \
+    --item-data-input-compressibility="${JARTEST_COMPRESSIBILITY}" \
+    --item-data-verify="${JARTEST_VERIFY}" \
+    --item-data-size="${JARTEST_OBJECT_SIZE}" \
+    --load-op-type=read \
+    --item-input-file="${ITEMS_FILE}" \
+    --load-step-id=jartest-read \
+    --load-op-limit-count="${JARTEST_READ_LIMIT_COUNT}" \
+    "$@" 2>&1 | tee "${RESULTS_DIR}/read.log"
+fi
 
 echo "== Results saved to: ${RESULTS_DIR} =="

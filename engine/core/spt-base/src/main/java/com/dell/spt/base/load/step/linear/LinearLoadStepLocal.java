@@ -95,14 +95,17 @@ public class LinearLoadStepLocal
 
 			final DataInput dataInput = DataInput.instance(
 							dataInputConfig.stringVal("file"), dataInputConfig.stringVal("seed"), dataLayerSize,
-							dataLayerConfig.intVal("cache"), dataLayerConfig.boolVal("heap"));
+							dataLayerConfig.intVal("cache"), dataLayerConfig.boolVal("heap"),
+							dataInputConfig.doubleVal("compressibility"), dataConfig.boolVal("dedupable"));
+			final boolean effectiveVerifyFlag = effectiveVerifyFlag(
+							dataConfig.boolVal("verify"), dataConfig.boolVal("dedupable"), testStepId);
 
 			final int batchSize = loadConfig.intVal("batch-size");
 
 			try {
 
 				final StorageDriver driver = StorageDriver.instance(
-								extensions, storageConfig, dataInput, dataConfig.boolVal("verify"), batchSize, testStepId);
+								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId);
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);

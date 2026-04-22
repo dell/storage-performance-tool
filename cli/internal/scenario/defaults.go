@@ -18,6 +18,7 @@ const (
 // DefaultsConfig represents the Spt defaults configuration
 type DefaultsConfig struct {
 	Storage StorageConfig `yaml:"storage"`
+	Item    *ItemConfig   `yaml:"item,omitempty"` // pointer so omitted when nil
 	Output  OutputConfig  `yaml:"output"`
 	Load    *LoadConfig   `yaml:"load,omitempty"` // pointer so omitted when nil
 }
@@ -29,6 +30,22 @@ type StorageConfig struct {
 	Auth     AuthConfig      `yaml:"auth,omitempty"`
 	Checksum *ChecksumConfig `yaml:"checksum,omitempty"` // pointer so omitted when nil
 	Rdma     *RdmaConfig     `yaml:"rdma,omitempty"`     // pointer so omitted when nil
+}
+
+// ItemConfig represents item-level configuration knobs.
+type ItemConfig struct {
+	Data *ItemDataConfig `yaml:"data,omitempty"`
+}
+
+// ItemDataConfig represents item.data configuration.
+type ItemDataConfig struct {
+	Input     *ItemDataInputConfig `yaml:"input,omitempty"`
+	Dedupable *bool                `yaml:"dedupable,omitempty"`
+}
+
+// ItemDataInputConfig represents item.data.input configuration.
+type ItemDataInputConfig struct {
+	Compressibility float64 `yaml:"compressibility,omitempty"`
 }
 
 // ChecksumConfig represents storage checksum configuration
@@ -365,6 +382,26 @@ func GenerateDefaults(params Params) ([]byte, error) {
 
 	default:
 		return nil, fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
+	}
+
+	needsItemData := params.ObjectDataCompressibility > 0.0 || !params.ObjectDataDedupable
+	if needsItemData {
+		if config.Item == nil {
+			config.Item = &ItemConfig{}
+		}
+		if config.Item.Data == nil {
+			config.Item.Data = &ItemDataConfig{}
+		}
+		if params.ObjectDataCompressibility > 0.0 {
+			if config.Item.Data.Input == nil {
+				config.Item.Data.Input = &ItemDataInputConfig{}
+			}
+			config.Item.Data.Input.Compressibility = params.ObjectDataCompressibility
+		}
+		if !params.ObjectDataDedupable {
+			dedupable := false
+			config.Item.Data.Dedupable = &dedupable
+		}
 	}
 
 	// Engine tuning: VT carrier parallelism and MPU batch size

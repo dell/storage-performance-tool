@@ -44,4 +44,9 @@ public final class ExternalDataInput
 		}
 		inputBuff.flip();
 	}
+
+	@Override
+	public boolean isDedupable() {
+		return true; // We don't mess with dedupability for file inputs at the moment
+	}
 }

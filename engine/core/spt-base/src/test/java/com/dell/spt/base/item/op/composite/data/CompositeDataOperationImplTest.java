@@ -23,7 +23,7 @@ class CompositeDataOperationImplTest {
 	private static CompositeDataOperationImpl<DataItem> newCompositeOp(
 					OpType opType, long itemSize, long threshold) throws IOException {
 		final var item = new DataItemImpl("obj", 0, itemSize);
-		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		return new CompositeDataOperationImpl<>(0, opType, item, "/bucket", null, null, null, 0, threshold);
 	}
 

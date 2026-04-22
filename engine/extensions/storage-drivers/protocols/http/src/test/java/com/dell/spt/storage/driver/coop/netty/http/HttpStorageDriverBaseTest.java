@@ -88,11 +88,11 @@ class HttpStorageDriverBaseTest {
 
 	private static class TestHttpDriver extends HttpStorageDriverBase<DataItemImpl, DataOperation<DataItemImpl>> {
 		TestHttpDriver(final Config storage) throws Exception {
-			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false), storage.configVal("storage"), false, 1024);
+			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true), storage.configVal("storage"), false, 1024);
 		}
 
 		TestHttpDriver(final Config storage, final boolean readMetaOnly) throws Exception {
-			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false), storage.configVal("storage"), false, 1024);
+			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true), storage.configVal("storage"), false, 1024);
 		}
 
 		String exposeDataUriPath(final DataItemImpl item, final String src, final String dst, final OpType t) {
@@ -192,7 +192,7 @@ class HttpStorageDriverBaseTest {
 
 		// Prepare a data item with in-memory generator and non-zero size
 		final var item = new DataItemImpl("payload.bin", 0, 1024);
-		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucket", null, null, 0);
 
 		final var ch = new EmbeddedChannel();
@@ -225,7 +225,7 @@ class HttpStorageDriverBaseTest {
 		final var drv = new TestHttpDriver(cfg);
 
 		final var item = new DataItemImpl("payloadSSL.bin", 0, 1024);
-		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false));
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
 		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucket", null, null, 0);
 
 		final var ch = new EmbeddedChannel();

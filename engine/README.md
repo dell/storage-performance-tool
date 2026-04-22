@@ -430,6 +430,38 @@ RDMA settings are passed through the scenario YAML under the `storage.rdma` name
 | `storage.rdma.device` | `auto` | RDMA device name or `auto` for auto-detection |
 | `storage.rdma.fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
 
+## Data Generation Controls
+
+The engine supports two knobs for shaping generated object data, useful for benchmarking storage compression and deduplication efficiency.
+
+### Configuration
+
+Settings live under `item.data` in the config schema (`config-schema.yaml`) and defaults (`defaults.yaml`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `item.data.input.compressibility` | `double` | `0.0` | Target compressibility percentage (0-100). Each 4KB chunk is split into a pseudo-random portion and a zero-filled portion according to this percentage. 0 = fully random, 100 = fully compressible. |
+| `item.data.dedupable` | `boolean` | `true` | When `true`, the engine uses its standard ring-buffer data which may deduplicate across objects. When `false`, the engine stamps every 4KB of the output stream with a 16-byte header (8-byte deterministic object ID + 8-byte absolute stream offset) to defeat inline deduplication. |
+
+### Compressibility Model
+
+Data generation uses a micro-compressibility model: within each 4KB chunk, the first portion is filled with XOR-shift pseudo-random bytes (incompressible) and the remainder is zero-filled (compressible). At 75% compressibility, each 4KB chunk contains ~1KB random + ~3KB zeros. This forces storage-side compression to evaluate every block rather than only detecting large all-zero regions.
+
+### Anti-Dedupe Stamping
+
+When `dedupable=false`, a 16-byte stamp is written at every 4KB boundary in the output stream:
+- **Bytes 0-7:** deterministic 64-bit identifier derived from the object name
+- **Bytes 8-15:** absolute byte offset in the object stream
+
+Stamps are applied in-transit without mutating the shared cached ring-buffer layers. All transfer paths (Netty non-SSL, Netty SSL/TLS, AWS SDK, RDMA buffer fill) apply identical stamping for consistency.
+
+The stamp overhead is ~0.39% (16 bytes per 4096 bytes), which slightly reduces the effective compressibility of the data.
+
+### Constraints
+
+- `dedupable=false` is incompatible with file-based data input (`item.data.input.file`). If both are configured, the engine rejects the configuration at startup.
+- When `dedupable=false`, data integrity verification is disabled in incompatible paths and a warning is logged. Full stamp-aware verification is planned for a future release.
+
 ## Contributing
 
 We welcome contributions! Please see our [Contributing Guide](core/spt-base/doc/contributing/README.md) for details on how to get started.

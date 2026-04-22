@@ -152,6 +152,17 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					final SizeInBytes itemDataSize,
 					final boolean outputColorFlag);
 
+	protected final boolean effectiveVerifyFlag(
+					final boolean verifyFlag, final boolean dedupable, final String stepId) {
+		if (verifyFlag && !dedupable) {
+			Loggers.MSG.warn(
+							"{}: item.data.verify=true is incompatible with item.data.dedupable=false; disabling verification",
+							stepId);
+			return false;
+		}
+		return verifyFlag;
+	}
+
 	@Override
 	protected void doStop() {
 

@@ -160,6 +160,27 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// Checksum algorithm: SPT_CHECKSUM env var (values: crc32, crc32c, sha1, sha256)
 	_ = setIf("checksum", constants.EnvChecksum)
 
+	// Object data shaping
+	if f := cmd.Flags().Lookup("object-data-compressibility"); f != nil && !cmd.Flags().Changed("object-data-compressibility") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvObjectDataCompressibility)); v != "" {
+			if _, err := strconv.ParseFloat(v, 64); err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvObjectDataCompressibility, v, err)
+			}
+			if err := cmd.Flags().Set("object-data-compressibility", v); err != nil {
+				return err
+			}
+		}
+	}
+	if f := cmd.Flags().Lookup("object-data-dedupable"); f != nil && !cmd.Flags().Changed("object-data-dedupable") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvObjectDataDedupable)); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				if err := cmd.Flags().Set("object-data-dedupable", strconv.FormatBool(b)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

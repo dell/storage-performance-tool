@@ -44,6 +44,9 @@ type Params struct {
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256 (empty = disabled)
 
+	ObjectDataCompressibility float64 // Object data compressibility percentage [0..100]
+	ObjectDataDedupable       bool    // True keeps repeating ring-buffer data dedupe-friendly; false enables anti-dedupe stamping
+
 	// Stable timestamp for step IDs.  When set, all Generate*Scenario
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
