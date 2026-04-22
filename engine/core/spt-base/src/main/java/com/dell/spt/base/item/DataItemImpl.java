@@ -28,6 +28,8 @@ import org.apache.commons.codec.binary.Hex;
 public class DataItemImpl extends ItemImpl implements DataItem {
 	//
 	private static final String STR_EMPTY_MASK = "0";
+	private static final int CHUNK_SIZE = 4096;
+	private static final int STAMP_SIZE = 16;
 	//
 	private static final char LAYER_MASK_SEP = '/';
 	//
@@ -332,8 +334,7 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 		return true;
 	}
 
-	//
-	private static final ThreadLocal<ByteBuffer> STAMP_BUFFER = ThreadLocal.withInitial(() -> ByteBuffer.allocate(16));
+	private static final ThreadLocal<ByteBuffer> STAMP_BUFFER = ThreadLocal.withInitial(() -> ByteBuffer.allocate(STAMP_SIZE));
 
 	private void writeStamp(final ByteBuffer stampBuffer) {
 		stampBuffer.clear();
@@ -342,46 +343,58 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 		stampBuffer.flip();
 	}
 
+	//
 	@Override
 	public final int read(final ByteBuffer dst) {
-		final int n;
-		final boolean isDedupable = dataInput.isDedupable();
-		
-		if (!isDedupable && dst.remaining() >= 16) {
-			final ByteBuffer stampBuff = STAMP_BUFFER.get();
-			writeStamp(stampBuff);
-			
-			// Always try to align writes to 4KB blocks
-			final int chunkSize = 4096;
-			final int remainingInChunk = chunkSize - (int) ((offset + position) % chunkSize);
-			
-			final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
-			
-			// If we are at the start of a chunk, write the stamp
-			if (remainingInChunk == chunkSize) {
-				dst.put(stampBuff);
-				position += 16;
-				n = Math.min(dst.remaining(), Math.min(chunkSize - 16, ringBuff.remaining() - 16));
-			} else {
-				n = Math.min(dst.remaining(), Math.min(remainingInChunk, ringBuff.remaining()));
-			}
-			
-			ringBuff.position((int) ((offset + position) % dataInputSize));
-			ringBuff.limit(ringBuff.position() + n);
+		final boolean dedupable = dataInput.isDedupable();
+		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+		if (dedupable || dst.remaining() == 0) {
+			final int ringPos = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(ringPos);
+			final int n = Math.min(dst.remaining(), ringBuff.remaining());
+			ringBuff.limit(ringPos + n);
 			dst.put(ringBuff);
 			position += n;
-			return n + (remainingInChunk == chunkSize ? 16 : 0);
+			return n;
 		}
-
-		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
-		ringBuff.position((int) ((offset + position) % dataInputSize));
-		// bytes count to transfer
-		n = Math.min(dst.remaining(), ringBuff.remaining());
-		ringBuff.limit(ringBuff.position() + n);
-		// do the transfer
-		dst.put(ringBuff);
-		position += n;
-		return n;
+		final int startRemaining = dst.remaining();
+		long doneCount = 0;
+		final long maxCount = dst.remaining();
+		while (doneCount < maxCount && dst.remaining() > 0) {
+			final long chunkOffset = position % CHUNK_SIZE;
+			if (chunkOffset < STAMP_SIZE) {
+				if (maxCount - doneCount <= 0 || dst.remaining() == 0) {
+					break;
+				}
+				final ByteBuffer stampBuff = STAMP_BUFFER.get();
+				writeStamp(stampBuff);
+				stampBuff.position((int) chunkOffset);
+				final int stampRemaining = STAMP_SIZE - (int) chunkOffset;
+				final int stampToPut = (int) Math.min(Math.min(stampRemaining, maxCount - doneCount), dst.remaining());
+				stampBuff.limit(stampBuff.position() + stampToPut);
+				dst.put(stampBuff);
+				position += stampToPut;
+				doneCount += stampToPut;
+				if (stampToPut < stampRemaining) {
+					break;
+				}
+				continue;
+			}
+			final long chunkRemaining = CHUNK_SIZE - Math.max(chunkOffset, STAMP_SIZE);
+			final int ringPos = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(ringPos);
+			final int n = (int) Math.min(Math.min(maxCount - doneCount, chunkRemaining), ringBuff.remaining());
+			if (n <= 0) {
+				break;
+			}
+			ringBuff.limit(ringPos + n);
+			dst.put(ringBuff);
+			position += n;
+			doneCount += n;
+		}
+		return startRemaining - dst.remaining();
 	}
 
 	//
@@ -413,47 +426,63 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 	@Override
 	public final long writeToSocketChannel(final WritableByteChannel chanDst, final long maxCount)
 					throws IOException {
+		if (maxCount <= 0) {
+			return 0;
+		}
 		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+		final boolean dedupable = dataInput.isDedupable();
 		long doneCount = 0;
 		int n, m;
-		final boolean isDedupable = dataInput.isDedupable();
-		
-		// spin while not done either destination channel consumes all the data
-		while (doneCount < maxCount) {
-			if (!isDedupable) {
-				final ByteBuffer stampBuff = STAMP_BUFFER.get();
-				writeStamp(stampBuff);
-				
-				final int chunkSize = 4096;
-				final int remainingInChunk = chunkSize - (int) ((offset + position) % chunkSize);
-				
-				if (remainingInChunk == chunkSize) {
-					m = chanDst.write(stampBuff);
-					if (m < 16) {
-						break; // socket full
-					}
-					position += 16;
-					doneCount += 16;
-					n = (int) Math.min(maxCount - doneCount, Math.min(chunkSize - 16, ringBuff.remaining() - 16));
-				} else {
-					n = (int) Math.min(maxCount - doneCount, Math.min(remainingInChunk, ringBuff.remaining()));
-				}
-				
-				ringBuff.position((int) ((offset + position) % dataInputSize));
-				ringBuff.limit(ringBuff.position() + n);
+		if (dedupable) {
+			// spin while not done either destination channel consumes all the data
+			while (doneCount < maxCount) {
+				final int ringPos = (int) ((offset + position) % dataInputSize);
+				ringBuff.limit(dataInputSize);
+				ringBuff.position(ringPos);
+				n = (int) Math.min(maxCount - doneCount, ringBuff.remaining());
+				ringBuff.limit(ringPos + n);
 				m = chanDst.write(ringBuff);
 				doneCount += m;
 				position += m;
 				if (m < n) {
 					break;
 				}
+			}
+			return doneCount;
+		}
+		while (doneCount < maxCount) {
+			final long chunkOffset = position % CHUNK_SIZE;
+			if (chunkOffset < STAMP_SIZE) {
+				final ByteBuffer stampBuff = STAMP_BUFFER.get();
+				writeStamp(stampBuff);
+				stampBuff.position((int) chunkOffset);
+				final int stampRemaining = STAMP_SIZE - (int) chunkOffset;
+				final int stampToWrite = (int) Math.min(stampRemaining, maxCount - doneCount);
+				stampBuff.limit(stampBuff.position() + stampToWrite);
+				m = chanDst.write(stampBuff);
+				if (m <= 0) {
+					break;
+				}
+				doneCount += m;
+				position += m;
+				if (m < stampToWrite) {
+					break;
+				}
 				continue;
 			}
-			
-			ringBuff.position((int) ((offset + position) % dataInputSize));
-			n = (int) Math.min(maxCount - doneCount, ringBuff.remaining());
-			ringBuff.limit(ringBuff.position() + n);
+			final long chunkRemaining = CHUNK_SIZE - Math.max(chunkOffset, STAMP_SIZE);
+			final int ringPos = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(ringPos);
+			n = (int) Math.min(Math.min(maxCount - doneCount, chunkRemaining), ringBuff.remaining());
+			if (n <= 0) {
+				break;
+			}
+			ringBuff.limit(ringPos + n);
 			m = chanDst.write(ringBuff);
+			if (m <= 0) {
+				break;
+			}
 			doneCount += m;
 			position += m;
 			if (m < n) {
@@ -466,75 +495,97 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 	@Override
 	public final long writeToFileChannel(final FileChannel chanDst, final long maxCount)
 					throws IOException {
-		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
-		int n;
-		final boolean isDedupable = dataInput.isDedupable();
-		
-		if (!isDedupable) {
-			final ByteBuffer stampBuff = STAMP_BUFFER.get();
-			writeStamp(stampBuff);
-			
-			final int chunkSize = 4096;
-			final int remainingInChunk = chunkSize - (int) ((offset + position) % chunkSize);
-			
-			if (remainingInChunk == chunkSize) {
-				chanDst.write(stampBuff);
-				position += 16;
-				n = (int) Math.min(maxCount - 16, Math.min(chunkSize - 16, ringBuff.remaining() - 16));
-			} else {
-				n = (int) Math.min(maxCount, Math.min(remainingInChunk, ringBuff.remaining()));
-			}
-			
-			ringBuff.position((int) ((offset + position) % dataInputSize));
-			ringBuff.limit(ringBuff.position() + n);
-			chanDst.write(ringBuff);
-			position += n;
-			return n + (remainingInChunk == chunkSize ? 16 : 0);
+		if (maxCount <= 0) {
+			return 0;
 		}
-		
-		n = (int) ((offset + position) % dataInputSize);
-		ringBuff.position(n);
-		n = (int) Math.min(maxCount, ringBuff.remaining());
-		ringBuff.limit(ringBuff.position() + n);
-		n = chanDst.write(ringBuff);
-		position += n;
-		return n;
+		if (dataInput.isDedupable()) {
+			final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+			int n = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(n);
+			n = (int) Math.min(maxCount, ringBuff.remaining());
+			ringBuff.limit(ringBuff.position() + n);
+			n = chanDst.write(ringBuff);
+			position += n;
+			return n;
+		}
+		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+		long doneCount = 0;
+		while (doneCount < maxCount) {
+			final long chunkOffset = position % CHUNK_SIZE;
+			if (chunkOffset < STAMP_SIZE) {
+				final ByteBuffer stampBuff = STAMP_BUFFER.get();
+				writeStamp(stampBuff);
+				stampBuff.position((int) chunkOffset);
+				final int stampRemaining = STAMP_SIZE - (int) chunkOffset;
+				final int stampToWrite = (int) Math.min(stampRemaining, maxCount - doneCount);
+				stampBuff.limit(stampBuff.position() + stampToWrite);
+				final int m = chanDst.write(stampBuff);
+				if (m <= 0) {
+					break;
+				}
+				doneCount += m;
+				position += m;
+				if (m < stampToWrite) {
+					break;
+				}
+				continue;
+			}
+			final long chunkRemaining = CHUNK_SIZE - Math.max(chunkOffset, STAMP_SIZE);
+			final int ringPos = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(ringPos);
+			final int n = (int) Math.min(Math.min(maxCount - doneCount, chunkRemaining), ringBuff.remaining());
+			if (n <= 0) {
+				break;
+			}
+			ringBuff.limit(ringPos + n);
+			final int m = chanDst.write(ringBuff);
+			if (m <= 0) {
+				break;
+			}
+			doneCount += m;
+			position += m;
+			if (m < n) {
+				break;
+			}
+		}
+		return doneCount;
 	}
 
 	@Override
 	public final <A> void writeToAsyncChannel(
 					final AsyncChannel dstChan, final long dstPos, final long maxCount, final A attach,
 					final CompletionHandler<Integer, ? super A> handler) {
-		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
-		int n;
-		final boolean isDedupable = dataInput.isDedupable();
-		
-		if (!isDedupable) {
-			final ByteBuffer stampBuff = STAMP_BUFFER.get();
-			writeStamp(stampBuff);
-			
-			final int chunkSize = 4096;
-			final int remainingInChunk = chunkSize - (int) ((offset + position) % chunkSize);
-			
-			if (remainingInChunk == chunkSize) {
-				// To keep it simple for async, if we hit a boundary, just write the stamp first.
-				// This might cause multiple completions depending on how the handler is written.
-				// However, AsyncChannel in SPT is generally used for reads, not dedupe writes.
-				dstChan.write(stampBuff, dstPos, attach, handler);
-				position += 16;
-				return; // The next call will write the rest
-			} else {
-				n = (int) Math.min(maxCount, Math.min(remainingInChunk, ringBuff.remaining()));
-			}
-			
-			ringBuff.position((int) ((offset + position) % dataInputSize));
-			ringBuff.limit(ringBuff.position() + n);
-			dstChan.write(ringBuff, dstPos, attach, handler);
-			position += n;
+		if (maxCount <= 0) {
+			handler.completed(0, attach);
 			return;
 		}
-
-		n = (int) ((offset + position) % dataInputSize);
+		if (!dataInput.isDedupable()) {
+			final long chunkOffset = position % CHUNK_SIZE;
+			if (chunkOffset < STAMP_SIZE) {
+				final ByteBuffer stampBuff = ByteBuffer.allocate(STAMP_SIZE);
+				writeStamp(stampBuff);
+				stampBuff.position((int) chunkOffset);
+				final int stampRemaining = STAMP_SIZE - (int) chunkOffset;
+				final int stampToWrite = (int) Math.min(stampRemaining, maxCount);
+				stampBuff.limit(stampBuff.position() + stampToWrite);
+				dstChan.write(stampBuff, dstPos, attach, handler);
+				return;
+			}
+			final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+			final long chunkRemaining = CHUNK_SIZE - Math.max(chunkOffset, STAMP_SIZE);
+			final int ringPos = (int) ((offset + position) % dataInputSize);
+			ringBuff.limit(dataInputSize);
+			ringBuff.position(ringPos);
+			final int n = (int) Math.min(Math.min(maxCount, chunkRemaining), ringBuff.remaining());
+			ringBuff.limit(ringPos + n);
+			dstChan.write(ringBuff, dstPos, attach, handler);
+			return;
+		}
+		final ByteBuffer ringBuff = dataInput.getLayer(layerNum).asReadOnlyBuffer();
+		int n = (int) ((offset + position) % dataInputSize);
+		ringBuff.limit(dataInputSize);
 		ringBuff.position(n);
 		n = (int) Math.min(maxCount, ringBuff.remaining());
 		ringBuff.limit(ringBuff.position() + n);
