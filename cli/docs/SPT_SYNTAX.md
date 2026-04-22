@@ -41,6 +41,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`)
+- **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
 
@@ -97,6 +98,8 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
 | `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
+| `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
+| `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
 | `--items-file` | | `""` | Path to a saved `items.csv` for `read` (skips seed phase) |
 
@@ -516,6 +519,62 @@ spt run write \
 
 Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`. The flag works with both the default Netty driver and the AWS SDK driver (`--s3-driver aws`).
 
+### Data Compressibility & Deduplication
+
+Use `--object-data-compressibility` and `--object-data-dedupable` to shape the generated object data for storage-efficiency benchmarks. These controls are useful for testing how a storage target handles compressible or deduplicated data.
+
+```bash
+# Write 75% compressible data (each 4KB chunk: ~1KB random + ~3KB zeros)
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 1MB \
+    --duration 5m \
+    --object-data-compressibility 75
+```
+
+```bash
+# Write dedupe-resistant data (per-4KB anti-dedupe stamping)
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 4MB \
+    --duration 5m \
+    --object-data-dedupable=false
+```
+
+```bash
+# Combine both: 50% compressible + dedupe-resistant
+spt run write \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 4MB \
+    --duration 10m \
+    --object-data-compressibility 50 \
+    --object-data-dedupable=false
+```
+
+**How it works:**
+
+- **Compressibility** (`--object-data-compressibility`): Each 4KB chunk of generated data is split into a pseudo-random (incompressible) portion and a zero-filled (compressible) portion. At 75%, each 4KB chunk contains ~1KB random data and ~3KB zeros. The target percentage is an input characteristic, not an exact compression-ratio guarantee -- actual ratios depend on the storage system's compression algorithm.
+
+- **Dedupe resistance** (`--object-data-dedupable=false`): Every 4KB of the output stream is stamped with a 16-byte header containing a deterministic 64-bit object identifier and an 8-byte absolute stream offset. This practically eliminates inline deduplication for full-object writes on typical fixed/variable chunking systems. The stamp is deterministic: the same object produces the same byte sequence on repeated reads. The stamp overhead (~0.39%) slightly reduces the effective compressibility of the data.
+
+**Constraints:**
+
+- `--object-data-compressibility` must be in the range `[0, 100]`. Values outside this range are rejected.
+- `--object-data-dedupable=false` is incompatible with file-based data input (`item.data.input.file`). If both are configured, the engine rejects the configuration with a clear error.
+- When `--object-data-dedupable=false` is set, data integrity verification is disabled in incompatible paths and a warning is logged. Full stamp-aware verification is planned for a future release.
+
 ### Mixed Workload
 
 The `mixed` workload runs GET, PUT, DELETE, and STAT operations concurrently with configurable weights. A seed phase pre-creates objects, then the benchmark phase issues operations at the specified distribution for the given duration.
@@ -761,5 +820,7 @@ Node status (port 9999)
 | Headless / CI mode | Implemented |
 | Distributed multi-host orchestration | Implemented |
 | `mixed` workload | Implemented |
+| Data compressibility control (`--object-data-compressibility`) | Implemented |
+| Anti-dedupe stamping (`--object-data-dedupable`) | Implemented |
 | `delete` workload | Planned |
 | `results` command | Planned (stub exists) |

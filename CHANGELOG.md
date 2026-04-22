@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Data compressibility control** (`--object-data-compressibility`) — set a target compressibility percentage (0-100) for generated object data. Each 4KB chunk is split into pseudo-random and zero-filled portions, forcing the storage system's compression to evaluate every block. Engine config key: `item.data.input.compressibility`. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
+- **Anti-dedupe stamping** (`--object-data-dedupable=false`) — stamp every 4KB of generated data with a 16-byte header (64-bit object identifier + 64-bit stream offset) to practically eliminate inline deduplication on typical fixed/variable chunking systems. Stamps are deterministic and consistent across all transfer paths (Netty, SSL, AWS SDK, RDMA). Engine config key: `item.data.dedupable`. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
+
 ## [5.8.0] - 2026-04-17
 
 ### Added
