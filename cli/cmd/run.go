@@ -931,10 +931,6 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().String("checksum", "",
 		`Enable checksum validation with the specified algorithm: crc32, crc32c, sha1, sha256.
 Omit to disable checksums. (env: SPT_CHECKSUM)`)
-	runCmd.Flags().Float64("object-data-compressibility", 0.0,
-		"Object data compressibility percentage [0..100] (env: SPT_OBJECT_DATA_COMPRESSIBILITY)")
-	runCmd.Flags().Bool("object-data-dedupable", true,
-		"Whether generated object data should remain dedupe-friendly; set false to defeat inline dedupe (env: SPT_OBJECT_DATA_DEDUPABLE)")
 
 	// S3 Tables Options
 	runCmd.Flags().String("test-vector", "tps", "Tables test vector: tps | compaction | catalog")
@@ -1039,9 +1035,6 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	objectSize, _ := cmd.Flags().GetString("object-size")
 	params.ObjectSize = objectSize
-	
-	params.ObjectDataCompressibility, _ = cmd.Flags().GetFloat64("object-data-compressibility")
-	params.ObjectDataDedupable, _ = cmd.Flags().GetBool("object-data-dedupable")
 
 	partSize, _ := cmd.Flags().GetString("part-size")
 	params.PartSize = partSize
