@@ -179,6 +179,19 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if err := validateObjectDataFlags(cmd); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
+
+	return nil
+}
+
+func validateObjectDataFlags(cmd *cobra.Command) error {
+	compressibility, _ := cmd.Flags().GetFloat64("object-data-compressibility")
+	if compressibility < 0.0 || compressibility > 100.0 {
+		return fmt.Errorf("--object-data-compressibility must be in range [0, 100]")
+	}
 	return nil
 }
 

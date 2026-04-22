@@ -931,6 +931,10 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().String("checksum", "",
 		`Enable checksum validation with the specified algorithm: crc32, crc32c, sha1, sha256.
 Omit to disable checksums. (env: SPT_CHECKSUM)`)
+	runCmd.Flags().Float64("object-data-compressibility", 0.0,
+		"Object data compressibility percentage [0..100] (env: SPT_OBJECT_DATA_COMPRESSIBILITY)")
+	runCmd.Flags().Bool("object-data-dedupable", true,
+		"Whether generated object data should remain dedupe-friendly; set false to defeat inline dedupe (env: SPT_OBJECT_DATA_DEDUPABLE)")
 
 	// S3 Tables Options
 	runCmd.Flags().String("test-vector", "tps", "Tables test vector: tps | compaction | catalog")
@@ -963,6 +967,7 @@ Omit to disable checksums. (env: SPT_CHECKSUM)`)
 func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Params, error) {
 	params := scenario.Params{
 		WorkloadType: workloadType,
+		ObjectDataDedupable: true,
 	}
 
 	// Get connection parameters (not required for mock)
@@ -1178,6 +1183,14 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 		params.Checksum = checksumAlgo
 	}
+
+	objectDataCompressibility, _ := cmd.Flags().GetFloat64("object-data-compressibility")
+	if objectDataCompressibility < 0.0 || objectDataCompressibility > 100.0 {
+		return params, fmt.Errorf("invalid --object-data-compressibility value %v: must be in range [0, 100]", objectDataCompressibility)
+	}
+	params.ObjectDataCompressibility = objectDataCompressibility
+	objectDataDedupable, _ := cmd.Flags().GetBool("object-data-dedupable")
+	params.ObjectDataDedupable = objectDataDedupable
 
 	// TUI layout
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")

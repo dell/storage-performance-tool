@@ -43,6 +43,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "10MB",
 				ObjectCount:  1000,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -73,6 +74,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:     "1MB",
 				ObjectCount:    100,
 				Duration:       "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -101,6 +103,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "512KB",
 				ObjectCount:  0,
 				Duration:     "5m",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -129,6 +132,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "1MB",
 				ObjectCount:  100,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -159,6 +163,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "",
 				ObjectCount:  0,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -185,6 +190,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "",
 				ObjectCount:  0,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -211,6 +217,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "2MB",
 				ObjectCount:  500,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -237,6 +244,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "1MB",
 				ObjectCount:  0,
 				Duration:     "30s",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -267,6 +275,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectCount:  100,
 				Duration:     "",
 				Cleanup:      true,
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -295,6 +304,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "100KB",
 				ObjectCount:  2000,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -323,6 +333,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "5MB",
 				ObjectCount:  0,
 				Duration:     "10m",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -351,6 +362,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "256KB",
 				ObjectCount:  50,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -379,6 +391,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "1KB",
 				ObjectCount:  10,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -407,6 +420,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:   "1GB",
 				ObjectCount:  1,
 				Duration:     "",
+				ObjectDataDedupable: true,
 			},
 			wantErr: false,
 		},
@@ -441,6 +455,8 @@ func TestBuildScenarioParams(t *testing.T) {
 			cmd.Flags().String("rdma-device", "auto", "")
 			cmd.Flags().String("rdma-log-level", "WARN", "")
 			cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+			cmd.Flags().Float64("object-data-compressibility", 0.0, "")
+			cmd.Flags().Bool("object-data-dedupable", true, "")
 
 			// Set the flag values from the test case
 			for flagName, value := range tt.flags {
@@ -560,6 +576,8 @@ func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 			cmd.Flags().String("rdma-device", "auto", "")
 			cmd.Flags().String("rdma-log-level", "WARN", "")
 			cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+			cmd.Flags().Float64("object-data-compressibility", 0.0, "")
+			cmd.Flags().Bool("object-data-dedupable", true, "")
 
 			// Setup flags for this test
 			tt.setupFlags(cmd)
@@ -648,6 +666,8 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		cmd.Flags().String("rdma-device", "auto", "")
 		cmd.Flags().String("rdma-log-level", "WARN", "")
 		cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+		cmd.Flags().Float64("object-data-compressibility", 0.0, "")
+		cmd.Flags().Bool("object-data-dedupable", true, "")
 		return cmd
 	}
 
@@ -707,6 +727,22 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "invalid --s3-driver") {
 			t.Errorf("expected validation message, got: %v", err)
+		}
+	})
+
+	t.Run("object data knobs are parsed", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("object-data-compressibility", "75")
+		_ = cmd.Flags().Set("object-data-dedupable", "false")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.ObjectDataCompressibility != 75 {
+			t.Errorf("ObjectDataCompressibility = %v, want 75", p.ObjectDataCompressibility)
+		}
+		if p.ObjectDataDedupable {
+			t.Errorf("ObjectDataDedupable = true, want false")
 		}
 	})
 }

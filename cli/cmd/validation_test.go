@@ -434,6 +434,17 @@ func TestValidateRunCommand(t *testing.T) {
 			wantErr:      false,
 		},
 		{
+			name:         "object-data-compressibility out of range",
+			workloadType: "write",
+			endpoint:     "http://s3.example.com",
+			accessKey:    "access123",
+			secretKey:    "secret456",
+			bucket:       "mybucket",
+			objectCount:  10,
+			wantErr:      true,
+			errContains:  "--object-data-compressibility must be in range [0, 100]",
+		},
+		{
 			name:         "mock ignores auth version",
 			workloadType: "mock",
 			endpoint:     "",
@@ -460,6 +471,7 @@ func TestValidateRunCommand(t *testing.T) {
 			cmd.Flags().String("duration", tt.duration, "")
 			cmd.Flags().Bool("cleanup", false, "")
 			cmd.Flags().Bool("create-prefix", false, "")
+			cmd.Flags().Float64("object-data-compressibility", 0.0, "")
 			cmd.Flags().String("part-size", "", "")
 			cmd.Flags().String("object-size", "", "")
 			if tt.authVersion != 0 {
@@ -476,6 +488,11 @@ func TestValidateRunCommand(t *testing.T) {
 			if tt.createPrefix {
 				if err := cmd.Flags().Set("create-prefix", "true"); err != nil {
 					t.Fatalf("failed to set create-prefix flag: %v", err)
+				}
+			}
+			if strings.Contains(tt.name, "compressibility out of range") {
+				if err := cmd.Flags().Set("object-data-compressibility", "101"); err != nil {
+					t.Fatalf("failed to set object-data-compressibility flag: %v", err)
 				}
 			}
 

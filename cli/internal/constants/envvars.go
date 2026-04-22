@@ -20,6 +20,10 @@ const (
 	// Checksum configuration
 	EnvChecksum = "SPT_CHECKSUM"
 
+	// Object data shaping configuration
+	EnvObjectDataCompressibility = "SPT_OBJECT_DATA_COMPRESSIBILITY"
+	EnvObjectDataDedupable       = "SPT_OBJECT_DATA_DEDUPABLE"
+
 	// RDMA configuration environment variables
 	EnvRdmaLocalIP   = "RDMA_LOCAL_IP"
 	EnvRdmaThreshold = "RDMA_THRESHOLD_BYTES"
