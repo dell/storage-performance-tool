@@ -610,14 +610,14 @@ func TestGenerateDefaults(t *testing.T) {
 		{
 			name: "ObjectDataCompressibility writes item.data.input.compressibility",
 			params: Params{
-				WorkloadType:             "write",
-				Endpoint:                 "http://minio:9000",
-				AccessKey:                "testkey",
-				SecretKey:                "testsecret",
-				Bucket:                   "testbucket",
-				Threads:                  4,
+				WorkloadType:              "write",
+				Endpoint:                  "http://minio:9000",
+				AccessKey:                 "testkey",
+				SecretKey:                 "testsecret",
+				Bucket:                    "testbucket",
+				Threads:                   4,
 				ObjectDataCompressibility: 72.5,
-				ObjectDataDedupable:      true,
+				ObjectDataDedupable:       true,
 			},
 			wantErr: false,
 			checkOutput: func(t *testing.T, data []byte) {

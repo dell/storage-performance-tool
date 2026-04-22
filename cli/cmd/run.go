@@ -962,7 +962,7 @@ Omit to disable checksums. (env: SPT_CHECKSUM)`)
 // buildScenarioParams builds scenario parameters from command flags
 func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Params, error) {
 	params := scenario.Params{
-		WorkloadType: workloadType,
+		WorkloadType:        workloadType,
 		ObjectDataDedupable: true,
 	}
 
