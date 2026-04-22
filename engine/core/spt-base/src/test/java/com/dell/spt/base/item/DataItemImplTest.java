@@ -3,6 +3,7 @@ package com.dell.spt.base.item;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -15,6 +16,7 @@ import java.nio.channels.CompletionHandler;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -33,6 +35,18 @@ import com.github.akurilov.confuse.Config;
 import com.google.common.base.Splitter;
 
 public class DataItemImplTest {
+
+	private static final long FNV64_OFFSET_BASIS = 0xcbf29ce484222325L;
+	private static final long FNV64_PRIME = 0x100000001b3L;
+
+	private static long fnv1a64(final String value) {
+		long hash = FNV64_OFFSET_BASIS;
+		for (final byte b : value.getBytes(StandardCharsets.UTF_8)) {
+			hash ^= b & 0xFFL;
+			hash *= FNV64_PRIME;
+		}
+		return hash;
+	}
 
 	/*
 		Description: Verify that a new data instance can be read in human format with toString() method.
@@ -337,10 +351,41 @@ public class DataItemImplTest {
 		final ByteBuffer outBuff = ByteBuffer.wrap(out);
 
 		final long objectId = outBuff.getLong();
+		assertEquals(fnv1a64("test-dedupe-item"), objectId);
 		assertEquals(100L, outBuff.getLong());
 		outBuff.position(4096);
 		assertEquals(objectId, outBuff.getLong());
 		assertEquals(100L + 4096L, outBuff.getLong());
+	}
+
+	@Test
+	public void writeToSocketChannelDedupableFalseUses64BitObjectIdForJavaHashCollisionsTest() throws Exception {
+		final DataInput dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("1MB"), 25, false, 0.0, false);
+		final DataItemImpl itemAa = new DataItemImpl("Aa", 100L, 1_000_000L);
+		final DataItemImpl itemBB = new DataItemImpl("BB", 100L, 1_000_000L);
+		itemAa.dataInput(dataInput);
+		itemBB.dataInput(dataInput);
+		assertEquals(itemAa.name().hashCode(), itemBB.name().hashCode());
+
+		final ByteArrayOutputStream aaOut = new ByteArrayOutputStream();
+		final ByteArrayOutputStream bbOut = new ByteArrayOutputStream();
+		final long aaWritten = itemAa.writeToSocketChannel(Channels.newChannel(aaOut), 16);
+		final long bbWritten = itemBB.writeToSocketChannel(Channels.newChannel(bbOut), 16);
+		assertEquals(16L, aaWritten);
+		assertEquals(16L, bbWritten);
+
+		final ByteBuffer aaBuff = ByteBuffer.wrap(aaOut.toByteArray());
+		final ByteBuffer bbBuff = ByteBuffer.wrap(bbOut.toByteArray());
+		final long aaObjectId = aaBuff.getLong();
+		final long bbObjectId = bbBuff.getLong();
+		assertNotEquals((long) itemAa.name().hashCode(), aaObjectId);
+		assertNotEquals((long) itemBB.name().hashCode(), bbObjectId);
+		assertEquals(fnv1a64(itemAa.name()), aaObjectId);
+		assertEquals(fnv1a64(itemBB.name()), bbObjectId);
+		assertNotEquals(aaObjectId, bbObjectId);
+		assertEquals(100L, aaBuff.getLong());
+		assertEquals(100L, bbBuff.getLong());
 	}
 
 	@Test
@@ -380,6 +425,7 @@ public class DataItemImplTest {
 		assertEquals(8192, item.position());
 		dst.flip();
 		final long objectId = dst.getLong();
+		assertEquals(fnv1a64("read-dedupe-item"), objectId);
 		assertEquals(200L, dst.getLong());
 		dst.position(4096);
 		assertEquals(objectId, dst.getLong());
@@ -408,9 +454,9 @@ public class DataItemImplTest {
 		final ByteBuffer first = channel.writtenBuffers.get(0).duplicate();
 		final ByteBuffer second = channel.writtenBuffers.get(1).duplicate();
 		assertNotSame(channel.writtenBuffers.get(0), channel.writtenBuffers.get(1));
-		assertEquals((long) "async-stamp-item".hashCode(), first.getLong());
+		assertEquals(fnv1a64("async-stamp-item"), first.getLong());
 		assertEquals(100L, first.getLong());
-		assertEquals((long) "async-stamp-item".hashCode(), second.getLong());
+		assertEquals(fnv1a64("async-stamp-item"), second.getLong());
 		assertEquals(100L + 4096L, second.getLong());
 	}
 

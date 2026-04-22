@@ -13,6 +13,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.CompletionHandler;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.BitSet;
 
 import com.dell.spt.base.item.io.AsyncChannel;
@@ -30,6 +31,8 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 	private static final String STR_EMPTY_MASK = "0";
 	private static final int CHUNK_SIZE = 4096;
 	private static final int STAMP_SIZE = 16;
+	private static final long FNV64_OFFSET_BASIS = 0xcbf29ce484222325L;
+	private static final long FNV64_PRIME = 0x100000001b3L;
 	//
 	private static final char LAYER_MASK_SEP = '/';
 	//
@@ -41,6 +44,8 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 	protected long offset = 0;
 	protected long position = 0;
 	protected long size = 0;
+	private transient String cachedObjectIdSourceName = null;
+	private transient long cachedObjectId = 0;
 	//
 	protected final BitSet modifiedRangesMask = new BitSet(Long.SIZE);
 
@@ -336,9 +341,30 @@ public class DataItemImpl extends ItemImpl implements DataItem {
 
 	private static final ThreadLocal<ByteBuffer> STAMP_BUFFER = ThreadLocal.withInitial(() -> ByteBuffer.allocate(STAMP_SIZE));
 
+	private static long fnv1a64(final String value) {
+		long hash = FNV64_OFFSET_BASIS;
+		for (final byte b : value.getBytes(StandardCharsets.UTF_8)) {
+			hash ^= b & 0xFFL;
+			hash *= FNV64_PRIME;
+		}
+		return hash;
+	}
+
+	private long objectId() {
+		final String itemName = name();
+		if (itemName == null) {
+			return 0;
+		}
+		if (!itemName.equals(cachedObjectIdSourceName)) {
+			cachedObjectId = fnv1a64(itemName);
+			cachedObjectIdSourceName = itemName;
+		}
+		return cachedObjectId;
+	}
+
 	private void writeStamp(final ByteBuffer stampBuffer) {
 		stampBuffer.clear();
-		stampBuffer.putLong(name().hashCode());
+		stampBuffer.putLong(objectId());
 		stampBuffer.putLong(offset + position);
 		stampBuffer.flip();
 	}
