@@ -19,3 +19,6 @@ storage:
       enabled: boolean
       tags: map
     versioning: boolean
+  crt:
+    targetThroughputGbps: double
+    minimumPartSizeBytes: int

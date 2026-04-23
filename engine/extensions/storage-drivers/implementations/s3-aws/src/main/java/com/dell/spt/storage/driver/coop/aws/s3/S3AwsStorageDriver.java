@@ -7,9 +7,11 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
@@ -21,19 +23,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
-
 import java.io.IOException;
-import com.dell.spt.base.item.io.DataItemInputStream;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import com.dell.spt.base.item.io.DataItemInputStream;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.core.async.AsyncRequestBody;
+import software.amazon.awssdk.core.async.AsyncResponseTransformer;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -45,10 +53,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 
-	private final S3Client s3Client;
+	// S3 API constants for multipart upload
+	private static final String KEY_UPLOAD_ID = "uploadId";
+	private static final String KEY_MPU_ABORT = "mpuAbort";
+	private static final String KEY_PART_CHECKSUM_PREFIX = "checksum-";
+
+	private final S3AsyncClient s3AsyncClient;
+	private final ExecutorService executor;
 	private final String bucketName;
 	private final boolean checksumEnabled;
 	private final ChecksumAlgorithm checksumAlgorithm;
+	private final boolean versioningEnabled;
+	private final boolean taggingEnabled;
+	private final Map<String, String> objectTags;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -56,14 +73,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final Config config,
 					final boolean verifyFlag,
 					final int batchSize,
-					final S3Client s3Client)
+					final S3AsyncClient s3AsyncClient)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
 			LOG.warn(
 							"S3-AWS driver does not support --item-data-verify; reads will report SUCC without integrity checks");
 		}
-		this.s3Client = s3Client;
+		this.s3AsyncClient = s3AsyncClient;
+		this.executor = Executors.newCachedThreadPool();
 
 		this.bucketName = resolveBucketName(config);
 
@@ -89,6 +107,53 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		this.checksumEnabled = ckEnabled;
 		this.checksumAlgorithm = ckAlgo;
+
+		// Read versioning configuration
+		boolean versioning = false;
+		try {
+			versioning = config.boolVal("versioning");
+		} catch (Exception e) {
+			LOG.debug("Could not read versioning from config: {}", e.toString());
+		}
+		this.versioningEnabled = versioning;
+		if (versioningEnabled) {
+			LOG.info("S3-AWS driver versioning enabled");
+		}
+
+		// Read tagging configuration
+		boolean tagging = false;
+		Map<String, String> tags = new HashMap<>();
+		try {
+			final var objectConfig = config.configVal("object");
+			if (objectConfig != null) {
+				final var taggingConfig = objectConfig.configVal("tagging");
+				if (taggingConfig != null) {
+					tagging = taggingConfig.boolVal("enabled");
+					if (tagging) {
+						try {
+							final var tagsMap = taggingConfig.mapVal("tags");
+							if (tagsMap != null) {
+								// Convert Map<String,Object> to Map<String,String>
+								for (var entry : tagsMap.entrySet()) {
+									if (entry.getValue() != null) {
+										tags.put(entry.getKey(), entry.getValue().toString());
+									}
+								}
+							}
+						} catch (Exception e) {
+							LOG.debug("Could not read tags from config: {}", e.toString());
+						}
+					}
+				}
+			}
+		} catch (Exception e) {
+			LOG.debug("Could not read tagging config: {}", e.toString());
+		}
+		this.taggingEnabled = tagging;
+		this.objectTags = tags;
+		if (taggingEnabled) {
+			LOG.info("S3-AWS driver tagging enabled with {} tags", tags.size());
+		}
 	}
 
 	/**
@@ -115,62 +180,68 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	/**
 	 * Resolve bucket name from config, trying multiple sources in order:
-	 * 1. storage-net-node-addrs (parsed as confuse nested path)
-	 * 2. item.output-path (for write operations)
-	 * 3. item.input-path (for read operations)
+	 * 1. item.output-path (for write operations)
+	 * 2. item.input-path (for read operations)
+	 * 3. storage-net-node-addrs (parsed as confuse nested path, for compatibility)
 	 * 4. System username + "test" (fallback)
 	 */
 	static String resolveBucketName(final Config config) {
 		final Logger log = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 		String resolved = null;
 
+		// Try item.output-path first (for write operations)
 		try {
-			String nodeAddrs = config.stringVal("storage-net-node-addrs");
-			if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
-				if (nodeAddrs.contains("/")) {
-					resolved = nodeAddrs.split("/")[0];
+			var itemConfig = config.configVal("item");
+			if (itemConfig != null) {
+				String outputPath = itemConfig.stringVal("output-path");
+				if (outputPath != null && outputPath.startsWith("/") && outputPath.length() > 1) {
+					resolved = outputPath.substring(1);
 				} else {
-					resolved = nodeAddrs;
+					// Try item.input-path (for read operations)
+					try {
+						String inputPath = itemConfig.stringVal("input-path");
+						if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
+							resolved = inputPath.substring(1);
+						}
+					} catch (Exception e) {
+						log.debug("Could not read item.input-path from config: {}", e.toString());
+					}
 				}
 			}
 		} catch (Exception e) {
-			log.debug("Could not read storage-net-node-addrs from config: {}", e.toString());
+			log.debug("Could not read item config: {}", e.toString());
 		}
 
+		// Fallback to storage-net-node-addrs (for compatibility)
 		if (resolved == null) {
 			try {
-				var itemConfig = config.configVal("item");
-				if (itemConfig != null) {
-					String outputPath = itemConfig.stringVal("output-path");
-					if (outputPath != null && outputPath.startsWith("/") && outputPath.length() > 1) {
-						resolved = outputPath.substring(1);
+				String nodeAddrs = config.stringVal("storage-net-node-addrs");
+				if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
+					if (nodeAddrs.contains("/")) {
+						resolved = nodeAddrs.split("/")[0];
 					} else {
-						try {
-							String inputPath = itemConfig.stringVal("input-path");
-							if (inputPath != null && inputPath.startsWith("/") && inputPath.length() > 1) {
-								resolved = inputPath.substring(1);
-							}
-						} catch (Exception e) {
-							log.debug("Could not read item.input-path from config: {}", e.toString());
-						}
+						resolved = nodeAddrs;
 					}
 				}
 			} catch (Exception e) {
-				log.debug("Could not read item config: {}", e.toString());
+				log.debug("Could not read storage-net-node-addrs from config: {}", e.toString());
 			}
 		}
 
+		// Final fallback to username + "test"
 		if (resolved == null || resolved.isEmpty()) {
 			resolved = System.getProperty("user.name", "spt") + "test";
 		}
+		log.info("S3-AWS driver resolved bucket name: {}", resolved);
 		return resolved;
 	}
 
 	@Override
 	protected void invokeNio(final O op) {
 		try {
-			// Execute AWS SDK operation synchronously - NioStorageDriverBase handles threading
-			execute(op);
+			// Execute AWS SDK operation asynchronously and block for result
+			// This maintains the existing NioStorageDriverBase threading model
+			execute(op).join();
 
 			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes)
 			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
@@ -180,13 +251,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 
-			// Use finishOperation helper like FileStorageDriver does
-			finishOperation(op);
+			// For READ operations, timing is handled in readObject with startResponse/finishResponse
+			// For other operations, use finishOperation helper
+			if (op.type() != OpType.READ) {
+				finishOperation(op);
+			} else {
+				// READ operations call finishResponse in readObject, just set status
+				op.status(Operation.Status.SUCC);
+			}
 
 		} catch (Exception e) {
 			op.status(classifyFailure(e));
-			LOG.debug("{} {} failed: {}", op.type(), op.item().name(), e.toString());
-			LOG.trace("{} {} stack trace", op.type(), op.item().name(), e);
+			LOG.error("{} {} failed: {} - {}", op.type(), op.item().name(), e.getClass().getSimpleName(), e.getMessage());
+			LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			try {
 				op.startResponse();
 				op.finishResponse();
@@ -235,19 +312,28 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		try {
 			// Validate that the target bucket exists
-			s3Client.headBucket(HeadBucketRequest.builder().bucket(targetBucket).build());
-		} catch (NoSuchBucketException e) {
-			// Bucket doesn't exist — create it (matches standard S3 driver behavior)
-			try {
-				s3Client.createBucket(CreateBucketRequest.builder().bucket(targetBucket).build());
-			} catch (Exception createEx) {
-				throw new RuntimeException("Failed to create bucket: " + targetBucket, createEx);
-			}
+			s3AsyncClient.headBucket(HeadBucketRequest.builder().bucket(targetBucket).build()).join();
 		} catch (Exception e) {
-			throw new RuntimeException("Failed to validate bucket: " + targetBucket, e);
+			if (e.getCause() instanceof NoSuchBucketException || isNoSuchBucket(e)) {
+				// Bucket doesn't exist — create it (matches standard S3 driver behavior)
+				try {
+					s3AsyncClient.createBucket(CreateBucketRequest.builder().bucket(targetBucket).build()).join();
+				} catch (Exception createEx) {
+					throw new RuntimeException("Failed to create bucket: " + targetBucket, createEx);
+				}
+			} else {
+				throw new RuntimeException("Failed to validate bucket: " + targetBucket, e);
+			}
 		}
 
 		return bucketPath;
+	}
+
+	private boolean isNoSuchBucket(Exception e) {
+		if (e.getCause() instanceof S3Exception) {
+			return ((S3Exception) e.getCause()).statusCode() == 404;
+		}
+		return false;
 	}
 
 	@Override
@@ -275,6 +361,17 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * @return a two-element array: [0] = bucket, [1] = key
 	 */
 	String[] resolveBucketAndKey(final O op) {
+		return resolveBucketAndKey(op, null);
+	}
+
+	/**
+	 * Resolve bucket name and object key from the operation context, with optional version ID.
+	 *
+	 * @param op the operation
+	 * @param versionId the version ID (can be null)
+	 * @return a two-element array: [0] = bucket, [1] = key
+	 */
+	String[] resolveBucketAndKey(final O op, final String versionId) {
 		final var dstPath = op.dstPath();
 		final var itemName = op.item().name();
 
@@ -321,50 +418,140 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 *
 	 * @return a two-element array: [0] = bucket, [1] = key
 	 */
-	static String[] parseBucketAndKey(final String itemName) {
+	String[] parseBucketAndKey(final String itemName) {
 		final var relPath = itemName.startsWith("/") ? itemName.substring(1) : itemName;
 		final var slashPos = relPath.indexOf('/');
 		if (slashPos > 0) {
-			return new String[]{relPath.substring(0, slashPos), relPath.substring(slashPos + 1)
+			final var bucket = relPath.substring(0, slashPos);
+			final var key = relPath.substring(slashPos + 1);
+			return new String[]{bucket, key
 			};
 		}
-		// No slash — entire relPath is the bucket, key is absent
-		return new String[]{relPath, null
+		// No slash — entire relPath is treated as the key, use configured bucket
+		return new String[]{bucketName, relPath
 		};
 	}
 
-	void execute(final O op) throws Exception {
+	/**
+	 * Extract version ID from item name if versioning is enabled.
+	 * Version IDs are appended with ~ separator: "key~versionId"
+	 *
+	 * @param itemName the item name
+	 * @return array with [0] = key without version, [1] = version ID (or null)
+	 */
+	String[] extractVersionId(final String itemName) {
+		if (!versioningEnabled) {
+			return new String[]{itemName, null
+			};
+		}
+
+		final int tildePos = itemName.lastIndexOf('~');
+		if (tildePos > 0) {
+			// Check if this looks like a version ID (contains only alphanumeric and special chars)
+			final String potentialVersionId = itemName.substring(tildePos + 1);
+			if (potentialVersionId.matches("[a-zA-Z0-9._-]+")) {
+				return new String[]{itemName.substring(0, tildePos), potentialVersionId
+				};
+			}
+		}
+
+		return new String[]{itemName, null
+		};
+	}
+
+	CompletableFuture<Void> execute(final O op) {
+		// Handle composite operations (multipart upload)
+		if (op instanceof CompositeDataOperation) {
+			return executeCompositeOperation((CompositeDataOperation) op);
+		}
+
+		// Handle partial operations (range reads/part uploads)
+		if (op instanceof PartialDataOperation) {
+			return executePartialOperation((PartialDataOperation) op);
+		}
+
+		// Handle standard operations
 		switch (op.type()) {
 		case NOOP:
-			break;
+			return CompletableFuture.completedFuture(null);
 
 		case CREATE:
 		case UPDATE:
-			putObject(op);
-			break;
+			// Check if this is a copy operation (srcPath present)
+			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
+				return copyObject(op);
+			}
+			return putObject(op);
 
 		case READ:
-			readObject(op);
-			break;
+			return readObject(op);
 
 		case STAT:
 			headObject(op);
 			break;
 
 		case DELETE:
-			deleteObject(op);
-			break;
+			return deleteObject(op);
 
 		case LIST:
-			listObjects(op);
-			break;
+			return listObjects(op);
 
 		default:
-			throw new UnsupportedOperationException(op.type().toString());
+			return CompletableFuture.failedFuture(new UnsupportedOperationException(op.type().toString()));
 		}
 	}
 
-	private void putObject(final O op) throws Exception {
+	/**
+	 * Handle composite operations (multipart upload).
+	 * For CREATE operations, this manages the multipart upload lifecycle:
+	 * - Initiate multipart upload if this is the first call
+	 * - Abort multipart upload if requested
+	 * - Complete multipart upload if all parts are done
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> executeCompositeOperation(final CompositeDataOperation op) {
+		if (op.type() == OpType.CREATE) {
+			// Check if this is an abort request
+			if (op.get(KEY_MPU_ABORT) != null) {
+				return abortMultipartUpload(op);
+			}
+
+			// Check if all sub-operations are done (complete the upload)
+			if (op.allSubOperationsDone()) {
+				return completeMultipartUpload(op);
+			}
+
+			// Initiate multipart upload (first call)
+			return initiateMultipartUpload(op);
+		} else if (op.type() == OpType.READ) {
+			// Composite READ operations should be handled by the framework
+			// by splitting into partial operations, not as a single HTTP request
+			return CompletableFuture.failedFuture(
+							new UnsupportedOperationException("Composite READ must be handled by partial operations"));
+		} else {
+			// For DELETE/UPDATE, delegate to standard path
+			return putObject((O) op);
+		}
+	}
+
+	/**
+	 * Handle partial operations (range reads and part uploads).
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> executePartialOperation(final PartialDataOperation op) {
+		if (op.type() == OpType.CREATE) {
+			// This is a part upload for multipart upload
+			return uploadPart(op);
+		} else if (op.type() == OpType.READ) {
+			// This is a range read for parallel download
+			return readRange(op);
+		} else {
+			return CompletableFuture.failedFuture(
+							new UnsupportedOperationException("Partial " + op.type() + " operations are not implemented"));
+		}
+	}
+
+	private CompletableFuture<Void> putObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 		var reqBuilder = PutObjectRequest.builder()
 						.bucket(bk[0])
@@ -373,54 +560,96 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			reqBuilder.checksumAlgorithm(checksumAlgorithm);
 		}
 
+		// Add tags if tagging is enabled
+		if (taggingEnabled && !objectTags.isEmpty()) {
+			final var tagSet = objectTags.entrySet().stream()
+							.map(entry -> Tag.builder().key(entry.getKey()).value(entry.getValue()).build())
+							.collect(Collectors.toList());
+			reqBuilder.tagging(Tagging.builder().tagSet(tagSet).build());
+		}
+
 		if (op.item() instanceof DataItem) {
 			DataItem dataItem = (DataItem) op.item();
 			dataItem.position(0);
-			s3Client.putObject(
-							reqBuilder.build(),
-							RequestBody.fromInputStream(new DataItemInputStream(dataItem), dataItem.size()));
+			try {
+				final long size = dataItem.size();
+				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+				return s3AsyncClient.putObject(
+								reqBuilder.build(),
+								AsyncRequestBody.fromInputStream(inputStream, size, executor))
+								.thenApply(response -> null);
+			} catch (IOException e) {
+				return CompletableFuture.failedFuture(e);
+			}
 		} else if (op.item() instanceof PathItem) {
 			PathItem pathItem = (PathItem) op.item();
 			Path path = Path.of(pathItem.name());
-			s3Client.putObject(
+			return s3AsyncClient.putObject(
 							reqBuilder.build(),
-							RequestBody.fromFile(path));
+							AsyncRequestBody.fromFile(path))
+							.thenApply(response -> null);
 		} else {
-			throw new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem");
+			return CompletableFuture.failedFuture(
+							new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem"));
 		}
 	}
 
-	private void readObject(final O op) throws Exception {
+	private CompletableFuture<Void> readObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
-		try (var response = s3Client.getObject(
-						GetObjectRequest.builder()
-										.bucket(bk[0])
-										.key(bk[1])
-										.build())) {
+		// Extract version ID from item name if versioning is enabled
+		final String[] versionInfo = extractVersionId(op.item().name());
+		final String key = versionInfo[0];
+		final String versionId = versionInfo[1];
 
-			byte[] buffer = new byte[8192];
-			long bytesRead = 0;
-			int n;
+		// Use custom response transformer to properly measure timing
+		// startResponse() is called when headers are available
+		// finishResponse() is called when body is fully consumed
+		var reqBuilder = GetObjectRequest.builder()
+						.bucket(bk[0])
+						.key(key);
 
-			while ((n = response.read(buffer)) != -1) {
-				bytesRead += n;
-			}
-
-			if (op instanceof DataOperation) {
-				((DataOperation) op).countBytesDone(bytesRead);
-			}
+		// Add version ID if present
+		if (versionId != null) {
+			reqBuilder.versionId(versionId);
 		}
+
+		return s3AsyncClient.getObject(
+						reqBuilder.build(),
+						AsyncResponseTransformer.toBlockingInputStream())
+						.thenAccept(response -> {
+							// Call startResponse() when headers are available (measures latency)
+							op.startResponse();
+
+							// Stream the data to count bytes without loading into memory
+							try (var inputStream = response) {
+								long bytesRead = 0;
+								byte[] buffer = new byte[8192];
+								int n;
+								while ((n = inputStream.read(buffer)) != -1) {
+									bytesRead += n;
+								}
+								if (op instanceof DataOperation) {
+									((DataOperation) op).countBytesDone(bytesRead);
+								}
+
+								// Call finishResponse() when body is fully consumed (measures duration)
+								op.finishResponse();
+							} catch (IOException e) {
+								throw new RuntimeException("Failed to read S3 object data", e);
+							}
+						});
 	}
 
-	private void deleteObject(final O op) {
+	private CompletableFuture<Void> deleteObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
-		s3Client.deleteObject(
+		return s3AsyncClient.deleteObject(
 						DeleteObjectRequest.builder()
 										.bucket(bk[0])
 										.key(bk[1])
-										.build());
+										.build())
+						.thenApply(response -> null);
 	}
 
 	private void headObject(final O op) {
@@ -434,7 +663,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	@SuppressWarnings("unchecked")
-	private void listObjects(final O op) {
+	private CompletableFuture<Void> listObjects(final O op) {
 		final var listOp = (ListOperation<? extends PathItem>) op;
 		final var options = listOp.options();
 
@@ -477,44 +706,45 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 
-		ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+		return s3AsyncClient.listObjectsV2(reqBuilder.build())
+						.thenAccept(resp -> {
+							int objectCount = 0;
+							long bytesTotal = 0;
+							String firstKey = null;
+							String lastKey = null;
 
-		int objectCount = 0;
-		long bytesTotal = 0;
-		String firstKey = null;
-		String lastKey = null;
+							for (S3Object s3obj : resp.contents()) {
+								objectCount++;
+								if (options.fetchMetadata()) {
+									bytesTotal += s3obj.size();
+								}
+								final var key = s3obj.key();
+								if (firstKey == null) {
+									firstKey = key;
+								}
+								lastKey = key;
+							}
 
-		for (S3Object s3obj : resp.contents()) {
-			objectCount++;
-			if (options.fetchMetadata()) {
-				bytesTotal += s3obj.size();
-			}
-			final var key = s3obj.key();
-			if (firstKey == null) {
-				firstKey = key;
-			}
-			lastKey = key;
-		}
+							listOp.objectsListed(objectCount);
+							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+							listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
 
-		listOp.objectsListed(objectCount);
-		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-		listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
+							if (firstKey != null) {
+								listOp.pageFirstKey(firstKey);
+							}
+							listOp.continuationToken(resp.nextContinuationToken());
 
-		if (firstKey != null) {
-			listOp.pageFirstKey(firstKey);
-		}
-		listOp.continuationToken(resp.nextContinuationToken());
+							// Update options with the new continuation token for the next page
+							listOp.options(
+											options.toBuilder()
+															.continuationToken(resp.nextContinuationToken())
+															.build());
 
-		// Update options with the new continuation token for the next page
-		listOp.options(
-						options.toBuilder()
-										.continuationToken(resp.nextContinuationToken())
-										.build());
-
-		if (lastKey != null) {
-			listOp.startAfter(lastKey);
-		}
-		listOp.countBytesDone(listOp.bytesListed());
+							if (lastKey != null) {
+								listOp.startAfter(lastKey);
+							}
+							listOp.countBytesDone(listOp.bytesListed());
+						});
 	}
 
 	/**
@@ -561,7 +791,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				reqBuilder.startAfter(startAfter);
 			}
 
-			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+			ListObjectsV2Response resp = s3AsyncClient.listObjectsV2(reqBuilder.build()).join();
 
 			List<I> result = new ArrayList<>(maxKeys);
 			for (S3Object s3obj : resp.contents()) {
@@ -639,7 +869,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				reqBuilder.delimiter(delimiter);
 			}
 
-			ListObjectsV2Response resp = s3Client.listObjectsV2(reqBuilder.build());
+			ListObjectsV2Response resp = s3AsyncClient.listObjectsV2(reqBuilder.build()).join();
 
 			List<String> commonPrefixes = resp.commonPrefixes().stream()
 							.map(CommonPrefix::prefix)
@@ -658,4 +888,215 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return bucketName;
 	}
 
+	// -----------------------------------------------------------------------
+	// Multipart Upload Operations
+	// -----------------------------------------------------------------------
+
+	/**
+	 * Initiate a multipart upload.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> initiateMultipartUpload(final CompositeDataOperation op) {
+		final var bk = resolveBucketAndKey((O) op);
+		var reqBuilder = CreateMultipartUploadRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1]);
+
+		// Add checksum algorithm if enabled
+		if (checksumEnabled && checksumAlgorithm != null) {
+			reqBuilder.checksumAlgorithm(checksumAlgorithm);
+		}
+
+		return s3AsyncClient.createMultipartUpload(reqBuilder.build())
+						.thenApply(response -> {
+							// Store the upload ID in the operation context
+							op.put(KEY_UPLOAD_ID, response.uploadId());
+							return null;
+						});
+	}
+
+	/**
+	 * Upload a single part of a multipart upload.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> uploadPart(final PartialDataOperation op) {
+		final var parentOp = op.parent();
+		if (!(parentOp instanceof CompositeDataOperation)) {
+			return CompletableFuture.failedFuture(new IllegalArgumentException("Partial operation parent must be CompositeDataOperation"));
+		}
+
+		final CompositeDataOperation parent = (CompositeDataOperation) op.parent();
+		final String uploadId = parent.get(KEY_UPLOAD_ID);
+		if (uploadId == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException("Upload ID not found in parent operation"));
+		}
+
+		final var bk = resolveBucketAndKey((O) parent);
+		final int partNumber = op.partNumber() + 1; // S3 uses 1-based part numbers
+
+		var reqBuilder = UploadPartRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1])
+						.uploadId(uploadId)
+						.partNumber(partNumber);
+
+		if (op.item() instanceof DataItem) {
+			DataItem dataItem = (DataItem) op.item();
+			dataItem.position(0);
+			try {
+				final long size = dataItem.size();
+				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+				return s3AsyncClient.uploadPart(
+								reqBuilder.build(),
+								AsyncRequestBody.fromInputStream(inputStream, size, executor))
+								.thenApply(response -> {
+									// Store the ETag in the parent operation context
+									// Key format: part number as string
+									parent.put(String.valueOf(partNumber), response.eTag());
+									return null;
+								});
+			} catch (IOException e) {
+				return CompletableFuture.failedFuture(e);
+			}
+		} else {
+			return CompletableFuture.failedFuture(new UnsupportedOperationException("Part upload requires DataItem"));
+		}
+	}
+
+	/**
+	 * Complete a multipart upload.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> completeMultipartUpload(final CompositeDataOperation op) {
+		final String uploadId = op.get(KEY_UPLOAD_ID);
+		if (uploadId == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException("Upload ID not found"));
+		}
+
+		final var bk = resolveBucketAndKey((O) op);
+		final List<CompletedPart> completedParts = new ArrayList<>();
+
+		// Collect all uploaded parts from the operation context
+		for (var subOp : op.subOperations()) {
+			if (subOp instanceof PartialDataOperation) {
+				final int partNumber = ((PartialDataOperation) subOp).partNumber() + 1;
+				final String eTag = op.get(String.valueOf(partNumber));
+				if (eTag != null) {
+					completedParts.add(CompletedPart.builder()
+									.partNumber(partNumber)
+									.eTag(eTag)
+									.build());
+				}
+			}
+		}
+
+		if (completedParts.isEmpty()) {
+			return CompletableFuture.failedFuture(new IllegalStateException("No parts to complete"));
+		}
+
+		var reqBuilder = CompleteMultipartUploadRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1])
+						.uploadId(uploadId)
+						.multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build());
+
+		return s3AsyncClient.completeMultipartUpload(reqBuilder.build())
+						.thenApply(response -> null);
+	}
+
+	/**
+	 * Abort a multipart upload.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> abortMultipartUpload(final CompositeDataOperation op) {
+		final String uploadId = op.get(KEY_UPLOAD_ID);
+		if (uploadId == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException("Upload ID not found"));
+		}
+
+		final var bk = resolveBucketAndKey((O) op);
+		return s3AsyncClient.abortMultipartUpload(
+						AbortMultipartUploadRequest.builder()
+										.bucket(bk[0])
+										.key(bk[1])
+										.uploadId(uploadId)
+										.build())
+						.thenApply(response -> null);
+	}
+
+	// -----------------------------------------------------------------------
+	// Range Read Operations
+	// -----------------------------------------------------------------------
+
+	/**
+	 * Read a specific byte range of an object.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> readRange(final PartialDataOperation op) {
+		final var parentOp = op.parent();
+		final var bk = resolveBucketAndKey((O) parentOp);
+
+		// Calculate range based on part number and size
+		long rangeStart, rangeEnd;
+		try {
+			rangeStart = op.partNumber() * op.item().size();
+			rangeEnd = rangeStart + op.item().size() - 1;
+		} catch (IOException e) {
+			return CompletableFuture.failedFuture(e);
+		}
+
+		var reqBuilder = GetObjectRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1])
+						.range("bytes=" + rangeStart + "-" + rangeEnd);
+
+		return s3AsyncClient.getObject(
+						reqBuilder.build(),
+						AsyncResponseTransformer.toBlockingInputStream())
+						.thenAccept(response -> {
+							op.startResponse();
+							try (var inputStream = response) {
+								long bytesRead = 0;
+								byte[] buffer = new byte[8192];
+								int n;
+								while ((n = inputStream.read(buffer)) != -1) {
+									bytesRead += n;
+								}
+								if (op instanceof DataOperation) {
+									((DataOperation) op).countBytesDone(bytesRead);
+								}
+								op.finishResponse();
+							} catch (IOException e) {
+								throw new RuntimeException("Failed to read S3 object range", e);
+							}
+						});
+	}
+
+	// -----------------------------------------------------------------------
+	// Copy Operations
+	// -----------------------------------------------------------------------
+
+	/**
+	 * Copy an object from source to destination.
+	 */
+	@SuppressWarnings("unchecked")
+	private CompletableFuture<Void> copyObject(final O op) {
+		final var dstBk = resolveBucketAndKey(op);
+		final var srcPath = op.srcPath();
+		if (srcPath == null || srcPath.isEmpty()) {
+			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
+		}
+
+		// Parse source bucket and key from srcPath
+		final String[] srcBk = parseBucketAndKey(srcPath);
+
+		var reqBuilder = CopyObjectRequest.builder()
+						.sourceBucket(srcBk[0])
+						.sourceKey(srcBk[1])
+						.destinationBucket(dstBk[0])
+						.destinationKey(dstBk[1]);
+
+		return s3AsyncClient.copyObject(reqBuilder.build())
+						.thenApply(response -> null);
+	}
 }

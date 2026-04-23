@@ -13,3 +13,6 @@ storage:
       enabled: false
       tags: {}
     versioning: false
+  crt:
+    targetThroughputGbps: 20.0
+    minimumPartSizeBytes: 16777216
