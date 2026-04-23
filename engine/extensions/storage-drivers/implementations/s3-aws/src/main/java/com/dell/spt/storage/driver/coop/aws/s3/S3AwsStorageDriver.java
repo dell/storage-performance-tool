@@ -487,8 +487,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return readObject(op);
 
 		case STAT:
-			headObject(op);
-			break;
+			return headObject(op);
 
 		case DELETE:
 			return deleteObject(op);
@@ -652,14 +651,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.thenApply(response -> null);
 	}
 
-	private void headObject(final O op) {
+	private CompletableFuture<Void> headObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
-		s3Client.headObject(
+		return s3AsyncClient.headObject(
 						HeadObjectRequest.builder()
 										.bucket(bk[0])
 										.key(bk[1])
-										.build());
+										.build())
+						.thenApply(response -> null);
 	}
 
 	@SuppressWarnings("unchecked")
