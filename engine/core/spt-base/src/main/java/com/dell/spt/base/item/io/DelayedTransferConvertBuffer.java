@@ -67,7 +67,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 					lock.unlock();
 				}
 			}
-			Thread.yield();
+			Thread.onSpinWait();
 		}
 	}
 
@@ -108,7 +108,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 					lock.unlock();
 				}
 			}
-			Thread.yield();
+			Thread.onSpinWait();
 		}
 		return to - from;
 	}
