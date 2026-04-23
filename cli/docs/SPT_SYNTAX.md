@@ -822,5 +822,6 @@ Node status (port 9999)
 | `mixed` workload | Implemented |
 | Data compressibility control (`--object-data-compressibility`) | Implemented |
 | Anti-dedupe stamping (`--object-data-dedupable`) | Implemented |
+| Post-quantum TLS (`pqcMode`: `off`/`prefer`/`require`) | Implemented |
 | `delete` workload | Planned |
 | `results` command | Planned (stub exists) |

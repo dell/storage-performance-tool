@@ -145,6 +145,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.
 - **Mixed Workloads** – run GET, PUT, DELETE, and STAT operations concurrently with configurable weights (`spt run mixed`). Seed objects automatically, tune the operation distribution, and optionally clean up when done.
+- **Post-Quantum TLS** -- hybrid PQC key exchange on the Netty HTTPS path, enabled by default with classical fallback (see [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md)).
 - **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
 - **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
 - **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
@@ -227,6 +228,7 @@ For detailed engineering notes and planning documents, browse the `docs/` direct
 - [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) — Full CLI syntax reference (all commands, flags, and examples)
 - [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) — S3-RDMA acceleration setup, tuning, and architecture
 - [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md) — S3 Tables (Iceberg) test vectors and usage guide
+- [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md) — Post-quantum TLS handshake support and configuration
 
 ---
 

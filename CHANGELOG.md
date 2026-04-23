@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- **Post-quantum TLS handshake support** — the Netty HTTPS driver now offers hybrid post-quantum key exchange groups (`X25519MLKEM768`, `x25519`, `secp256r1`) during TLS 1.3 handshakes via the Bouncy Castle JSSE provider. Enabled by default in `prefer` mode with automatic classical fallback. Covers the `default`, `rdma`, and S3 Tables drivers. Engine config keys: `storage.net.ssl.pqcMode` (`off`/`prefer`/`require`), `storage.net.ssl.jsseProvider`, `storage.net.ssl.namedGroups`. See [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md).
 - **Data compressibility control** (`--object-data-compressibility`) — set a target compressibility percentage (0-100) for generated object data. Each 4KB chunk is split into pseudo-random and zero-filled portions, forcing the storage system's compression to evaluate every block. Engine config key: `item.data.input.compressibility`. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - **Anti-dedupe stamping** (`--object-data-dedupable=false`) — stamp every 4KB of generated data with a 16-byte header (64-bit object identifier + 64-bit stream offset) to practically eliminate inline deduplication on typical fixed/variable chunking systems. Stamps are deterministic and consistent across all transfer paths (Netty, SSL, AWS SDK, RDMA). Engine config key: `item.data.dedupable`. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 
