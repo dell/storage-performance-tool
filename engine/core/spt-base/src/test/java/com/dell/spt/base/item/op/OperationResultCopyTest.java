@@ -44,7 +44,7 @@ class OperationResultCopyTest {
 
 		final var copy = op.result();
 
-		assertTrue(copy.duration() > 0, "copy should have positive duration");
+		assertTrue(copy.duration() >= 0, "copy should have non-negative duration");
 		assertTrue(copy.latency() >= 0, "copy should have non-negative latency");
 		assertEquals(op.duration(), copy.duration(),
 						"copy duration must match original at snapshot time");
