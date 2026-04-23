@@ -64,14 +64,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try {
 			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
 			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
-		} catch (final Exception ignored) {}
+		} catch (final Exception e) {
+			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
+		}
 
 		this.mpuMaxParts = maxParts;
 		this.mpuObjectThrottle = mpuObjects > 0 ? new Semaphore(mpuObjects, true) : null;
 
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
-						dispatchLock, dispatchReady);
+						dispatchLock, dispatchReady, inQueueLimit);
 	}
 
 	@Override
@@ -198,6 +200,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	void releaseMpuObjectPermit() {
 		if (mpuObjectThrottle != null) {
 			mpuObjectThrottle.release();
+			signalDispatch();
 		}
 	}
 
@@ -216,6 +219,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					parentOp.put("permitReleased", "true");
 					if (mpuObjectThrottle != null) {
 						mpuObjectThrottle.release();
+						signalDispatch();
 					}
 				}
 			}
