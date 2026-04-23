@@ -16,9 +16,11 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
@@ -63,8 +65,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		int maxParts = 0;
 		try {
 			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
+			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
+		}
+		try {
 			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
-		} catch (final Exception e) {
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
 			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
 		}
 

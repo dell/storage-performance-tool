@@ -105,7 +105,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						boolean childEmpty = childOpQueue.isEmpty();
 						boolean inEmpty = inOpQueue.isEmpty();
 						boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
-						
+
 						if (childEmpty && (inEmpty || !canDrainIn)) {
 							if (!storageDriver.tryAcquireMpuObjectPermit()) {
 								dispatchReady.await();

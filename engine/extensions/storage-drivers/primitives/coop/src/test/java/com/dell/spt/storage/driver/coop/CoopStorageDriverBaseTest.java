@@ -18,9 +18,11 @@ import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -84,6 +86,15 @@ class CoopStorageDriverBaseTest {
 	private static Config storageConfigWithMalformedMultipartLimit(final RuntimeException parseException) {
 		final var storageConfig = storageConfigForMultipartLimits(0, 0);
 		when(storageConfig.intVal("driver-limit-multipart-objects")).thenThrow(parseException);
+		return storageConfig;
+	}
+
+	private static Config storageConfigWithMissingMultipartLimits() {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0);
+		when(storageConfig.intVal("driver-limit-multipart-objects"))
+						.thenThrow(new NoSuchElementException("driver-limit-multipart-objects"));
+		when(storageConfig.intVal("driver-limit-multipart-parts"))
+						.thenThrow(new InvalidValuePathException("driver-limit-multipart-parts"));
 		return storageConfig;
 	}
 
@@ -184,6 +195,47 @@ class CoopStorageDriverBaseTest {
 							.filter(msg -> msg.contains("Failed to parse multipart limits"))
 							.count();
 			assertEquals(0, parseWarnCount, "valid multipart limits should not produce parse warnings");
+		} finally {
+			try {
+				if (driver != null) {
+					driver.close();
+				} else {
+					dataInput.close();
+				}
+			} finally {
+				logger.removeAppender(appender);
+				logger.setLevel(originalLevel);
+				appender.stop();
+			}
+		}
+	}
+
+	@Test
+	void missingMultipartLimitsDoNotEmitParseWarnings() throws Exception {
+		final var storageConfig = storageConfigWithMissingMultipartLimits();
+		final var appender = new CapturingAppender();
+		appender.start();
+
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
+		final var originalLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.WARN);
+
+		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
+		try {
+			driver = new CoopStorageDriverMock<>("parse-missing-step", dataInput, storageConfig, false, 16);
+
+			assertNull(mpuObjectThrottleOf(driver), "missing multipart object limit should keep MPU objects unlimited");
+			assertEquals(0, mpuMaxPartsOf(driver), "missing multipart part limit should keep MPU parts unlimited");
+
+			final var parseWarnCount = appender.events().stream()
+							.filter(e -> Level.WARN.equals(e.getLevel()))
+							.map(e -> e.getMessage().getFormattedMessage())
+							.filter(msg -> msg.contains("Failed to parse multipart limits"))
+							.count();
+			assertEquals(0, parseWarnCount, "missing optional multipart limits should not emit parse warnings");
 		} finally {
 			try {
 				if (driver != null) {
@@ -866,7 +918,8 @@ class CoopStorageDriverBaseTest {
 
 		final var waiterReady = new CountDownLatch(1);
 		final var waiterDone = new CountDownLatch(1);
-		final boolean[] awakened = {false};
+		final boolean[] awakened = {false
+		};
 
 		Thread.ofVirtual().start(() -> {
 			lock.lock();
