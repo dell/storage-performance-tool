@@ -16,6 +16,9 @@ storage:
     ssl:
       ciphers: list
       enabled: boolean
+      jsseProvider: string
+      namedGroups: list
+      pqcMode: string
       protocols: list
       provider: string
     node:

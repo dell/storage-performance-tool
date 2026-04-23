@@ -40,5 +40,8 @@ dependencies {
 		libs.netty.codec,
 		libs.disruptor,
 		libs.javassist,
+		libs.bouncycastle.bcprov.jdk18on,
+		libs.bouncycastle.bctls.jdk18on,
+		libs.bouncycastle.bcutil.jdk18on,
 	)
 }
