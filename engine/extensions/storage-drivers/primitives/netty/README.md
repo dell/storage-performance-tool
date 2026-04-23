@@ -26,7 +26,10 @@ count of the open connections may be limited by `storage-driver-limit-concurrenc
 | storage-net-transport                          | Enum | nio | The I/O transport to use (see the [details](http://netty.io/wiki/native-transports.html)). By default tries to use "nio" (the most compatible). For Linux try to use "epoll" or "iouring", for MacOS/BSD use "kqueue" (requires rebuilding).
 | storage-net-ssl-ciphers                        | List of strings | null | The list of ciphers to use if SSL is enabled. First cipher in the list that matches is applied. Make sure to match used ciphers and protocols. 
 | storage-net-ssl-enabled                        | Flag | false | The flag to enable the load through SSL/TLS. Currently only HTTPS implementation is available. Have no effect if configured storage type is filesystem.
-| storage-net-ssl-protocols                      | List of strings | TLSv1.1, TLSv1.2 | The list of secure protocols to use if SSL is enabled 
+| storage-net-ssl-jsseProvider                   | String | BCJSSE | JSSE provider for PQC TLS. Used when `pqcMode` is `prefer` or `require`. Default resolves the Bouncy Castle JSSE provider without JVM-global registration.
+| storage-net-ssl-namedGroups                    | List of strings | X25519MLKEM768, x25519, secp256r1 | TLS named groups (key exchange curves) offered during the handshake. The first group supported by the target is selected.
+| storage-net-ssl-pqcMode                        | String | prefer | Post-quantum TLS mode: `off` (no PQC), `prefer` (attempt PQC with classical fallback), or `require` (fail if PQC provider unavailable).
+| storage-net-ssl-protocols                      | List of strings | TLSv1.3, TLSv1.2 | The list of secure protocols to use if SSL is enabled 
 | storage-net-ssl-provider                       | String | OPENSSL | The SSL provider. May be "OPENSSL" (better performance) or "JDK" (fallback)
 | storage-net-writeSpinCount                     | Integer | 1 | Maximum loop count for a write operation until WritableByteChannel.write(ByteBuffer) returns a non-zero value.
 
@@ -43,6 +46,30 @@ java -jar spt-<VERSION>.jar \
     --storage-net-node-port=9021 \
     ...
 ```
+
+### Post-Quantum TLS (PQC)
+
+When SSL is enabled, the driver defaults to `pqcMode=prefer`, which loads the Bouncy Castle JSSE provider and offers hybrid post-quantum key exchange groups (`X25519MLKEM768`, `x25519`, `secp256r1`) during the TLS 1.3 handshake. If the target or provider does not support PQC, the handshake falls back to classical TLS automatically.
+
+To require PQC (fail if unavailable):
+
+```bash
+java -jar spt-<VERSION>.jar \
+    --storage-net-ssl-enabled \
+    --storage-net-ssl-pqcMode=require \
+    ...
+```
+
+To disable PQC entirely:
+
+```bash
+java -jar spt-<VERSION>.jar \
+    --storage-net-ssl-enabled \
+    --storage-net-ssl-pqcMode=off \
+    ...
+```
+
+See [`cli/docs/PQC_TLS.md`](../../../cli/docs/PQC_TLS.md) for the full guide including verification, troubleshooting, and driver coverage.
 
 ## 4. Connection Timeout
 
