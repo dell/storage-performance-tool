@@ -12,9 +12,17 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
+import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -23,6 +31,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -30,6 +43,213 @@ import org.junit.jupiter.api.Test;
  */
 @SuppressWarnings("unchecked")
 class CoopStorageDriverBaseTest {
+
+	private static class CapturingAppender extends AbstractAppender {
+		private final List<LogEvent> events = Collections.synchronizedList(new ArrayList<>());
+
+		CapturingAppender() {
+			super("coop-driver-base-test-capture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			events.add(event.toImmutable());
+		}
+
+		List<LogEvent> events() {
+			return List.copyOf(events);
+		}
+	}
+
+	private static Config storageConfigForMultipartLimits(final int mpuObjectLimit, final int mpuPartLimit) {
+		final var storageConfig = mock(Config.class);
+		final var driverConfig = mock(Config.class);
+		final var limitConfig = mock(Config.class);
+		final var authConfig = mock(Config.class);
+
+		when(storageConfig.configVal("driver")).thenReturn(driverConfig);
+		when(driverConfig.configVal("limit")).thenReturn(limitConfig);
+		when(storageConfig.stringVal("namespace")).thenReturn("test-ns");
+		when(storageConfig.configVal("auth")).thenReturn(authConfig);
+		when(authConfig.stringVal("uid")).thenReturn("user");
+		when(authConfig.stringVal("secret")).thenReturn("secret");
+		when(authConfig.stringVal("token")).thenReturn(null);
+		when(limitConfig.intVal("concurrency")).thenReturn(4);
+		when(driverConfig.intVal("threads")).thenReturn(0);
+		when(storageConfig.intVal("driver-limit-queue-input")).thenReturn(16);
+		when(storageConfig.intVal("driver-limit-multipart-objects")).thenReturn(mpuObjectLimit);
+		when(storageConfig.intVal("driver-limit-multipart-parts")).thenReturn(mpuPartLimit);
+
+		return storageConfig;
+	}
+
+	private static Config storageConfigWithMalformedMultipartLimit(final RuntimeException parseException) {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0);
+		when(storageConfig.intVal("driver-limit-multipart-objects")).thenThrow(parseException);
+		return storageConfig;
+	}
+
+	private static Config storageConfigWithMissingMultipartLimits() {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0);
+		when(storageConfig.intVal("driver-limit-multipart-objects"))
+						.thenThrow(new NoSuchElementException("driver-limit-multipart-objects"));
+		when(storageConfig.intVal("driver-limit-multipart-parts"))
+						.thenThrow(new InvalidValuePathException("driver-limit-multipart-parts"));
+		return storageConfig;
+	}
+
+	private static Semaphore mpuObjectThrottleOf(final CoopStorageDriverBase<Item, Operation<Item>> driver) throws Exception {
+		final var field = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
+		field.setAccessible(true);
+		return (Semaphore) field.get(driver);
+	}
+
+	private static int mpuMaxPartsOf(final CoopStorageDriverBase<Item, Operation<Item>> driver) throws Exception {
+		final var field = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
+		field.setAccessible(true);
+		return field.getInt(driver);
+	}
+
+	private static void awaitCapturedEvents(
+					final CapturingAppender appender, final int minCount, final long timeoutMillis)
+					throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+		while (appender.events().size() < minCount && System.nanoTime() < deadlineNanos) {
+			Thread.sleep(10);
+		}
+	}
+
+	@Test
+	void malformedMultipartLimitLogsWarningAndFallsBackToUnlimited() throws Exception {
+		final var storageConfig = storageConfigWithMalformedMultipartLimit(
+						new IllegalArgumentException("For input string: \"oops\""));
+		final var appender = new CapturingAppender();
+		appender.start();
+
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
+		final var originalLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.WARN);
+
+		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
+		try {
+			driver = new CoopStorageDriverMock<>("parse-warn-step", dataInput, storageConfig, false, 16);
+
+			assertNull(mpuObjectThrottleOf(driver), "malformed multipart limits should fall back to unlimited MPU objects");
+			assertEquals(0, mpuMaxPartsOf(driver), "malformed multipart limits should fall back to unlimited MPU parts");
+			awaitCapturedEvents(appender, 1, 2000);
+
+			final var parseWarnEvents = appender.events().stream()
+							.filter(e -> Level.WARN.equals(e.getLevel()))
+							.map(e -> e.getMessage().getFormattedMessage())
+							.filter(msg -> msg.contains("Failed to parse multipart limits"))
+							.toList();
+			assertEquals(1, parseWarnEvents.size(), "exactly one multipart parse warning should be logged");
+			assertTrue(parseWarnEvents.get(0).contains("For input string: \"oops\""),
+							"warning should include parse failure details");
+			assertTrue(parseWarnEvents.get(0).contains("Proceeding with unlimited"),
+							"warning should indicate fallback behavior");
+		} finally {
+			try {
+				if (driver != null) {
+					driver.close();
+				} else {
+					dataInput.close();
+				}
+			} finally {
+				logger.removeAppender(appender);
+				logger.setLevel(originalLevel);
+				appender.stop();
+			}
+		}
+	}
+
+	@Test
+	void validMultipartLimitsConfigureThrottleWithoutParseWarning() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(3, 9);
+		final var appender = new CapturingAppender();
+		appender.start();
+
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
+		final var originalLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.WARN);
+
+		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
+		try {
+			driver = new CoopStorageDriverMock<>("parse-ok-step", dataInput, storageConfig, false, 16);
+
+			final var mpuThrottle = mpuObjectThrottleOf(driver);
+			assertNotNull(mpuThrottle, "valid multipart object limit should create MPU throttle");
+			assertEquals(3, mpuThrottle.availablePermits(),
+							"MPU throttle permits should match configured multipart object limit");
+			assertEquals(9, mpuMaxPartsOf(driver), "multipart part limit should match configured value");
+
+			final var parseWarnCount = appender.events().stream()
+							.filter(e -> Level.WARN.equals(e.getLevel()))
+							.map(e -> e.getMessage().getFormattedMessage())
+							.filter(msg -> msg.contains("Failed to parse multipart limits"))
+							.count();
+			assertEquals(0, parseWarnCount, "valid multipart limits should not produce parse warnings");
+		} finally {
+			try {
+				if (driver != null) {
+					driver.close();
+				} else {
+					dataInput.close();
+				}
+			} finally {
+				logger.removeAppender(appender);
+				logger.setLevel(originalLevel);
+				appender.stop();
+			}
+		}
+	}
+
+	@Test
+	void missingMultipartLimitsDoNotEmitParseWarnings() throws Exception {
+		final var storageConfig = storageConfigWithMissingMultipartLimits();
+		final var appender = new CapturingAppender();
+		appender.start();
+
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
+		final var originalLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.WARN);
+
+		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
+		try {
+			driver = new CoopStorageDriverMock<>("parse-missing-step", dataInput, storageConfig, false, 16);
+
+			assertNull(mpuObjectThrottleOf(driver), "missing multipart object limit should keep MPU objects unlimited");
+			assertEquals(0, mpuMaxPartsOf(driver), "missing multipart part limit should keep MPU parts unlimited");
+
+			final var parseWarnCount = appender.events().stream()
+							.filter(e -> Level.WARN.equals(e.getLevel()))
+							.map(e -> e.getMessage().getFormattedMessage())
+							.filter(msg -> msg.contains("Failed to parse multipart limits"))
+							.count();
+			assertEquals(0, parseWarnCount, "missing optional multipart limits should not emit parse warnings");
+		} finally {
+			try {
+				if (driver != null) {
+					driver.close();
+				} else {
+					dataInput.close();
+				}
+			} finally {
+				logger.removeAppender(appender);
+				logger.setLevel(originalLevel);
+				appender.stop();
+			}
+		}
+	}
 
 	@Test
 	void scheduledAndCompletedCountersAreIndependent() throws Exception {
@@ -676,5 +896,48 @@ class CoopStorageDriverBaseTest {
 
 		assertFalse(result, "handleCompleted should return false on overflow");
 		assertEquals(1, mpuThrottle.availablePermits(), "MPU object permit should be safely released on parent enqueue overflow");
+	}
+
+	@Test
+	void releaseMpuObjectPermitSignalsDispatchWaiter() throws Exception {
+		final var driver = newRetryTestDriver();
+
+		final Semaphore mpuThrottle = new Semaphore(1, true);
+		mpuThrottle.acquire(); // force available permits to 0 before release
+		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
+		mpuField.setAccessible(true);
+		mpuField.set(driver, mpuThrottle);
+
+		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
+		lockField.setAccessible(true);
+		final ReentrantLock lock = (ReentrantLock) lockField.get(driver);
+
+		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
+		condField.setAccessible(true);
+		final var condition = (java.util.concurrent.locks.Condition) condField.get(driver);
+
+		final var waiterReady = new CountDownLatch(1);
+		final var waiterDone = new CountDownLatch(1);
+		final boolean[] awakened = {false
+		};
+
+		Thread.ofVirtual().start(() -> {
+			lock.lock();
+			try {
+				waiterReady.countDown();
+				awakened[0] = condition.await(2, TimeUnit.SECONDS);
+			} catch (final InterruptedException ignored) {} finally {
+				lock.unlock();
+				waiterDone.countDown();
+			}
+		});
+
+		assertTrue(waiterReady.await(5, TimeUnit.SECONDS), "waiter should be parked on dispatch condition");
+
+		driver.releaseMpuObjectPermit();
+
+		assertTrue(waiterDone.await(5, TimeUnit.SECONDS), "waiter should complete after permit release signal");
+		assertTrue(awakened[0], "permit release should signal the dispatch condition");
+		assertEquals(1, mpuThrottle.availablePermits(), "permit release should return one permit");
 	}
 }

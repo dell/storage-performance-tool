@@ -16,9 +16,11 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
@@ -63,15 +65,21 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		int maxParts = 0;
 		try {
 			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
+			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
+		}
+		try {
 			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
-		} catch (final Exception ignored) {}
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
+			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
+		}
 
 		this.mpuMaxParts = maxParts;
 		this.mpuObjectThrottle = mpuObjects > 0 ? new Semaphore(mpuObjects, true) : null;
 
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
-						dispatchLock, dispatchReady);
+						dispatchLock, dispatchReady, inQueueLimit);
 	}
 
 	@Override
@@ -198,6 +206,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	void releaseMpuObjectPermit() {
 		if (mpuObjectThrottle != null) {
 			mpuObjectThrottle.release();
+			signalDispatch();
 		}
 	}
 
@@ -216,6 +225,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					parentOp.put("permitReleased", "true");
 					if (mpuObjectThrottle != null) {
 						mpuObjectThrottle.release();
+						signalDispatch();
 					}
 				}
 			}

@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
@@ -42,13 +43,40 @@ class OperationDispatchTaskTest {
 		dispatchReady = dispatchLock.newCondition();
 		task = new OperationDispatchTask<>(
 						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
-						dispatchLock, dispatchReady);
+						dispatchLock, dispatchReady, 16);
 	}
 
 	@AfterEach
 	void tearDown() {
 		task.close();
 		executor.close();
+	}
+
+	private void configurePermitGate(final AtomicInteger availableMpuPermits) {
+		when(driverMock.tryAcquireMpuObjectPermit()).thenAnswer(inv -> {
+			final int permits = availableMpuPermits.get();
+			if (permits > 0) {
+				availableMpuPermits.decrementAndGet();
+				return true;
+			}
+			return false;
+		});
+	}
+
+	private void captureSubmittedOps(final List<Operation<Item>> submitted) {
+		when(driverMock.submit(any(Operation.class))).thenAnswer(inv -> {
+			submitted.add(inv.getArgument(0));
+			return true;
+		});
+		when(driverMock.submit(anyList(), anyInt(), anyInt())).thenAnswer(inv -> {
+			final List<Operation<Item>> buff = inv.getArgument(0);
+			final int from = inv.getArgument(1);
+			final int to = inv.getArgument(2);
+			for (int i = from; i < to; i++) {
+				submitted.add(buff.get(i));
+			}
+			return to - from;
+		});
 	}
 
 	@Test
@@ -272,5 +300,189 @@ class OperationDispatchTaskTest {
 
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
+
+	@Test
+	void deferredMpuQueueCapacityPreservesInputBackpressure() throws Exception {
+		task = new OperationDispatchTask<>(
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 2);
+		final Operation<Item> op1 = mock(Operation.class);
+		final Operation<Item> op2 = mock(Operation.class);
+		final Operation<Item> op3 = mock(Operation.class);
+		final Operation<Item> op4 = mock(Operation.class);
+		final Operation<Item> op5 = mock(Operation.class);
+		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
+		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+
+		inOpQueue.add(op1);
+		inOpQueue.add(op2);
+		inOpQueue.add(op3);
+		inOpQueue.add(op4);
+		inOpQueue.add(op5);
+		task.doWork();
+
+		assertEquals(3, inOpQueue.size(), "dispatcher should stop draining input once deferred MPU queue reaches capacity");
+		verify(driverMock, never()).submit(any(Operation.class));
+		verify(driverMock, never()).submit(anyList(), anyInt(), anyInt());
+	}
+
+	@Test
+	void deferredMpuOnlyWorkAwaitsWhenPermitsUnavailable() throws Exception {
+		final Operation<Item> mpuOp = mock(Operation.class);
+		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
+		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+
+		inOpQueue.add(mpuOp);
+		task.doWork();
+		assertTrue(inOpQueue.isEmpty(), "precondition: MPU init op should be deferred");
+
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(50);
+		assertTrue(worker.isAlive(), "dispatcher should await when only deferred MPU ops exist and no permits are available");
+
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+		worker.join(5000);
+		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
+	}
+
+	@Test
+	void deferredQueueFullAndInputPendingAwaitsWithoutPermits() throws Exception {
+		task = new OperationDispatchTask<>(
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 2);
+		final Operation<Item> op1 = mock(Operation.class);
+		final Operation<Item> op2 = mock(Operation.class);
+		final Operation<Item> op3 = mock(Operation.class);
+		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
+		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+
+		inOpQueue.add(op1);
+		inOpQueue.add(op2);
+		inOpQueue.add(op3);
+		task.doWork();
+		assertEquals(1, inOpQueue.size(), "precondition: one input op should remain when deferred queue is full");
+
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(50);
+		assertTrue(worker.isAlive(), "dispatcher should await when deferred queue is full and MPU permits are unavailable");
+		assertEquals(1, inOpQueue.size(), "input queue should not be drained while deferred queue is full");
+
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+		worker.join(5000);
+		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
+	}
+
+	@Test
+	void deferredQueueFullResumesWithoutDroppingMpuOpsInFifoOrder() throws Exception {
+		task = new OperationDispatchTask<>(
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 2);
+		final Operation<Item> op1 = mock(Operation.class);
+		final Operation<Item> op2 = mock(Operation.class);
+		final Operation<Item> op3 = mock(Operation.class);
+		final List<Operation<Item>> submitted = new ArrayList<>();
+		final AtomicInteger availableMpuPermits = new AtomicInteger(0);
+
+		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
+		configurePermitGate(availableMpuPermits);
+		captureSubmittedOps(submitted);
+
+		inOpQueue.add(op1);
+		inOpQueue.add(op2);
+		inOpQueue.add(op3);
+
+		task.doWork();
+		assertEquals(1, inOpQueue.size(), "input queue should preserve backpressure while deferred MPU queue is full");
+		assertTrue(submitted.isEmpty(), "no MPU op should be dispatched without permits");
+
+		availableMpuPermits.set(1);
+		task.doWork();
+		assertEquals(1, submitted.size(), "one permit should resume exactly one deferred MPU op");
+		assertSame(op1, submitted.get(0), "deferred MPU ops should resume in FIFO order");
+		assertTrue(inOpQueue.isEmpty(), "pending input should move only when deferred queue capacity reopens");
+
+		availableMpuPermits.set(1);
+		task.doWork();
+		assertEquals(2, submitted.size(), "second permit should dispatch the second deferred MPU op");
+		assertSame(op2, submitted.get(1), "second dispatched op should preserve FIFO order");
+
+		availableMpuPermits.set(1);
+		task.doWork();
+		assertEquals(3, submitted.size(), "third permit should dispatch the last preserved MPU op");
+		assertSame(op3, submitted.get(2), "all deferred/pending MPU ops should eventually dispatch without loss");
+	}
+
+	@Test
+	void deferredQueueFullPausesIntakeUntilPermitThenResumesMpuAndNonMpu() throws Exception {
+		task = new OperationDispatchTask<>(
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 1);
+		final Operation<Item> mpuOp = mock(Operation.class);
+		final Operation<Item> simpleOp = mock(Operation.class);
+		final List<Operation<Item>> submitted = new ArrayList<>();
+		final AtomicInteger availableMpuPermits = new AtomicInteger(0);
+
+		when(driverMock.isMpuInit(any(Operation.class))).thenAnswer(inv -> inv.getArgument(0) == mpuOp);
+		configurePermitGate(availableMpuPermits);
+		captureSubmittedOps(submitted);
+
+		inOpQueue.add(mpuOp);
+		inOpQueue.add(simpleOp);
+
+		task.doWork();
+		assertEquals(1, inOpQueue.size(), "non-MPU input should remain queued while deferred MPU queue is full");
+		assertTrue(submitted.isEmpty(), "dispatcher should not submit work without MPU permits");
+
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(50);
+		assertTrue(worker.isAlive(), "dispatcher should await when deferred MPU queue is full and permits are unavailable");
+		assertEquals(1, inOpQueue.size(), "input queue should remain paused while awaiting permits");
+
+		dispatchLock.lock();
+		try {
+			dispatchReady.signal();
+		} finally {
+			dispatchLock.unlock();
+		}
+		worker.join(5000);
+		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
+		assertEquals(1, inOpQueue.size(), "signal without permits should not drain paused input");
+		assertTrue(submitted.isEmpty(), "signal without permits should not dispatch queued ops");
+
+		availableMpuPermits.set(1);
+		task.doWork();
+		assertTrue(inOpQueue.isEmpty(), "paused input should resume once deferred MPU capacity opens");
+		assertEquals(2, submitted.size(), "resume should dispatch both the deferred MPU op and queued non-MPU op");
+		assertSame(mpuOp, submitted.get(0), "deferred MPU op should dispatch first on resume");
+		assertSame(simpleOp, submitted.get(1), "queued non-MPU op should dispatch immediately after resume");
 	}
 }

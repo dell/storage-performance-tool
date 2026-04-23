@@ -36,13 +36,14 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final CircularBuffer<O> buff;
 	private final Lock dispatchLock;
 	private final Condition dispatchReady;
+	private final int deferredQueueCapacity;
 
-	private final Queue<O> deferredMpuQueue = new java.util.ArrayDeque<>();
+	private final Queue<O> deferredMpuQueue;
 
 	public OperationDispatchTask(
 					final VirtualThreadExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
-					final int batchSize, final Lock dispatchLock, final Condition dispatchReady) {
+					final int batchSize, final Lock dispatchLock, final Condition dispatchReady, final int deferredQueueCapacity) {
 		super(executor);
 		this.buff = new CircularArrayBuffer<>(batchSize);
 		this.storageDriver = storageDriver;
@@ -52,6 +53,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		this.batchSize = batchSize;
 		this.dispatchLock = dispatchLock;
 		this.dispatchReady = dispatchReady;
+		this.deferredQueueCapacity = deferredQueueCapacity;
+		this.deferredMpuQueue = new java.util.ArrayDeque<>(deferredQueueCapacity);
 	}
 
 	@Override
@@ -75,7 +78,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			// Then drain incoming ops
 			final java.util.List<O> tempInOps = new java.util.ArrayList<>(batchSize);
 			if (buff.size() == 0) {
-				inOpQueue.drainTo(tempInOps, batchSize);
+				inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
 				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
 					dispatchLock.lock();
 					try {
@@ -93,11 +96,38 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						childOpQueue.drainTo(buff, batchSize - buff.size());
 					}
 					if (buff.size() < batchSize) {
-						inOpQueue.drainTo(tempInOps, batchSize - buff.size());
+						inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
+					}
+				} else if (tempInOps.isEmpty() && !deferredMpuQueue.isEmpty()) {
+					// We might have no actionable work (MPU permits are exhausted, or deferred queue is full and inOpQueue is blocked).
+					dispatchLock.lock();
+					try {
+						boolean childEmpty = childOpQueue.isEmpty();
+						boolean inEmpty = inOpQueue.isEmpty();
+						boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
+
+						if (childEmpty && (inEmpty || !canDrainIn)) {
+							if (!storageDriver.tryAcquireMpuObjectPermit()) {
+								dispatchReady.await();
+							} else {
+								// We acquired a permit just now, we can process a deferred op
+								if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
+									buff.add(deferredMpuQueue.poll());
+								}
+							}
+						}
+					} finally {
+						dispatchLock.unlock();
+					}
+					if (buff.size() < batchSize) {
+						childOpQueue.drainTo(buff, batchSize - buff.size());
+					}
+					if (buff.size() < batchSize) {
+						inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 					}
 				}
 			} else if (buff.size() < batchSize) {
-				inOpQueue.drainTo(tempInOps, batchSize - buff.size());
+				inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 			}
 
 			// Process new incoming ops to respect MPU object limits
