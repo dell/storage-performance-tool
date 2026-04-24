@@ -46,6 +46,9 @@ hadoop = "3.3.6"
 # AWS SDK
 awsSdk = "2.42.28"
 
+# Crypto / TLS
+bouncycastle = "1.78.1"
+
 # Build tools
 dockerJava = "3.1.5"
 shadow = "8.1.1"
@@ -145,6 +148,11 @@ aws-apache-client = { module = "software.amazon.awssdk:apache-client", version.r
 aws-sdk-core = { module = "software.amazon.awssdk:sdk-core", version.ref = "awsSdk" }
 aws-utils = { module = "software.amazon.awssdk:utils", version.ref = "awsSdk" }
 aws-profiles = { module = "software.amazon.awssdk:profiles", version.ref = "awsSdk" }
+
+# Bouncy Castle
+bouncycastle-bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bctls-jdk18on = { module = "org.bouncycastle:bctls-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bcutil-jdk18on = { module = "org.bouncycastle:bcutil-jdk18on", version.ref = "bouncycastle" }
 
 [bundles]
 # Common logging bundle

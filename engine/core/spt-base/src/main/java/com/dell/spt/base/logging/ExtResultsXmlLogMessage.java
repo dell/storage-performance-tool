@@ -10,11 +10,9 @@ import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.TimeZone;
+import java.time.ZoneOffset;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 
 /**
  * Formats a single {@code <result ... />} XML element containing the final metrics for a load step.
@@ -27,11 +25,9 @@ import java.util.TimeZone;
 @AsynchronouslyFormattable
 public final class ExtResultsXmlLogMessage extends LogMessageBase {
 
-	private static final ThreadLocal<DateFormat> FMT_DATE_RESULTS = ThreadLocal.withInitial(() -> {
-		final DateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT);
-		df.setTimeZone(TimeZone.getTimeZone("UTC"));
-		return df;
-	});
+	private static final DateTimeFormatter FMT_DATE_RESULTS = DateTimeFormatter
+					.ofPattern("yyyy-MM-dd HH:mm:ss")
+					.withZone(ZoneOffset.UTC);
 
 	private final MetricsContext<?> metricsCtx;
 	private final AllMetricsSnapshot snapshot;
@@ -64,14 +60,14 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append('"');
 
 		strb.append(" StartDate=\"")
-						.append(FMT_DATE_RESULTS.get().format(new Date(startTimeMillis)))
+						.append(FMT_DATE_RESULTS.format(Instant.ofEpochMilli(startTimeMillis)))
 						.append('"');
 		strb.append(" StartTimestamp=\"")
 						.append(startTimeMillis)
 						.append('"');
 
 		strb.append(" EndDate=\"")
-						.append(FMT_DATE_RESULTS.get().format(new Date(endTimeMillis)))
+						.append(FMT_DATE_RESULTS.format(Instant.ofEpochMilli(endTimeMillis)))
 						.append('"');
 		strb.append(" EndTimestamp=\"")
 						.append(endTimeMillis)

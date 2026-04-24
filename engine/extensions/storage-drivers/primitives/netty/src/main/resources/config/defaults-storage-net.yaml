@@ -18,10 +18,16 @@ storage:
     ssl:
       ciphers: null
       enabled: false
+      jsseProvider: BCJSSE
+      namedGroups:
+        - X25519MLKEM768
+        - x25519
+        - secp256r1
+      pqcMode: prefer
       protocols:
+        - TLSv1.3
         - TLSv1.2
-        - TLSv1.1
-      provider: OPENSSL
+      provider: JDK
     node:
       addrs:
         - 127.0.0.1

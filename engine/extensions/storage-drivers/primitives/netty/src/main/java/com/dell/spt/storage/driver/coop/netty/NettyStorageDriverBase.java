@@ -26,6 +26,7 @@ import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import com.github.akurilov.netty.connection.pool.MultiNodeConnPoolImpl;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.bootstrap.Bootstrap;
@@ -43,6 +44,7 @@ import io.netty.channel.pool.ChannelPoolHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.timeout.IdleStateHandler;
@@ -52,6 +54,10 @@ import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Locale;
+import java.util.NoSuchElementException;
+import java.security.Provider;
+import java.security.Security;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -59,12 +65,17 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 
 /** Created by kurila on 30.09.16. */
 public abstract class NettyStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends CoopStorageDriverBase<I, O> implements NettyStorageDriver<I, O>, ChannelPoolHandler {
 
 	private static final String CLS_NAME = NettyStorageDriverBase.class.getSimpleName();
+	private static final String BC_JSSE_PROVIDER_NAME = "BCJSSE";
+	private static final String BC_JSSE_PROVIDER_CLASS = "org.bouncycastle.jsse.provider.BouncyCastleJsseProvider";
+	private static final String BC_JCE_PROVIDER_CLASS = "org.bouncycastle.jce.provider.BouncyCastleProvider";
 
 	static {
 		final java.util.logging.Logger julConnPoolLogger = java.util.logging.Logger.getLogger(MultiNodeConnPoolImpl.class.getName());
@@ -84,6 +95,10 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final NonBlockingConnPool connPool;
 	private final boolean sslFlag;
 	private final SslContext sslCtx;
+	private final String[] sslNamedGroups;
+	private final String sslPqcMode;
+	private final AtomicBoolean namedGroupsWarned = new AtomicBoolean(false);
+	private final AtomicBoolean tlsHandshakeLogged = new AtomicBoolean(false);
 	protected final ChannelFutureListener reqSentCallback = this::sendFullRequestComplete;
 
 	@SuppressWarnings("unchecked")
@@ -106,21 +121,46 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			final var userCiphers = sslConfig.<String> listVal("ciphers");
 			final var providerName = sslConfig.stringVal("provider");
 			final var provider = SslProvider.valueOf(providerName);
+			sslPqcMode = normalizedPqcMode(sslStringVal(sslConfig, "pqcMode", "off"));
+			final var jsseProviderName = sslStringVal(sslConfig, "jsseProvider", null);
+			sslNamedGroups = sslListVal(sslConfig, "namedGroups").toArray(new String[]{});
 			Loggers.MSG.info("{}: SSL/TLS provider: {}", stepId, providerName);
+			if (sslNamedGroups.length > 0) {
+				Loggers.MSG.info("{}: SSL/TLS named groups: {}", stepId, String.join(", ", sslNamedGroups));
+			}
 			try {
-				sslCtx = SslContextBuilder
+				final var sslBuilder = SslContextBuilder
 								.forClient()
 								.trustManager(InsecureTrustManagerFactory.INSTANCE)
 								.sslProvider(provider)
 								.protocols(protocols.toArray(new String[]{}))
-								.ciphers(userCiphers)
-								.build();
+								.ciphers(userCiphers);
+				if (SslProvider.JDK.equals(provider) && !"off".equals(sslPqcMode)) {
+					final var jsseProvider = resolveJsseProvider(jsseProviderName);
+					if (jsseProvider == null) {
+						if ("require".equals(sslPqcMode)) {
+							throw new IllegalConfigurationException(
+											"PQC TLS provider \"" + jsseProviderName + "\" is unavailable in require mode");
+						}
+						Loggers.MSG.warn(
+										"{}: PQC TLS provider \"{}\" is unavailable; falling back to default JSSE provider",
+										stepId,
+										jsseProviderName);
+					} else {
+						sslBuilder.sslContextProvider(jsseProvider);
+						Loggers.MSG.info("{}: SSL/TLS JSSE provider: {}", stepId, jsseProvider.getName());
+					}
+				}
+				sslCtx = sslBuilder.build();
 				Loggers.MSG.info("{}: SSL/TLS cipher suites: {}", stepId, sslCtx.cipherSuites());
+				Loggers.MSG.info("{}: SSL/TLS PQC mode: {}", stepId, sslPqcMode);
 			} catch (final SSLException e) {
 				throw new IllegalConfigurationException("Failed to build the SSL context", e);
 			}
 		} else {
 			sslCtx = null;
+			sslNamedGroups = new String[]{};
+			sslPqcMode = "off";
 		}
 		final var sto = netConfig.intVal("timeoutMilliSec");
 		if (sto > 0) {
@@ -689,12 +729,126 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		final var pipeline = channel.pipeline();
 		if (sslFlag) {
 			Loggers.MSG.debug("{}: SSL/TLS is enabled for the channel", stepId);
-			pipeline.addLast(sslCtx.newHandler(channel.alloc()));
+			final var sslHandler = (SslHandler) sslCtx.newHandler(channel.alloc());
+			applyNamedGroups(sslHandler.engine());
+			sslHandler.handshakeFuture().addListener(future -> {
+				if (future.isSuccess()) {
+					logNegotiatedTls(sslHandler);
+				}
+			});
+			pipeline.addLast(sslHandler);
 		}
 		if (netTimeoutMilliSec > 0) {
 			pipeline.addLast(
 							new IdleStateHandler(
 											netTimeoutMilliSec, netTimeoutMilliSec, netTimeoutMilliSec, TimeUnit.MILLISECONDS));
+		}
+	}
+
+	void logNegotiatedTls(final SslHandler sslHandler) {
+		if (!tlsHandshakeLogged.compareAndSet(false, true)) {
+			return;
+		}
+		final var session = sslHandler.engine().getSession();
+		Loggers.MSG.info(
+						"{}: negotiated TLS protocol={}, cipher={}",
+						stepId,
+						session.getProtocol(),
+						session.getCipherSuite());
+	}
+
+	void applyNamedGroups(final SSLEngine sslEngine) {
+		if (sslNamedGroups.length == 0) {
+			return;
+		}
+		try {
+			final SSLParameters sslParameters = sslEngine.getSSLParameters();
+			sslParameters.setNamedGroups(sslNamedGroups);
+			sslEngine.setSSLParameters(sslParameters);
+		} catch (final RuntimeException e) {
+			if ("require".equals(sslPqcMode)) {
+				throw e;
+			}
+			if (namedGroupsWarned.compareAndSet(false, true)) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to apply SSL named groups", stepId);
+			}
+		}
+	}
+
+	private static String normalizedPqcMode(final String mode) {
+		if (mode == null || mode.isBlank()) {
+			return "off";
+		}
+		switch (mode.toLowerCase(Locale.ROOT)) {
+		case "off":
+		case "prefer":
+		case "require":
+			return mode.toLowerCase(Locale.ROOT);
+		default:
+			return "off";
+		}
+	}
+
+	private static Provider resolveJsseProvider(final String providerName) {
+		if (providerName == null || providerName.isBlank()) {
+			return null;
+		}
+		final var normalizedName = providerName.trim();
+		final var provider = Security.getProvider(normalizedName);
+		if (provider != null) {
+			return provider;
+		}
+		if (BC_JSSE_PROVIDER_NAME.equalsIgnoreCase(normalizedName)) {
+			return newBouncyCastleJsseProvider();
+		}
+		final var directProvider = instantiateProviderClass(normalizedName);
+		if (directProvider != null) {
+			if (BC_JSSE_PROVIDER_CLASS.equals(directProvider.getClass().getName())) {
+				final var wiredProvider = newBouncyCastleJsseProvider();
+				return wiredProvider == null ? directProvider : wiredProvider;
+			}
+			return directProvider;
+		}
+		return null;
+	}
+
+	private static Provider instantiateProviderClass(final String providerClassName) {
+		try {
+			final var providerClass = Class.forName(providerClassName);
+			if (Provider.class.isAssignableFrom(providerClass)) {
+				return (Provider) providerClass.getDeclaredConstructor().newInstance();
+			}
+		} catch (final ReflectiveOperationException ignored) {}
+		return null;
+	}
+
+	private static Provider newBouncyCastleJsseProvider() {
+		try {
+			final var jceProviderClass = Class.forName(BC_JCE_PROVIDER_CLASS);
+			final var jceProvider = (Provider) jceProviderClass.getDeclaredConstructor().newInstance();
+			final var jsseProviderClass = Class.forName(BC_JSSE_PROVIDER_CLASS);
+			final var ctor = jsseProviderClass.getConstructor(Provider.class);
+			return (Provider) ctor.newInstance(jceProvider);
+		} catch (final ReflectiveOperationException ignored) {
+			return null;
+		}
+	}
+
+	private static String sslStringVal(final Config sslConfig, final String key, final String fallback) {
+		try {
+			final var value = sslConfig.stringVal(key);
+			return value == null ? fallback : value;
+		} catch (final InvalidValuePathException | NoSuchElementException ignored) {
+			return fallback;
+		}
+	}
+
+	private static List<String> sslListVal(final Config sslConfig, final String key) {
+		try {
+			final var value = sslConfig.<String> listVal(key);
+			return value == null ? List.of() : value;
+		} catch (final InvalidValuePathException | NoSuchElementException ignored) {
+			return List.of();
 		}
 	}
 

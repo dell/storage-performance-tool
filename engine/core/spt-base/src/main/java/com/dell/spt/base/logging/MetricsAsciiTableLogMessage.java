@@ -86,6 +86,9 @@ public class MetricsAsciiTableLogMessage extends LogMessageBase {
 						case LIST:
 							strb.append(LogUtil.LIST_COLOR);
 							break;
+						case STAT:
+							strb.append(LogUtil.CYAN);
+							break;
 						}
 					}
 					strb.appendFixedWidthPadRight(metricsCtx.opType().name(), 6, ' ');

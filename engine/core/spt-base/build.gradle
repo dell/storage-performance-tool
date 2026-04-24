@@ -120,6 +120,13 @@ dependencies {
 	)
 }
 
+tasks.named("compileJava", JavaCompile) {
+	options.compilerArgs.addAll([
+		"-Alog4j.graalvm.groupId=${project.group}",
+		"-Alog4j.graalvm.artifactId=${project.name}",
+	])
+}
+
 // Common test configuration for all test tasks
 tasks.withType(Test) {
 	useJUnitPlatform()
