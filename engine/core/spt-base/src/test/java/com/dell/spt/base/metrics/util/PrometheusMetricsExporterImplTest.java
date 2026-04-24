@@ -175,6 +175,34 @@ class PrometheusMetricsExporterImplTest {
 						"Malformed metadata should be ignored and completion should remain at default");
 	}
 
+	@Test
+	void metricFamilyNamesRemainStableAcrossCollectCalls() throws Exception {
+		setupMockSnapshot(10, 1, 1.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+
+		List<MetricFamilySamples> first = exporter.collect();
+		Thread.sleep(2L);
+		List<MetricFamilySamples> second = exporter.collect();
+
+		MetricFamilySamples firstElapsed = findMetricByName(first, MetricsConstants.METRIC_NAME_TIME);
+		MetricFamilySamples secondElapsed = findMetricByName(second, MetricsConstants.METRIC_NAME_TIME);
+		assertNotNull(firstElapsed);
+		assertNotNull(secondElapsed);
+		assertEquals(firstElapsed.name, secondElapsed.name, "Elapsed metric family name should be stable");
+
+		MetricFamilySamples firstCompletion = findMetricByName(first, MetricsConstants.METRIC_NAME_COMPLETION);
+		MetricFamilySamples secondCompletion = findMetricByName(second, MetricsConstants.METRIC_NAME_COMPLETION);
+		assertNotNull(firstCompletion);
+		assertNotNull(secondCompletion);
+		assertEquals(firstCompletion.name, secondCompletion.name, "Completion metric family name should be stable");
+
+		MetricFamilySamples firstTestState = findMetricByName(first, MetricsConstants.METRIC_NAME_TEST_STATE);
+		MetricFamilySamples secondTestState = findMetricByName(second, MetricsConstants.METRIC_NAME_TEST_STATE);
+		assertNotNull(firstTestState);
+		assertNotNull(secondTestState);
+		assertEquals(firstTestState.name, secondTestState.name, "Test-state metric family name should be stable");
+	}
+
 	private void setupMockSnapshot(long successCount, long failsCount, double concurrency) {
 		// Setup success snapshot
 		when(mockSuccessSnapshot.name()).thenReturn("spt_success");

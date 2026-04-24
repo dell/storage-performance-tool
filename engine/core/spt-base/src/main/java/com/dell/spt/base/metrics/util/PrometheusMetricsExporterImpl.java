@@ -17,14 +17,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Prometheus collector that exports SPT distributed metrics snapshots. */
 public class PrometheusMetricsExporterImpl extends Collector implements PrometheusMetricsExporter {
 
+	private static final AtomicLong COLLECTOR_IDS = new AtomicLong(0);
 	private final List<String> labelValues = new ArrayList<>();
 	private final List<String> labelNames = new ArrayList<>();
 	private final DistributedMetricsContext metricsContext;
 	private final List<Double> quantileValues = new ArrayList<>();
+	private final long collectorId = COLLECTOR_IDS.incrementAndGet();
 	private String help = "";
 
 	public PrometheusMetricsExporterImpl(final DistributedMetricsContext context) {
@@ -117,7 +120,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		final double timeSeconds = (double) timeMillis / Constants.K;
 		mfsList.add(
 						new MetricFamilySamples(
-										String.format(METRIC_FORMAT, METRIC_NAME_TIME + System.currentTimeMillis()),
+										metricFamilyName(METRIC_NAME_TIME),
 										Type.GAUGE,
 										help,
 										Collections.singletonList(
@@ -158,8 +161,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 
 		mfsList.add(
 						new MetricFamilySamples(
-										String.format(MetricsConstants.METRIC_FORMAT,
-														MetricsConstants.METRIC_NAME_COMPLETION + System.currentTimeMillis()),
+										metricFamilyName(MetricsConstants.METRIC_NAME_COMPLETION),
 										Type.GAUGE,
 										help,
 										Collections.singletonList(
@@ -194,7 +196,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 
 		mfsList.add(
 						new MetricFamilySamples(
-										String.format(METRIC_FORMAT, METRIC_NAME_TEST_STATE + System.currentTimeMillis()),
+										metricFamilyName(METRIC_NAME_TEST_STATE),
 										Type.GAUGE,
 										help,
 										Collections.singletonList(
@@ -213,7 +215,7 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		} else {
 			Loggers.ERR.warn("Unexpected metric snapshot type: {}", snapshot.getClass());
 		}
-		final MetricFamilySamples mfs = new MetricFamilySamples(String.format(METRIC_FORMAT, snapshot.name() + snapshot.hashCode()), Type.GAUGE, help, samples);
+		final MetricFamilySamples mfs = new MetricFamilySamples(metricFamilyName(snapshot.name()), Type.GAUGE, help, samples);
 		mfsList.add(mfs);
 	}
 
@@ -265,6 +267,10 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 					final String metricName, final String aggregationType, final double value) {
 		return new Sample(
 						String.format(METRIC_FORMAT, metricName) + "_" + aggregationType, labelNames, labelValues, value);
+	}
+
+	private String metricFamilyName(final String metricName) {
+		return String.format(METRIC_FORMAT, metricName + collectorId);
 	}
 
 	private static Long toLong(final Object raw, final String key) {
