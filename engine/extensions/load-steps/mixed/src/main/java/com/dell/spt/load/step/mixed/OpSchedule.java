@@ -27,6 +27,7 @@ public final class OpSchedule {
 	private final AtomicInteger index = new AtomicInteger(0);
 	private final OpType[] activeOps;
 	private final Map<OpType, Integer> originIndices;
+	private final Map<OpType, Integer> weights;
 
 	/**
 	 * @param weights non-empty map of op types to positive integer weights;
@@ -39,12 +40,14 @@ public final class OpSchedule {
 
 		int totalWeight = 0;
 		int nonZeroCount = 0;
+		this.weights = new EnumMap<>(OpType.class);
 		for (final var entry : weights.entrySet()) {
 			final int w = entry.getValue();
 			if (w < 0) {
 				throw new IllegalArgumentException("Negative weight for " + entry.getKey() + ": " + w);
 			}
 			if (w > 0) {
+				this.weights.put(entry.getKey(), w);
 				totalWeight += w;
 				nonZeroCount++;
 			}
@@ -118,5 +121,10 @@ public final class OpSchedule {
 	/** Returns the active (non-zero weight) op types in enum ordinal order. */
 	public OpType[] activeOpTypes() {
 		return activeOps.clone();
+	}
+
+	public int weight(final OpType opType) {
+		final Integer w = weights.get(opType);
+		return w != null ? w : 0;
 	}
 }

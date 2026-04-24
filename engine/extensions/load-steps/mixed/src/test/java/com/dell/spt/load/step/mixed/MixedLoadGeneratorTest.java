@@ -21,6 +21,8 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -286,7 +288,7 @@ class MixedLoadGeneratorTest {
 
 		// Concurrency limit of 2 — no permits are ever released, so only 2 ops should be generated
 		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, schedule, pool, builders,
-						mockDriver, 2, mockNewItemSupplier(), null, null);
+						mockDriver, 2, mockNewItemSupplier());
 
 		gen.start();
 		Thread.sleep(200);
@@ -313,7 +315,7 @@ class MixedLoadGeneratorTest {
 		final Output<Operation> mockDriver = noopOutput();
 
 		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, schedule, pool, builders,
-						mockDriver, 1, mockNewItemSupplier(), null, null);
+						mockDriver, 1, mockNewItemSupplier());
 
 		gen.start();
 		Thread.sleep(50);
@@ -328,6 +330,137 @@ class MixedLoadGeneratorTest {
 		gen.await(5, TimeUnit.SECONDS);
 	}
 
+	@Test
+	@DisplayName("Builder Error path releases acquired permit")
+	void builderErrorReleasesPermit() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.CREATE, 50);
+		final OpSchedule schedule = new OpSchedule(weights);
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(10));
+
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, errorBuilder(OpType.READ));
+		builders.put(OpType.CREATE, errorBuilder(OpType.CREATE));
+
+		final MixedLoadGenerator gen = new MixedLoadGenerator(
+						executor, schedule, pool, builders, noopOutput(), 1, mockNewItemSupplier());
+
+		assertThrows(AssertionError.class, gen::doWork,
+						"precondition: builder must fail with Error to exercise throwable path");
+		assertEquals(1, availablePermits(gen),
+						"generator must release permit even when builder throws Error");
+	}
+
+	@Test
+	@DisplayName("Per-op in-flight counters increment on dispatch and decrement on completion")
+	void perOpInFlightCountersTrackDispatchAndCompletion() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 70);
+		weights.put(OpType.CREATE, 30);
+		final OpSchedule schedule = new OpSchedule(weights);
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		final List<Operation<Item>> dispatched = new CopyOnWriteArrayList<>();
+		final Output<Operation> captureOutput = new Output<>() {
+			@Override
+			public boolean put(final Operation op) {
+				dispatched.add(op);
+				return true;
+			}
+
+			@Override
+			public int put(final List<Operation> ops, final int from, final int to) {
+				for (int i = from; i < to; i++) {
+					dispatched.add(ops.get(i));
+				}
+				return to - from;
+			}
+
+			@Override
+			public int put(final List<Operation> ops) {
+				for (final Operation op : ops) {
+					dispatched.add(op);
+				}
+				return ops.size();
+			}
+
+			@Override
+			public Input<Operation> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		};
+
+		final MixedLoadGenerator gen = new MixedLoadGenerator(
+						executor, schedule, pool, builders, captureOutput, 10_000, mockNewItemSupplier());
+
+		for (int i = 0; i < 200; i++) {
+			gen.doWork();
+		}
+		assertFalse(dispatched.isEmpty(), "sanity: generator should dispatch operations");
+
+		final long dispatchedRead = dispatched.stream().filter(o -> OpType.READ.equals(o.type())).count();
+		final long dispatchedCreate = dispatched.stream().filter(o -> OpType.CREATE.equals(o.type())).count();
+		assertEquals(dispatchedRead, gen.inFlightCount(OpType.READ),
+						"READ in-flight count should match dispatched READ ops");
+		assertEquals(dispatchedCreate, gen.inFlightCount(OpType.CREATE),
+						"CREATE in-flight count should match dispatched CREATE ops");
+
+		for (final Operation<Item> op : dispatched) {
+			gen.onOperationCompleted(op);
+			gen.releasePermit();
+		}
+		assertEquals(0, gen.inFlightCount(OpType.READ), "READ in-flight count should return to zero after completion");
+		assertEquals(0, gen.inFlightCount(OpType.CREATE), "CREATE in-flight count should return to zero after completion");
+	}
+
+	@Test
+	@DisplayName("DELETE reroll follows configured non-DELETE weights when delete queue is empty")
+	void rerollDeleteHonorsConfiguredWeights() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 10);
+		weights.put(OpType.CREATE, 90);
+		weights.put(OpType.DELETE, 900);
+		final OpSchedule schedule = new OpSchedule(weights);
+
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		final ConcurrentLinkedQueue<OpType> dispatched = new ConcurrentLinkedQueue<>();
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, dispatched));
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, dispatched));
+		builders.put(OpType.DELETE, testBuilder(OpType.DELETE, dispatched));
+
+		final MixedLoadGenerator gen = new MixedLoadGenerator(
+						executor, schedule, pool, builders, noopOutput(), Integer.MAX_VALUE, mockNewItemSupplier());
+
+		for (int i = 0; i < 20_000; i++) {
+			gen.doWork();
+		}
+
+		final long readCount = dispatched.stream().filter(t -> t == OpType.READ).count();
+		final long createCount = dispatched.stream().filter(t -> t == OpType.CREATE).count();
+		final long deleteCount = dispatched.stream().filter(t -> t == OpType.DELETE).count();
+		final long nonDeleteCount = readCount + createCount;
+
+		assertEquals(0, deleteCount, "DELETE queue is empty, so DELETE ops must reroll");
+		assertTrue(nonDeleteCount > 0, "sanity: test must dispatch non-delete operations");
+		final double readRatio = (double) readCount / nonDeleteCount;
+		assertEquals(0.10, readRatio, 0.08,
+						"reroll should preserve configured READ:CREATE weight ratio (10:90)");
+	}
+
+	@Test
+	@DisplayName("Legacy PUT completion hook is removed from MixedLoadGenerator")
+	void legacyPutCompletionHookRemoved() {
+		assertThrows(NoSuchMethodException.class,
+						() -> MixedLoadGenerator.class.getDeclaredMethod("handlePutCompletion", Operation.class));
+	}
+
 	// ── Helpers ───────────────────────────────────────────────────────────
 
 	/** Helper to create a MixedLoadGenerator with raw types (avoids generic inference issues in tests). */
@@ -337,7 +470,7 @@ class MixedLoadGeneratorTest {
 					final Map builders,
 					final Output driver) {
 		return new MixedLoadGenerator(executor, schedule, pool, builders, driver,
-						Integer.MAX_VALUE, mockNewItemSupplier(), null, null);
+						Integer.MAX_VALUE, mockNewItemSupplier());
 	}
 
 	/** Creates a simple Output that accepts all put() calls (avoids Mockito raw-type issues). */
@@ -445,6 +578,67 @@ class MixedLoadGeneratorTest {
 			@Override
 			public void close() {}
 		};
+	}
+
+	private static OperationsBuilder<Item, Operation<Item>> errorBuilder(final OpType opType) {
+		return new OperationsBuilder<>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return opType;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> opType(final OpType t) {
+				return this;
+			}
+
+			@Override
+			public String inputPath() {
+				return "";
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> inputPath(final String p) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> outputPathInput(final Input<String> i) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> credentialInput(final Input i) {
+				return this;
+			}
+
+			@Override
+			public OperationsBuilder<Item, Operation<Item>> credentialsByPath(final Map m) {
+				return this;
+			}
+
+			@Override
+			public Operation<Item> buildOp(final Item item) {
+				throw new AssertionError("synthetic builder error");
+			}
+
+			@Override
+			public void buildOps(final List<Item> items, final List<Operation<Item>> buff) {}
+
+			@Override
+			public void close() {}
+		};
+	}
+
+	private static int availablePermits(final MixedLoadGenerator gen) throws Exception {
+		final var throttleField = MixedLoadGenerator.class.getDeclaredField("concurrencyThrottle");
+		throttleField.setAccessible(true);
+		return ((Semaphore) throttleField.get(gen)).availablePermits();
 	}
 
 	/** Creates a supplier of new items for CREATE operations. */

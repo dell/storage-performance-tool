@@ -47,6 +47,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.IntSupplier;
 
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
@@ -70,12 +71,25 @@ import static com.github.akurilov.confuse.Config.deepToMap;
 })
 public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
+	private volatile MixedLoadGenerator mixedGenerator;
+
 	public MixedLoadStepLocal(
 					final Config baseConfig,
 					final List<Extension> extensions,
 					final List<Config> contextConfigs,
 					final MetricsManager metricsManager) {
 		super(baseConfig, extensions, contextConfigs, metricsManager);
+	}
+
+	@Override
+	protected IntSupplier actualConcurrencyGauge(final int index, final OpType opType) {
+		return () -> {
+			final MixedLoadGenerator generator = mixedGenerator;
+			if (generator != null) {
+				return generator.inFlightCount(opType);
+			}
+			return stepContexts.get(index).activeOpCount();
+		};
 	}
 
 	@Override
@@ -269,7 +283,25 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			newItemInput = null;
 		}
 
-		// ── 11. Register metrics ───────────────────────────────────────────
+		// ── 11. Wire put-remaining.csv output for PUT completions ──────────
+		final ItemInfoFileOutput putRemainingFileOut;
+		if (putWeight > 0) {
+			try {
+				putRemainingFileOut = new ItemInfoFileOutput<>(putRemainingFilePath);
+			} catch (final IOException e) {
+				throw new IllegalStateException("Failed to open put-remaining.csv: " + putRemainingFilePath, e);
+			}
+		} else {
+			putRemainingFileOut = null;
+		}
+
+		// ── 12. Create MixedLoadGenerator ──────────────────────────────────
+		final MixedLoadGenerator generator = new MixedLoadGenerator(
+						ServiceTaskExecutor.VT_EXECUTOR, schedule, pool, builders,
+						driver, concurrencyLimit, newItemInput);
+		this.mixedGenerator = generator;
+
+		// ── 13. Register metrics ───────────────────────────────────────────
 		originIdx = 0;
 		if (getWeight > 0)
 			initMetrics(originIdx++, OpType.READ, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
@@ -292,73 +324,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (statWeight > 0)
 			metricsCtxByOpType.put(OpType.STAT, metricsContexts.get(originIdx++));
 
-		// ── 12. Wire put-remaining.csv output for PUT completions ──────────
-		final ItemInfoFileOutput putRemainingFileOut;
-		if (putWeight > 0) {
-			try {
-				putRemainingFileOut = new ItemInfoFileOutput<>(putRemainingFilePath);
-			} catch (final IOException e) {
-				throw new IllegalStateException("Failed to open put-remaining.csv: " + putRemainingFilePath, e);
-			}
-		} else {
-			putRemainingFileOut = null;
-		}
-
-		// PUT results output: feeds delete queue + writes to put-remaining.csv
-		final Output putResultsOutput;
-		if (putWeight > 0) {
-			putResultsOutput = new Output() {
-				@Override
-				public boolean put(final Object op) {
-					if (op instanceof Operation) {
-						final Operation o = (Operation) op;
-						if (Operation.Status.SUCC.equals(o.status())) {
-							// Feed the delete queue
-							pool.addDeleteItem((Item) o.item());
-							// Write to put-remaining.csv — pass the Operation, not the Item,
-							// because ItemInfoFileOutput<O extends Operation> expects an Operation
-							if (putRemainingFileOut != null) {
-								putRemainingFileOut.put(o);
-							}
-						}
-					}
-					return true;
-				}
-
-				@Override
-				public int put(final List ops, final int from, final int to) {
-					for (int i = from; i < to; i++)
-						put(ops.get(i));
-					return to - from;
-				}
-
-				@Override
-				public int put(final List ops) {
-					for (final Object op : ops)
-						put(op);
-					return ops.size();
-				}
-
-				@Override
-				public Input getInput() {
-					return null;
-				}
-
-				@Override
-				public void close() throws Exception {
-					if (putRemainingFileOut != null)
-						putRemainingFileOut.close();
-				}
-			};
-		} else {
-			putResultsOutput = null;
-		}
-
-		// ── 13. Create MixedLoadGenerator ──────────────────────────────────
-		final MixedLoadGenerator generator = new MixedLoadGenerator(
-						ServiceTaskExecutor.VT_EXECUTOR, schedule, pool, builders,
-						driver, concurrencyLimit, newItemInput, putResultsOutput, null);
-
 		// ── 14. Create single LoadStepContextImpl with per-op metrics map ──
 		// Use the first MetricsContext as the primary (for isDone checks).
 		// The metricsCtxByOpType map handles per-op routing in put().
@@ -378,6 +343,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		driver.operationResultOutput(new Output() {
 			@Override
 			public boolean put(final Object op) {
+				generator.onOperationCompleted((Operation) op);
 				generator.releasePermit();
 				return stepCtx.put((Operation) op);
 			}
@@ -385,6 +351,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			@Override
 			public int put(final List ops, final int from, final int to) {
 				for (int i = from; i < to; i++) {
+					generator.onOperationCompleted((Operation) ops.get(i));
 					generator.releasePermit();
 				}
 				return stepCtx.put((List) ops, from, to);
@@ -405,12 +372,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		});
 
 		stepContexts.add(stepCtx);
-		// Pad stepContexts so all metrics context indices resolve to the same context.
-		// initMetrics() captures stepContexts.get(i) in a closure for the concurrency gauge;
-		// without padding, indices 1+ throw IndexOutOfBoundsException.
-		for (int i = 1; i < nonZero; i++) {
-			stepContexts.add(stepCtx);
-		}
 
 		// ── 15. Wire operation results output (for put-remaining routing) ──
 		stepCtx.operationsResultsOutput(new Output() {

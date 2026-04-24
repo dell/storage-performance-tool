@@ -2,10 +2,13 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemImpl;
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -109,6 +112,46 @@ class PoolItemInputTest {
 		for (final Thread t : threads)
 			t.join();
 		assertFalse(errors[0], "randomItem returned null during concurrent access");
+	}
+
+	@Test
+	@DisplayName("randomItem returns independent DataItem instances")
+	void randomItemReturnsIndependentDataItemInstances() {
+		final DataItemImpl seed = new DataItemImpl("obj-a", 0, 4096);
+		final PoolItemInput<Item> pool = new PoolItemInput<>(List.of(seed));
+
+		final DataItem first = (DataItem) pool.randomItem();
+		final DataItem second = (DataItem) pool.randomItem();
+
+		assertNotSame(seed, first, "first random item should be an independent instance");
+		assertNotSame(seed, second, "second random item should be an independent instance");
+		assertNotSame(first, second, "each random read should get its own DataItem instance");
+
+		first.position(128);
+		assertEquals(0, seed.position(), "mutating returned item position must not mutate seed item");
+		assertEquals(0, second.position(), "mutating one returned item must not mutate another");
+	}
+
+	@Test
+	@DisplayName("randomItem preserves updated DataItem state when cloning")
+	void randomItemPreservesUpdatedDataItemState() {
+		final DataItemImpl seed = new DataItemImpl("obj-b", 0, 8192);
+		final BitSet[] updateMask = new BitSet[]{new BitSet(Long.SIZE), new BitSet(Long.SIZE)
+		};
+		updateMask[0].set(2);
+		updateMask[0].set(5);
+		seed.commitUpdatedRanges(updateMask);
+		assertTrue(seed.isUpdated(), "precondition: seed must be updated");
+		assertTrue(seed.isRangeUpdated(2), "precondition: range 2 must be marked updated");
+		assertTrue(seed.isRangeUpdated(5), "precondition: range 5 must be marked updated");
+
+		final PoolItemInput<Item> pool = new PoolItemInput<>(List.of(seed));
+		final DataItem copy = (DataItem) pool.randomItem();
+
+		assertNotSame(seed, copy, "updated DataItem must still be cloned");
+		assertTrue(copy.isUpdated(), "updated state should be preserved");
+		assertTrue(copy.isRangeUpdated(2), "range update mask should be preserved");
+		assertTrue(copy.isRangeUpdated(5), "range update mask should be preserved");
 	}
 
 	// ── Delete queue ──────────────────────────────────────────────────────
