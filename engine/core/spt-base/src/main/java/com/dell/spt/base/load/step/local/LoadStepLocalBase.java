@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntSupplier;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepLocalBase extends LoadStepBase {
@@ -31,6 +32,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
 	protected final List<LoadStepContext> stepContexts = new ArrayList<>();
+
+	protected IntSupplier actualConcurrencyGauge(final int index, final OpType opType) {
+		return () -> stepContexts.get(index).activeOpCount();
+	}
 
 	protected LoadStepLocalBase(
 					final Config baseConfig,
@@ -76,7 +81,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		final var metricsCtx = MetricsContextImpl.builder()
 						.loadStepId(loadStepId())
 						.opType(opType)
-						.actualConcurrencyGauge(() -> stepContexts.get(index).activeOpCount())
+						.actualConcurrencyGauge(actualConcurrencyGauge(index, opType))
 						.concurrencyLimit(concurrency)
 						.concurrencyThreshold((int) (concurrency * metricsConfig.doubleVal("threshold")))
 						.itemDataSize(itemDataSize)

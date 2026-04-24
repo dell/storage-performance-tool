@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.mixed;
 
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
 
 import java.util.Collection;
@@ -56,7 +57,24 @@ public final class PoolItemInput<I extends Item> {
 
 	/** Returns a random item from the read pool. Thread-safe, never returns null. */
 	public I randomItem() {
-		return readPool[ThreadLocalRandom.current().nextInt(readPool.length)];
+		final I item = readPool[ThreadLocalRandom.current().nextInt(readPool.length)];
+		if (item instanceof DataItemImpl) {
+			final DataItemImpl dataItem = (DataItemImpl) item;
+			final DataItemImpl independentItem;
+			if (dataItem.isUpdated()) {
+				independentItem = new DataItemImpl(dataItem.toString());
+			} else {
+				independentItem = new DataItemImpl(dataItem.name(), dataItem.offset(), dataItem.size(), dataItem.layer());
+			}
+			final var dataInput = dataItem.dataInput();
+			if (dataInput != null) {
+				independentItem.dataInput(dataInput);
+			}
+			@SuppressWarnings("unchecked")
+			final I typedItem = (I) independentItem;
+			return typedItem;
+		}
+		return item;
 	}
 
 	/** Number of items in the read pool. */

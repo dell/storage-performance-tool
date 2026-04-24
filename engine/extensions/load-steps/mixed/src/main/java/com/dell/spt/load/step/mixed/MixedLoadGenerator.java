@@ -15,11 +15,13 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 import java.io.IOException;
+import java.util.EnumMap;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -50,9 +52,8 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private final Map<OpType, OperationsBuilder<I, O>> builders;
 	private final Output<O> opOutput;
 	private final Input<I> newItemInput;
-	private final Output<O> putResultsOutput;
-	private final Output<O> operationsResultsOutput;
 	private final Semaphore concurrencyThrottle;
+	private final Map<OpType, AtomicInteger> inFlightByOpType;
 
 	private final Queue<O> recycleQueue = new ConcurrentLinkedQueue<>();
 	private final LongAdder generatedCount = new LongAdder();
@@ -60,6 +61,8 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	// Active op types excluding DELETE (for re-roll)
 	private final OpType[] rerollTargets;
+	private final int[] rerollCumulativeWeights;
+	private final int rerollTotalWeight;
 
 	/**
 	 * @param executor         VT executor for the generation task
@@ -69,8 +72,6 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	 * @param opOutput         driver to submit operations to
 	 * @param concurrencyLimit max in-flight operations (matches driver concurrency)
 	 * @param newItemInput     item source for CREATE operations (generates new items)
-	 * @param putResultsOutput optional output for successful PUT results (put-remaining.csv + queue feed)
-	 * @param operationsResultsOutput optional output for all operation results
 	 */
 	public MixedLoadGenerator(
 					final VirtualThreadExecutor executor,
@@ -79,9 +80,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 					final Map<OpType, OperationsBuilder<I, O>> builders,
 					final Output<O> opOutput,
 					final int concurrencyLimit,
-					final Input<I> newItemInput,
-					final Output<O> putResultsOutput,
-					final Output<O> operationsResultsOutput) {
+					final Input<I> newItemInput) {
 		super(executor);
 		this.schedule = schedule;
 		this.pool = pool;
@@ -90,18 +89,25 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		this.concurrencyThrottle = new Semaphore(
 						concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE, true);
 		this.newItemInput = newItemInput;
-		this.putResultsOutput = putResultsOutput;
-		this.operationsResultsOutput = operationsResultsOutput;
+		this.inFlightByOpType = new EnumMap<>(OpType.class);
 
 		// Build the re-roll target list: all active ops except DELETE
 		final OpType[] active = schedule.activeOpTypes();
 		final java.util.List<OpType> targets = new java.util.ArrayList<>(active.length);
 		for (final OpType op : active) {
+			inFlightByOpType.put(op, new AtomicInteger());
 			if (op != OpType.DELETE) {
 				targets.add(op);
 			}
 		}
 		this.rerollTargets = targets.toArray(new OpType[0]);
+		this.rerollCumulativeWeights = new int[this.rerollTargets.length];
+		int cumulative = 0;
+		for (int i = 0; i < this.rerollTargets.length; i++) {
+			cumulative += schedule.weight(this.rerollTargets[i]);
+			this.rerollCumulativeWeights[i] = cumulative;
+		}
+		this.rerollTotalWeight = cumulative;
 	}
 
 	@Override
@@ -115,6 +121,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		// This prevents the generator from flooding the driver's input queue
 		// faster than the driver can process operations.
 		concurrencyThrottle.acquire();
+		boolean permitTransferred = false;
 
 		try {
 			OpType opType = schedule.next();
@@ -124,29 +131,28 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 				final I deleteItem = pool.pollDelete();
 				if (deleteItem == null) {
 					opType = reroll();
-					dispatchNonDelete(opType);
+					permitTransferred = dispatchNonDelete(opType);
 				} else {
-					dispatchDelete(deleteItem);
+					permitTransferred = dispatchDelete(deleteItem);
 				}
 			} else {
-				dispatchNonDelete(opType);
+				permitTransferred = dispatchNonDelete(opType);
 			}
-		} catch (final Exception e) {
-			// Release permit on any error to avoid leaking
-			concurrencyThrottle.release();
-			throw e;
+		} finally {
+			if (!permitTransferred) {
+				concurrencyThrottle.release();
+			}
 		}
 	}
 
-	private void dispatchNonDelete(final OpType opType) throws IOException {
+	private boolean dispatchNonDelete(final OpType opType) throws IOException {
 		final I item;
 		if (opType == OpType.CREATE) {
 			item = newItemInput.get();
 			if (item == null) {
 				itemInputFinished = true;
-				concurrencyThrottle.release();
 				Thread.yield();
-				return;
+				return false;
 			}
 		} else {
 			// READ or STAT — random item from static pool
@@ -155,31 +161,45 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 		final O op = builders.get(opType).buildOp(item);
 		if (!opOutput.put(op)) {
-			concurrencyThrottle.release();
 			Thread.yield();
-			return;
+			return false;
+		}
+		final AtomicInteger counter = inFlightByOpType.get(opType);
+		if (counter != null) {
+			counter.incrementAndGet();
 		}
 		generatedCount.increment();
+		return true;
 	}
 
-	private void dispatchDelete(final I item) throws IOException {
+	private boolean dispatchDelete(final I item) throws IOException {
 		final O op = builders.get(OpType.DELETE).buildOp(item);
 		if (!opOutput.put(op)) {
 			// Put item back if driver rejected — avoid item loss
 			pool.addDeleteItem(item);
-			concurrencyThrottle.release();
 			Thread.yield();
-			return;
+			return false;
+		}
+		final AtomicInteger counter = inFlightByOpType.get(OpType.DELETE);
+		if (counter != null) {
+			counter.incrementAndGet();
 		}
 		generatedCount.increment();
+		return true;
 	}
 
-	/** Re-roll DELETE to another active op type (uniform random among non-DELETE ops). */
+	/** Re-roll DELETE to another active op type (weighted by configured non-DELETE weights). */
 	private OpType reroll() {
 		if (rerollTargets.length == 1) {
 			return rerollTargets[0];
 		}
-		return rerollTargets[ThreadLocalRandom.current().nextInt(rerollTargets.length)];
+		final int draw = ThreadLocalRandom.current().nextInt(rerollTotalWeight);
+		for (int i = 0; i < rerollCumulativeWeights.length; i++) {
+			if (draw < rerollCumulativeWeights[i]) {
+				return rerollTargets[i];
+			}
+		}
+		return rerollTargets[rerollTargets.length - 1];
 	}
 
 	@Override
@@ -239,16 +259,18 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		concurrencyThrottle.release();
 	}
 
-	/**
-	 * Called by the step context when a PUT operation completes successfully.
-	 * Feeds the item into the delete queue and optionally writes to put-remaining.csv.
-	 */
-	public void handlePutCompletion(final O op) {
-		if (op.item() != null) {
-			pool.addDeleteItem(op.item());
+	public void onOperationCompleted(final O op) {
+		if (op == null) {
+			return;
 		}
-		if (putResultsOutput != null) {
-			putResultsOutput.put(op);
+		final AtomicInteger counter = inFlightByOpType.get(op.type());
+		if (counter != null) {
+			counter.getAndUpdate(v -> v > 0 ? v - 1 : 0);
 		}
+	}
+
+	public int inFlightCount(final OpType opType) {
+		final AtomicInteger counter = inFlightByOpType.get(opType);
+		return counter != null ? counter.get() : 0;
 	}
 }
