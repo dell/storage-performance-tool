@@ -246,7 +246,7 @@ class CompositeDataOperationImplTest {
 
 			// Wait for all threads to complete
 			CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-					.get(10, TimeUnit.SECONDS);
+							.get(10, TimeUnit.SECONDS);
 
 			// Verify that all entries were preserved (no data loss)
 			@SuppressWarnings("unchecked")
@@ -255,7 +255,7 @@ class CompositeDataOperationImplTest {
 			for (int i = 0; i < threadCount; i++) {
 				String expectedEtag = "eTag-" + i;
 				assertEquals(expectedEtag, op.get(String.valueOf(i)),
-						"Entry " + i + " should have correct eTag");
+								"Entry " + i + " should have correct eTag");
 			}
 		} finally {
 			executor.shutdown();

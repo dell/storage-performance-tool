@@ -68,8 +68,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final boolean versioningEnabled;
 	private final boolean taggingEnabled;
 	private final Map<String, String> objectTags;
-	private final long smallObjectThresholdBytes; // Threshold for size-aware optimizations
-	private final long partSizeBytes; // Part size for multipart uploads
+	private final long smallObjectThresholdBytes;
+	private final long partSizeBytes;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -89,11 +89,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.s3AsyncClient = s3AsyncClient;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
-
-		LOG.info("S3-AWS driver initialized with small object threshold: {} bytes ({} KB)",
-						smallObjectThresholdBytes, smallObjectThresholdBytes / 1024);
-		LOG.info("S3-AWS driver initialized with part size: {} bytes ({} MB)",
-						partSizeBytes, partSizeBytes / (1024 * 1024));
 
 		// Use virtual threads to support high concurrency without OS-level thread explosion
 		// This allows thousands of blocking operations while honoring user's --concurrency limit
@@ -615,9 +610,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				final long size = dataItem.size();
 
-				// Size-aware optimization: use different strategies based on object size
-				if (size <= 8 * 1024) {  // Very small objects (< 8KB)
-					// For very small objects, read into byte array and use fromBytes for maximum efficiency
+				if (size <= 8 * 1024) {
 					ByteBuffer buffer = ByteBuffer.allocate((int) size);
 					int bytesRead = dataItem.read(buffer);
 					if (bytesRead != size) {
@@ -629,14 +622,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 									AsyncRequestBody.fromByteBuffer(buffer))
 									.thenApply(response -> null);
 				} else if (size <= smallObjectThresholdBytes) {
-					// Small objects (8KB - 100KB): use InputStream with upload executor
 					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 					return s3AsyncClient.putObject(
 									reqBuilder.build(),
 									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
 									.thenApply(response -> null);
 				} else {
-					// Larger objects: use standard upload with upload executor
 					// The CRT will handle multipart if size exceeds minimumPartSizeInBytes
 					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 					return s3AsyncClient.putObject(
@@ -835,7 +826,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				targetBucket = slash > 0 ? rel.substring(0, slash) : rel;
 			}
 
-			// Optimize request size for better performance
 			int maxKeys = Math.min(Math.max(count, 1), 1000);
 
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()

@@ -257,7 +257,7 @@ class S3AwsStorageDriverFactoryTest {
 			// Verify the exception is not related to downcast/overflow
 			assertFalse(ex.getMessage().contains("overflow") || ex.getMessage().contains("downcast") ||
 							ex instanceof ClassCastException,
-					"Exception should not be related to overflow/downcast, got: " + ex.getMessage());
+							"Exception should not be related to overflow/downcast, got: " + ex.getMessage());
 		}
 	}
 
@@ -291,7 +291,7 @@ class S3AwsStorageDriverFactoryTest {
 
 			// Verify the exception is not a NoSuchElementException (which would indicate config path issue)
 			assertFalse(ex instanceof java.util.NoSuchElementException,
-					"Exception should not be NoSuchElementException, got: " + ex.getClass().getName());
+							"Exception should not be NoSuchElementException, got: " + ex.getClass().getName());
 		}
 	}
 

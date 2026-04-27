@@ -40,16 +40,13 @@ import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1985,132 +1982,132 @@ public class S3AwsStorageDriverTest {
 		}
 	}
 
-// -----------------------------------------------------------------------
-// Tagging Config Path Tests
-// -----------------------------------------------------------------------
+	// -----------------------------------------------------------------------
+	// Tagging Config Path Tests
+	// -----------------------------------------------------------------------
 
-@Nested
-class TaggingConfigPathTest {
+	@Nested
+	class TaggingConfigPathTest {
 
-	private Config mockBaseConfig(Map<String, String> tags) {
-		// Mock parent class config requirements (StorageDriverBase)
-		Config driverConfig = mock(Config.class);
-		Config limitConfig = mock(Config.class);
-		when(limitConfig.intVal("concurrency")).thenReturn(1);
-		when(driverConfig.configVal("limit")).thenReturn(limitConfig);
+		private Config mockBaseConfig(Map<String, String> tags) {
+			// Mock parent class config requirements (StorageDriverBase)
+			Config driverConfig = mock(Config.class);
+			Config limitConfig = mock(Config.class);
+			when(limitConfig.intVal("concurrency")).thenReturn(1);
+			when(driverConfig.configVal("limit")).thenReturn(limitConfig);
 
-		Config authConfig = mock(Config.class);
-		when(authConfig.stringVal("uid")).thenReturn("test-user");
-		when(authConfig.stringVal("secret")).thenReturn("test-secret");
-		when(authConfig.stringVal("token")).thenReturn(null);
+			Config authConfig = mock(Config.class);
+			when(authConfig.stringVal("uid")).thenReturn("test-user");
+			when(authConfig.stringVal("secret")).thenReturn("test-secret");
+			when(authConfig.stringVal("token")).thenReturn(null);
 
-		Config config = mock(Config.class);
-		when(config.configVal("driver")).thenReturn(driverConfig);
-		when(config.stringVal("namespace")).thenReturn("test-ns");
-		when(config.configVal("auth")).thenReturn(authConfig);
+			Config config = mock(Config.class);
+			when(config.configVal("driver")).thenReturn(driverConfig);
+			when(config.stringVal("namespace")).thenReturn("test-ns");
+			when(config.configVal("auth")).thenReturn(authConfig);
 
-		// Mock CoopStorageDriverBase config requirements
-		when(config.intVal("driver-limit-queue-input")).thenReturn(100);
+			// Mock CoopStorageDriverBase config requirements
+			when(config.intVal("driver-limit-queue-input")).thenReturn(100);
 
-		// Mock tagging config
-		Config objectConfig = mock(Config.class);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
+			// Mock tagging config
+			Config objectConfig = mock(Config.class);
+			when(objectConfig.boolVal("versioning")).thenReturn(false);
 
-		Config taggingConfig = mock(Config.class);
-		when(taggingConfig.boolVal("enabled")).thenReturn(true);
-		when(taggingConfig.mapVal("tags")).thenReturn(new java.util.HashMap<>(tags));
+			Config taggingConfig = mock(Config.class);
+			when(taggingConfig.boolVal("enabled")).thenReturn(true);
+			when(taggingConfig.mapVal("tags")).thenReturn(new java.util.HashMap<>(tags));
 
-		when(objectConfig.configVal("tagging")).thenReturn(taggingConfig);
-		when(config.configVal("object")).thenReturn(objectConfig);
+			when(objectConfig.configVal("tagging")).thenReturn(taggingConfig);
+			when(config.configVal("object")).thenReturn(objectConfig);
 
-		// Mock other S3AwsStorageDriver config requirements
-		when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
-		when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
-		when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
+			// Mock other S3AwsStorageDriver config requirements
+			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
+			when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
+			when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
 
-		return config;
+			return config;
+		}
+
+		@Test
+		void taggingEnabled_whenConfigObjectTaggingEnabled() throws Exception {
+			// Mock config with tagging enabled and tags
+			Config config = mockBaseConfig(Map.of("tag1", "value1", "tag2", "value2"));
+
+			// Mock S3AsyncClient
+			S3AsyncClient mockS3Client = mock(S3AsyncClient.class);
+
+			// Create driver with mocked config and S3AsyncClient
+			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1",
+							null,
+							config,
+							false,
+							1,
+							mockS3Client,
+							100 * 1024L,  // smallObjectThresholdBytes
+							8 * 1024 * 1024L  // partSizeBytes
+			);
+
+			// Verify the tagging fields were set correctly using reflection
+			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
+			taggingEnabledField.setAccessible(true);
+			boolean taggingEnabled = taggingEnabledField.getBoolean(driver);
+
+			Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+			objectTagsField.setAccessible(true);
+			@SuppressWarnings("unchecked")
+			Map<String, String> objectTags = (Map<String, String>) objectTagsField.get(driver);
+
+			assertTrue(taggingEnabled, "taggingEnabled should be true when config.object.tagging.enabled is true");
+			assertEquals(2, objectTags.size(), "Should have 2 tags");
+			assertEquals("value1", objectTags.get("tag1"));
+			assertEquals("value2", objectTags.get("tag2"));
+		}
+
+		@Test
+		void taggingDisabled_whenConfigObjectTaggingDisabled() throws Exception {
+			// Mock config with tagging disabled
+			Config objectConfig = mock(Config.class);
+			when(objectConfig.boolVal("versioning")).thenReturn(false);
+
+			Config taggingConfig = mock(Config.class);
+			when(taggingConfig.boolVal("enabled")).thenReturn(false);
+			when(taggingConfig.mapVal("tags")).thenReturn(Map.of());
+
+			when(objectConfig.configVal("tagging")).thenReturn(taggingConfig);
+
+			Config config = mockBaseConfig(Map.of());
+			when(config.configVal("object")).thenReturn(objectConfig);
+
+			// Mock S3AsyncClient
+			S3AsyncClient mockS3Client = mock(S3AsyncClient.class);
+
+			// Create driver with mocked config and S3AsyncClient
+			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1",
+							null,
+							config,
+							false,
+							1,
+							mockS3Client,
+							100 * 1024L,  // smallObjectThresholdBytes
+							8 * 1024 * 1024L  // partSizeBytes
+			);
+
+			// Verify the tagging fields were set correctly using reflection
+			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
+			taggingEnabledField.setAccessible(true);
+			boolean taggingEnabled = taggingEnabledField.getBoolean(driver);
+
+			Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+			objectTagsField.setAccessible(true);
+			@SuppressWarnings("unchecked")
+			Map<String, String> objectTags = (Map<String, String>) objectTagsField.get(driver);
+
+			assertFalse(taggingEnabled, "taggingEnabled should be false when config.object.tagging.enabled is false");
+			assertTrue(objectTags.isEmpty(), "Should have no tags when tagging is disabled");
+		}
 	}
-
-	@Test
-	void taggingEnabled_whenConfigObjectTaggingEnabled() throws Exception {
-		// Mock config with tagging enabled and tags
-		Config config = mockBaseConfig(Map.of("tag1", "value1", "tag2", "value2"));
-
-		// Mock S3AsyncClient
-		S3AsyncClient mockS3Client = mock(S3AsyncClient.class);
-
-		// Create driver with mocked config and S3AsyncClient
-		S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-				"step-1",
-				null,
-				config,
-				false,
-				1,
-				mockS3Client,
-				100 * 1024L,  // smallObjectThresholdBytes
-				8 * 1024 * 1024L  // partSizeBytes
-		);
-
-		// Verify the tagging fields were set correctly using reflection
-		Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
-		taggingEnabledField.setAccessible(true);
-		boolean taggingEnabled = taggingEnabledField.getBoolean(driver);
-
-		Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
-		objectTagsField.setAccessible(true);
-		@SuppressWarnings("unchecked")
-		Map<String, String> objectTags = (Map<String, String>) objectTagsField.get(driver);
-
-		assertTrue(taggingEnabled, "taggingEnabled should be true when config.object.tagging.enabled is true");
-		assertEquals(2, objectTags.size(), "Should have 2 tags");
-		assertEquals("value1", objectTags.get("tag1"));
-		assertEquals("value2", objectTags.get("tag2"));
-	}
-
-	@Test
-	void taggingDisabled_whenConfigObjectTaggingDisabled() throws Exception {
-		// Mock config with tagging disabled
-		Config objectConfig = mock(Config.class);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
-
-		Config taggingConfig = mock(Config.class);
-		when(taggingConfig.boolVal("enabled")).thenReturn(false);
-		when(taggingConfig.mapVal("tags")).thenReturn(Map.of());
-
-		when(objectConfig.configVal("tagging")).thenReturn(taggingConfig);
-
-		Config config = mockBaseConfig(Map.of());
-		when(config.configVal("object")).thenReturn(objectConfig);
-
-		// Mock S3AsyncClient
-		S3AsyncClient mockS3Client = mock(S3AsyncClient.class);
-
-		// Create driver with mocked config and S3AsyncClient
-		S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-				"step-1",
-				null,
-				config,
-				false,
-				1,
-				mockS3Client,
-				100 * 1024L,  // smallObjectThresholdBytes
-				8 * 1024 * 1024L  // partSizeBytes
-		);
-
-		// Verify the tagging fields were set correctly using reflection
-		Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
-		taggingEnabledField.setAccessible(true);
-		boolean taggingEnabled = taggingEnabledField.getBoolean(driver);
-
-		Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
-		objectTagsField.setAccessible(true);
-		@SuppressWarnings("unchecked")
-		Map<String, String> objectTags = (Map<String, String>) objectTagsField.get(driver);
-
-		assertFalse(taggingEnabled, "taggingEnabled should be false when config.object.tagging.enabled is false");
-		assertTrue(objectTags.isEmpty(), "Should have no tags when tagging is disabled");
-	}
-}
 
 	// -----------------------------------------------------------------------
 	// Versioning Config Path Tests
@@ -2161,14 +2158,14 @@ class TaggingConfigPathTest {
 
 			// Create driver with mocked config and S3AsyncClient
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-					"step-1",
-					null,
-					config,
-					false,
-					1,
-					mockS3Client,
-					100 * 1024L,  // smallObjectThresholdBytes
-					8 * 1024 * 1024L  // partSizeBytes
+							"step-1",
+							null,
+							config,
+							false,
+							1,
+							mockS3Client,
+							100 * 1024L,  // smallObjectThresholdBytes
+							8 * 1024 * 1024L  // partSizeBytes
 			);
 
 			// Verify the versioningEnabled field was set correctly using reflection
@@ -2196,14 +2193,14 @@ class TaggingConfigPathTest {
 
 			// Create driver with mocked config and S3AsyncClient
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-					"step-1",
-					null,
-					config,
-					false,
-					1,
-					mockS3Client,
-					100 * 1024L,  // smallObjectThresholdBytes
-					8 * 1024 * 1024L  // partSizeBytes
+							"step-1",
+							null,
+							config,
+							false,
+							1,
+							mockS3Client,
+							100 * 1024L,  // smallObjectThresholdBytes
+							8 * 1024 * 1024L  // partSizeBytes
 			);
 
 			// Verify the versioningEnabled field was set correctly using reflection
@@ -2229,14 +2226,14 @@ class TaggingConfigPathTest {
 
 			// Create driver with mocked config and S3AsyncClient
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-					"step-1",
-					null,
-					config,
-					false,
-					1,
-					mockS3Client,
-					100 * 1024L,  // smallObjectThresholdBytes
-					8 * 1024 * 1024L  // partSizeBytes
+							"step-1",
+							null,
+							config,
+							false,
+							1,
+							mockS3Client,
+							100 * 1024L,  // smallObjectThresholdBytes
+							8 * 1024 * 1024L  // partSizeBytes
 			);
 
 			// Verify the versioningEnabled field was set to default (false)
