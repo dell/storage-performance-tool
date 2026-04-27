@@ -95,14 +95,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		LOG.info("S3-AWS driver initialized with part size: {} bytes ({} MB)",
 						partSizeBytes, partSizeBytes / (1024 * 1024));
 
-		// Use a bounded thread pool instead of CachedThreadPool to prevent thread explosion
-		// Size based on driver-threads config, concurrency limit, or hardware thread count
-		int poolSize = determineExecutorPoolSize(config);
-		this.executor = Executors.newFixedThreadPool(poolSize);
-
-		// Dedicated larger pool for upload operations to maximize throughput
-		int uploadPoolSize = determineUploadExecutorPoolSize(config);
-		this.uploadExecutor = Executors.newFixedThreadPool(uploadPoolSize);
+		// Use virtual threads to support high concurrency without OS-level thread explosion
+		// This allows thousands of blocking operations while honoring user's --concurrency limit
+		this.executor = Executors.newVirtualThreadPerTaskExecutor();
+		this.uploadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 		this.bucketName = resolveBucketName(config);
 
@@ -184,45 +180,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (taggingEnabled) {
 			LOG.info("S3-AWS driver tagging enabled with {} tags", tags.size());
 		}
-	}
-
-	/**
-	 * Determine the appropriate executor pool size for read operations based on configuration and system resources.
-	 * This prevents thread explosion while maintaining good performance for read operations.
-	 */
-	int determineExecutorPoolSize(final Config config) {
-		try {
-			final var confWorkerCount = config.intVal("driver-threads");
-			if (confWorkerCount > 0) {
-				return confWorkerCount;
-			}
-		} catch (Exception e) {
-			LOG.debug("Could not read driver-threads from config: {}", e.toString());
-		}
-
-		// For read operations, use larger pool size for better concurrency
-		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
-		return Math.max(8, hardwareThreads * 2);
-	}
-
-	/**
-	 * Determine the appropriate executor pool size for upload operations.
-	 * Uploads can benefit from higher concurrency to maximize throughput.
-	 */
-	int determineUploadExecutorPoolSize(final Config config) {
-		try {
-			final var confWorkerCount = config.intVal("driver-threads");
-			if (confWorkerCount > 0) {
-				// Use 2x the configured threads for uploads
-				return confWorkerCount * 2;
-			}
-		} catch (Exception e) {
-			LOG.debug("Could not read driver-threads from config: {}", e.toString());
-		}
-
-		// For upload operations, use more threads to maximize throughput
-		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
-		return Math.max(8, hardwareThreads * 2); // Use 2x hardware threads, minimum 8
 	}
 
 	/**
@@ -722,32 +679,33 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		// Get the response asynchronously - this completes when headers arrive
-		return s3AsyncClient.getObject(
+		// Since invokeNio already blocks, we can join() here and read synchronously
+		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
+		try (var response = s3AsyncClient.getObject(
 						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream())
-						.thenAcceptAsync(response -> {
-							// Call startResponse() when headers are available (measures latency)
-							op.startResponse();
+						AsyncResponseTransformer.toBlockingInputStream()).join()) {
+			// Call startResponse() when headers are available (measures latency)
+			op.startResponse();
 
-							// Stream the data to count bytes without loading into memory
-							// This blocking read runs on the executor thread, not the CRT EventLoop
-							try (var inputStream = response) {
-								long bytesRead = 0;
-								byte[] buffer = new byte[8192];
-								int n;
-								while ((n = inputStream.read(buffer)) != -1) {
-									bytesRead += n;
-								}
-								if (op instanceof DataOperation) {
-									((DataOperation) op).countBytesDone(bytesRead);
-								}
+			// Stream the data to count bytes without loading into memory
+			// This blocking read runs on the caller thread (virtual thread)
+			long bytesRead = 0;
+			byte[] buffer = new byte[8192];
+			int n;
+			while ((n = response.read(buffer)) != -1) {
+				bytesRead += n;
+			}
+			if (op instanceof DataOperation) {
+				((DataOperation) op).countBytesDone(bytesRead);
+			}
 
-								// Call finishResponse() when body is fully consumed (measures duration)
-								op.finishResponse();
-							} catch (IOException e) {
-								throw new RuntimeException("Failed to read S3 object data", e);
-							}
-						}, executor);
+			// Call finishResponse() when body is fully consumed (measures duration)
+			op.finishResponse();
+		} catch (IOException e) {
+			throw new RuntimeException("Failed to read S3 object data", e);
+		}
+
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private CompletableFuture<Void> deleteObject(final O op) {
@@ -1169,10 +1127,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final var parentOp = op.parent();
 		final var bk = resolveBucketAndKey((O) parentOp);
 
-		// Calculate range based on part number and size
-		long rangeStart, rangeEnd;
+		// Calculate range based on item offset and size
+		// The framework's DataItem tracks the correct slice offset natively
+		long rangeStart = op.item().offset();
+		long rangeEnd;
 		try {
-			rangeStart = op.partNumber() * op.item().size();
 			rangeEnd = rangeStart + op.item().size() - 1;
 		} catch (IOException e) {
 			return CompletableFuture.failedFuture(e);
@@ -1184,27 +1143,28 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.range("bytes=" + rangeStart + "-" + rangeEnd);
 
 		// Get the response asynchronously - this completes when headers arrive
-		return s3AsyncClient.getObject(
+		// Since invokeNio already blocks, we can join() here and read synchronously
+		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
+		try (var response = s3AsyncClient.getObject(
 						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream())
-						.thenAcceptAsync(response -> {
-							op.startResponse();
-							// This blocking read runs on the executor thread, not the CRT EventLoop
-							try (var inputStream = response) {
-								long bytesRead = 0;
-								byte[] buffer = new byte[8192];
-								int n;
-								while ((n = inputStream.read(buffer)) != -1) {
-									bytesRead += n;
-								}
-								if (op instanceof DataOperation) {
-									((DataOperation) op).countBytesDone(bytesRead);
-								}
-								op.finishResponse();
-							} catch (IOException e) {
-								throw new RuntimeException("Failed to read S3 object range", e);
-							}
-						}, executor);
+						AsyncResponseTransformer.toBlockingInputStream()).join()) {
+			op.startResponse();
+			// This blocking read runs on the caller thread (virtual thread)
+			long bytesRead = 0;
+			byte[] buffer = new byte[8192];
+			int n;
+			while ((n = response.read(buffer)) != -1) {
+				bytesRead += n;
+			}
+			if (op instanceof DataOperation) {
+				((DataOperation) op).countBytesDone(bytesRead);
+			}
+			op.finishResponse();
+		} catch (IOException e) {
+			throw new RuntimeException("Failed to read S3 object range", e);
+		}
+
+		return CompletableFuture.completedFuture(null);
 	}
 
 	// -----------------------------------------------------------------------
