@@ -6,6 +6,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.PathItem;
+import com.dell.spt.base.item.io.DataItemInputStream;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
@@ -22,6 +23,7 @@ import com.github.akurilov.confuse.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;
@@ -29,7 +31,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import com.dell.spt.base.item.io.DataItemInputStream;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -59,13 +60,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_PART_CHECKSUM_PREFIX = "checksum-";
 
 	private final S3AsyncClient s3AsyncClient;
-	private final ExecutorService executor;
+	private final ExecutorService executor; // For read operations
+	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
 	private final boolean checksumEnabled;
 	private final ChecksumAlgorithm checksumAlgorithm;
 	private final boolean versioningEnabled;
 	private final boolean taggingEnabled;
 	private final Map<String, String> objectTags;
+	private final long smallObjectThresholdBytes; // Threshold for size-aware optimizations
+	private final long partSizeBytes; // Part size for multipart uploads
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -73,7 +77,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final Config config,
 					final boolean verifyFlag,
 					final int batchSize,
-					final S3AsyncClient s3AsyncClient)
+					final S3AsyncClient s3AsyncClient,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
@@ -81,24 +87,45 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							"S3-AWS driver does not support --item-data-verify; reads will report SUCC without integrity checks");
 		}
 		this.s3AsyncClient = s3AsyncClient;
-		this.executor = Executors.newCachedThreadPool();
+		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
+		this.partSizeBytes = partSizeBytes;
+
+		LOG.info("S3-AWS driver initialized with small object threshold: {} bytes ({} KB)",
+						smallObjectThresholdBytes, smallObjectThresholdBytes / 1024);
+		LOG.info("S3-AWS driver initialized with part size: {} bytes ({} MB)",
+						partSizeBytes, partSizeBytes / (1024 * 1024));
+
+		// Use a bounded thread pool instead of CachedThreadPool to prevent thread explosion
+		// Size based on driver-threads config, concurrency limit, or hardware thread count
+		int poolSize = determineExecutorPoolSize(config);
+		this.executor = Executors.newFixedThreadPool(poolSize);
+
+		// Dedicated larger pool for upload operations to maximize throughput
+		int uploadPoolSize = determineUploadExecutorPoolSize(config);
+		this.uploadExecutor = Executors.newFixedThreadPool(uploadPoolSize);
 
 		this.bucketName = resolveBucketName(config);
 
 		boolean ckEnabled = false;
 		ChecksumAlgorithm ckAlgo = null;
 		try {
-			ckEnabled = config.boolVal("checksum-enabled");
+			final var checksumConfig = config.configVal("checksum");
+			if (checksumConfig != null) {
+				ckEnabled = checksumConfig.boolVal("enabled");
+			}
 		} catch (Exception e) {
 			LOG.debug("Could not read checksum-enabled from config: {}", e.toString());
 		}
 		if (ckEnabled) {
 			try {
-				final String algo = config.stringVal("checksum-algorithm");
-				ckAlgo = resolveChecksumAlgorithm(algo);
-				if (ckAlgo == null) {
-					LOG.warn("Unsupported checksum algorithm '{}' for s3-aws driver; checksums will not be applied", algo);
-					ckEnabled = false;
+				final var checksumConfig = config.configVal("checksum");
+				if (checksumConfig != null) {
+					final String algo = checksumConfig.stringVal("algorithm");
+					ckAlgo = resolveChecksumAlgorithm(algo);
+					if (ckAlgo == null) {
+						LOG.warn("Unsupported checksum algorithm '{}' for s3-aws driver; checksums will not be applied", algo);
+						ckEnabled = false;
+					}
 				}
 			} catch (Exception e) {
 				LOG.warn("Could not read checksum-algorithm from config: {}", e.toString());
@@ -111,7 +138,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		// Read versioning configuration
 		boolean versioning = false;
 		try {
-			versioning = config.boolVal("versioning");
+			final var objectConfig = config.configVal("object");
+			if (objectConfig != null) {
+				versioning = objectConfig.boolVal("versioning");
+			}
 		} catch (Exception e) {
 			LOG.debug("Could not read versioning from config: {}", e.toString());
 		}
@@ -154,6 +184,45 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (taggingEnabled) {
 			LOG.info("S3-AWS driver tagging enabled with {} tags", tags.size());
 		}
+	}
+
+	/**
+	 * Determine the appropriate executor pool size for read operations based on configuration and system resources.
+	 * This prevents thread explosion while maintaining good performance for read operations.
+	 */
+	int determineExecutorPoolSize(final Config config) {
+		try {
+			final var confWorkerCount = config.intVal("driver-threads");
+			if (confWorkerCount > 0) {
+				return confWorkerCount;
+			}
+		} catch (Exception e) {
+			LOG.debug("Could not read driver-threads from config: {}", e.toString());
+		}
+
+		// For read operations, use larger pool size for better concurrency
+		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
+		return Math.max(8, hardwareThreads * 2);
+	}
+
+	/**
+	 * Determine the appropriate executor pool size for upload operations.
+	 * Uploads can benefit from higher concurrency to maximize throughput.
+	 */
+	int determineUploadExecutorPoolSize(final Config config) {
+		try {
+			final var confWorkerCount = config.intVal("driver-threads");
+			if (confWorkerCount > 0) {
+				// Use 2x the configured threads for uploads
+				return confWorkerCount * 2;
+			}
+		} catch (Exception e) {
+			LOG.debug("Could not read driver-threads from config: {}", e.toString());
+		}
+
+		// For upload operations, use more threads to maximize throughput
+		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
+		return Math.max(8, hardwareThreads * 2); // Use 2x hardware threads, minimum 8
 	}
 
 	/**
@@ -273,10 +342,26 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	/**
 	 * Map an exception to the most specific Operation.Status failure code.
+	 * Unwraps CompletionException to handle async failures properly.
 	 */
 	static Status classifyFailure(final Exception e) {
-		if (e instanceof S3Exception) {
-			final int statusCode = ((S3Exception) e).statusCode();
+		// Unwrap CompletionException from .join() calls
+		Throwable cause = e;
+		if (e instanceof java.util.concurrent.CompletionException) {
+			cause = e.getCause();
+			if (cause == null) {
+				cause = e;
+			}
+		}
+
+		// Convert to Exception for type checking
+		if (!(cause instanceof Exception)) {
+			return Status.FAIL_UNKNOWN;
+		}
+		final Exception ex = (Exception) cause;
+
+		if (ex instanceof S3Exception) {
+			final int statusCode = ((S3Exception) ex).statusCode();
 			if (statusCode == 401 || statusCode == 403) {
 				return Status.RESP_FAIL_AUTH;
 			} else if (statusCode == 404) {
@@ -291,11 +376,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				return Status.RESP_FAIL_SVC;
 			}
 		}
-		if (e instanceof ApiCallTimeoutException || e instanceof ApiCallAttemptTimeoutException
-						|| e instanceof TimeoutException) {
+		if (ex instanceof ApiCallTimeoutException || ex instanceof ApiCallAttemptTimeoutException
+						|| ex instanceof TimeoutException) {
 			return Status.FAIL_TIMEOUT;
 		}
-		if (e instanceof IOException || (e instanceof SdkClientException && e.getCause() instanceof IOException)) {
+		if (ex instanceof IOException || (ex instanceof SdkClientException && ex.getCause() instanceof IOException)) {
 			return Status.FAIL_IO;
 		}
 		return Status.FAIL_UNKNOWN;
@@ -572,11 +657,36 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			dataItem.position(0);
 			try {
 				final long size = dataItem.size();
-				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-				return s3AsyncClient.putObject(
-								reqBuilder.build(),
-								AsyncRequestBody.fromInputStream(inputStream, size, executor))
-								.thenApply(response -> null);
+
+				// Size-aware optimization: use different strategies based on object size
+				if (size <= 8 * 1024) {  // Very small objects (< 8KB)
+					// For very small objects, read into byte array and use fromBytes for maximum efficiency
+					ByteBuffer buffer = ByteBuffer.allocate((int) size);
+					int bytesRead = dataItem.read(buffer);
+					if (bytesRead != size) {
+						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
+					}
+					buffer.flip();
+					return s3AsyncClient.putObject(
+									reqBuilder.build(),
+									AsyncRequestBody.fromByteBuffer(buffer))
+									.thenApply(response -> null);
+				} else if (size <= smallObjectThresholdBytes) {
+					// Small objects (8KB - 100KB): use InputStream with upload executor
+					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+					return s3AsyncClient.putObject(
+									reqBuilder.build(),
+									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
+									.thenApply(response -> null);
+				} else {
+					// Larger objects: use standard upload with upload executor
+					// The CRT will handle multipart if size exceeds minimumPartSizeInBytes
+					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+					return s3AsyncClient.putObject(
+									reqBuilder.build(),
+									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
+									.thenApply(response -> null);
+				}
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}
@@ -596,14 +706,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private CompletableFuture<Void> readObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
-		// Extract version ID from item name if versioning is enabled
-		final String[] versionInfo = extractVersionId(op.item().name());
+		// Extract version ID from the resolved key if versioning is enabled
+		// Use the properly resolved key from resolveBucketAndKey to handle recycled/prefixed reads correctly
+		final String[] versionInfo = extractVersionId(bk[1]);
 		final String key = versionInfo[0];
 		final String versionId = versionInfo[1];
 
-		// Use custom response transformer to properly measure timing
-		// startResponse() is called when headers are available
-		// finishResponse() is called when body is fully consumed
 		var reqBuilder = GetObjectRequest.builder()
 						.bucket(bk[0])
 						.key(key);
@@ -613,14 +721,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			reqBuilder.versionId(versionId);
 		}
 
+		// Get the response asynchronously - this completes when headers arrive
 		return s3AsyncClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream())
-						.thenAccept(response -> {
+						.thenAcceptAsync(response -> {
 							// Call startResponse() when headers are available (measures latency)
 							op.startResponse();
 
 							// Stream the data to count bytes without loading into memory
+							// This blocking read runs on the executor thread, not the CRT EventLoop
 							try (var inputStream = response) {
 								long bytesRead = 0;
 								byte[] buffer = new byte[8192];
@@ -637,7 +747,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							} catch (IOException e) {
 								throw new RuntimeException("Failed to read S3 object data", e);
 							}
-						});
+						}, executor);
 	}
 
 	private CompletableFuture<Void> deleteObject(final O op) {
@@ -823,7 +933,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 
 			return result;
-		} catch (S3Exception e) {
+		} catch (Exception e) {
+			// Unwrap CompletionException from .join() call
+			Throwable cause = e;
+			if (e instanceof java.util.concurrent.CompletionException) {
+				cause = e.getCause();
+				if (cause == null) {
+					cause = e;
+				}
+			}
+			if (cause instanceof S3Exception) {
+				throw new IOException("Failed to list objects", cause);
+			}
 			throw new IOException("Failed to list objects", e);
 		}
 	}
@@ -879,7 +1000,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			boolean hasContents = resp.contents() != null && !resp.contents().isEmpty();
 			return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
 							commonPrefixes, hasContents, truncated);
-		} catch (S3Exception e) {
+		} catch (Exception e) {
+			// Unwrap CompletionException from .join() call
+			Throwable cause = e;
+			if (e instanceof java.util.concurrent.CompletionException) {
+				cause = e.getCause();
+				if (cause == null) {
+					cause = e;
+				}
+			}
+			if (cause instanceof S3Exception) {
+				throw new IOException("Failed to probe common prefixes", cause);
+			}
 			throw new IOException("Failed to probe common prefixes", e);
 		}
 	}
@@ -946,9 +1078,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				final long size = dataItem.size();
 				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+				// Use dedicated upload executor to maximize throughput
 				return s3AsyncClient.uploadPart(
 								reqBuilder.build(),
-								AsyncRequestBody.fromInputStream(inputStream, size, executor))
+								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
 								.thenApply(response -> {
 									// Store the ETag in the parent operation context
 									// Key format: part number as string
@@ -1050,11 +1183,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.key(bk[1])
 						.range("bytes=" + rangeStart + "-" + rangeEnd);
 
+		// Get the response asynchronously - this completes when headers arrive
 		return s3AsyncClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream())
-						.thenAccept(response -> {
+						.thenAcceptAsync(response -> {
 							op.startResponse();
+							// This blocking read runs on the executor thread, not the CRT EventLoop
 							try (var inputStream = response) {
 								long bytesRead = 0;
 								byte[] buffer = new byte[8192];
@@ -1069,7 +1204,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							} catch (IOException e) {
 								throw new RuntimeException("Failed to read S3 object range", e);
 							}
-						});
+						}, executor);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1098,5 +1233,59 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return s3AsyncClient.copyObject(reqBuilder.build())
 						.thenApply(response -> null);
+	}
+
+	@Override
+	protected void doClose()
+					throws IOException {
+		try {
+			// Close the S3AsyncClient to release native CRT resources
+			// This closes the underlying event loops and connection pools
+			if (s3AsyncClient != null) {
+				s3AsyncClient.close();
+				LOG.info("S3AsyncClient closed successfully");
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to close S3AsyncClient: {}", e.getMessage());
+		}
+
+		try {
+			// Shutdown the executor service to release thread pool resources
+			if (executor != null) {
+				executor.shutdown();
+				// Wait for pending tasks to complete (with timeout)
+				if (!executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+					LOG.warn("Executor service did not terminate gracefully, forcing shutdown");
+					executor.shutdownNow();
+				}
+				LOG.info("Executor service shutdown successfully");
+			}
+		} catch (InterruptedException e) {
+			LOG.warn("Executor service shutdown interrupted");
+			Thread.currentThread().interrupt();
+		} catch (Exception e) {
+			LOG.warn("Failed to shutdown executor service: {}", e.getMessage());
+		}
+
+		try {
+			// Shutdown the upload executor service to release thread pool resources
+			if (uploadExecutor != null) {
+				uploadExecutor.shutdown();
+				// Wait for pending tasks to complete (with timeout)
+				if (!uploadExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+					LOG.warn("Upload executor service did not terminate gracefully, forcing shutdown");
+					uploadExecutor.shutdownNow();
+				}
+				LOG.info("Upload executor service shutdown successfully");
+			}
+		} catch (InterruptedException e) {
+			LOG.warn("Upload executor service shutdown interrupted");
+			Thread.currentThread().interrupt();
+		} catch (Exception e) {
+			LOG.warn("Failed to shutdown upload executor service: {}", e.getMessage());
+		}
+
+		// Call parent's doClose to clean up base class resources
+		super.doClose();
 	}
 }

@@ -105,25 +105,81 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// ---------------------------
 		// CRT Performance Tuning
 		// ---------------------------
-		// Target throughput in Gbps - adjust based on network capacity
-		// Using aggressive defaults for high-performance environments
-		double targetThroughputInGbps = 20.0;  // 20 Gbps for high-throughput scenarios
+		// Check if we should optimize for small objects
+		boolean optimizeForSmallObjects = true;  // Default to small object optimization
+		try {
+			optimizeForSmallObjects = storageConfig.configVal("crt").boolVal("optimizeForSmallObjects");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.optimizeForSmallObjects from config, using default: {}", optimizeForSmallObjects);
+		}
+
+		// Target throughput in Gbps - adjust based on workload type
+		double targetThroughputInGbps;
+		long minimumPartSizeInBytes;
+		int maxConcurrency;
+
+		if (optimizeForSmallObjects) {
+			// Optimized for small objects (< 1MB typical)
+			targetThroughputInGbps = 10.0;  // Optimized throughput for small objects
+			minimumPartSizeInBytes = 8 * 1024 * 1024L;  // 8MB threshold for multipart
+			maxConcurrency = 512;  // Higher concurrency for many small requests
+		} else {
+			// Optimized for large objects (mixed or large object workloads)
+			targetThroughputInGbps = 20.0;  // Higher throughput for large object transfers
+			minimumPartSizeInBytes = 16 * 1024 * 1024L;  // 16MB threshold for multipart
+			maxConcurrency = 256;  // Moderate concurrency for large objects
+		}
+
+		// Allow config override
 		try {
 			targetThroughputInGbps = storageConfig.configVal("crt").doubleVal("targetThroughputGbps");
 		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.targetThroughputGbps from config, using default: {}", targetThroughputInGbps);
+			LOG.debug("Could not read storage.crt.targetThroughputGbps from config, using optimized default: {}", targetThroughputInGbps);
 		}
 
-		// Minimum part size for multipart uploads (16 MB for better performance with large objects)
-		long minimumPartSizeInBytes = 16 * 1024 * 1024L;
 		try {
 			minimumPartSizeInBytes = storageConfig.configVal("crt").longVal("minimumPartSizeBytes");
 		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.minimumPartSizeBytes from config, using default: {}", minimumPartSizeInBytes);
+			LOG.debug("Could not read storage.crt.minimumPartSizeBytes from config, using optimized default: {}", minimumPartSizeInBytes);
 		}
 
-		// Maximum concurrent connections (CRT manages this internally, but higher values help parallelism)
-		final int maxConcurrency = 256;  // Increased from 128 for better parallelism
+		try {
+			maxConcurrency = storageConfig.configVal("crt").intVal("maxConcurrency");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.maxConcurrency from config, using optimized default: {}", maxConcurrency);
+		}
+
+		// Part size for multipart uploads (when object exceeds minimumPartSizeBytes)
+		long partSizeBytes = 8 * 1024 * 1024L;  // 8MB default part size
+		try {
+			partSizeBytes = storageConfig.configVal("crt").longVal("partSizeBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.partSizeBytes from config, using default: {}", partSizeBytes);
+		}
+
+		// Small object threshold for driver-level optimizations
+		long smallObjectThresholdBytes = 100 * 1024L;  // 100KB threshold
+		try {
+			smallObjectThresholdBytes = storageConfig.configVal("crt").longVal("smallObjectThresholdBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
+		}
+
+		// Connection timeout settings
+		int connectionTimeoutMs = 5000;  // 5 seconds
+		try {
+			connectionTimeoutMs = storageConfig.configVal("crt").intVal("connectionTimeoutMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.connectionTimeoutMs from config, using default: {}", connectionTimeoutMs);
+		}
+
+		// Socket timeout settings
+		int socketTimeoutMs = 30000;  // 30 seconds
+		try {
+			socketTimeoutMs = storageConfig.configVal("crt").intVal("socketTimeoutMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.socketTimeoutMs from config, using default: {}", socketTimeoutMs);
+		}
 
 		// ---------------------------
 		// Build AWS S3 Async Client with CRT
@@ -132,21 +188,31 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 
 		LOG.info("Creating AWS S3 Async Client with CRT");
 		LOG.info("CRT Configuration:");
+		LOG.info("  Optimize for Small Objects: {}", optimizeForSmallObjects);
 		LOG.info("  Target Throughput: {} Gbps", targetThroughputInGbps);
 		LOG.info("  Minimum Part Size: {} bytes ({} MB)", minimumPartSizeInBytes, minimumPartSizeInBytes / (1024 * 1024));
-		LOG.info("  Max Concurrency: {} (internal CRT management)", maxConcurrency);
+		LOG.info("  Part Size: {} bytes ({} MB)", partSizeBytes, partSizeBytes / (1024 * 1024));
+		LOG.info("  Small Object Threshold: {} bytes ({} KB)", smallObjectThresholdBytes, smallObjectThresholdBytes / 1024);
+		LOG.info("  Max Concurrency: {}", maxConcurrency);
+		LOG.info("  Connection Timeout: {} ms", connectionTimeoutMs);
+		LOG.info("  Socket Timeout: {} ms", socketTimeoutMs);
 		LOG.info("  Endpoint: {}", endpoint);
 		LOG.info("  Region: {}", region);
 		LOG.info("  Path Style: {}", pathStyle);
 
-		S3AsyncClient s3AsyncClient = S3AsyncClient.crtBuilder()
+		var crtBuilder = S3AsyncClient.crtBuilder()
 						.credentialsProvider(StaticCredentialsProvider.create(creds))
 						.region(Region.of(region))
 						.endpointOverride(URI.create(endpoint))
 						.forcePathStyle(pathStyle)
 						.targetThroughputInGbps(targetThroughputInGbps)
 						.minimumPartSizeInBytes(minimumPartSizeInBytes)
-						.build();
+						.maxConcurrency(maxConcurrency);
+
+		// Note: partSizeBytes is used for driver-level multipart decisions
+		// The CRT manages part size internally based on minimumPartSizeInBytes
+
+		S3AsyncClient s3AsyncClient = crtBuilder.build();
 
 		LOG.info("AWS S3 Async Client with CRT created successfully: {}", s3AsyncClient.getClass().getSimpleName());
 
@@ -156,7 +222,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						storageConfig,
 						verifyFlag,
 						batchSize,
-						s3AsyncClient);
+						s3AsyncClient,
+						smallObjectThresholdBytes,
+						partSizeBytes);
 	}
 
 	/**

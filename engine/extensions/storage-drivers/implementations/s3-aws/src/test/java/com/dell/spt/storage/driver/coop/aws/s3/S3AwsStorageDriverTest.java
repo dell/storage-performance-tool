@@ -490,9 +490,10 @@ public class S3AwsStorageDriverTest {
 			@SuppressWarnings("unchecked")
 			ItemFactory<Item> factory = mock(ItemFactory.class);
 
-			// .join() wraps exceptions in CompletionException
-			assertThrows(java.util.concurrent.CompletionException.class,
+			// .join() wraps exceptions in CompletionException, which is now unwrapped and wrapped in IOException
+			IOException ex = assertThrows(IOException.class,
 							() -> drv.list(factory, null, null, 10, null, 100, null));
+			assertTrue(ex.getCause() instanceof S3Exception);
 		}
 
 		@Test
@@ -720,9 +721,10 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.failedFuture(S3Exception.builder().message("access denied").build()));
 
-			// .join() wraps exceptions in CompletionException
-			assertThrows(java.util.concurrent.CompletionException.class,
+			// .join() wraps exceptions in CompletionException, which is now unwrapped and wrapped in IOException
+			IOException ex = assertThrows(IOException.class,
 							() -> drv.probeCommonPrefixes("/bucket", "", "/", 10));
+			assertTrue(ex.getCause() instanceof S3Exception);
 		}
 	}
 
@@ -758,22 +760,8 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class PutObjectTest {
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void putsDataItemWithCorrectBucketAndKey() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Functionality is now tested through execute() integration tests
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void updateRoutesToPut() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Functionality is now tested through execute() integration tests
-		}
+		// buildPutObjectRequest tests removed - method no longer exists after CRT streaming refactor
+		// Functionality is now tested through execute() integration tests
 	}
 
 	// -----------------------------------------------------------------------
@@ -782,14 +770,8 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class ReadObjectTest {
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("toBlockingInputStream() returns specific type that's hard to mock - tested through integration")
-		void readsWithCorrectBucketAndKey() throws Exception {
-			// Test disabled - toBlockingInputStream() returns specific implementation type
-			// Core functionality tested through integration tests
-		}
+		// toBlockingInputStream tests removed - returns specific type that's hard to mock
+		// Core functionality tested through integration tests
 	}
 
 	// -----------------------------------------------------------------------
@@ -1160,15 +1142,6 @@ public class S3AwsStorageDriverTest {
 			verify(op).status(Operation.Status.SUCC);
 		}
 
-		@SuppressWarnings({"unchecked", "rawtypes"
-		})
-		@Test
-		@Disabled("toBlockingInputStream() returns specific type that's hard to mock - tested through integration")
-		void successfulRead_withDataItem_countsBytesDone() throws Exception {
-			// Test disabled - toBlockingInputStream() returns specific implementation type
-			// Core functionality tested through integration tests
-		}
-
 		@SuppressWarnings("unchecked")
 		@Test
 		void failedOperation_setsStatusToFailUnknown() {
@@ -1281,23 +1254,8 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class ReadObjectDataOperationTest {
-
-		@SuppressWarnings({"unchecked", "rawtypes"
-		})
-		@Test
-		@Disabled("toBlockingInputStream() returns specific type that's hard to mock - tested through integration")
-		void readsDataAndCountsBytes() throws Exception {
-			// Test disabled - toBlockingInputStream() returns specific implementation type
-			// Core functionality tested through integration tests
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("toBlockingInputStream() returns specific type that's hard to mock - tested through integration")
-		void nonDataOperation_doesNotCountBytes() throws Exception {
-			// Test disabled - toBlockingInputStream() returns specific implementation type
-			// Core functionality tested through integration tests
-		}
+		// toBlockingInputStream tests removed - returns specific type that's hard to mock
+		// Core functionality tested through integration tests
 	}
 
 	// -----------------------------------------------------------------------
@@ -1581,38 +1539,8 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class PutObjectChecksumTest {
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void putObject_setsChecksumAlgorithm_whenEnabled() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Checksum functionality is tested through integration tests
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void putObject_noChecksumAlgorithm_whenDisabled() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Checksum functionality is tested through integration tests
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void putObject_sha256Checksum() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Checksum functionality is tested through integration tests
-		}
-
-		@SuppressWarnings("unchecked")
-		@Test
-		@Disabled("buildPutObjectRequest helper method not available after CRT streaming refactor")
-		void putObject_update_setsChecksumAlgorithm() throws Exception {
-			// Test disabled - buildPutObjectRequest() method removed after CRT streaming refactor
-			// Checksum functionality is tested through integration tests
-		}
+		// Checksum tests removed - buildPutObjectRequest() method removed after CRT streaming refactor
+		// Checksum functionality tested through integration tests
 	}
 
 	// -----------------------------------------------------------------------
@@ -1677,7 +1605,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Mockito limitations with instanceof checks - requires real CompositeDataOperation/PartialDataOperation instances")
+		@Disabled("Requires complex setup with real CompositeDataOperation/PartialDataOperation instances - tested through integration")
 		@Test
 		void uploadPart_storesEtagInParent() throws Exception {
 			UploadPartResponse mockResponse = UploadPartResponse.builder()
@@ -1709,7 +1637,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Mockito limitations with instanceof checks - requires real CompositeDataOperation instances")
+		@Disabled("Requires complex setup with real CompositeDataOperation instances - tested through integration")
 		@Test
 		void completeMultipartUpload_assemblesParts() throws Exception {
 			CompleteMultipartUploadResponse mockResponse = CompleteMultipartUploadResponse.builder()
@@ -1773,7 +1701,7 @@ public class S3AwsStorageDriverTest {
 	class RangeReadTest {
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Mockito limitations with instanceof checks - requires real CompositeDataOperation/PartialDataOperation instances")
+		@Disabled("Requires complex setup with real PartialDataOperation instances - tested through integration")
 		@Test
 		void readRange_calculatesCorrectRange() throws Exception {
 			GetObjectResponse mockResponse = GetObjectResponse.builder()
@@ -2050,5 +1978,99 @@ public class S3AwsStorageDriverTest {
 		java.lang.reflect.Method uploadPartMethod = S3AwsStorageDriver.class.getDeclaredMethod("uploadPart", PartialDataOperation.class);
 		uploadPartMethod.setAccessible(true);
 		((CompletableFuture<Void>) uploadPartMethod.invoke(driver, op)).join();
+	}
+
+	// -----------------------------------------------------------------------
+	// Thread Pool Sizing Tests
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ThreadPoolSizingTest {
+
+		@Test
+		void determineExecutorPoolSize_usesConfigWhenProvided() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenReturn(16);
+
+			int poolSize = drv.determineExecutorPoolSize(config);
+			assertEquals(16, poolSize, "Should use configured thread count");
+		}
+
+		@Test
+		void determineExecutorPoolSize_usesDefaultWhenConfigMissing() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenThrow(new RuntimeException("no config"));
+
+			int hardwareThreads = Runtime.getRuntime().availableProcessors();
+			int expectedSize = Math.max(8, hardwareThreads * 2);
+
+			int poolSize = drv.determineExecutorPoolSize(config);
+			assertEquals(expectedSize, poolSize, "Should use default: 2x hardware threads, minimum 8");
+		}
+
+		@Test
+		void determineExecutorPoolSize_respectsMinimumOf8() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenThrow(new RuntimeException("no config"));
+
+			// Even on systems with few hardware threads, should return at least 8
+			int poolSize = drv.determineExecutorPoolSize(config);
+			assertTrue(poolSize >= 8, "Should be at least 8 threads");
+		}
+
+		@Test
+		void determineUploadExecutorPoolSize_usesConfigWhenProvided() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenReturn(16);
+
+			int poolSize = drv.determineUploadExecutorPoolSize(config);
+			assertEquals(32, poolSize, "Should use 2x configured thread count for uploads");
+		}
+
+		@Test
+		void determineUploadExecutorPoolSize_usesDefaultWhenConfigMissing() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenThrow(new RuntimeException("no config"));
+
+			int hardwareThreads = Runtime.getRuntime().availableProcessors();
+			int expectedSize = Math.max(8, hardwareThreads * 2);
+
+			int poolSize = drv.determineUploadExecutorPoolSize(config);
+			assertEquals(expectedSize, poolSize, "Should use default: 2x hardware threads, minimum 8");
+		}
+
+		@Test
+		void determineUploadExecutorPoolSize_respectsMinimumOf8() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenThrow(new RuntimeException("no config"));
+
+			// Even on systems with few hardware threads, should return at least 8
+			int poolSize = drv.determineUploadExecutorPoolSize(config);
+			assertTrue(poolSize >= 8, "Should be at least 8 threads");
+		}
+
+		@Test
+		void determineExecutorPoolSize_ignoresZeroConfigValue() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenReturn(0);
+
+			int hardwareThreads = Runtime.getRuntime().availableProcessors();
+			int expectedSize = Math.max(8, hardwareThreads * 2);
+
+			int poolSize = drv.determineExecutorPoolSize(config);
+			assertEquals(expectedSize, poolSize, "Should ignore zero config value and use default");
+		}
+
+		@Test
+		void determineUploadExecutorPoolSize_ignoresZeroConfigValue() throws Exception {
+			Config config = mock(Config.class);
+			when(config.intVal("driver-threads")).thenReturn(0);
+
+			int hardwareThreads = Runtime.getRuntime().availableProcessors();
+			int expectedSize = Math.max(8, hardwareThreads * 2);
+
+			int poolSize = drv.determineUploadExecutorPoolSize(config);
+			assertEquals(expectedSize, poolSize, "Should ignore zero config value and use default");
+		}
 	}
 }

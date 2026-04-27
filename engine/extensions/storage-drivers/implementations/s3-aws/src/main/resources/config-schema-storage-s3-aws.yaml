@@ -21,4 +21,10 @@ storage:
     versioning: boolean
   crt:
     targetThroughputGbps: double
-    minimumPartSizeBytes: int
+    minimumPartSizeBytes: long
+    maxConcurrency: int
+    partSizeBytes: long
+    smallObjectThresholdBytes: long
+    optimizeForSmallObjects: boolean
+    connectionTimeoutMs: int
+    socketTimeoutMs: int
