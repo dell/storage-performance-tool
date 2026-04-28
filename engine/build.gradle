@@ -35,6 +35,10 @@ subprojects {
         
         tasks.withType(JavaCompile).configureEach {
             options.release = 21
+            options.compilerArgs += [
+                "-Alog4j.graalvm.groupId=${project.group}",
+                "-Alog4j.graalvm.artifactId=${project.name}",
+            ]
         }
         
         jacoco {
