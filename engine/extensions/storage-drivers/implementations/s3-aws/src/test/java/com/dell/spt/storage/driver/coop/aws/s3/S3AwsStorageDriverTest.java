@@ -45,6 +45,7 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -2253,21 +2254,59 @@ public class S3AwsStorageDriverTest {
 	class ResourceCleanupTest {
 
 		@Test
-		void doClose_closesS3AsyncClient() throws Exception {
+		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
 			S3AsyncClient mockClient = mock(S3AsyncClient.class);
-			S3AwsStorageDriver<Item, Operation<Item>> driver = newDriverMock();
-			setS3Client(driver, mockClient);
-			setBucketName(driver, "test-bucket");
-
-			// Verify that the s3AsyncClient field is set correctly
-			Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3AsyncClient");
-			clientField.setAccessible(true);
-			S3AsyncClient clientFromField = (S3AsyncClient) clientField.get(driver);
-			assertEquals(mockClient, clientFromField, "s3AsyncClient field should be set to mock client");
-
-			// Verify that calling close on the mock client would work
-			mockClient.close();
+			
+			// Mock parent class config requirements
+			Config driverConfig = mock(Config.class);
+			Config limitConfig = mock(Config.class);
+			when(limitConfig.intVal("concurrency")).thenReturn(1);
+			when(driverConfig.configVal("limit")).thenReturn(limitConfig);
+			when(driverConfig.intVal("threads")).thenReturn(1);
+			
+			Config authConfig = mock(Config.class);
+			when(authConfig.stringVal("uid")).thenReturn("test-user");
+			when(authConfig.stringVal("secret")).thenReturn("test-secret");
+			when(authConfig.stringVal("token")).thenReturn(null);
+			
+			Config config = mock(Config.class);
+			when(config.configVal("driver")).thenReturn(driverConfig);
+			when(config.stringVal("namespace")).thenReturn("test-ns");
+			when(config.configVal("auth")).thenReturn(authConfig);
+			
+			// Mock CoopStorageDriverBase config requirements
+			when(config.intVal("driver-limit-queue-input")).thenReturn(100);
+			
+			// Mock other S3AwsStorageDriver config requirements
+			when(config.configVal("object")).thenThrow(new RuntimeException("no object config"));
+			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
+			when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
+			when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
+			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no net config"));
+			
+			// Try to mock crt config, though optional
+			when(config.configVal("crt")).thenThrow(new RuntimeException("no crt config"));
+			
+			// Create the driver so it initializes its executors
+			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
+			
+			// Act: Call the close method on the driver
+			driver.close();
+			
+			// Assert: Verify the S3 client was closed
 			verify(mockClient, times(1)).close();
+			
+			// Assert: Verify the thread pools were shut down
+			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
+			executorField.setAccessible(true);
+			ExecutorService executor = (ExecutorService) executorField.get(driver);
+			assertTrue(executor.isShutdown(), "Read executor should be shut down");
+			
+			Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
+			uploadExecutorField.setAccessible(true);
+			ExecutorService uploadExecutor = (ExecutorService) uploadExecutorField.get(driver);
+			assertTrue(uploadExecutor.isShutdown(), "Upload executor should be shut down");
 		}
 	}
 
