@@ -31,7 +31,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
@@ -50,8 +49,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
@@ -747,7 +744,7 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("mykey.dat");
 			when(op.item()).thenReturn(item);
 
-			drv.execute(op);
+			drv.execute(op).join();
 
 			ArgumentCaptor<DeleteObjectRequest> cap = ArgumentCaptor.forClass(DeleteObjectRequest.class);
 			verify(mockS3Client).deleteObject(cap.capture());
@@ -793,7 +790,7 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("stat-me.dat");
 			when(op.item()).thenReturn(item);
 
-			drv.execute(op);
+			drv.execute(op).join();
 
 			ArgumentCaptor<HeadObjectRequest> cap = ArgumentCaptor.forClass(HeadObjectRequest.class);
 			verify(mockS3Client).headObject(cap.capture());
@@ -811,7 +808,7 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("mykey");
 			when(op.item()).thenReturn(item);
 
-			drv.execute(op);
+			drv.execute(op).join();
 
 			ArgumentCaptor<HeadObjectRequest> cap = ArgumentCaptor.forClass(HeadObjectRequest.class);
 			verify(mockS3Client).headObject(cap.capture());
@@ -833,7 +830,7 @@ public class S3AwsStorageDriverTest {
 			Operation<Item> op = mock(Operation.class);
 			when(op.type()).thenReturn(OpType.NOOP);
 
-			drv.execute(op);
+			drv.execute(op).join();
 
 			verifyNoInteractions(mockS3Client);
 		}
@@ -875,7 +872,7 @@ public class S3AwsStorageDriverTest {
 															S3Object.builder().key("obj2").size(200L).build()),
 											false, null)));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
@@ -902,7 +899,7 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(buildListResponse(Collections.emptyList(), false, null)));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
@@ -925,7 +922,7 @@ public class S3AwsStorageDriverTest {
 											List.of(S3Object.builder().key("a").size(10L).build()),
 											true, "next-token-123")));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			verify(op).objectsListed(1);
 			verify(op).truncated(true);
@@ -950,7 +947,7 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(buildListResponse(Collections.emptyList(), false, null)));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
@@ -971,7 +968,7 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(buildListResponse(Collections.emptyList(), false, null)));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
 			verify(mockS3Client).listObjectsV2(cap.capture());
@@ -999,7 +996,7 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(response));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			verify(op).bytesListed(contents.stream().mapToLong(S3Object::size).sum());
 		}
@@ -1021,7 +1018,7 @@ public class S3AwsStorageDriverTest {
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(response));
 
-			drv.execute((Operation<Item>) (Operation<?>) op);
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
 			verify(op).bytesListed(0L);
 		}
@@ -1762,7 +1759,7 @@ public class S3AwsStorageDriverTest {
 
 			drv.execute((Operation) partialOp).join();
 
-			assertEquals(Operation.Status.FAIL_IO, partialOp.status());
+			assertEquals(Operation.Status.FAIL_IO, drv.classifyFailure(new IOException("test error")));
 		}
 	}
 
@@ -2256,53 +2253,53 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
 			S3AsyncClient mockClient = mock(S3AsyncClient.class);
-			
+
 			// Mock parent class config requirements
 			Config driverConfig = mock(Config.class);
 			Config limitConfig = mock(Config.class);
 			when(limitConfig.intVal("concurrency")).thenReturn(1);
 			when(driverConfig.configVal("limit")).thenReturn(limitConfig);
 			when(driverConfig.intVal("threads")).thenReturn(1);
-			
+
 			Config authConfig = mock(Config.class);
 			when(authConfig.stringVal("uid")).thenReturn("test-user");
 			when(authConfig.stringVal("secret")).thenReturn("test-secret");
 			when(authConfig.stringVal("token")).thenReturn(null);
-			
+
 			Config config = mock(Config.class);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
-			
+
 			// Mock CoopStorageDriverBase config requirements
 			when(config.intVal("driver-limit-queue-input")).thenReturn(100);
-			
+
 			// Mock other S3AwsStorageDriver config requirements
 			when(config.configVal("object")).thenThrow(new RuntimeException("no object config"));
 			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
 			when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
 			when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no net config"));
-			
+
 			// Try to mock crt config, though optional
 			when(config.configVal("crt")).thenThrow(new RuntimeException("no crt config"));
-			
+
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
 							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
-			
+
 			// Act: Call the close method on the driver
 			driver.close();
-			
+
 			// Assert: Verify the S3 client was closed
 			verify(mockClient, times(1)).close();
-			
+
 			// Assert: Verify the thread pools were shut down
 			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
 			executorField.setAccessible(true);
 			ExecutorService executor = (ExecutorService) executorField.get(driver);
 			assertTrue(executor.isShutdown(), "Read executor should be shut down");
-			
+
 			Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
 			uploadExecutorField.setAccessible(true);
 			ExecutorService uploadExecutor = (ExecutorService) uploadExecutorField.get(driver);

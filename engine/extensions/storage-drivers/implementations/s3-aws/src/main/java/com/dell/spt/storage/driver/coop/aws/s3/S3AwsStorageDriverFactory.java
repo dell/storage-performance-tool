@@ -226,11 +226,15 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			int port = 0;
 			try {
 				port = nodeConfig.intVal("port");
-			} catch (Exception ignored) {}
+			} catch (Exception e) {
+				LOG.debug("Could not read storage.net.node.port from config", e);
+			}
 
 			try {
 				sslEnabled = netConfig.configVal("ssl").boolVal("enabled");
-			} catch (Exception ignored) {}
+			} catch (Exception e) {
+				LOG.debug("Could not read storage.net.ssl.enabled from config", e);
+			}
 
 			if (addrs != null && !addrs.isEmpty()) {
 				final String addr = addrs.get(0);
@@ -244,7 +248,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					endpoint = scheme + "://" + addr;
 				}
 			}
-		} catch (Exception ignored) {}
+		} catch (Exception e) {
+			LOG.debug("Could not resolve endpoint from storage.net config", e);
+		}
 
 		if (endpoint == null) {
 			throw new IllegalConfigurationException(

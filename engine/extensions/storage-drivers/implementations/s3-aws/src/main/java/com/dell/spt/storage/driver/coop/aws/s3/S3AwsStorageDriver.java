@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -57,7 +58,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";
 	private static final String KEY_MPU_ABORT = "mpuAbort";
-	private static final String KEY_PART_CHECKSUM_PREFIX = "checksum-";
 
 	private final S3AsyncClient s3AsyncClient;
 	private final ExecutorService executor; // For read operations
@@ -185,7 +185,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (algorithm == null || algorithm.isEmpty()) {
 			return null;
 		}
-		switch (algorithm.toLowerCase()) {
+		switch (algorithm.toLowerCase(Locale.ROOT)) {
 		case "crc32":
 			return ChecksumAlgorithm.CRC32;
 		case "crc32c":
@@ -238,8 +238,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				String nodeAddrs = config.stringVal("storage-net-node-addrs");
 				if (nodeAddrs != null && !nodeAddrs.isEmpty()) {
-					if (nodeAddrs.contains("/")) {
-						resolved = nodeAddrs.split("/")[0];
+					final int slashPos = nodeAddrs.indexOf('/');
+					if (slashPos >= 0) {
+						resolved = nodeAddrs.substring(0, slashPos);
 					} else {
 						resolved = nodeAddrs;
 					}
@@ -288,7 +289,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				op.startResponse();
 				op.finishResponse();
-			} catch (Exception ignored) {}
+			} catch (Exception responseEx) {
+				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
+			}
 		}
 	}
 
@@ -622,13 +625,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 									AsyncRequestBody.fromByteBuffer(buffer))
 									.thenApply(response -> null);
 				} else if (size <= smallObjectThresholdBytes) {
+					LOG.trace(
+									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
+									size, smallObjectThresholdBytes, partSizeBytes);
 					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 					return s3AsyncClient.putObject(
 									reqBuilder.build(),
 									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
 									.thenApply(response -> null);
 				} else {
-					// The CRT will handle multipart if size exceeds minimumPartSizeInBytes
+					LOG.trace(
+									"Streaming large object upload, size={}B, threshold={}B, partSize={}B",
+									size, smallObjectThresholdBytes, partSizeBytes);
 					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 					return s3AsyncClient.putObject(
 									reqBuilder.build(),
@@ -809,6 +817,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	/**
 	 * List objects in the bucket with optional prefix and options.
 	 */
+	@Override
 	public List<I> list(
 					final ItemFactory<I> itemFactory,
 					final String path,
@@ -900,6 +909,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	/**
 	 * List objects in the bucket with optional prefix.
 	 */
+	@Override
 	public List<I> list(
 					final ItemFactory<I> itemFactory,
 					final String path,
@@ -1001,11 +1011,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> uploadPart(final PartialDataOperation op) {
 		final var parentOp = op.parent();
-		if (!(parentOp instanceof CompositeDataOperation)) {
+		if (parentOp == null) {
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Partial operation parent must be CompositeDataOperation"));
 		}
 
-		final CompositeDataOperation parent = (CompositeDataOperation) op.parent();
+		final CompositeDataOperation parent = parentOp;
 		final String uploadId = parent.get(KEY_UPLOAD_ID);
 		if (uploadId == null) {
 			return CompletableFuture.failedFuture(new IllegalStateException("Upload ID not found in parent operation"));
@@ -1020,8 +1030,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.uploadId(uploadId)
 						.partNumber(partNumber);
 
-		if (op.item() instanceof DataItem) {
-			DataItem dataItem = (DataItem) op.item();
+		final DataItem dataItem = op.item();
+		if (dataItem != null) {
 			dataItem.position(0);
 			try {
 				final long size = dataItem.size();
@@ -1146,9 +1156,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			while ((n = response.read(buffer)) != -1) {
 				bytesRead += n;
 			}
-			if (op instanceof DataOperation) {
-				((DataOperation) op).countBytesDone(bytesRead);
-			}
+			op.countBytesDone(bytesRead);
 			op.finishResponse();
 		} catch (IOException e) {
 			throw new RuntimeException("Failed to read S3 object range", e);
