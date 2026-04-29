@@ -19,3 +19,12 @@ storage:
       enabled: boolean
       tags: map
     versioning: boolean
+  crt:
+    targetThroughputGbps: double
+    minimumPartSizeBytes: long
+    maxConcurrency: int
+    partSizeBytes: long
+    smallObjectThresholdBytes: long
+    optimizeForSmallObjects: boolean
+    connectionTimeoutMs: int
+    socketTimeoutMs: int

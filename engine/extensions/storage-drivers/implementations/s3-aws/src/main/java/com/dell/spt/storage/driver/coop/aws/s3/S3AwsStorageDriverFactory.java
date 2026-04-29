@@ -12,14 +12,13 @@ import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.io.yaml.YamlSchemaProviderBase;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.net.URI;
-import java.time.Duration;
 import java.util.List;
 
 /**
@@ -29,6 +28,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 				extends ExtensionBase
 				implements StorageDriverFactory<I, O, S3AwsStorageDriver<I, O>> {
 
+	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriverFactory.class);
 	private static final String NAME = "s3-aws";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-aws.yaml";
 
@@ -102,39 +102,97 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// Default to true since this driver targets non-AWS endpoints.
 		final boolean pathStyle = true;
 
-		// Connection tuning
-		final int maxConnections = 128;
-		final int socketTimeout = 30_000;
-		final int connTimeout = 10_000;
+		// ---------------------------
+		// CRT Configuration
+		// ---------------------------
+		boolean optimizeForSmallObjects = true;
+		try {
+			optimizeForSmallObjects = storageConfig.configVal("crt").boolVal("optimizeForSmallObjects");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.optimizeForSmallObjects from config, using default: {}", optimizeForSmallObjects);
+		}
+
+		double targetThroughputInGbps;
+		long minimumPartSizeInBytes;
+		int maxConcurrency;
+
+		if (optimizeForSmallObjects) {
+			targetThroughputInGbps = 10.0;
+			minimumPartSizeInBytes = 8 * 1024 * 1024L;
+			maxConcurrency = 512;
+		} else {
+			targetThroughputInGbps = 20.0;
+			minimumPartSizeInBytes = 16 * 1024 * 1024L;
+			maxConcurrency = 256;
+		}
+
+		// Allow config override
+		try {
+			targetThroughputInGbps = storageConfig.configVal("crt").doubleVal("targetThroughputGbps");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.targetThroughputGbps from config, using default: {}", targetThroughputInGbps);
+		}
+
+		try {
+			minimumPartSizeInBytes = storageConfig.configVal("crt").longVal("minimumPartSizeBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.minimumPartSizeBytes from config, using default: {}", minimumPartSizeInBytes);
+		}
+
+		try {
+			maxConcurrency = storageConfig.configVal("crt").intVal("maxConcurrency");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.maxConcurrency from config, using default: {}", maxConcurrency);
+		}
+
+		long partSizeBytes = 8 * 1024 * 1024L;  // 8MB default part size
+		try {
+			partSizeBytes = storageConfig.configVal("crt").longVal("partSizeBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.partSizeBytes from config, using default: {}", partSizeBytes);
+		}
+
+		long smallObjectThresholdBytes = 100 * 1024L;
+		try {
+			smallObjectThresholdBytes = storageConfig.configVal("crt").longVal("smallObjectThresholdBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
+		}
+
+		// Connection timeout settings
+		int connectionTimeoutMs = 5000;  // 5 seconds
+		try {
+			connectionTimeoutMs = storageConfig.configVal("crt").intVal("connectionTimeoutMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.connectionTimeoutMs from config, using default: {}", connectionTimeoutMs);
+		}
+
+		// Socket timeout settings
+		int socketTimeoutMs = 30000;  // 30 seconds
+		try {
+			socketTimeoutMs = storageConfig.configVal("crt").intVal("socketTimeoutMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.socketTimeoutMs from config, using default: {}", socketTimeoutMs);
+		}
 
 		// ---------------------------
-		// Build AWS S3 client
+		// Build AWS S3 Async Client with CRT
 		// ---------------------------
 		final var creds = AwsBasicCredentials.create(accessKey, secretKey);
 
-		final var httpClient = ApacheHttpClient.builder()
-						.maxConnections(maxConnections)
-						.connectionTimeout(Duration.ofMillis(connTimeout))
-						.socketTimeout(Duration.ofMillis(socketTimeout))
-						.connectionAcquisitionTimeout(Duration.ofSeconds(3))
-						.connectionMaxIdleTime(Duration.ofSeconds(30))
-						.connectionTimeToLive(Duration.ofMinutes(2))
-						.tcpKeepAlive(true)
-						.build();
-
-		S3Client s3Client = S3Client.builder()
-						.region(Region.of(region))
+		var crtBuilder = S3AsyncClient.crtBuilder()
 						.credentialsProvider(StaticCredentialsProvider.create(creds))
-						.httpClient(httpClient)
+						.region(Region.of(region))
 						.endpointOverride(URI.create(endpoint))
 						.forcePathStyle(pathStyle)
-						.serviceConfiguration(S3Configuration.builder()
-										.chunkedEncodingEnabled(false)
-										.dualstackEnabled(false)
-										.accelerateModeEnabled(false)
-										.useArnRegionEnabled(true)
-										.build())
-						.build();
+						.targetThroughputInGbps(targetThroughputInGbps)
+						.minimumPartSizeInBytes(minimumPartSizeInBytes)
+						.maxConcurrency(maxConcurrency);
+
+		// Note: partSizeBytes is used for driver-level multipart decisions
+		// The CRT manages part size internally based on minimumPartSizeInBytes
+
+		S3AsyncClient s3AsyncClient = crtBuilder.build();
 
 		return new S3AwsStorageDriver<>(
 						stepId,
@@ -142,7 +200,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						storageConfig,
 						verifyFlag,
 						batchSize,
-						s3Client);
+						s3AsyncClient,
+						smallObjectThresholdBytes,
+						partSizeBytes);
 	}
 
 	/**
@@ -166,11 +226,15 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			int port = 0;
 			try {
 				port = nodeConfig.intVal("port");
-			} catch (Exception ignored) {}
+			} catch (Exception e) {
+				LOG.debug("Could not read storage.net.node.port from config", e);
+			}
 
 			try {
 				sslEnabled = netConfig.configVal("ssl").boolVal("enabled");
-			} catch (Exception ignored) {}
+			} catch (Exception e) {
+				LOG.debug("Could not read storage.net.ssl.enabled from config", e);
+			}
 
 			if (addrs != null && !addrs.isEmpty()) {
 				final String addr = addrs.get(0);
@@ -184,7 +248,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					endpoint = scheme + "://" + addr;
 				}
 			}
-		} catch (Exception ignored) {}
+		} catch (Exception e) {
+			LOG.debug("Could not resolve endpoint from storage.net config", e);
+		}
 
 		if (endpoint == null) {
 			throw new IllegalConfigurationException(

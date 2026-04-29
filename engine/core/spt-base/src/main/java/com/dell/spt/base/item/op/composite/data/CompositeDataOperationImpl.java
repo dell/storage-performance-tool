@@ -8,9 +8,9 @@ import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.Range;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Created by andrey on 25.11.16. */
@@ -20,7 +20,7 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	private long sizeThreshold;
 	private final AtomicInteger pendingSubTasksCount = new AtomicInteger(-1);
 
-	private final Map<String, String> contextData = new HashMap<>();
+	private final Map<String, String> contextData = new ConcurrentHashMap<>();
 	private final List<PartialDataOperation<I>> subTasks = new ArrayList<>();
 	private final AtomicInteger subTaskYieldIndex = new AtomicInteger(0);
 

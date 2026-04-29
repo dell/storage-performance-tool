@@ -45,6 +45,7 @@ hadoop = "3.3.6"
 
 # AWS SDK
 awsSdk = "2.42.28"
+awsCrt = "0.45.1"  # Latest stable version for AWS SDK 2.42.28
 
 # Crypto / TLS
 bouncycastle = "1.78.1"
@@ -145,9 +146,11 @@ aws-core = { module = "software.amazon.awssdk:aws-core", version.ref = "awsSdk" 
 aws-sts = { module = "software.amazon.awssdk:sts", version.ref = "awsSdk" }
 aws-http-client-spi = { module = "software.amazon.awssdk:http-client-spi", version.ref = "awsSdk" }
 aws-apache-client = { module = "software.amazon.awssdk:apache-client", version.ref = "awsSdk" }
+aws-netty-nio-client = { module = "software.amazon.awssdk:netty-nio-client", version.ref = "awsSdk" }
 aws-sdk-core = { module = "software.amazon.awssdk:sdk-core", version.ref = "awsSdk" }
 aws-utils = { module = "software.amazon.awssdk:utils", version.ref = "awsSdk" }
 aws-profiles = { module = "software.amazon.awssdk:profiles", version.ref = "awsSdk" }
+aws-crt = { module = "software.amazon.awssdk.crt:aws-crt", version.ref = "awsCrt" }
 
 # Bouncy Castle
 bouncycastle-bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }

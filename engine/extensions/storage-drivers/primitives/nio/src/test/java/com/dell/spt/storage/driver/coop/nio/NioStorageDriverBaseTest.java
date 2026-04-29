@@ -16,8 +16,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -55,6 +59,12 @@ public class NioStorageDriverBaseTest {
 	private NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> newDriver(Config config) throws Exception {
 		var drv = new NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>>(
 						"test-nio", dataInput, config, false, 16);
+		drv.operationResultOutput(results);
+		return drv;
+	}
+
+	private BlockingInvokeDriver newBlockingDriver(Config config) throws Exception {
+		var drv = new BlockingInvokeDriver("test-nio-blocking", dataInput, config, false, 16);
 		drv.operationResultOutput(results);
 		return drv;
 	}
@@ -264,6 +274,58 @@ public class NioStorageDriverBaseTest {
 		}
 	}
 
+	@Test
+	void testBatchSubmitProgressWhenWorkerIsExecutingBlockingInvoke() throws Exception {
+		final var config = buildStorageConfig(2, 1);
+		final var drv = newBlockingDriver(config);
+		try {
+			drv.start();
+			assertTrue(drv.submit(newCreateOp("blocking-0", 256)));
+			assertTrue(drv.awaitInvokeEntered(2_000), "First blocking invoke should start");
+			final int submitted = drv.submit(List.of(newCreateOp("blocking-1", 256)), 0, 1);
+			assertEquals(1, submitted,
+							"Batch submit should make progress while another op is in blocking invoke");
+			drv.releaseInvokes();
+			assertNotNull(results.await(2_000));
+			assertNotNull(results.await(2_000));
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void testBatchSubmitDistributesAcrossMultipleWorkers() throws Exception {
+		final int workerCount = 4;
+		final int opCount = 8;
+		final var config = buildStorageConfig(8, workerCount);
+		final var drv = newBlockingDriver(config);
+		try {
+			drv.start();
+			final List<Operation<DataItemImpl>> ops = new ArrayList<>(opCount);
+			for (int i = 0; i < opCount; i++) {
+				ops.add(newCreateOp("fair-" + i, 256));
+			}
+			final int submitted = drv.submit(ops, 0, opCount);
+			assertEquals(opCount, submitted);
+			assertTrue(drv.awaitWorkerThreadCountAtLeast(2, 2_000),
+							"Batch submit should distribute work so at least two workers execute invokeNio");
+			drv.releaseInvokes();
+			for (int i = 0; i < opCount; i++) {
+				assertNotNull(results.await(5_000), "Op " + i + " should complete");
+			}
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
 	// --- Test infrastructure ---
 
 	/** Minimal storage config matching the driver constructor hierarchy. */
@@ -272,6 +334,10 @@ public class NioStorageDriverBaseTest {
 	}
 
 	private static Config buildStorageConfig(int concurrency) {
+		return buildStorageConfig(concurrency, 2);
+	}
+
+	private static Config buildStorageConfig(int concurrency, int driverThreads) {
 		Map<String, Object> schema = new HashMap<>();
 		schema.put("namespace", String.class);
 
@@ -314,7 +380,7 @@ public class NioStorageDriverBaseTest {
 		limitVals.put("queue", limitQueueVals);
 		Map<String, Object> driverVals = new HashMap<>();
 		driverVals.put("type", "dummy-mock");
-		driverVals.put("threads", 2);
+		driverVals.put("threads", driverThreads);
 		driverVals.put("limit", limitVals);
 		values.put("driver", driverVals);
 
@@ -365,6 +431,54 @@ public class NioStorageDriverBaseTest {
 
 		Operation<DataItemImpl> await(long timeoutMs) throws InterruptedException {
 			return queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	static class BlockingInvokeDriver extends NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> {
+		private final CountDownLatch invokeEntered = new CountDownLatch(1);
+		private final CountDownLatch releaseInvoke = new CountDownLatch(1);
+		private final Set<Long> workerThreadIds = ConcurrentHashMap.newKeySet();
+
+		BlockingInvokeDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			workerThreadIds.add(Thread.currentThread().threadId());
+			invokeEntered.countDown();
+			try {
+				releaseInvoke.await();
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				op.status(Operation.Status.INTERRUPTED);
+				return;
+			}
+			super.invokeNio(op);
+		}
+
+		boolean awaitInvokeEntered(final long timeoutMs) throws InterruptedException {
+			return invokeEntered.await(timeoutMs, TimeUnit.MILLISECONDS);
+		}
+
+		boolean awaitWorkerThreadCountAtLeast(final int minCount, final long timeoutMs) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			while (System.nanoTime() < deadline) {
+				if (workerThreadIds.size() >= minCount) {
+					return true;
+				}
+				Thread.sleep(1);
+			}
+			return workerThreadIds.size() >= minCount;
+		}
+
+		void releaseInvokes() {
+			releaseInvoke.countDown();
 		}
 	}
 }

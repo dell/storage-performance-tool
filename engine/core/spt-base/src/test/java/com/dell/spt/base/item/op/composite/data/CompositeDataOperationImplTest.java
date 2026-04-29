@@ -8,6 +8,14 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -208,5 +216,50 @@ class CompositeDataOperationImplTest {
 		op.markSubTaskCompleted(); // 1
 		op.markSubTaskCompleted(); // 0
 		assertTrue(op.allSubOperationsDone());
+	}
+
+	// ---------- Concurrency tests (Concurrent Map Corruption) ----------
+
+	@Test
+	void concurrentPutOperations_preservesAllEntries() throws Exception {
+		var op = newCompositeOp(OpType.CREATE, 4096, 1024);
+
+		// Use reflection to access the contextData field
+		Field contextDataField = CompositeDataOperationImpl.class.getDeclaredField("contextData");
+		contextDataField.setAccessible(true);
+
+		int threadCount = 20;
+		ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+		try {
+			List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+			// Spawn 20 threads to concurrently put entries
+			for (int i = 0; i < threadCount; i++) {
+				final int threadId = i;
+				String eTag = "eTag-" + threadId;
+				CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+					op.put(String.valueOf(threadId), eTag);
+				}, executor);
+				futures.add(future);
+			}
+
+			// Wait for all threads to complete
+			CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+							.get(10, TimeUnit.SECONDS);
+
+			// Verify that all entries were preserved (no data loss)
+			@SuppressWarnings("unchecked")
+			Map<String, String> contextData = (Map<String, String>) contextDataField.get(op);
+			assertEquals(threadCount, contextData.size(), "All concurrent puts should be preserved");
+			for (int i = 0; i < threadCount; i++) {
+				String expectedEtag = "eTag-" + i;
+				assertEquals(expectedEtag, op.get(String.valueOf(i)),
+								"Entry " + i + " should have correct eTag");
+			}
+		} finally {
+			executor.shutdown();
+			executor.awaitTermination(5, TimeUnit.SECONDS);
+		}
 	}
 }

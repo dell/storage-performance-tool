@@ -3,16 +3,9 @@ plugins {
 	alias(libs.plugins.shadow)
 }
 
-version = "0.1.0"
-
-ext {
-	rootPkg = "com.dell.spt.storage.driver.coop.aws.s3"
-}
-
 configurations.implementation {
-	// The s3-aws driver uses the Apache HTTP client, not the Netty NIO client.
-	// Exclude netty-nio-client and all io.netty transitive deps globally so that
-	// no AWS SDK module (s3, sts, etc.) can pull them in.
+	// The s3-aws driver now uses the CRT-based S3AsyncClient.
+	// Exclude netty-nio-client and io.netty to avoid conflicts with engine's Netty.
 	exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
 	exclude group: 'io.netty'
 }
@@ -25,7 +18,7 @@ dependencies {
 	implementation libs.aws.core
 	implementation libs.aws.sts
 	implementation libs.aws.http.client.spi
-	implementation libs.aws.apache.client
+	implementation libs.aws.crt
 	implementation libs.aws.sdk.core
 	implementation libs.aws.utils
 	implementation libs.aws.profiles
@@ -50,6 +43,10 @@ dependencies {
 	testImplementation 'org.junit.jupiter:junit-jupiter-params:5.10.2'
 	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
 	testImplementation libs.mockito.core
+	// Add primitives for test compilation
+	testImplementation project(':extensions:storage-drivers:primitives:coop')
+	testImplementation project(':extensions:storage-drivers:primitives:nio')
+	testImplementation project(':core:spt-base')
 }
 
 shadowJar {
@@ -62,10 +59,8 @@ shadowJar {
 	exclude('org/apache/log4j/**')
 	exclude('org/apache/logging/**')
 
-	// Exclude Netty classes — the AWS SDK's transitive netty-nio-client (4.1.x)
-	// conflicts with the engine's own Netty (4.2.x). The s3-aws driver uses the
-	// Apache HTTP client and does not need Netty.
-	exclude('io/netty/**')
+	// Note: CRT manages its own HTTP connections and doesn't need Netty
+	// We exclude Netty to avoid conflicts with the engine's Netty version
 
 	// Never bundle SPT framework classes
 	// exclude("com/dell/spt/**")

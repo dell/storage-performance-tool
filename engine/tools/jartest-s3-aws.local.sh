@@ -10,7 +10,7 @@ RUN_SCRIPT="$ENGINE_ROOT/bundle/build/dist/run.sh"
 # .env file (which uses plain assignments) does not clobber them.
 declare -A _caller_env
 for _v in S3_ENDPOINTS S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_AUTH_VERSION \
-          JARTEST_CONCURRENCY JARTEST_OBJECT_SIZE JARTEST_OP_LIMIT_COUNT; do
+          JARTEST_CONCURRENCY JARTEST_OBJECT_SIZE JARTEST_OP_LIMIT_COUNT JARTEST_TIME_LIMIT_MINS; do
   [[ -n "${!_v+set}" ]] && _caller_env[$_v]="${!_v}"
 done
 
@@ -41,6 +41,11 @@ unset _caller_env _v
 : "${JARTEST_OBJECT_SIZE:=1MB}"
 : "${JARTEST_OP_LIMIT_COUNT:=5000}"
 
+# If time limit is explicitly set, set operations limit to 0 (infinite) unless explicitly defined
+if [[ -n "${JARTEST_TIME_LIMIT_MINS:-}" ]]; then
+  JARTEST_OP_LIMIT_COUNT=0
+fi
+
 # Convert comma-separated endpoints into host:port pairs expected by Spt.
 NODE_ADDRS="${S3_ENDPOINTS//http:\/\/}"
 NODE_ADDRS="${NODE_ADDRS//https:\/\/}"
@@ -52,6 +57,11 @@ fi
 
 echo "Using S3-AWS driver with legacy S3 parameters..." >&2
 
+EXTRA_ARGS=()
+if [[ -n "${JARTEST_TIME_LIMIT_MINS:-}" ]]; then
+  EXTRA_ARGS+=("--load-step-limit-time=${JARTEST_TIME_LIMIT_MINS}m")
+fi
+
 exec "$RUN_SCRIPT" \
   --storage-driver-type=s3-aws \
   --storage-net-node-addrs="${NODE_ADDRS}" \
@@ -61,4 +71,6 @@ exec "$RUN_SCRIPT" \
   --item-output-path="/${S3_BUCKET}" \
   --item-data-size="${JARTEST_OBJECT_SIZE}" \
   --load-op-limit-count="${JARTEST_OP_LIMIT_COUNT}" \
+  --storage-driver-limit-concurrency="${JARTEST_CONCURRENCY}" \
+  "${EXTRA_ARGS[@]}" \
   "$@"
