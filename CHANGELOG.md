@@ -6,11 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.9.0] - 2026-04-29
+
 ### Added
 
 - **Post-quantum TLS handshake support** — the Netty HTTPS driver now offers hybrid post-quantum key exchange groups (`X25519MLKEM768`, `x25519`, `secp256r1`) during TLS 1.3 handshakes via the Bouncy Castle JSSE provider. Enabled by default in `prefer` mode with automatic classical fallback. Covers the `default`, `rdma`, and S3 Tables drivers. Engine config keys: `storage.net.ssl.pqcMode` (`off`/`prefer`/`require`), `storage.net.ssl.jsseProvider`, `storage.net.ssl.namedGroups`. See [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md).
 - **Data compressibility control** (`--object-data-compressibility`) — set a target compressibility percentage (0-100) for generated object data. Each 4KB chunk is split into pseudo-random and zero-filled portions, forcing the storage system's compression to evaluate every block. Engine config key: `item.data.input.compressibility`. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - **Anti-dedupe stamping** (`--object-data-dedupable=false`) — stamp every 4KB of generated data with a 16-byte header (64-bit object identifier + 64-bit stream offset) to practically eliminate inline deduplication on typical fixed/variable chunking systems. Stamps are deterministic and consistent across all transfer paths (Netty, SSL, AWS SDK, RDMA). Engine config key: `item.data.dedupable`. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
+- **MPU concurrency limits** — add `--mpu-object-concurrency` and `--mpu-part-concurrency` flags to control object-level and part-level concurrency for multipart uploads. Prevents resource exhaustion and improves throughput control. Engine config keys: `load.op.create.mpu.objectConcurrency` and `load.op.create.mpu.partConcurrency`.
+- **AWS CRT driver optimization** — optimize s3-aws storage driver to use AWS CRT (Common Runtime) library for improved performance and efficiency.
+
+### Fixed
+
+- **Post-5.6.0 AWS Driver performance regression** — fix performance issue introduced after 5.6.0 in the s3-aws driver.
+- **Mixed-mode generator correctness** — fix correctness issues in mixed workload generator.
+- **headObject rebase fix** — fix headObject to use s3AsyncClient after rebase.
+- **Async stamp buffer lifetime race** — fix race condition in async stamp buffer lifetime management.
+- **MPU init condition bug** — resolve MPU init condition bug in complete method.
+- **Operation timing fields reset** — reset operation timing fields when generating MPU complete/abort requests.
+- **Prometheus metric family names** — stabilize prometheus metric family names for consistency.
+- **Operation result timing snapshot test** — stabilize operation result timing snapshot test.
+
+### Changed
+
+- **MPU dispatch backpressure** — harden coop MPU dispatch backpressure for better flow control.
+- **Multipart limit warning noise** — reduce multipart limit warning noise.
+- **Deduplication stamping** — use 64-bit object id in dedupe stamps for larger object space.
 
 ## [5.8.0] - 2026-04-17
 
