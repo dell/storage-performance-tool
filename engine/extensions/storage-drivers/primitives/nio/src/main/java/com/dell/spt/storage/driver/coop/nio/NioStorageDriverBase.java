@@ -56,6 +56,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final CircularBuffer<O>[] opBuffs;
 	private final Lock[] opBuffLocks;
 	private final Condition[] opAvailableConditions;
+	private final int[] opBuffReserved;
 	private final AtomicLong rrc = new AtomicLong(0);
 
 	@SuppressWarnings("unchecked")
@@ -75,12 +76,13 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		opBuffs = new CircularBuffer[ioWorkerCount];
 		opBuffLocks = new Lock[ioWorkerCount];
 		opAvailableConditions = new Condition[ioWorkerCount];
+		opBuffReserved = new int[ioWorkerCount];
 		opBuffCapacity = Math.max(MIN_TASK_BUFF_CAPACITY, concurrencyLimit / ioWorkerCount);
 		for (var i = 0; i < ioWorkerCount; i++) {
 			opBuffs[i] = new CircularArrayBuffer<>(opBuffCapacity);
 			opBuffLocks[i] = new ReentrantLock();
 			opAvailableConditions[i] = opBuffLocks[i].newCondition();
-			ioWorkers.add(new NioWorkerTask(IO_EXECUTOR, opBuffs[i], opBuffLocks[i], opAvailableConditions[i]));
+			ioWorkers.add(new NioWorkerTask(IO_EXECUTOR, i, opBuffs[i], opBuffLocks[i], opAvailableConditions[i]));
 		}
 	}
 
@@ -95,16 +97,20 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		private final CircularBuffer<O> opBuff;
 		private final Lock opBuffLock;
 		private final Condition opAvailable;
+		private final int workerIdx;
 		private final List<O> opLocalBuff;
+		private final List<O> opActiveBuff;
 
 		public NioWorkerTask(
-						final VirtualThreadExecutor executor, final CircularBuffer<O> opBuff,
+						final VirtualThreadExecutor executor, final int workerIdx, final CircularBuffer<O> opBuff,
 						final Lock opBuffLock, final Condition opAvailable) {
 			super(executor);
+			this.workerIdx = workerIdx;
 			this.opBuff = opBuff;
 			this.opBuffLock = opBuffLock;
 			this.opAvailable = opAvailable;
 			this.opLocalBuff = new ArrayList<>(opBuffCapacity);
+			this.opActiveBuff = new ArrayList<>(opBuffCapacity);
 		}
 
 		@Override
@@ -128,50 +134,66 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 						return;
 					}
 				}
-
-				try {
-					for (var i = 0; i < opBuffSize; i++) {
-						final var op = opBuff.get(i);
-						// check if the op is invoked 1st time
-						if (PENDING.equals(op.status())) {
-							if (!isStarted()) {
-								// Permit already acquired in submit() — release it
-								concurrencyThrottle.release();
-								op.status(INTERRUPTED);
-								handleCompleted(op);
-								continue;
-							}
-							// Permit already acquired in submit() — mark active
-							op.startRequest();
-							op.finishRequest();
-						}
-						// perform non blocking I/O for the op
-						invokeNio(op);
-						// remove the op from the buffer if it is not active more
-						if (!ACTIVE.equals(op.status())) {
-							concurrencyThrottle.release();
-							handleCompleted(op);
-						} else {
-							// the op remains in the buffer for the next iteration
-							opLocalBuff.add(op);
-						}
-					}
-				} catch (final Throwable cause) {
-					throwUncheckedIfInterrupted(cause);
-					LogUtil.exception(Level.ERROR, cause, "I/O worker failure");
-				} finally {
-					// put the active operations back into the buffer
-					opBuff.clear();
-					final var localSize = opLocalBuff.size();
-					if (localSize > 0) {
-						for (var i = 0; i < localSize; i++) {
-							opBuff.add(opLocalBuff.get(i));
-						}
-						opLocalBuff.clear();
-					}
+				opBuffReserved[workerIdx] = opBuffSize;
+				for (var i = 0; i < opBuffSize; i++) {
+					opLocalBuff.add(opBuff.get(i));
 				}
+				opBuff.clear();
 			} finally {
 				opBuffLock.unlock();
+			}
+
+			try {
+				final var opLocalBuffSize = opLocalBuff.size();
+				for (var i = 0; i < opLocalBuffSize; i++) {
+					final var op = opLocalBuff.get(i);
+					// check if the op is invoked 1st time
+					if (PENDING.equals(op.status())) {
+						if (!isStarted()) {
+							// Permit already acquired in submit() — release it
+							concurrencyThrottle.release();
+							op.status(INTERRUPTED);
+							handleCompleted(op);
+							continue;
+						}
+						// Permit already acquired in submit() — mark active
+						op.startRequest();
+						op.finishRequest();
+					}
+					// perform non blocking I/O for the op
+					invokeNio(op);
+					// remove the op from the buffer if it is not active more
+					if (!ACTIVE.equals(op.status())) {
+						concurrencyThrottle.release();
+						handleCompleted(op);
+					} else {
+						// the op remains in the buffer for the next iteration
+						opActiveBuff.add(op);
+					}
+				}
+			} catch (final Throwable cause) {
+				throwUncheckedIfInterrupted(cause);
+				LogUtil.exception(Level.ERROR, cause, "I/O worker failure");
+			} finally {
+				opLocalBuff.clear();
+				opBuffLock.lock();
+				try {
+					final var activeSize = opActiveBuff.size();
+					if (activeSize > 0) {
+						for (var i = 0; i < activeSize; i++) {
+							if (!opBuff.add(opActiveBuff.get(i))) {
+								final var op = opActiveBuff.get(i);
+								op.status(INTERRUPTED);
+								concurrencyThrottle.release();
+								handleCompleted(op);
+							}
+						}
+						opActiveBuff.clear();
+					}
+					opBuffReserved[workerIdx] = 0;
+				} finally {
+					opBuffLock.unlock();
+				}
 			}
 		}
 
@@ -250,18 +272,22 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		if (!concurrencyThrottle.tryAcquire()) {
 			return false;
 		}
-		// Round-robin into a worker buffer
-		final var j = (int) (rrc.getAndIncrement() % ioWorkerCount);
-		opBuffLocks[j].lock();
-		try {
-			if (opBuffs[j].size() < opBuffCapacity && opBuffs[j].add(op)) {
-				opAvailableConditions[j].signal();
-				return true;
+		final var startIdx = (int) (rrc.getAndIncrement() % ioWorkerCount);
+		for (var i = 0; i < ioWorkerCount && isStarted(); i++) {
+			final var workerIdx = (startIdx + i) % ioWorkerCount;
+			final var opBuffLock = opBuffLocks[workerIdx];
+			if (opBuffLock.tryLock()) {
+				try {
+					final var bufferedCount = opBuffs[workerIdx].size() + opBuffReserved[workerIdx];
+					if (bufferedCount < opBuffCapacity && opBuffs[workerIdx].add(op)) {
+						opAvailableConditions[workerIdx].signal();
+						return true;
+					}
+				} finally {
+					opBuffLock.unlock();
+				}
 			}
-		} finally {
-			opBuffLocks[j].unlock();
 		}
-		// Buffer full — release permit and fail
 		concurrencyThrottle.release();
 		return false;
 	}
@@ -286,44 +312,37 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			concurrencyThrottle.release(permits - numOps);
 			permits = numOps;
 		}
-		// Cap the number of ops we distribute at the number of permits acquired.
-		// Each op placed in a worker buffer will eventually release one permit on
-		// completion — distributing more ops than permits would inflate the
-		// semaphore past concurrencyLimit.
-		final int limit = from + permits;
-		CircularBuffer<O> opBuff;
-		Lock opBuffLock;
-		var j = from;
-		int k;
-		int n;
-		int m;
-		for (var i = 0; i < ioWorkerCount; i++) {
-			if (!isStarted()) {
-				break;
-			}
-			m = (int) (rrc.getAndIncrement() % ioWorkerCount);
-			opBuff = opBuffs[m];
-			opBuffLock = opBuffLocks[m];
-			if (opBuffLock.tryLock()) {
-				try {
-					n = Math.min(limit - j, opBuffCapacity - opBuff.size());
-					for (k = 0; k < n; k++) {
-						opBuff.add(ops.get(j + k));
+		var submitted = 0;
+		var opIdx = from;
+		var nextStartIdx = (int) (rrc.getAndIncrement() % ioWorkerCount);
+		while (submitted < permits && isStarted()) {
+			var accepted = false;
+			for (var i = 0; i < ioWorkerCount; i++) {
+				final var workerIdx = (nextStartIdx + i) % ioWorkerCount;
+				final var opBuffLock = opBuffLocks[workerIdx];
+				if (opBuffLock.tryLock()) {
+					try {
+						final var opBuff = opBuffs[workerIdx];
+						final var bufferedCount = opBuff.size() + opBuffReserved[workerIdx];
+						if (bufferedCount < opBuffCapacity && opBuff.add(ops.get(opIdx))) {
+							opAvailableConditions[workerIdx].signal();
+							accepted = true;
+						}
+					} finally {
+						opBuffLock.unlock();
 					}
-					if (n > 0) {
-						opAvailableConditions[m].signal();
-					}
-					j += n;
-				} finally {
-					opBuffLock.unlock();
+				}
+				if (accepted) {
+					break;
 				}
 			}
-			if (j >= limit) {
+			if (!accepted) {
 				break;
 			}
+			submitted++;
+			opIdx++;
+			nextStartIdx = (nextStartIdx + 1) % ioWorkerCount;
 		}
-		// Refund permits for any ops that could not be buffered
-		final int submitted = j - from;
 		if (submitted < permits) {
 			concurrencyThrottle.release(permits - submitted);
 		}
