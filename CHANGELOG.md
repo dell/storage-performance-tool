@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.9.1] - 2026-05-01
+
+### Added
+
+- **CRC64-NVME checksum support** — added support for the `crc64-nvme` checksum algorithm across all S3 drivers (Netty, AWS SDK, and RDMA). The Netty driver now includes explicit checksum strategy metadata and multipart checksum wiring for CRC64-NVME. The CLI `--checksum crc64-nvme` flag is now accepted for all S3 drivers (previously AWS-only). Added RDMA checksum parity tests covering CRC32, CRC32C, and CRC64-NVME known vectors. (PRs #101, #102)
+
 ## [5.9.0] - 2026-04-29
 
 ### Added
