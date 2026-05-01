@@ -30,6 +30,8 @@ const (
 	ChecksumSHA1 = "sha1"
 	// ChecksumSHA256 selects SHA-256 checksum validation.
 	ChecksumSHA256 = "sha256"
+	// ChecksumCRC64NVME selects CRC64-NVME checksum validation.
+	ChecksumCRC64NVME = "crc64-nvme"
 
 	itemTypeData         = "data"
 	itemTypePath         = "path"

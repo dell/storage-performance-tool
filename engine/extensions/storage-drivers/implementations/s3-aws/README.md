@@ -160,7 +160,7 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 | connectionTimeout | int | 10000 | Connection timeout in milliseconds |
 | enableRequestMetrics | boolean | false | Enable AWS SDK request metrics |
 | checksumEnabled | boolean | false | Compute and send a checksum on write requests |
-| checksumAlgorithm | String | null | Checksum algorithm: `crc32`, `crc32c`, `sha1`, `sha256`. MD5 is not supported as a flexible checksum by the AWS SDK |
+| checksumAlgorithm | String | null | Checksum algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. MD5 is not supported as a flexible checksum by the AWS SDK |
 
 ## API Methods
 

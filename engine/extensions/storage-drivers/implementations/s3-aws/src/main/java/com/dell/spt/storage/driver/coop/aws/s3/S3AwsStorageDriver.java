@@ -194,6 +194,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return ChecksumAlgorithm.SHA1;
 		case "sha256":
 			return ChecksumAlgorithm.SHA256;
+		case "crc64-nvme":
+			return ChecksumAlgorithm.CRC64_NVME;
 		default:
 			return null;
 		}

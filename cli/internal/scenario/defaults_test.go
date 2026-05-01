@@ -968,6 +968,32 @@ func TestGenerateDefaults(t *testing.T) {
 			},
 		},
 		{
+			name: "checksum crc64-nvme",
+			params: Params{
+				WorkloadType: "write",
+				Endpoint:     "http://s3.example.com",
+				AccessKey:    "key",
+				SecretKey:    "secret",
+				Bucket:       "bucket",
+				Threads:      4,
+				Checksum:     "crc64-nvme",
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Checksum == nil {
+					t.Fatal("Expected storage.checksum section")
+				}
+				if config.Storage.Checksum.Algorithm != "crc64-nvme" {
+					t.Errorf("Expected algorithm 'crc64-nvme', got %q", config.Storage.Checksum.Algorithm)
+				}
+			},
+		},
+		{
 			name: "no checksum omits checksum section",
 			params: Params{
 				WorkloadType: "write",
