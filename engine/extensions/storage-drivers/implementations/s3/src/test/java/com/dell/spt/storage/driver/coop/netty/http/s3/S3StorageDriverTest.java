@@ -682,7 +682,8 @@ public class S3StorageDriverTest {
 		final var partItem = base.slice(0, 1024);
 		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
-		final var handler = new S3ResponseHandler<>(drv, false, false, "md5");
+		final var handler = new S3ResponseHandler<>(
+						drv, false, false, S3Api.AMZ_CHECKSUM_PREFIX + "md5");
 		final var headers = new DefaultHttpHeaders();
 		headers.set(HttpHeaderNames.ETAG, "\"etag-part1\"");
 		Method m = S3ResponseHandler.class.getDeclaredMethod(
@@ -899,7 +900,8 @@ public class S3StorageDriverTest {
 		final var partItem = base.slice(0, 1024);
 		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
 						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
-		final var handler = new S3ResponseHandler<>(drv, false, false, "crc32c");
+		final var handler = new S3ResponseHandler<>(
+						drv, false, false, S3Api.AMZ_CHECKSUM_PREFIX + "crc32c");
 		final var headers = new DefaultHttpHeaders();
 		headers.set(HttpHeaderNames.ETAG, "\"etag-part1\"");
 		headers.set("x-amz-checksum-crc32c", "XYZABC==");

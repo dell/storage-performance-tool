@@ -44,12 +44,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
-					final boolean versioningEnabled, final String checksumAlgorithm) {
+					final boolean versioningEnabled, final String checksumHeader) {
 		super(driver, verifyFlag);
 		this.versioningEnabled = versioningEnabled;
-		this.checksumHeader = checksumAlgorithm != null
-						? S3Api.AMZ_CHECKSUM_PREFIX + checksumAlgorithm.toLowerCase(java.util.Locale.ROOT)
-						: null;
+		this.checksumHeader = checksumHeader;
 	}
 
 	@Override
