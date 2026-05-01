@@ -1511,11 +1511,17 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
+		void crc64Nvme() {
+			assertEquals(ChecksumAlgorithm.CRC64_NVME, S3AwsStorageDriver.resolveChecksumAlgorithm("crc64-nvme"));
+		}
+
+		@Test
 		void caseInsensitive() {
 			assertEquals(ChecksumAlgorithm.CRC32, S3AwsStorageDriver.resolveChecksumAlgorithm("CRC32"));
 			assertEquals(ChecksumAlgorithm.CRC32_C, S3AwsStorageDriver.resolveChecksumAlgorithm("CRC32C"));
 			assertEquals(ChecksumAlgorithm.SHA1, S3AwsStorageDriver.resolveChecksumAlgorithm("SHA1"));
 			assertEquals(ChecksumAlgorithm.SHA256, S3AwsStorageDriver.resolveChecksumAlgorithm("SHA256"));
+			assertEquals(ChecksumAlgorithm.CRC64_NVME, S3AwsStorageDriver.resolveChecksumAlgorithm("CRC64-NVME"));
 		}
 
 		@Test
@@ -1608,6 +1614,33 @@ public class S3AwsStorageDriverTest {
 			ArgumentCaptor<CreateMultipartUploadRequest> cap = ArgumentCaptor.forClass(CreateMultipartUploadRequest.class);
 			verify(mockS3Client).createMultipartUpload(cap.capture());
 			assertEquals(ChecksumAlgorithm.CRC32, cap.getValue().checksumAlgorithm());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void initiateMultipartUpload_includesCrc64NvmeWhenEnabled() throws Exception {
+			setChecksumFields(drv, true, ChecksumAlgorithm.CRC64_NVME);
+
+			CreateMultipartUploadResponse mockResponse = CreateMultipartUploadResponse.builder()
+							.uploadId("test-upload-id-crc64")
+							.build();
+
+			when(mockS3Client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(mockResponse));
+
+			@SuppressWarnings("rawtypes")
+			CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+			DataItem item = mock(DataItem.class);
+			when(compositeOp.item()).thenReturn(item);
+			when(compositeOp.type()).thenReturn(OpType.CREATE);
+			when(compositeOp.dstPath()).thenReturn("/test-bucket");
+			when(item.name()).thenReturn("test-key");
+
+			drv.execute((Operation) compositeOp).join();
+
+			ArgumentCaptor<CreateMultipartUploadRequest> cap = ArgumentCaptor.forClass(CreateMultipartUploadRequest.class);
+			verify(mockS3Client).createMultipartUpload(cap.capture());
+			assertEquals(ChecksumAlgorithm.CRC64_NVME, cap.getValue().checksumAlgorithm());
 		}
 
 		@SuppressWarnings("unchecked")

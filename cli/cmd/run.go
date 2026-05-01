@@ -929,7 +929,7 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 
 	// Checksum Options
 	runCmd.Flags().String("checksum", "",
-		`Enable checksum validation with the specified algorithm: crc32, crc32c, sha1, sha256.
+		`Enable checksum validation with the specified algorithm: crc32, crc32c, sha1, sha256, crc64-nvme.
 Omit to disable checksums. (env: SPT_CHECKSUM)`)
 
 	// S3 Tables Options
@@ -1169,10 +1169,13 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		checksumAlgo = strings.ToLower(strings.TrimSpace(checksumAlgo))
 		switch checksumAlgo {
 		case scenario.ChecksumCRC32, scenario.ChecksumCRC32C,
-			scenario.ChecksumSHA1, scenario.ChecksumSHA256:
+			scenario.ChecksumSHA1, scenario.ChecksumSHA256, scenario.ChecksumCRC64NVME:
 			// valid
 		default:
-			return params, fmt.Errorf("invalid --checksum value %q: must be one of: crc32, crc32c, sha1, sha256", checksumAlgo)
+			return params, fmt.Errorf("invalid --checksum value %q: must be one of: crc32, crc32c, sha1, sha256, crc64-nvme", checksumAlgo)
+		}
+		if checksumAlgo == scenario.ChecksumCRC64NVME && s3Driver != scenario.S3DriverAws {
+			return params, fmt.Errorf("invalid --checksum value %q for --s3-driver %q: crc64-nvme requires --s3-driver aws", checksumAlgo, s3Driver)
 		}
 		params.Checksum = checksumAlgo
 	}

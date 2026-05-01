@@ -157,7 +157,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
-	// Checksum algorithm: SPT_CHECKSUM env var (values: crc32, crc32c, sha1, sha256)
+	// Checksum algorithm: SPT_CHECKSUM env var (values: crc32, crc32c, sha1, sha256, crc64-nvme)
 	_ = setIf("checksum", constants.EnvChecksum)
 
 	// Object data shaping

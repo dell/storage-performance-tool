@@ -359,7 +359,7 @@ Executes a benchmark test with the specified workload type.
 - `--threads, -t`: Number of parallel client threads (default: 1)
 - `--object-size, -o`: Size of each object (e.g., 1MB, 256KB, 4GB)
 - `--part-size`: Enable S3 multipart upload with the given part size (e.g., 5MB, 64MB). When set, `load.batch.size` is forced to `1`. The engine automatically retries individual parts (up to 3 times) and aborts incomplete uploads on failure. Per-part checksums are applied when checksum is enabled. See [`SPT_SYNTAX.md`](docs/SPT_SYNTAX.md) for details
-- `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
+- `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. When used with `--part-size`, checksums are applied per part. `crc64-nvme` currently requires `--s3-driver aws`. (env: `SPT_CHECKSUM`)
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--cleanup`: Delete all created objects after test completion

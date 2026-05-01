@@ -42,7 +42,7 @@ type Params struct {
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
 
 	// Checksum validation
-	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256 (empty = disabled)
+	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)
 
 	ObjectDataCompressibility float64 // Object data compressibility percentage [0..100]
 	ObjectDataDedupable       bool    // True keeps repeating ring-buffer data dedupe-friendly; false enables anti-dedupe stamping
