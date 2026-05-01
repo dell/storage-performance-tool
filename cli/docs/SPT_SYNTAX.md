@@ -40,7 +40,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
-- **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`; `crc64-nvme` requires `SPT_S3_DRIVER=aws` or `--s3-driver aws`)
+- **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`)
 - **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
@@ -97,7 +97,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
-| `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. `crc64-nvme` currently requires `--s3-driver aws`. (env: `SPT_CHECKSUM`) |
+| `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
@@ -324,7 +324,7 @@ When `--part-size` is set, each object goes through a four-phase lifecycle:
 
 **Checksums:**
 
-When the engine's checksum feature is enabled (`storage-checksum-enabled=true` in defaults or scenario config), checksums are computed and sent for **each individual part upload**, not just the final object. Supported algorithms: `md5`, `crc32`, `crc32c`, `sha1`, `sha256`.
+When the engine's checksum feature is enabled (`storage-checksum-enabled=true` in defaults or scenario config), checksums are computed and sent for **each individual part upload**, not just the final object. Supported algorithms: `md5`, `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`.
 
 **Results artifacts:**
 
@@ -517,7 +517,7 @@ spt run write \
     --checksum sha256
 ```
 
-Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`. The flag works with both the default Netty driver and the AWS SDK driver (`--s3-driver aws`).
+Supported algorithms: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. The flag works with the default Netty driver, the AWS SDK driver (`--s3-driver aws`), and the RDMA driver (`--s3-driver rdma` / `--use-rdma`).
 
 ### Data Compressibility & Deduplication
 
