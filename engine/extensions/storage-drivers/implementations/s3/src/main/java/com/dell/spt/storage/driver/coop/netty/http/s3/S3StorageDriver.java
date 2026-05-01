@@ -53,6 +53,7 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.HttpVersion;
+import software.amazon.awssdk.crt.checksums.CRC64NVME;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -139,10 +140,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html
 	static class ChecksumMessageDigest extends MessageDigest {
 		private final Checksum checksum;
+		private final int digestWidthBytes;
 
 		public ChecksumMessageDigest(Checksum checksum, String algorithm) {
+			this(checksum, algorithm, Integer.BYTES);
+		}
+
+		public ChecksumMessageDigest(Checksum checksum, String algorithm, int digestWidthBytes) {
 			super(algorithm);
 			this.checksum = checksum;
+			this.digestWidthBytes = digestWidthBytes;
 		}
 
 		@Override
@@ -157,8 +164,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 		@Override
 		protected byte[] engineDigest() {
-			ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES);
-			buffer.putInt((int) (checksum.getValue() & 0xFFFFFFFFL)); // Amazon is expecting this
+			ByteBuffer buffer = ByteBuffer.allocate(digestWidthBytes);
+			if (digestWidthBytes == Integer.BYTES) {
+				buffer.putInt((int) (checksum.getValue() & 0xFFFFFFFFL)); // Amazon is expecting this
+			} else if (digestWidthBytes == Long.BYTES) {
+				buffer.putLong(checksum.getValue());
+			} else {
+				throw new AssertionError("Unsupported checksum width: " + digestWidthBytes);
+			}
 			return buffer.array();
 		}
 
@@ -175,6 +188,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private static final ThreadLocal<MessageDigest> THREAD_LOCAL_CRC32C = ThreadLocal.withInitial(
 					() -> {
 						return new ChecksumMessageDigest(new CRC32C(), "CRC32C");
+					});
+	private static final ThreadLocal<MessageDigest> THREAD_LOCAL_CRC64_NVME = ThreadLocal.withInitial(
+					() -> {
+						return new ChecksumMessageDigest(new CRC64NVME(), "CRC64NVME", Long.BYTES);
 					});
 	private static final ThreadLocal<MessageDigest> THREAD_LOCAL_SHA1 = ThreadLocal.withInitial(
 					() -> {
@@ -209,8 +226,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private static final Map<String, ChecksumStrategy> CHECKSUM_STRATEGIES =
-					createChecksumStrategies();
+	private static final Map<String, ChecksumStrategy> CHECKSUM_STRATEGIES = createChecksumStrategies();
 
 	private static Map<String, ChecksumStrategy> createChecksumStrategies() {
 		final Map<String, ChecksumStrategy> strategiesByToken = new LinkedHashMap<>();
@@ -259,6 +275,15 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										"ChecksumSHA256",
 										S3Api.AMZ_CHECKSUM_PREFIX + "sha256",
 										THREAD_LOCAL_SHA256::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"crc64-nvme",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme",
+										"CRC64NVME",
+										"ChecksumCRC64NVME",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme",
+										THREAD_LOCAL_CRC64_NVME::get));
 		return Collections.unmodifiableMap(strategiesByToken);
 	}
 

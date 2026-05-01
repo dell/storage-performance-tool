@@ -40,6 +40,7 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.util.Attribute;
+import software.amazon.awssdk.crt.checksums.CRC64NVME;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -220,7 +221,8 @@ public class S3StorageDriverTest {
 
 	private static DataItem mockDataItemFromBytes(final byte[] payload) throws Exception {
 		final DataItem dataItem = Mockito.mock(DataItem.class);
-		final int[] readOffset = new int[] {0};
+		final int[] readOffset = new int[]{0
+		};
 		Mockito.when(dataItem.size()).thenReturn((long) payload.length);
 		Mockito.doAnswer(invocation -> {
 			final ByteBuffer dst = invocation.getArgument(0);
@@ -240,7 +242,13 @@ public class S3StorageDriverTest {
 	}
 
 	private static String checksumHeaderName(final String algorithm) {
-		return "md5".equals(algorithm) ? HttpHeaderNames.CONTENT_MD5.toString() : S3Api.AMZ_CHECKSUM_PREFIX + algorithm;
+		if ("md5".equals(algorithm)) {
+			return HttpHeaderNames.CONTENT_MD5.toString();
+		}
+		if ("crc64-nvme".equals(algorithm)) {
+			return S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme";
+		}
+		return S3Api.AMZ_CHECKSUM_PREFIX + algorithm;
 	}
 
 	private static String checksumHeaderFor(final String algorithm, final byte[] payload) throws Exception {
@@ -261,6 +269,13 @@ public class S3StorageDriverTest {
 		checksum.reset();
 		checksum.update(payload, 0, payload.length);
 		final byte[] checksumBytes = ByteBuffer.allocate(Integer.BYTES).putInt((int) (checksum.getValue() & 0xFFFFFFFFL)).array();
+		return Base64.getEncoder().encodeToString(checksumBytes);
+	}
+
+	private static String reference64BitChecksum(final Checksum checksum, final byte[] payload) {
+		checksum.reset();
+		checksum.update(payload, 0, payload.length);
+		final byte[] checksumBytes = ByteBuffer.allocate(Long.BYTES).putLong(checksum.getValue()).array();
 		return Base64.getEncoder().encodeToString(checksumBytes);
 	}
 
@@ -555,6 +570,12 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void constructor_acceptsCrc64NvmeChecksum() {
+		Config cfg = baseConfig(false, 2, true, "crc64-nvme", "127.0.0.1");
+		assertDoesNotThrow(() -> new TestS3Driver(cfg));
+	}
+
+	@Test
 	void constructor_extractsAwsRegionFromHost() throws Exception {
 		Config cfg = baseConfig(false, 2, false, null, "s3.us-west-2.amazonaws.com:80");
 		TestS3Driver drv = new TestS3Driver(cfg);
@@ -590,11 +611,17 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void applyChecksum_crc64nvme_knownVector_123456789_setsAmzChecksumHeader() throws Exception {
+		assertChecksumHeader("crc64-nvme", "123456789".getBytes(StandardCharsets.UTF_8), "rosUhgp5mIg=");
+	}
+
+	@Test
 	void applyChecksum_emptyPayload_vectors_areStable() throws Exception {
 		final byte[] payload = new byte[0];
 		assertChecksumHeader("md5", payload, "1B2M2Y8AsgTpgAmY7PhCfg==");
 		assertChecksumHeader("crc32", payload, "AAAAAA==");
 		assertChecksumHeader("crc32c", payload, "AAAAAA==");
+		assertChecksumHeader("crc64-nvme", payload, "AAAAAAAAAAA=");
 		assertChecksumHeader("sha1", payload, "2jmj7l5rSw0yVb/vlWAYkK/YBwk=");
 		assertChecksumHeader("sha256", payload, "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=");
 	}
@@ -669,6 +696,16 @@ public class S3StorageDriverTest {
 		}
 		final String expected = reference32BitChecksum(new CRC32C(), payload);
 		assertChecksumHeader("crc32c", payload, expected);
+	}
+
+	@Test
+	void applyChecksum_crc64nvme_largePayload_over64KiB_matchesReference() throws Exception {
+		final byte[] payload = new byte[64 * 1024 + 513];
+		for (int i = 0; i < payload.length; i++) {
+			payload[i] = (byte) (i * 13 + 5);
+		}
+		final String expected = reference64BitChecksum(new CRC64NVME(), payload);
+		assertChecksumHeader("crc64-nvme", payload, expected);
 	}
 
 	@Test
@@ -811,6 +848,23 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void mpu_part_appliesCrc64NvmeChecksumWhenEnabled() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc64-nvme", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		base.dataInput(com.dell.spt.base.data.DataInput.instance(null, "7a42d9c483244167", new com.github.akurilov.commons.system.SizeInBytes("64KB"), 4, false, 0.0, true));
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-crc64");
+		final var partItem = base.slice(0, 1024);
+		final var slice = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		HttpRequest req = drv.partUploadRequest(slice, "s3.us-east-1.amazonaws.com");
+		String checksumHeader = req.headers().get(S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme");
+		assertNotNull(checksumHeader, "Part upload should include CRC64-NVME checksum header when enabled");
+		assertEquals(12, checksumHeader.length(), "CRC64-NVME Base64 checksum should be 12 chars (8 bytes)");
+	}
+
+	@Test
 	void mpu_part_noChecksumWhenDisabled() throws Exception {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
@@ -838,6 +892,17 @@ public class S3StorageDriverTest {
 		HttpRequest req = drv.initMultipartUploadRequest(op, "s3.us-east-1.amazonaws.com");
 		assertEquals("CRC32C", req.headers().get(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER),
 						"InitiateMultipartUpload should include x-amz-checksum-algorithm when checksums enabled");
+	}
+
+	@Test
+	void mpu_init_includesCrc64NvmeChecksumAlgorithmHeaderWhenEnabled() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc64-nvme", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		Item item = new ItemImpl("/bucket/obj");
+		Operation<Item> op = new OperationImpl<>(1, OpType.CREATE, item, null, "/bucket", TEST_CRED);
+		HttpRequest req = drv.initMultipartUploadRequest(op, "s3.us-east-1.amazonaws.com");
+		assertEquals("CRC64NVME", req.headers().get(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER),
+						"InitiateMultipartUpload should include CRC64-NVME algorithm token when enabled");
 	}
 
 	@Test
@@ -869,6 +934,27 @@ public class S3StorageDriverTest {
 						"CompleteMultipartUpload XML should include part 1 checksum: " + body);
 		assertTrue(body.contains("<ChecksumCRC32C>BBBBBB==</ChecksumCRC32C>"),
 						"CompleteMultipartUpload XML should include part 2 checksum: " + body);
+		assertTrue(body.contains("<ETag>\"etag-1\"</ETag>"), "XML should still include ETags: " + body);
+	}
+
+	@Test
+	void mpu_complete_includesPerPartCrc64NvmeChecksums() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc64-nvme", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-complete-crc64");
+		parent.put("1", "\"etag-1\"");
+		parent.put("2", "\"etag-2\"");
+		parent.put(S3Api.KEY_PART_CHECKSUM_PREFIX + "1", "AAAAAAAAAAA=");
+		parent.put(S3Api.KEY_PART_CHECKSUM_PREFIX + "2", "rosUhgp5mIg=");
+		final var req = drv.completeMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+		final String body = req.content().toString(java.nio.charset.StandardCharsets.UTF_8);
+		assertTrue(body.contains("<ChecksumCRC64NVME>AAAAAAAAAAA=</ChecksumCRC64NVME>"),
+						"CompleteMultipartUpload XML should include part 1 CRC64 checksum: " + body);
+		assertTrue(body.contains("<ChecksumCRC64NVME>rosUhgp5mIg=</ChecksumCRC64NVME>"),
+						"CompleteMultipartUpload XML should include part 2 CRC64 checksum: " + body);
 		assertTrue(body.contains("<ETag>\"etag-1\"</ETag>"), "XML should still include ETags: " + body);
 	}
 
@@ -912,6 +998,31 @@ public class S3StorageDriverTest {
 		assertEquals("\"etag-part1\"", parent.get("1"), "ETag should be captured");
 		assertEquals("XYZABC==", parent.get(S3Api.KEY_PART_CHECKSUM_PREFIX + "1"),
 						"Per-part checksum should be captured from response header");
+	}
+
+	@Test
+	void responseHandler_capturesCrc64NvmePartChecksum() throws Exception {
+		Config cfg = baseConfig(false, 4, true, "crc64-nvme", "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var base = new com.dell.spt.base.item.DataItemImpl("/bucket/obj", 0, 4096);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, base, "/bucket", null, TEST_CRED, null, 0, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-resp-crc64");
+		final var partItem = base.slice(0, 1024);
+		final var partOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0, OpType.CREATE, partItem, "/bucket", null, TEST_CRED, 0, parent);
+		final var handler = new S3ResponseHandler<>(
+						drv, false, false, S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme");
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.ETAG, "\"etag-part1\"");
+		headers.set(S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme", "AQIDBAUGBwg=");
+		Method m = S3ResponseHandler.class.getDeclaredMethod(
+						"handleResponseHeaders", Channel.class, Operation.class, HttpHeaders.class);
+		m.setAccessible(true);
+		m.invoke(handler, null, partOp, headers);
+		assertEquals("\"etag-part1\"", parent.get("1"), "ETag should be captured");
+		assertEquals("AQIDBAUGBwg=", parent.get(S3Api.KEY_PART_CHECKSUM_PREFIX + "1"),
+						"Per-part CRC64 checksum should be captured from response header");
 	}
 
 	@Test
