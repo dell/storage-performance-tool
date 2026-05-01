@@ -747,28 +747,28 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		}
 	})
 
-	t.Run("--checksum crc64-nvme with default driver fails fast", func(t *testing.T) {
+	t.Run("--checksum crc64-nvme with default driver is accepted", func(t *testing.T) {
 		cmd := newCmd()
 		_ = cmd.Flags().Set("checksum", "crc64-nvme")
-		_, err := buildScenarioParams("mock", cmd)
-		if err == nil {
-			t.Fatal("expected validation error")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(err.Error(), "requires --s3-driver aws") {
-			t.Errorf("expected aws conflict message, got: %v", err)
+		if p.Checksum != "crc64-nvme" {
+			t.Errorf("Checksum = %q, want %q", p.Checksum, "crc64-nvme")
 		}
 	})
 
-	t.Run("--checksum crc64-nvme with rdma fails fast", func(t *testing.T) {
+	t.Run("--checksum crc64-nvme with rdma is accepted", func(t *testing.T) {
 		cmd := newCmd()
 		_ = cmd.Flags().Set("s3-driver", "rdma")
 		_ = cmd.Flags().Set("checksum", "crc64-nvme")
-		_, err := buildScenarioParams("mock", cmd)
-		if err == nil {
-			t.Fatal("expected validation error")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(err.Error(), "requires --s3-driver aws") {
-			t.Errorf("expected aws conflict message, got: %v", err)
+		if p.Checksum != "crc64-nvme" {
+			t.Errorf("Checksum = %q, want %q", p.Checksum, "crc64-nvme")
 		}
 	})
 

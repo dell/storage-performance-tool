@@ -1174,9 +1174,6 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		default:
 			return params, fmt.Errorf("invalid --checksum value %q: must be one of: crc32, crc32c, sha1, sha256, crc64-nvme", checksumAlgo)
 		}
-		if checksumAlgo == scenario.ChecksumCRC64NVME && s3Driver != scenario.S3DriverAws {
-			return params, fmt.Errorf("invalid --checksum value %q for --s3-driver %q: crc64-nvme requires --s3-driver aws", checksumAlgo, s3Driver)
-		}
 		params.Checksum = checksumAlgo
 	}
 

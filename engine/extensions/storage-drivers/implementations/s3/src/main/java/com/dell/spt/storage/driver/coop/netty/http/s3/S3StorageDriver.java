@@ -36,7 +36,6 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.netty.http.HttpStorageDriverBase;
-import com.dell.spt.storage.driver.coop.netty.http.s3.S3Api.AMZChecksum;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
 import io.netty.buffer.ByteBufInputStream;
@@ -54,6 +53,7 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.HttpVersion;
+import software.amazon.awssdk.crt.checksums.CRC64NVME;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -70,11 +70,13 @@ import java.util.Base64;
 import java.util.Collections;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
@@ -138,10 +140,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html
 	static class ChecksumMessageDigest extends MessageDigest {
 		private final Checksum checksum;
+		private final int digestWidthBytes;
 
 		public ChecksumMessageDigest(Checksum checksum, String algorithm) {
+			this(checksum, algorithm, Integer.BYTES);
+		}
+
+		public ChecksumMessageDigest(Checksum checksum, String algorithm, int digestWidthBytes) {
 			super(algorithm);
 			this.checksum = checksum;
+			this.digestWidthBytes = digestWidthBytes;
 		}
 
 		@Override
@@ -156,8 +164,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 		@Override
 		protected byte[] engineDigest() {
-			ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES);
-			buffer.putInt((int) (checksum.getValue() & 0xFFFFFFFFL)); // Amazon is expecting this
+			ByteBuffer buffer = ByteBuffer.allocate(digestWidthBytes);
+			if (digestWidthBytes == Integer.BYTES) {
+				buffer.putInt((int) (checksum.getValue() & 0xFFFFFFFFL)); // Amazon is expecting this
+			} else if (digestWidthBytes == Long.BYTES) {
+				buffer.putLong(checksum.getValue());
+			} else {
+				throw new AssertionError("Unsupported checksum width: " + digestWidthBytes);
+			}
 			return buffer.array();
 		}
 
@@ -175,6 +189,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					() -> {
 						return new ChecksumMessageDigest(new CRC32C(), "CRC32C");
 					});
+	private static final ThreadLocal<MessageDigest> THREAD_LOCAL_CRC64_NVME = ThreadLocal.withInitial(
+					() -> {
+						return new ChecksumMessageDigest(new CRC64NVME(), "CRC64NVME", Long.BYTES);
+					});
 	private static final ThreadLocal<MessageDigest> THREAD_LOCAL_SHA1 = ThreadLocal.withInitial(
 					() -> {
 						try {
@@ -184,6 +202,97 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						}
 					});
 
+	static final class ChecksumStrategy {
+		final String configToken;
+		final String requestHeaderName;
+		final String mpuInitAlgorithmToken;
+		final String completeMultipartXmlElementName;
+		final String responseChecksumHeaderName;
+		final Supplier<MessageDigest> digestSupplier;
+
+		ChecksumStrategy(
+						final String configToken,
+						final String requestHeaderName,
+						final String mpuInitAlgorithmToken,
+						final String completeMultipartXmlElementName,
+						final String responseChecksumHeaderName,
+						final Supplier<MessageDigest> digestSupplier) {
+			this.configToken = configToken;
+			this.requestHeaderName = requestHeaderName;
+			this.mpuInitAlgorithmToken = mpuInitAlgorithmToken;
+			this.completeMultipartXmlElementName = completeMultipartXmlElementName;
+			this.responseChecksumHeaderName = responseChecksumHeaderName;
+			this.digestSupplier = digestSupplier;
+		}
+	}
+
+	private static final Map<String, ChecksumStrategy> CHECKSUM_STRATEGIES = createChecksumStrategies();
+
+	private static Map<String, ChecksumStrategy> createChecksumStrategies() {
+		final Map<String, ChecksumStrategy> strategiesByToken = new LinkedHashMap<>();
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"md5",
+										HttpHeaderNames.CONTENT_MD5.toString(),
+										"MD5",
+										"ChecksumMD5",
+										null,
+										THREAD_LOCAL_MD5::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"crc32",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc32",
+										"CRC32",
+										"ChecksumCRC32",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc32",
+										THREAD_LOCAL_CRC32::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"crc32c",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc32c",
+										"CRC32C",
+										"ChecksumCRC32C",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc32c",
+										THREAD_LOCAL_CRC32C::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"sha1",
+										S3Api.AMZ_CHECKSUM_PREFIX + "sha1",
+										"SHA1",
+										"ChecksumSHA1",
+										S3Api.AMZ_CHECKSUM_PREFIX + "sha1",
+										THREAD_LOCAL_SHA1::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"sha256",
+										S3Api.AMZ_CHECKSUM_PREFIX + "sha256",
+										"SHA256",
+										"ChecksumSHA256",
+										S3Api.AMZ_CHECKSUM_PREFIX + "sha256",
+										THREAD_LOCAL_SHA256::get));
+		registerChecksumStrategy(
+						strategiesByToken,
+						new ChecksumStrategy(
+										"crc64-nvme",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme",
+										"CRC64NVME",
+										"ChecksumCRC64NVME",
+										S3Api.AMZ_CHECKSUM_PREFIX + "crc64nvme",
+										THREAD_LOCAL_CRC64_NVME::get));
+		return Collections.unmodifiableMap(strategiesByToken);
+	}
+
+	private static void registerChecksumStrategy(
+					final Map<String, ChecksumStrategy> strategiesByToken,
+					final ChecksumStrategy checksumStrategy) {
+		strategiesByToken.put(checksumStrategy.configToken, checksumStrategy);
+	}
+
 	protected final boolean fsAccess;
 	protected final boolean taggingEnabled;
 	protected final Input<String> taggingContentInput;
@@ -191,6 +300,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final boolean versioning;
 	protected final String awsRegion;
 	protected final String checksumAlgorithm;
+	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
 
 	public S3StorageDriver(
@@ -263,13 +373,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 		// Validate the checksum algorithm
 		if (storageConfig.boolVal("checksum-enabled")) {
-			checksumAlgorithm = storageConfig.stringVal("checksum-algorithm");
-			if (!Pattern.matches(S3Api.amzChecksumRegex(), checksumAlgorithm)) {
-				throw new IllegalArgumentException("Invalid checksum algorithm: " + checksumAlgorithm);
+			checksumStrategy = CHECKSUM_STRATEGIES.get(storageConfig.stringVal("checksum-algorithm"));
+			if (checksumStrategy == null) {
+				throw new IllegalArgumentException(
+								"Invalid checksum algorithm: " + storageConfig.stringVal("checksum-algorithm"));
 			}
+			checksumAlgorithm = checksumStrategy.configToken;
 			Loggers.MSG.info("Checksum algorithm: {}", checksumAlgorithm);
 		} else {
 			checksumAlgorithm = null;
+			checksumStrategy = null;
 		}
 
 		// Look for an AWS endpoint, e.g. "s3.us-east-1.amazonaws.com:80"
@@ -929,34 +1042,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// TODO Handle other areas where applyAuthHeaders() is called
 	@Override
 	protected void applyChecksum(final HttpHeaders httpHeaders, final O op) {
-		if (checksumAlgorithm == null || !(op.item() instanceof DataItem)) {
+		if (checksumStrategy == null || !(op.item() instanceof DataItem)) {
 			return;
 		}
 
-		AMZChecksum amzChecksum = AMZChecksum.valueOf(checksumAlgorithm.toUpperCase(Locale.ROOT));
 		var dataItem = (DataItem) op.item();
-
-		// Select digest
-		MessageDigest digest = null;
-		switch (amzChecksum) {
-		case MD5:
-			digest = THREAD_LOCAL_MD5.get();
-			break;
-		case CRC32:
-			digest = THREAD_LOCAL_CRC32.get();
-			break;
-		case CRC32C:
-			digest = THREAD_LOCAL_CRC32C.get();
-			break;
-		case SHA1:
-			digest = THREAD_LOCAL_SHA1.get();
-			break;
-		case SHA256:
-			digest = THREAD_LOCAL_SHA256.get();
-			break;
-		default:
-			break;
-		}
+		final MessageDigest digest = checksumStrategy.digestSupplier.get();
 
 		try {
 			// Reset the digest
@@ -988,12 +1079,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 
 			// Add checksum header
-			if (amzChecksum == AMZChecksum.MD5) {
-				httpHeaders.set(HttpHeaderNames.CONTENT_MD5, checksum);
-			} else {
-				httpHeaders.set(
-								S3Api.AMZ_CHECKSUM_PREFIX + amzChecksum.toString().toLowerCase(Locale.ROOT), checksum);
-			}
+			httpHeaders.set(checksumStrategy.requestHeaderName, checksum);
 		} catch (IOException e) {
 			Loggers.ERR.info("Unable to compute checksum: {}", e.getMessage());
 		} finally {
@@ -1017,8 +1103,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		}
 		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
-		if (checksumAlgorithm != null) {
-			httpHeaders.set(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER, checksumAlgorithm.toUpperCase(Locale.ROOT));
+		if (checksumStrategy != null) {
+			httpHeaders.set(S3Api.AMZ_CHECKSUM_ALGORITHM_HEADER, checksumStrategy.mpuInitAlgorithmToken);
 		}
 		final var httpMethod = HttpMethod.POST;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
@@ -1111,12 +1197,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(S3Api.COMPLETE_MPU_PART_NUM_END)
 							.append(nextEtag)
 							.append(S3Api.COMPLETE_MPU_PART_ETAG_END);
-			if (checksumAlgorithm != null) {
+			if (checksumStrategy != null) {
 				final var partChecksum = mpuTask.get(
 								S3Api.KEY_PART_CHECKSUM_PREFIX + nextPartNum);
 				if (partChecksum != null) {
-					final var xmlElem = AMZChecksum.valueOf(
-									checksumAlgorithm.toUpperCase(Locale.ROOT)).xmlElementName();
+					final var xmlElem = checksumStrategy.completeMultipartXmlElementName;
 					content.append("\n\t\t<").append(xmlElem).append('>')
 									.append(partChecksum)
 									.append("</").append(xmlElem).append('>');
@@ -1394,7 +1479,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected void appendHandlers(final Channel channel) {
 		super.appendHandlers(channel);
-		channel.pipeline().addLast(new S3ResponseHandler<>(this, verifyFlag, versioning, checksumAlgorithm));
+		channel.pipeline().addLast(new S3ResponseHandler<>(
+						this,
+						verifyFlag,
+						versioning,
+						checksumStrategy == null ? null : checksumStrategy.responseChecksumHeaderName));
 	}
 
 	@Override
