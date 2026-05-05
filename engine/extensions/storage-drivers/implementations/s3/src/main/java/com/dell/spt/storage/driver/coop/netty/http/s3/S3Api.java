@@ -5,8 +5,6 @@ import io.netty.util.AsciiString;
 import io.netty.util.AttributeKey;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.stream.Collectors;
 
 /**
 Created by kurila on 02.08.16.
@@ -95,26 +93,4 @@ public interface S3Api {
 
 	/** Key prefix used to store per-part checksum values in the MPU context map. */
 	String KEY_PART_CHECKSUM_PREFIX = "checksum-";
-
-	enum AMZChecksum {
-		MD5, CRC32, CRC32C, SHA1, SHA256;
-
-		/** Returns the XML element name used inside CompleteMultipartUpload, e.g. "ChecksumCRC32C". */
-		String xmlElementName() {
-			return switch (this) {
-			case CRC32 -> "ChecksumCRC32";
-			case CRC32C -> "ChecksumCRC32C";
-			case SHA1 -> "ChecksumSHA1";
-			case SHA256 -> "ChecksumSHA256";
-			case MD5 -> "ChecksumMD5";
-			};
-		}
-	}
-
-	static String amzChecksumRegex() {
-		return String.format("^(%s)$", Arrays.stream(AMZChecksum.values())
-						.map(Enum::name)
-						.map(String::toLowerCase)
-						.collect(Collectors.joining("|")));
-	}
 }
