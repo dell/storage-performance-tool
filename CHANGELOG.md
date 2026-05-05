@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.9.2] - 2026-05-05
+
+### Fixed
+
+- **S3 multipart NPE on error responses** — `S3ResponseHandler` no longer throws `NullPointerException` when an MPU part PUT returns a non-2xx response without an `ETag` header. The handler previously attempted to record a null ETag into the parent task's context map (a `ConcurrentHashMap`, which rejects null values), surfacing as misleading "Premature channel closure" warnings that masked the real upstream 4xx/5xx failure. (PR #105)
+- **Item name corruption with versioning enabled** — when versioning was enabled and a response omitted the `x-amz-version-id` header, the literal string "null" was appended to the item name (compounding `~null~null~…` across retries). Both header reads now early-out cleanly when absent. (PR #105)
+
 ## [5.9.1] - 2026-05-01
 
 ### Added
