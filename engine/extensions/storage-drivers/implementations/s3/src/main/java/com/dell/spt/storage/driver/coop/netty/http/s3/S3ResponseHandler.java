@@ -53,22 +53,31 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders) {
 		if (op instanceof PartialDataOperation && OpType.CREATE.equals(op.type())) {
-			// Capture part ETags for MPU write — needed for CompleteMultipartUpload XML body
-			final PartialDataOperation subTask = (PartialDataOperation) op;
+			// Capture part ETags for MPU write — needed for CompleteMultipartUpload XML body.
+			// On error responses the server omits the ETag header; skip recording in that case
+			// (the part will be retried, and the contextData map rejects null values).
 			final String eTag = respHeaders.get(HttpHeaderNames.ETAG);
-			final CompositeDataOperation mpuTask = subTask.parent();
-			final int partNum = subTask.partNumber() + 1;
-			mpuTask.put(Integer.toString(partNum), eTag);
-			// Capture per-part checksum value if the server echoed one back
-			if (checksumHeader != null) {
-				final String checksumVal = respHeaders.get(checksumHeader);
-				if (checksumVal != null) {
-					mpuTask.put(S3Api.KEY_PART_CHECKSUM_PREFIX + partNum, checksumVal);
+			if (eTag != null) {
+				final PartialDataOperation subTask = (PartialDataOperation) op;
+				final CompositeDataOperation mpuTask = subTask.parent();
+				final int partNum = subTask.partNumber() + 1;
+				mpuTask.put(Integer.toString(partNum), eTag);
+				// Capture per-part checksum value if the server echoed one back
+				if (checksumHeader != null) {
+					final String checksumVal = respHeaders.get(checksumHeader);
+					if (checksumVal != null) {
+						mpuTask.put(S3Api.KEY_PART_CHECKSUM_PREFIX + partNum, checksumVal);
+					}
 				}
 			}
 		}
 		if (versioningEnabled) {
-			op.item().name(op.item().name() + "~" + respHeaders.get("x-amz-version-id"));
+			// Skip on error responses (no x-amz-version-id header); otherwise the literal
+			// string "null" gets appended to the item name, compounding on each retry.
+			final String versionId = respHeaders.get("x-amz-version-id");
+			if (versionId != null) {
+				op.item().name(op.item().name() + "~" + versionId);
+			}
 		}
 	}
 
