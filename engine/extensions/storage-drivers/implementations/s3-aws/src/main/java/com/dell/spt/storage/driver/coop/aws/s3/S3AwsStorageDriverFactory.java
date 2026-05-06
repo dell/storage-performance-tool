@@ -7,6 +7,9 @@ import com.dell.spt.base.env.ExtensionBase;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.storage.driver.coop.aws.s3.config.AdaptiveProfileManager;
+import com.dell.spt.storage.driver.coop.aws.s3.config.SmartS3ClientPool;
+import com.dell.spt.storage.driver.coop.aws.s3.metrics.WorkloadMetrics;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.io.yaml.YamlSchemaProviderBase;
@@ -31,6 +34,11 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriverFactory.class);
 	private static final String NAME = "s3-aws";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-aws.yaml";
+
+	// Smart configuration components (shared across all driver instances)
+	private static volatile SmartS3ClientPool sharedClientPool;
+	private static volatile WorkloadMetrics sharedMetrics;
+	private static volatile AdaptiveProfileManager sharedProfileManager;
 
 	@Override
 	public String id() {
@@ -103,6 +111,38 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		final boolean pathStyle = true;
 
 		// ---------------------------
+		// Smart Configuration (Adaptive Tuning)
+		// ---------------------------
+		boolean enableAdaptiveTuning = false;
+		try {
+			enableAdaptiveTuning = storageConfig.configVal("crt").boolVal("enableAdaptiveTuning");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.enableAdaptiveTuning from config, using default: {}", enableAdaptiveTuning);
+		}
+
+		long adaptiveTuningIntervalSeconds = 30;
+		try {
+			adaptiveTuningIntervalSeconds = storageConfig.configVal("crt").longVal("adaptiveTuningIntervalSeconds");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.adaptiveTuningIntervalSeconds from config, using default: {}", adaptiveTuningIntervalSeconds);
+		}
+
+		// Initialize smart configuration components if adaptive tuning is enabled
+		if (enableAdaptiveTuning) {
+			synchronized (S3AwsStorageDriverFactory.class) {
+				if (sharedClientPool == null) {
+					final var creds = AwsBasicCredentials.create(accessKey, secretKey);
+					sharedClientPool = new SmartS3ClientPool(creds, Region.of(region), URI.create(endpoint), pathStyle);
+					sharedMetrics = new WorkloadMetrics();
+					sharedProfileManager = new AdaptiveProfileManager(sharedMetrics, adaptiveTuningIntervalSeconds,
+									com.dell.spt.storage.driver.coop.aws.s3.config.ObjectSizeProfile.MEDIUM);
+					sharedProfileManager.start();
+					LOG.info("Smart configuration initialized with adaptive tuning enabled (interval: {}s)", adaptiveTuningIntervalSeconds);
+				}
+			}
+		}
+
+		// ---------------------------
 		// CRT Configuration
 		// ---------------------------
 		boolean optimizeForSmallObjects = true;
@@ -159,6 +199,13 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
 		}
 
+		long byteBufferThresholdBytes = 64 * 1024L;  // 64KB default
+		try {
+			byteBufferThresholdBytes = storageConfig.configVal("crt").longVal("byteBufferThresholdBytes");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.byteBufferThresholdBytes from config, using default: {}", byteBufferThresholdBytes);
+		}
+
 		// Connection timeout settings
 		int connectionTimeoutMs = 5000;  // 5 seconds
 		try {
@@ -173,6 +220,35 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			socketTimeoutMs = storageConfig.configVal("crt").intVal("socketTimeoutMs");
 		} catch (Exception e) {
 			LOG.debug("Could not read storage.crt.socketTimeoutMs from config, using default: {}", socketTimeoutMs);
+		}
+
+		// Additional connection pool settings
+		int maxConcurrentRequestStreams = 4;  // Default for small objects
+		try {
+			maxConcurrentRequestStreams = storageConfig.configVal("crt").intVal("maxConcurrentRequestStreams");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.maxConcurrentRequestStreams from config, using default: {}", maxConcurrentRequestStreams);
+		}
+
+		int connectionAcquisitionTimeoutMs = 1000;  // 1 second
+		try {
+			connectionAcquisitionTimeoutMs = storageConfig.configVal("crt").intVal("connectionAcquisitionTimeoutMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.connectionAcquisitionTimeoutMs from config, using default: {}", connectionAcquisitionTimeoutMs);
+		}
+
+		int connectionMaxIdleTimeMs = 60000;  // 60 seconds
+		try {
+			connectionMaxIdleTimeMs = storageConfig.configVal("crt").intVal("connectionMaxIdleTimeMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.connectionMaxIdleTimeMs from config, using default: {}", connectionMaxIdleTimeMs);
+		}
+
+		int connectionTimeToLiveMs = 300000;  // 5 minutes
+		try {
+			connectionTimeToLiveMs = storageConfig.configVal("crt").intVal("connectionTimeToLiveMs");
+		} catch (Exception e) {
+			LOG.debug("Could not read storage.crt.connectionTimeToLiveMs from config, using default: {}", connectionTimeToLiveMs);
 		}
 
 		// ---------------------------
@@ -202,7 +278,11 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						batchSize,
 						s3AsyncClient,
 						smallObjectThresholdBytes,
-						partSizeBytes);
+						partSizeBytes,
+						byteBufferThresholdBytes,
+						enableAdaptiveTuning ? sharedMetrics : null,
+						enableAdaptiveTuning ? sharedClientPool : null,
+						enableAdaptiveTuning);
 	}
 
 	/**
@@ -284,5 +364,25 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 	@Override
 	protected List<String> resourceFilesToInstall() {
 		return List.of("config/" + DEFAULTS_FILE_NAME);
+	}
+
+	/**
+	 * Cleanup method to shutdown smart configuration components.
+	 * Call this when the driver is no longer needed.
+	 */
+	public static void shutdown() {
+		synchronized (S3AwsStorageDriverFactory.class) {
+			if (sharedProfileManager != null) {
+				sharedProfileManager.shutdown();
+				sharedProfileManager = null;
+				LOG.info("AdaptiveProfileManager shutdown");
+			}
+			if (sharedClientPool != null) {
+				sharedClientPool.close();
+				sharedClientPool = null;
+				LOG.info("SmartS3ClientPool closed");
+			}
+			sharedMetrics = null;
+		}
 	}
 }

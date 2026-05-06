@@ -18,6 +18,8 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
+import com.dell.spt.storage.driver.coop.aws.s3.config.SmartS3ClientPool;
+import com.dell.spt.storage.driver.coop.aws.s3.metrics.WorkloadMetrics;
 import com.github.akurilov.confuse.Config;
 
 import org.slf4j.Logger;
@@ -70,6 +72,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Map<String, String> objectTags;
 	private final long smallObjectThresholdBytes;
 	private final long partSizeBytes;
+	private final long byteBufferThresholdBytes;
+	private final WorkloadMetrics metrics;
+	private final SmartS3ClientPool clientPool;
+	private final boolean useSmartConfig;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -79,7 +85,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final int batchSize,
 					final S3AsyncClient s3AsyncClient,
 					final long smallObjectThresholdBytes,
-					final long partSizeBytes)
+					final long partSizeBytes,
+					final long byteBufferThresholdBytes,
+					final WorkloadMetrics metrics,
+					final SmartS3ClientPool clientPool,
+					final boolean useSmartConfig)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
@@ -89,6 +99,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.s3AsyncClient = s3AsyncClient;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
+		this.byteBufferThresholdBytes = byteBufferThresholdBytes;
+		this.metrics = metrics != null ? metrics : new WorkloadMetrics();
+		this.clientPool = clientPool;
+		this.useSmartConfig = useSmartConfig;
+
+		if (useSmartConfig && clientPool != null) {
+			LOG.info("S3-AWS driver initialized with smart configuration (client pool enabled)");
+		} else if (useSmartConfig) {
+			LOG.warn("S3-AWS driver smart configuration requested but client pool is null, using single client");
+		} else {
+			LOG.info("S3-AWS driver initialized with single client (smart configuration disabled)");
+		}
 
 		// Use virtual threads to support high concurrency without OS-level thread explosion
 		// This allows thousands of blocking operations while honoring user's --concurrency limit
@@ -267,7 +289,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// This maintains the existing NioStorageDriverBase threading model
 			execute(op).join();
 
-			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes)
+			// Set bytes transferred (skip READs — readObject sets actual bytes)
 			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
 				DataItem dataItem = (DataItem) op.item();
 				if (op instanceof DataOperation) {
@@ -295,6 +317,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
 			}
 		}
+	}
+
+	/**
+	 * Get the object size for metrics collection.
+	 */
+	private long getObjectSize(final O op) {
+		if (op.item() instanceof DataItem) {
+			try {
+				return ((DataItem) op.item()).size();
+			} catch (IOException e) {
+				return 0;
+			}
+		}
+		return 0;
 	}
 
 	/**
@@ -615,7 +651,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				final long size = dataItem.size();
 
-				if (size <= 8 * 1024) {
+				if (size <= byteBufferThresholdBytes) {
 					ByteBuffer buffer = ByteBuffer.allocate((int) size);
 					int bytesRead = dataItem.read(buffer);
 					if (bytesRead != size) {

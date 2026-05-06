@@ -113,7 +113,12 @@ public class S3AwsTaggingIntegrationTest {
 						4096,
 						mockS3Client,
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
+						8 * 1024L,  // byteBufferThresholdBytes
+						null,  // metrics
+						null,  // clientPool
+						false  // useSmartConfig
+		);
 	}
 
 	@AfterEach
@@ -166,7 +171,12 @@ public class S3AwsTaggingIntegrationTest {
 						4096,
 						mockS3Client,
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
+						8 * 1024L,  // byteBufferThresholdBytes
+						null,  // metrics
+						null,  // clientPool
+						false  // useSmartConfig
+		);
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
@@ -205,7 +215,12 @@ public class S3AwsTaggingIntegrationTest {
 						4096,
 						mockS3Client,
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
+						8 * 1024L,  // byteBufferThresholdBytes
+						null,  // metrics
+						null,  // clientPool
+						false  // useSmartConfig
+		);
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));

@@ -40,6 +40,9 @@ import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 import software.amazon.awssdk.core.ResponseInputStream;
 
 import java.io.ByteArrayInputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.Instant;
@@ -94,12 +97,23 @@ public class S3AwsStorageDriverTest {
 		algoField.set(driver, algorithm);
 	}
 
+	private void setExecutors(S3AwsStorageDriver<Item, Operation<Item>> driver) throws Exception {
+		Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
+		executorField.setAccessible(true);
+		executorField.set(driver, Executors.newVirtualThreadPerTaskExecutor());
+
+		Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
+		uploadExecutorField.setAccessible(true);
+		uploadExecutorField.set(driver, Executors.newVirtualThreadPerTaskExecutor());
+	}
+
 	@BeforeEach
 	void setUp() throws Exception {
 		drv = newDriverMock();
 		mockS3Client = mock(S3AsyncClient.class);
 		setS3Client(drv, mockS3Client);
 		setBucketName(drv, "test-bucket");
+		setExecutors(drv);
 	}
 
 	// -----------------------------------------------------------------------
@@ -2153,7 +2167,11 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L  // partSizeBytes
+							8 * 1024 * 1024L,  // partSizeBytes
+							8 * 1024L,  // byteBufferThresholdBytes
+							null,  // metrics
+							null,  // clientPool
+							false  // useSmartConfig
 			);
 
 			// Verify the tagging fields were set correctly using reflection
@@ -2199,7 +2217,11 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L  // partSizeBytes
+							8 * 1024 * 1024L,  // partSizeBytes
+							8 * 1024L,  // byteBufferThresholdBytes
+							null,  // metrics
+							null,  // clientPool
+							false  // useSmartConfig
 			);
 
 			// Verify the tagging fields were set correctly using reflection
@@ -2273,7 +2295,11 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L  // partSizeBytes
+							8 * 1024 * 1024L,  // partSizeBytes
+							8 * 1024L,  // byteBufferThresholdBytes
+							null,  // metrics
+							null,  // clientPool
+							false  // useSmartConfig
 			);
 
 			// Verify the versioningEnabled field was set correctly using reflection
@@ -2308,7 +2334,11 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L  // partSizeBytes
+							8 * 1024 * 1024L,  // partSizeBytes
+							8 * 1024L,  // byteBufferThresholdBytes
+							null,  // metrics
+							null,  // clientPool
+							false  // useSmartConfig
 			);
 
 			// Verify the versioningEnabled field was set correctly using reflection
@@ -2341,7 +2371,11 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L  // partSizeBytes
+							8 * 1024 * 1024L,  // partSizeBytes
+							8 * 1024L,  // byteBufferThresholdBytes
+							null,  // metrics
+							null,  // clientPool
+							false  // useSmartConfig
 			);
 
 			// Verify the versioningEnabled field was set to default (false)
@@ -2396,7 +2430,7 @@ public class S3AwsStorageDriverTest {
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L, 8 * 1024L, null, null, false);
 
 			// Act: Call the close method on the driver
 			driver.close();
