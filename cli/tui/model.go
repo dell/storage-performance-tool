@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -868,11 +869,16 @@ func StartTUI() error {
 func StartTUIWithScenario(image string, scenarioPath string) error {
 	// Create empty params for backward compatibility - endpoint args will be empty
 	params := scenario.ScenarioParams{}
-	return StartTUIWithScenarioAndParams(image, scenarioPath, params, "", nil)
+	return StartTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, "", nil, "", false)
 }
 
 // StartTUIWithScenarioAndParams starts the TUI with a scenario file and scenario parameters
 func StartTUIWithScenarioAndParams(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string))) error {
+	return StartTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, "", false)
+}
+
+// StartTUIWithScenarioAndParamsWithTrace starts the TUI with optional full-output trace capture.
+func StartTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -899,7 +905,13 @@ func StartTUIWithScenarioAndParams(image string, scenarioPath string, params sce
 
 	model.dockerManager = dm
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p, traceFile, err := newProgramWithTrace(model, tracePath, traceAppend)
+	if err != nil {
+		return err
+	}
+	if traceFile != nil {
+		defer func() { _ = traceFile.Close() }()
+	}
 
 	if setSummarySink != nil {
 		setSummarySink(func(line string) {
@@ -988,6 +1000,11 @@ func StartTUIWithScenarioAndParams(image string, scenarioPath string, params sce
 
 // StartTUIWithMultiHostOrchestrator starts the TUI with a pre-configured multi-host orchestrator
 func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string))) error {
+	return StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, "", false)
+}
+
+// StartTUIWithMultiHostOrchestratorWithTrace starts the multi-host TUI with optional full-output trace capture.
+func StartTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1017,7 +1034,13 @@ func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, imag
 	// Provide baseline generator so Model.Init can emit it safely at startup
 	model.baselineFn = multiOrchestrator.BuildBaselineUpdate
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p, traceFile, err := newProgramWithTrace(model, tracePath, traceAppend)
+	if err != nil {
+		return err
+	}
+	if traceFile != nil {
+		defer func() { _ = traceFile.Close() }()
+	}
 
 	if setSummarySink != nil {
 		setSummarySink(func(line string) {
@@ -1124,8 +1147,13 @@ func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, imag
 
 // StartTUIWithScenarioAndParamsTimeout starts the TUI (single host) and exits after autoTerminateSeconds (>0).
 func StartTUIWithScenarioAndParamsTimeout(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string))) error {
+	return StartTUIWithScenarioAndParamsTimeoutWithTrace(image, scenarioPath, params, apiPort, autoTerminateSeconds, setSummarySink, "", false)
+}
+
+// StartTUIWithScenarioAndParamsTimeoutWithTrace starts the TUI (single host), exits after timeout, and can capture full output.
+func StartTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
 	if autoTerminateSeconds <= 0 {
-		return StartTUIWithScenarioAndParams(image, scenarioPath, params, apiPort, setSummarySink)
+		return StartTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend)
 	}
 	model := InitialModel()
 	if params.MinimalTUI {
@@ -1148,7 +1176,19 @@ func StartTUIWithScenarioAndParamsTimeout(image string, scenarioPath string, par
 	model.orchestrator = orchestrator
 	model.dockerManager = dm
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p, traceFile, err := newProgramWithTrace(model, tracePath, traceAppend)
+	if err != nil {
+		return err
+	}
+	if traceFile != nil {
+		defer func() { _ = traceFile.Close() }()
+	}
+
+	if setSummarySink != nil {
+		setSummarySink(func(line string) {
+			p.Send(sptMessageMsg(line))
+		})
+	}
 
 	orchestrator.SetCallbacks(
 		func(status *TestStatus) {
@@ -1216,8 +1256,13 @@ func StartTUIWithScenarioAndParamsTimeout(image string, scenarioPath string, par
 
 // StartTUIWithMultiHostOrchestratorTimeout starts the TUI (multi-host) and exits after autoTerminateSeconds (>0).
 func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string))) error {
+	return StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, "", false)
+}
+
+// StartTUIWithMultiHostOrchestratorTimeoutWithTrace starts the multi-host TUI with timeout and optional full-output trace capture.
+func StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
 	if autoTerminateSeconds <= 0 {
-		return StartTUIWithMultiHostOrchestrator(orchestrator, image, scenarioPath, params, setSummarySink)
+		return StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend)
 	}
 	model := InitialModel()
 	if params.MinimalTUI {
@@ -1239,7 +1284,19 @@ func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrato
 	model.orchestrator = multiOrchestrator
 	model.baselineFn = multiOrchestrator.BuildBaselineUpdate
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p, traceFile, err := newProgramWithTrace(model, tracePath, traceAppend)
+	if err != nil {
+		return err
+	}
+	if traceFile != nil {
+		defer func() { _ = traceFile.Close() }()
+	}
+
+	if setSummarySink != nil {
+		setSummarySink(func(line string) {
+			p.Send(sptMessageMsg(line))
+		})
+	}
 
 	orchestrator.SetNotifier(func(msg string) { p.Send(sptMessageMsg(msg)) })
 	multiOrchestrator.SetMessageSink(func(msg string) {
@@ -1309,6 +1366,30 @@ func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrato
 		}
 	}
 	return err
+}
+
+func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.Program, *os.File, error) {
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if tracePath == "" {
+		return tea.NewProgram(model, opts...), nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(tracePath), 0o750); err != nil {
+		return nil, nil, fmt.Errorf("failed to create trace file directory: %w", err)
+	}
+	flags := os.O_CREATE | os.O_WRONLY
+	if traceAppend {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	traceFile, err := os.OpenFile(tracePath, flags, 0600) // #nosec G304 -- path validated by caller and kept local
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open trace file: %w", err)
+	}
+	if !traceAppend {
+		_, _ = fmt.Fprintf(traceFile, "# TUI trace file: %s\n# Generated: %s\n#\n", tracePath, time.Now().Format("2006-01-02 15:04:05"))
+	}
+	return tea.NewProgram(model, opts...), traceFile, nil
 }
 
 // StartTUIWithContainer starts the TUI and immediately launches a container

@@ -6,6 +6,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,56 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
+
+func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "tui.trace.log")
+	model := InitialModel()
+
+	_, f, err := newProgramWithTrace(model, tracePath, false)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace create error: %v", err)
+	}
+	if f == nil {
+		t.Fatalf("expected trace file handle")
+	}
+	_, _ = f.WriteString("first\n")
+	_ = f.Close()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	s := string(content)
+	if !strings.Contains(s, "# TUI trace file:") {
+		t.Fatalf("trace header missing: %q", s)
+	}
+	if !strings.Contains(s, "first") {
+		t.Fatalf("trace content missing first marker: %q", s)
+	}
+
+	_, f2, err := newProgramWithTrace(model, tracePath, true)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace append error: %v", err)
+	}
+	if f2 == nil {
+		t.Fatalf("expected trace file handle on append")
+	}
+	_, _ = f2.WriteString("second\n")
+	_ = f2.Close()
+
+	content2, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file after append: %v", err)
+	}
+	s2 := string(content2)
+	if strings.Count(s2, "# TUI trace file:") != 1 {
+		t.Fatalf("expected single header after append, got content: %q", s2)
+	}
+	if !strings.Contains(s2, "first") || !strings.Contains(s2, "second") {
+		t.Fatalf("append content missing markers: %q", s2)
+	}
+}
 
 func TestInitialModel(t *testing.T) {
 	m := InitialModel()
