@@ -29,7 +29,7 @@ ZIP_FILE := bundle/build/distributions/spt-bundle-$(SPT_VERSION).zip
 BUILD_OPTS := --no-daemon
 
 # Phony targets (not files)
-.PHONY: all build clean distclean test test-coverage bundle help check lint spotless docker docker-run docker-push
+.PHONY: all build clean distclean test test-coverage bundle help check lint spotless docker docker-local docker-run docker-push
 .PHONY: test-integration test-performance test-all test-coverage-all errorprone
 
 # Help target - displays available targets
@@ -54,6 +54,7 @@ help:
 	@echo "  make quick      - Quick build without tests or checks"
 	@echo "  make cache-report - Build with configuration cache debugging"
 	@echo "  make docker     - Build Docker image"
+	@echo "  make docker-local - Build local dev Docker image tagged ghcr.io/dell/storage-performance-tool:spt_dev"
 	@echo "  make docker-run - Run Spt in Docker container"
 	@echo "  make docker-push- Push Docker image to Dell registry"
 	@echo "  make docker-build-push - Build and push with authentication"
@@ -273,6 +274,12 @@ docker: $(SPT_JAR)
 	$(GRADLE) :bundle:dockerBuildImage
 	@echo "Docker image built successfully: $(DOCKER_IMAGE):$(DOCKER_TAG)"
 	@echo "Run with: docker run --rm $(DOCKER_IMAGE):latest --help"
+
+# Build Docker image with a stable local-dev tag for CLI testing
+docker-local: $(SPT_JAR)
+	@echo "Building Spt Docker image for local development..."
+	$(GRADLE) :bundle:dockerBuildImage -PdockerImageTag=spt_dev $(BUILD_OPTS)
+	@echo "Docker image built successfully: ghcr.io/dell/storage-performance-tool:spt_dev"
 
 # Run Spt in Docker container (interactive)
 docker-run: docker
