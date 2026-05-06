@@ -26,6 +26,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.METADATA_NODE_LIST;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_OP_TYPE;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_RUN_ID;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_STEP_ID;
+import static com.dell.spt.base.metrics.MetricsConstants.METRIC_NAME_TTFB;
 
 public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapshotImpl>
 				extends MetricsContextBase<S> implements DistributedMetricsContext<S> {
@@ -66,7 +67,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	public void markSucc(final long bytes, final long duration, final long latency) {}
 
 	@Override
+	public void markSucc(final long bytes, final long duration, final long latency, final long ttfb) {}
+
+	@Override
 	public void markPartSucc(final long bytes, final long duration, final long latency) {}
+
+	@Override
+	public void markPartSucc(final long bytes, final long duration, final long latency, final long ttfb) {}
 
 	@Override
 	public void markSucc(
@@ -76,8 +83,23 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 					final long[] latencyValues) {}
 
 	@Override
+	public void markSucc(
+					final long count,
+					final long bytes,
+					final long[] durationValues,
+					final long[] latencyValues,
+					final long[] ttfbValues) {}
+
+	@Override
 	public void markPartSucc(
 					final long bytes, final long[] durationValues, final long[] latencyValues) {}
+
+	@Override
+	public void markPartSucc(
+					final long bytes,
+					final long[] durationValues,
+					final long[] latencyValues,
+					final long[] ttfbValues) {}
 
 	@Override
 	public void markFail() {}
@@ -130,6 +152,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 			final ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 			final TimingMetricSnapshot durSnapshot;
 			final TimingMetricSnapshot latSnapshot;
+			final TimingMetricSnapshot ttfbSnapshot;
 
 			if (snapshotsCount == 1) { // single
 
@@ -140,11 +163,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				actualConcurrencySnapshot = snapshot.concurrencySnapshot();
 				durSnapshot = snapshot.durationSnapshot();
 				latSnapshot = snapshot.latencySnapshot();
+				ttfbSnapshot = snapshot.ttfbSnapshot();
 
 			} else { // many
 
 				final List<TimingMetricSnapshot> durSnapshots = new ArrayList<>();
 				final List<TimingMetricSnapshot> latSnapshots = new ArrayList<>();
+				final List<TimingMetricSnapshot> ttfbSnapshots = new ArrayList<>();
 				final List<ConcurrencyMetricSnapshot> conSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> succSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> failSnapshots = new ArrayList<>();
@@ -153,6 +178,9 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 					final var snapshot = snapshots.get(i);
 					durSnapshots.add(snapshot.durationSnapshot());
 					latSnapshots.add(snapshot.latencySnapshot());
+					if (snapshot.ttfbSnapshot() != null) {
+						ttfbSnapshots.add(snapshot.ttfbSnapshot());
+					}
 					succSnapshots.add(snapshot.successSnapshot());
 					failSnapshots.add(snapshot.failsSnapshot());
 					byteSnapshots.add(snapshot.byteSnapshot());
@@ -164,11 +192,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				actualConcurrencySnapshot = ConcurrencyMetricSnapshotImpl.aggregate(conSnapshots);
 				durSnapshot = TimingMetricSnapshotImpl.aggregate(durSnapshots);
 				latSnapshot = TimingMetricSnapshotImpl.aggregate(latSnapshots);
+				ttfbSnapshot = TimingMetricSnapshotImpl.aggregate(ttfbSnapshots, METRIC_NAME_TTFB);
 			}
 
 			lastSnapshot = (S) new DistributedAllMetricsSnapshotImpl(
 							durSnapshot,
 							latSnapshot,
+							ttfbSnapshot,
 							actualConcurrencySnapshot,
 							failsSnapshot,
 							successSnapshot,

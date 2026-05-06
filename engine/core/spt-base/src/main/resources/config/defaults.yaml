@@ -105,7 +105,7 @@ output:
       persist: false
     threshold: 0
     timing:
-      persist: true
+      persist: false
     quantiles:
     - 0.25
     - 0.5

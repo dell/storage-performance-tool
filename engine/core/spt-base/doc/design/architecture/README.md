@@ -127,12 +127,11 @@ We read it by ~16Mb chunks (if there is enough data) and synchronously put it in
 node. But as we aggregate data in parallel from workers, each chunk can be a bit less than 16Mb so that chunk finishes 
 at the end of line, so we don't mix lines from different workers.
 
-Since version 4.3.0 some of the metrics are also only aggregated after the test step. To avoid a continuous stream
-of metrics passed over to entry node the timing metrics (latency and duration) are only aggregated after the test step.
-While the test is running only the mean value is calculated and passed over. After the step is done remote temporary
-files are aggregated into local entry node temporary files. Then they are deleted on the remote workers. 
-After that on the entry node the files are first sorted and then merged. Spt takes the specified quantile values from the sorted values and then 
-deletes files on the entry node.
+Timing metrics are maintained as bounded in-memory histograms on each node. Duration, latency, and time-to-first-byte
+percentiles can therefore be reported while a step is running and in final summaries without reading and sorting raw
+per-operation timing files. In distributed mode the timing snapshot sent to the entry node includes compact compressed
+histogram payloads, and the entry node merges the histograms before calculating percentiles. Raw timing files are now a
+diagnostic artifact controlled by `--output-metrics-timing-persist`; normal percentile reporting does not depend on them.
 
 # 3. Concurrency
 

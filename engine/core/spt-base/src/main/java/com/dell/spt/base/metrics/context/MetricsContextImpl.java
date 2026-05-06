@@ -28,10 +28,10 @@ import static com.dell.spt.base.metrics.MetricsConstants.METADATA_STEP_ID;
 public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends MetricsContextBase<S>
 				implements MetricsContext<S> {
 
-	private final LongMeter<TimingMetricSnapshot> reqDuration, respLatency;
+	private final LongMeter<TimingMetricSnapshot> reqDuration, respLatency, timeToFirstByte;
 	private final LongMeter<ConcurrencyMetricSnapshot> actualConcurrency;
 	private final RateMeter<RateMetricSnapshot> throughputSuccess, throughputFail, reqBytes;
-	private volatile TimingMetricSnapshot reqDurSnapshot, respLatSnapshot;
+	private volatile TimingMetricSnapshot reqDurSnapshot, respLatSnapshot, ttfbSnapshot;
 	private volatile ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 	private volatile long lastSnapshotsUpdateTs = 0;
 	private final IntSupplier actualConcurrencyGauge;
@@ -53,6 +53,9 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		//
 		reqDuration = new TimingMeterImpl(MetricsConstants.METRIC_NAME_DUR);
 		reqDurSnapshot = reqDuration.snapshot();
+		//
+		timeToFirstByte = new TimingMeterImpl(MetricsConstants.METRIC_NAME_TTFB);
+		ttfbSnapshot = timeToFirstByte.snapshot();
 		//
 		this.actualConcurrencyGauge = actualConcurrencyGauge;
 		actualConcurrency = new ConcurrencyMeterImpl(MetricsConstants.METRIC_NAME_CONC);
@@ -77,26 +80,46 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 
 	@Override
 	public final void markSucc(final long bytes, final long duration, final long latency) {
+		markSucc(bytes, duration, latency, 0L);
+	}
+
+	@Override
+	public final void markSucc(final long bytes, final long duration, final long latency, final long ttfb) {
 		throughputSuccess.update(1);
 		reqBytes.update(bytes);
-		updateTimings(latency, duration);
+		updateTimings(latency, duration, ttfb);
 		if (thresholdMetricsCtx != null) {
-			thresholdMetricsCtx.markSucc(bytes, duration, latency);
+			thresholdMetricsCtx.markSucc(bytes, duration, latency, ttfb);
 		}
 	}
 
 	@Override
 	public final void markPartSucc(final long bytes, final long duration, final long latency) {
+		markPartSucc(bytes, duration, latency, 0L);
+	}
+
+	@Override
+	public final void markPartSucc(final long bytes, final long duration, final long latency, final long ttfb) {
 		reqBytes.update(bytes);
-		updateTimings(latency, duration);
+		updateTimings(latency, duration, ttfb);
 		if (thresholdMetricsCtx != null) {
-			thresholdMetricsCtx.markPartSucc(bytes, duration, latency);
+			thresholdMetricsCtx.markPartSucc(bytes, duration, latency, ttfb);
 		}
 	}
 
 	@Override
 	public final void markSucc(
 					final long count, final long bytes, final long durationValues[], final long latencyValues[]) {
+		markSucc(count, bytes, durationValues, latencyValues, new long[0]);
+	}
+
+	@Override
+	public final void markSucc(
+					final long count,
+					final long bytes,
+					final long durationValues[],
+					final long latencyValues[],
+					final long ttfbValues[]) {
 		throughputSuccess.update(count);
 		reqBytes.update(bytes);
 		final var timingsLen = Math.min(durationValues.length, latencyValues.length);
@@ -104,34 +127,46 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		for (var i = 0; i < timingsLen; ++i) {
 			duration = durationValues[i];
 			latency = latencyValues[i];
-			updateTimings(latency, duration);
+			updateTimings(latency, duration, i < ttfbValues.length ? ttfbValues[i] : 0L);
 		}
 		if (thresholdMetricsCtx != null) {
-			thresholdMetricsCtx.markSucc(count, bytes, durationValues, latencyValues);
+			thresholdMetricsCtx.markSucc(count, bytes, durationValues, latencyValues, ttfbValues);
 		}
 	}
 
 	@Override
 	public final void markPartSucc(
 					final long bytes, final long durationValues[], final long latencyValues[]) {
+		markPartSucc(bytes, durationValues, latencyValues, new long[0]);
+	}
+
+	@Override
+	public final void markPartSucc(
+					final long bytes,
+					final long durationValues[],
+					final long latencyValues[],
+					final long ttfbValues[]) {
 		reqBytes.update(bytes);
 		final var timingsLen = Math.min(durationValues.length, latencyValues.length);
 		long duration, latency;
 		for (var i = 0; i < timingsLen; ++i) {
 			duration = durationValues[i];
 			latency = latencyValues[i];
-			updateTimings(latency, duration);
+			updateTimings(latency, duration, i < ttfbValues.length ? ttfbValues[i] : 0L);
 		}
 		if (thresholdMetricsCtx != null) {
-			thresholdMetricsCtx.markPartSucc(bytes, durationValues, latencyValues);
+			thresholdMetricsCtx.markPartSucc(bytes, durationValues, latencyValues, ttfbValues);
 		}
 	}
 
-	private void updateTimings(final long latencyMicros, final long durationMicros) {
+	private void updateTimings(final long latencyMicros, final long durationMicros, final long ttfbMicros) {
 		if (durationMicros > 0) {
 			reqDuration.update(durationMicros);
 			if (latencyMicros > 0) {
 				respLatency.update(latencyMicros);
+			}
+			if (ttfbMicros > 0 && ttfbMicros <= durationMicros) {
+				timeToFirstByte.update(ttfbMicros);
 			}
 		}
 	}
@@ -180,6 +215,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		lastSnapshot = (S) new AllMetricsSnapshotImpl(
 						reqDurSnapshot,
 						respLatSnapshot,
+						ttfbSnapshot,
 						actualConcurrencySnapshot,
 						throughputFail.snapshot(),
 						throughputSuccess.snapshot(),
@@ -191,6 +227,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	private void updateTimingSnapshots() {
 		reqDurSnapshot = reqDuration.snapshot();
 		respLatSnapshot = respLatency.snapshot();
+		ttfbSnapshot = timeToFirstByte.snapshot();
 	}
 
 	@Override

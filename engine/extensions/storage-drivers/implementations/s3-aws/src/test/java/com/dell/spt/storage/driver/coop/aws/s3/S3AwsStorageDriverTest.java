@@ -37,7 +37,9 @@ import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
+import software.amazon.awssdk.core.ResponseInputStream;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.Instant;
@@ -1253,8 +1255,30 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class ReadObjectDataOperationTest {
-		// toBlockingInputStream tests removed - returns specific type that's hard to mock
-		// Core functionality tested through integration tests
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void readObjectStartsDataResponseOnFirstBodyBytes() {
+			final DataOperation op = mock(DataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(op.type()).thenReturn(OpType.READ);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(op.item()).thenReturn(item);
+			when(item.name()).thenReturn("key");
+			final var response = new ResponseInputStream<>(
+							GetObjectResponse.builder().build(),
+							new ByteArrayInputStream(new byte[]{1, 2, 3, 4
+							}));
+			when(mockS3Client.getObject(any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(response));
+
+			drv.execute(op).join();
+
+			verify(op).startResponse();
+			verify(op).startDataResponse();
+			verify(op).countBytesDone(4L);
+			verify(op).finishResponse();
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -1738,6 +1762,37 @@ public class S3AwsStorageDriverTest {
 
 	@Nested
 	class RangeReadTest {
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void readRangeStartsDataResponseOnFirstBodyBytes() throws Exception {
+			final PartialDataOperation partialOp = mock(PartialDataOperation.class);
+			final CompositeDataOperation parentOp = mock(CompositeDataOperation.class);
+			final DataItem parentItem = mock(DataItem.class);
+			final DataItem partItem = mock(DataItem.class);
+			when(partialOp.type()).thenReturn(OpType.READ);
+			when(partialOp.parent()).thenReturn(parentOp);
+			when(partialOp.item()).thenReturn(partItem);
+			when(parentOp.dstPath()).thenReturn("/test-bucket");
+			when(parentOp.item()).thenReturn(parentItem);
+			when(parentItem.name()).thenReturn("test-key");
+			when(partItem.offset()).thenReturn(2048L);
+			when(partItem.size()).thenReturn(1024L);
+			final var response = new ResponseInputStream<>(
+							GetObjectResponse.builder().build(),
+							new ByteArrayInputStream(new byte[]{1, 2, 3, 4
+							}));
+			when(mockS3Client.getObject(any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(response));
+
+			drv.execute((Operation) partialOp).join();
+
+			verify(partialOp).startResponse();
+			verify(partialOp).startDataResponse();
+			verify(partialOp).countBytesDone(4L);
+			verify(partialOp).finishResponse();
+		}
 
 		@SuppressWarnings("unchecked")
 		@Disabled("Mocking complexity - requires ResponseInputStream and AsyncResponseTransformer mocking")

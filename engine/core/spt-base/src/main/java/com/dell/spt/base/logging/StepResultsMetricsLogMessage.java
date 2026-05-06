@@ -21,6 +21,7 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 	private final DistributedAllMetricsSnapshot snapshot;
 	private final Map<Double, Long> latencies;
 	private final Map<Double, Long> durations;
+	private final Map<Double, Long> ttfbs;
 	// assuming 0.999999 is the most detailed quantile user would want to use
 	private final int LENGTH_OF_LONGEST_QUANTILE = 8;
 
@@ -31,12 +32,24 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 					final DistributedAllMetricsSnapshot snapshot,
 					final Map<Double, Long> latencyQuantiles,
 					final Map<Double, Long> durationQuantiles) {
+		this(opType, stepId, concurrencyLimit, snapshot, latencyQuantiles, durationQuantiles, Map.of());
+	}
+
+	public StepResultsMetricsLogMessage(
+					final OpType opType,
+					final String stepId,
+					final int concurrencyLimit,
+					final DistributedAllMetricsSnapshot snapshot,
+					final Map<Double, Long> latencyQuantiles,
+					final Map<Double, Long> durationQuantiles,
+					final Map<Double, Long> ttfbQuantiles) {
 		this.opType = opType;
 		this.stepId = stepId;
 		this.snapshot = snapshot;
 		this.concurrencyLimit = concurrencyLimit;
 		this.latencies = latencyQuantiles;
 		this.durations = durationQuantiles;
+		this.ttfbs = ttfbQuantiles;
 
 	}
 
@@ -122,7 +135,7 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 			if (quantileLengthDifference > 0) {
 				buff.append(" ".repeat(quantileLengthDifference));
 			}
-			buff.append(durations.get(quantile))
+			appendQuantileValue(buff, durations.get(quantile))
 							.append(lineSep);
 		}
 
@@ -146,14 +159,47 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 			if (quantileLengthDifference > 0) {
 				buff.append(" ".repeat(quantileLengthDifference));
 			}
-			buff.append(latencies.get(quantile))
+			appendQuantileValue(buff, latencies.get(quantile))
 							.append(lineSep);
 		}
 
 		buff.append("    Max:                       ")
 						.append(snapshot.latencySnapshot().max())
 						.append(lineSep)
+						.append("  Time To First Byte [us]:     ")
+						.append(lineSep);
+
+		if (snapshot.ttfbSnapshot() == null || snapshot.ttfbSnapshot().count() == 0) {
+			buff.append("    N/A").append(lineSep);
+		} else {
+			buff.append("    Avg:                       ")
+							.append(snapshot.ttfbSnapshot().mean())
+							.append(lineSep)
+							.append("    Min:                       ")
+							.append(snapshot.ttfbSnapshot().min())
+							.append(lineSep);
+			for (Double quantile : ttfbs.keySet()) {
+				buff.append("    Quantile ")
+								.append(quantile)
+								.append(":         ");
+				final int quantileLengthDifference = LENGTH_OF_LONGEST_QUANTILE - String.valueOf(quantile).length();
+				if (quantileLengthDifference > 0) {
+					buff.append(" ".repeat(quantileLengthDifference));
+				}
+				appendQuantileValue(buff, ttfbs.get(quantile))
+								.append(lineSep);
+			}
+			buff.append("    Max:                       ")
+							.append(snapshot.ttfbSnapshot().max())
+							.append(lineSep);
+		}
+
+		buff
 						.append("...")
 						.append(lineSep);
+	}
+
+	private static StringBuilder appendQuantileValue(final StringBuilder buff, final Long value) {
+		return value == null ? buff.append("N/A") : buff.append(value);
 	}
 }

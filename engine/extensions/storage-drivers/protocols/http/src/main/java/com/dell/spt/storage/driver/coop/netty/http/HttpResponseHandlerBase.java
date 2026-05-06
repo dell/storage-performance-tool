@@ -103,15 +103,15 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 			if (op instanceof DataOperation) {
 				final DataOperation dataOp = (DataOperation) op;
 				final long countBytesDone = dataOp.countBytesDone();
-				if (dataOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					try {
-						dataOp.startDataResponse();
-					} catch (final IllegalStateException e) {
-						LogUtil.exception(Level.DEBUG, e, "{}", dataOp.toString());
-					}
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (dataOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						try {
+							dataOp.startDataResponse();
+						} catch (final IllegalStateException e) {
+							LogUtil.exception(Level.DEBUG, e, "{}", dataOp.toString());
+						}
+					}
 					if (verifyFlag) {
 						if (!RESP_FAIL_CORRUPT.equals(op.status())) {
 							verifyChunk(dataOp, countBytesDone, contentChunk, chunkSize);
@@ -123,21 +123,21 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 			} else if (op instanceof PathOperation) {
 				final PathOperation pathOp = (PathOperation) op;
 				final long countBytesDone = pathOp.countBytesDone();
-				if (pathOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					pathOp.startDataResponse();
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (pathOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						pathOp.startDataResponse();
+					}
 					pathOp.countBytesDone(countBytesDone + chunkSize);
 				}
 			} else if (op instanceof TokenOperation) {
 				final TokenOperation tokenOp = (TokenOperation) op;
 				final long countBytesDone = tokenOp.countBytesDone();
-				if (tokenOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					tokenOp.startDataResponse();
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (tokenOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						tokenOp.startDataResponse();
+					}
 					tokenOp.countBytesDone(countBytesDone + chunkSize);
 				}
 			} else {

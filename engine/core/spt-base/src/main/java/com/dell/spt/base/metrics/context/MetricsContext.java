@@ -29,12 +29,29 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 
 	void markSucc(final long bytes, final long duration, final long latency);
 
+	void markSucc(final long bytes, final long duration, final long latency, final long ttfb);
+
 	void markPartSucc(final long bytes, final long duration, final long latency);
+
+	void markPartSucc(final long bytes, final long duration, final long latency, final long ttfb);
 
 	void markSucc(
 					final long count, final long bytes, final long durationValues[], final long latencyValues[]);
 
+	void markSucc(
+					final long count,
+					final long bytes,
+					final long durationValues[],
+					final long latencyValues[],
+					final long ttfbValues[]);
+
 	void markPartSucc(final long bytes, final long durationValues[], final long latencyValues[]);
+
+	void markPartSucc(
+					final long bytes,
+					final long durationValues[],
+					final long latencyValues[],
+					final long ttfbValues[]);
 
 	void markFail();
 

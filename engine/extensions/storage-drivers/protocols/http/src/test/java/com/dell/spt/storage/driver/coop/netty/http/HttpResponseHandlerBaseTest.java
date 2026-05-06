@@ -7,10 +7,13 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpStatusClass;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -86,5 +89,23 @@ class HttpResponseHandlerBaseTest {
 
 		assertEquals(expectedReturn, result);
 		verify(op).status(expectedOpStatus);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void startsDataResponseOnlyForFirstNonEmptyReadChunk() throws Exception {
+		final DataOperation<DataItemImpl> op = mock(DataOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+
+		handler.handleResponseContentChunk(mock(Channel.class), op, Unpooled.EMPTY_BUFFER);
+		verify(op, never()).startDataResponse();
+		verify(op, never()).countBytesDone(anyLong());
+
+		handler.handleResponseContentChunk(mock(Channel.class), op, Unpooled.wrappedBuffer(new byte[]{1, 2, 3
+		}));
+
+		verify(op).startDataResponse();
+		verify(op).countBytesDone(3L);
 	}
 }

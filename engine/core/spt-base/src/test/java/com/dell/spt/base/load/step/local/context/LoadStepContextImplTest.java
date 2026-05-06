@@ -258,6 +258,28 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	void readTtfbEqualToDurationIsRecorded() throws Exception {
+		testConfig.val("load-op-recycle-mode", false);
+		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(buildMetricsCtx("read-ttfb-equal"));
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"step-read-ttfb-equal", generator, mockDriver, trackingCtx, testConfig.configVal("load"), false);
+		final DataItem item = new DataItemImpl("fast-read", 0, 1);
+		@SuppressWarnings("unchecked")
+		final DataOperation<DataItem> op = mock(DataOperation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.type()).thenReturn(OpType.READ);
+		when(op.item()).thenReturn(item);
+		when(op.duration()).thenReturn(100L);
+		when(op.latency()).thenReturn(25L);
+		when(op.dataLatency()).thenReturn(100L);
+		when(op.countBytesDone()).thenReturn(1L);
+
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+
+		assertEquals(100L, trackingCtx.singleTtfb.get());
+	}
+
+	@Test
 	public void listWorkloadCompletesOnceNamespaceExhausted() {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");
@@ -419,6 +441,7 @@ public class LoadStepContextImplTest {
 		private final MetricsContext<AllMetricsSnapshot> delegate;
 		final AtomicLong successCount = new AtomicLong();
 		final AtomicLong byteCount = new AtomicLong();
+		final AtomicLong singleTtfb = new AtomicLong();
 
 		TrackingMetricsContext(final MetricsContext<AllMetricsSnapshot> delegate) {
 			this.delegate = delegate;
@@ -460,8 +483,19 @@ public class LoadStepContextImplTest {
 		}
 
 		@Override
+		public void markSucc(final long bytes, final long duration, final long latency, final long ttfb) {
+			singleTtfb.set(ttfb);
+			delegate.markSucc(bytes, duration, latency, ttfb);
+		}
+
+		@Override
 		public void markPartSucc(final long bytes, final long duration, final long latency) {
 			delegate.markPartSucc(bytes, duration, latency);
+		}
+
+		@Override
+		public void markPartSucc(final long bytes, final long duration, final long latency, final long ttfb) {
+			delegate.markPartSucc(bytes, duration, latency, ttfb);
 		}
 
 		@Override
@@ -472,8 +506,29 @@ public class LoadStepContextImplTest {
 		}
 
 		@Override
+		public void markSucc(
+						final long count,
+						final long bytes,
+						final long[] durationValues,
+						final long[] latencyValues,
+						final long[] ttfbValues) {
+			successCount.addAndGet(count);
+			byteCount.addAndGet(bytes);
+			delegate.markSucc(count, bytes, durationValues, latencyValues, ttfbValues);
+		}
+
+		@Override
 		public void markPartSucc(final long bytes, final long[] durationValues, final long[] latencyValues) {
 			delegate.markPartSucc(bytes, durationValues, latencyValues);
+		}
+
+		@Override
+		public void markPartSucc(
+						final long bytes,
+						final long[] durationValues,
+						final long[] latencyValues,
+						final long[] ttfbValues) {
+			delegate.markPartSucc(bytes, durationValues, latencyValues, ttfbValues);
 		}
 
 		@Override

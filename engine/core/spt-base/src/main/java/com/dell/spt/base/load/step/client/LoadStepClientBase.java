@@ -232,9 +232,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.debug("{}: item output file aggregator initialized", loadStepId());
 		}
 
-		itemTimingMetricsOutputFileAggregators.add(
-						new ItemTimingMetricOutputFileAggregator(loadStepId(), fileMgrs));
-		Loggers.MSG.debug("{}: item metrics output file aggregator initialized", loadStepId());
+		if (config.boolVal("output-metrics-timing-persist")) {
+			itemTimingMetricsOutputFileAggregators.add(
+							new ItemTimingMetricOutputFileAggregator(loadStepId(), fileMgrs));
+			Loggers.MSG.debug("{}: item metrics output file aggregator initialized", loadStepId());
+		}
 
 		if (config.boolVal("output-metrics-trace-persist")) {
 			opTraceLogFileAggregators.add(new OpTraceLogFileAggregator(loadStepId(), fileMgrs));

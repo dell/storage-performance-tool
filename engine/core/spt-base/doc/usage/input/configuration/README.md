@@ -69,8 +69,9 @@ reference.
 | output-metrics-average-aggregation-period      | Int > 0 | 100                    | The time period in ms for the load step's metrics to get aggregated to entry node. Happens not often than the specified value (meaning for 100ms it can happen 10 or less times).
 | output-metrics-average-persist                 | Flag | true                      | Persist the average (periodic) metrics if true
 | output-metrics-average-table-header-period     | Integer > 0 | 20                 | Output the metrics table header every N rows
-| output-metrics-quantiles                       | List |0.25,0.5,0.75              | Output quantiles for metrics (only for [Monitoring API](../../api/monitoring#monitoring-api))
+| output-metrics-quantiles                       | List |0.25,0.5,0.75              | Extra output quantiles for timing metrics. SPT always reports p50, p90, p99, and p99.9.
 | output-metrics-summary-persist                 | Flag | true                      | Persist the load step's summary (total) metrics if true
+| output-metrics-timing-persist                  | Flag | false                     | Persist raw per-operation timing files for diagnostics. Normal percentile reporting uses in-memory histograms and does not require this.
 | output-metrics-trace-persist                   | Flag | false                     | Persist the information about each load operation if true
 | output-metrics-threshold                       | 0 <= Float <= 1 | 0              | The concurrency threshold to enable intermediate statistics calculation, 0 means no threshold
 | run-comment                                    | String | ""                      | A user defined comment to run the scenario via the Control API

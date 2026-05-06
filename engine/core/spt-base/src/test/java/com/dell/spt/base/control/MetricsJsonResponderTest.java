@@ -3,19 +3,23 @@ package com.dell.spt.base.control;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.github.akurilov.confuse.Config;
@@ -43,7 +47,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildClusterMetrics(false);
 		assertEquals(1, payload.size());
 		final JsonNode obj = payload.get(0);
-		assertEquals(2, obj.get("metrics_schema").asInt());
+		assertEquals(3, obj.get("metrics_schema").asInt());
 		assertEquals("fleet", obj.get("scope").asText());
 		assertEquals("aggregate", obj.get("role").asText());
 		assertEquals("step-agg", obj.get("step_id").asText());
@@ -55,6 +59,29 @@ public class MetricsJsonResponderTest {
 		assertEquals(1, obj.get("nodes_present").size());
 		assertFalse(obj.get("partial").asBoolean());
 		assertEquals("123", obj.get("run_id").asText());
+	}
+
+	@Test
+	void timingBlockIncludesSchema3PercentilesAndNullableTtfb() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot();
+		when(snapshot.latencySnapshot()).thenReturn(TimingMetricSnapshotImpl.fromSamples("latency", List.of(10L, 20L, 30L)));
+		when(snapshot.durationSnapshot()).thenReturn(TimingMetricSnapshotImpl.fromSamples("duration", List.of(100L, 200L, 300L)));
+		when(snapshot.ttfbSnapshot()).thenReturn(TimingMetricSnapshotImpl.fromSamples("ttfb", List.of(15L, 25L)));
+		final DistributedMetricsContext ctx = mockDistributedContext("step-timing", OpType.READ, snapshot, Map.of());
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode timing = responder.buildClusterMetrics(false).get(0).get("timing");
+
+		assertEquals(3, timing.get("latency").get("count").asInt());
+		assertTrue(timing.get("latency").get("p50_us").asLong() > 0);
+		assertTrue(timing.get("duration").get("p99_us").asLong() > 0);
+		assertEquals(2, timing.get("ttfb").get("count").asInt());
+		assertTrue(timing.get("ttfb").get("p999_us").asLong() > 0);
 	}
 
 	@Test
@@ -141,8 +168,42 @@ public class MetricsJsonResponderTest {
 		assertEquals("777", first.get("run_id").asText());
 		assertTrue(first.get("terminal").asBoolean());
 		assertEquals("node", nodePayload.get(0).get("scope").asText());
-		assertEquals(2, nodePayload.get(0).get("metrics_schema").asInt());
+		assertEquals(3, nodePayload.get(0).get("metrics_schema").asInt());
 		assertEquals("entry", nodePayload.get(0).get("role").asText());
+	}
+
+	@Test
+	void terminalNodeMetricsPreserveSchema3TimingDistributions() {
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000L);
+		final MetricsContext<?> ctx = MetricsContextImpl.builder()
+						.loadStepId("terminal-timing")
+						.runId(444L)
+						.opType(OpType.READ)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(1024))
+						.stdOutColorFlag(false)
+						.outputPeriodSec(0)
+						.comment("")
+						.actualConcurrencyGauge(() -> 0)
+						.build();
+		ctx.start();
+		ctx.markSucc(1024L, 1_000L, 100L, 250L);
+		ctx.markSucc(1024L, 2_000L, 200L, 350L);
+		ctx.refreshLastSnapshot();
+
+		mgr.register(ctx);
+		mgr.unregister(ctx);
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode timing = responder.buildNodeMetrics(false).get(0).get("timing");
+		assertEquals(2, timing.get("latency").get("count").asInt());
+		assertTrue(timing.get("latency").get("p50_us").asLong() > 0);
+		assertEquals(2, timing.get("duration").get("count").asInt());
+		assertTrue(timing.get("duration").get("p99_us").asLong() > 0);
+		assertEquals(2, timing.get("ttfb").get("count").asInt());
+		assertTrue(timing.get("ttfb").get("p90_us").asLong() > 0);
 	}
 
 	@Test
@@ -183,6 +244,45 @@ public class MetricsJsonResponderTest {
 		assertTrue(agg.get("partial").asBoolean());
 		assertEquals("321", agg.get("run_id").asText());
 		assertEquals(110L, agg.get("operations").get("success_count").asLong() + agg.get("operations").get("failed_count").asLong());
+	}
+
+	@Test
+	void distributedTerminalMetricsPreserveSchema3TimingDistributions() {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		final TerminalStepEntry terminal = new TerminalStepEntry(
+						"step-dist-timing",
+						OpType.READ,
+						321L,
+						System.currentTimeMillis(),
+						100L,
+						0L,
+						4096L,
+						120.0,
+						180.0,
+						TimingMetricSnapshotImpl.fromSamples("latency", List.of(100L, 120L, 140L)),
+						TimingMetricSnapshotImpl.fromSamples("duration", List.of(150L, 180L, 210L)),
+						TimingMetricSnapshotImpl.fromSamples("ttfb", List.of(80L, 90L, 100L)),
+						0L,
+						0.0,
+						1000L,
+						0L,
+						9_000L,
+						true,
+						3,
+						List.of("node-a", "node-b", "node-c"),
+						false);
+		when(mgr.getTerminalSteps()).thenReturn(List.of(terminal));
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode timing = responder.buildClusterMetrics(false).get(0).get("timing");
+		assertEquals(3, timing.get("latency").get("count").asInt());
+		assertTrue(timing.get("latency").get("p99_us").asLong() > 0);
+		assertEquals(3, timing.get("duration").get("count").asInt());
+		assertTrue(timing.get("duration").get("p999_us").asLong() > 0);
+		assertEquals(3, timing.get("ttfb").get("count").asInt());
+		assertTrue(timing.get("ttfb").get("p50_us").asLong() > 0);
 	}
 
 	@Test
@@ -397,7 +497,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildNodeMetrics(false);
 		assertEquals(1, payload.size(), "Expected a single idle element");
 		final JsonNode obj = payload.get(0);
-		assertEquals(2, obj.get("metrics_schema").asInt());
+		assertEquals(3, obj.get("metrics_schema").asInt());
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("worker", obj.get("role").asText());
 		assertEquals("idle-node", obj.get("node_id").asText());

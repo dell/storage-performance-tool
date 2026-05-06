@@ -9,6 +9,7 @@ import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -24,7 +25,7 @@ import com.dell.spt.base.logging.Loggers;
 
 final class MetricsJsonResponder {
 
-	private static final int METRICS_SCHEMA_VERSION = 2;
+	private static final int METRICS_SCHEMA_VERSION = 3;
 
 	private final MetricsManager metricsManager;
 	private final ObjectMapper objectMapper = new ObjectMapper();
@@ -290,12 +291,51 @@ final class MetricsJsonResponder {
 		final ObjectNode timing = objectMapper.createObjectNode();
 		timing.put("latency_mean_us", latencyMean);
 		timing.put("duration_mean_us", durationMean);
+		timing.set("latency", timingObject(snapshot.latencySnapshot(), latencyMean));
+		timing.set("duration", timingObject(snapshot.durationSnapshot(), durationMean));
+		final TimingMetricSnapshot ttfbSnapshot = snapshot.ttfbSnapshot();
+		if (ttfbSnapshot != null && ttfbSnapshot.count() > 0) {
+			timing.set("ttfb", timingObject(ttfbSnapshot, ttfbSnapshot.mean()));
+		} else {
+			timing.putNull("ttfb");
+		}
 		jsonObj.set("timing", timing);
 
 		final ObjectNode concurrency = objectMapper.createObjectNode();
 		concurrency.put("current", snapshot.concurrencySnapshot().last());
 		concurrency.put("mean", snapshot.concurrencySnapshot().mean());
 		jsonObj.set("concurrency", concurrency);
+	}
+
+	private ObjectNode timingObject(final TimingMetricSnapshot snapshot, final double mean) {
+		if (snapshot == null || snapshot.count() == 0) {
+			return emptyTimingObject(mean);
+		}
+		final ObjectNode node = objectMapper.createObjectNode();
+		node.put("count", snapshot.count());
+		node.put("mean_us", mean);
+		node.put("min_us", snapshot.min());
+		node.put("p50_us", snapshot.percentile(0.5));
+		node.put("p90_us", snapshot.percentile(0.9));
+		node.put("p99_us", snapshot.percentile(0.99));
+		node.put("p999_us", snapshot.percentile(0.999));
+		node.put("max_us", snapshot.max());
+		node.put("overflow_count", snapshot.overflowCount());
+		return node;
+	}
+
+	private ObjectNode emptyTimingObject(final double mean) {
+		final ObjectNode node = objectMapper.createObjectNode();
+		node.put("count", 0L);
+		node.put("mean_us", mean);
+		node.put("min_us", 0L);
+		node.put("p50_us", 0L);
+		node.put("p90_us", 0L);
+		node.put("p99_us", 0L);
+		node.put("p999_us", 0L);
+		node.put("max_us", 0L);
+		node.put("overflow_count", 0L);
+		return node;
 	}
 
 	private void addListShardMetrics(final ObjectNode jsonObj, final java.util.Map metadata) {
@@ -387,6 +427,9 @@ final class MetricsJsonResponder {
 		final ObjectNode timing = objectMapper.createObjectNode();
 		timing.put("latency_mean_us", 0.0);
 		timing.put("duration_mean_us", 0.0);
+		timing.set("latency", emptyTimingObject(0.0));
+		timing.set("duration", emptyTimingObject(0.0));
+		timing.putNull("ttfb");
 		jsonObj.set("timing", timing);
 
 		final ObjectNode concurrency = objectMapper.createObjectNode();
@@ -464,6 +507,13 @@ final class MetricsJsonResponder {
 			final ObjectNode timing = objectMapper.createObjectNode();
 			timing.put("latency_mean_us", entry.latencyMeanUs);
 			timing.put("duration_mean_us", entry.durationMeanUs);
+			timing.set("latency", timingObject(entry.latencySnapshot, entry.latencyMeanUs));
+			timing.set("duration", timingObject(entry.durationSnapshot, entry.durationMeanUs));
+			if (entry.ttfbSnapshot != null && entry.ttfbSnapshot.count() > 0) {
+				timing.set("ttfb", timingObject(entry.ttfbSnapshot, entry.ttfbSnapshot.mean()));
+			} else {
+				timing.putNull("ttfb");
+			}
 			jsonObj.set("timing", timing);
 
 			final ObjectNode concurrency = objectMapper.createObjectNode();
@@ -541,6 +591,13 @@ final class MetricsJsonResponder {
 			final ObjectNode timing = objectMapper.createObjectNode();
 			timing.put("latency_mean_us", entry.latencyMeanUs);
 			timing.put("duration_mean_us", entry.durationMeanUs);
+			timing.set("latency", timingObject(entry.latencySnapshot, entry.latencyMeanUs));
+			timing.set("duration", timingObject(entry.durationSnapshot, entry.durationMeanUs));
+			if (entry.ttfbSnapshot != null && entry.ttfbSnapshot.count() > 0) {
+				timing.set("ttfb", timingObject(entry.ttfbSnapshot, entry.ttfbSnapshot.mean()));
+			} else {
+				timing.putNull("ttfb");
+			}
 			jsonObj.set("timing", timing);
 
 			final ObjectNode concurrency = objectMapper.createObjectNode();

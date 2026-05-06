@@ -62,6 +62,7 @@ dependencies {
 	implementation(libs.fastutil) {
 		transitive = false
 	}
+	implementation libs.hdr.histogram
 	annotationProcessor libs.log4j.core
 	implementation(
 		libs.commons.codec,

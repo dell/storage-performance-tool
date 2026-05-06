@@ -120,7 +120,7 @@ public class WorkerJsonMetricsIntegrationTest {
 		final JsonNode arr = objectMapper.readTree(json);
 		assertTrue(arr.size() > 0, "/metrics/json should return at least one entry on worker");
 		final JsonNode first = arr.get(0);
-		assertEquals(2, first.get("metrics_schema").asInt());
+		assertEquals(3, first.get("metrics_schema").asInt());
 		assertEquals("node", first.get("scope").asText());
 		assertEquals("worker", first.get("role").asText());
 		assertEquals("worker-node", first.get("node_id").asText());

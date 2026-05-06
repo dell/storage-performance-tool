@@ -386,6 +386,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (Status.SUCC.equals(status)) {
 			final long reqDuration = opResult.duration();
 			final long respLatency = opResult.latency();
+			final long timeToFirstByte = timeToFirstByte(opResult);
 			final long countBytesDone;
 			if (opResult instanceof DataOperation) {
 				countBytesDone = ((DataOperation) opResult).countBytesDone();
@@ -403,7 +404,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				recycleEligible = recycleFlag;
 			}
 			if (opResult instanceof PartialOperation) {
-				resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency);
+				resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
 			} else {
 				if (!recycleEligible) {
 					// recycled ops should only appear in output.csv only once unless
@@ -437,9 +438,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// just like regular op
 				outputTimingMetrics(opResult);
 				if (opResult instanceof ListOperation) {
-					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency);
+					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency, timeToFirstByte);
 				} else {
-					resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency);
+					resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				}
 				counterResults.increment();
 			}
@@ -492,6 +493,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		Status status;
 		long reqDuration;
 		long respLatency;
+		long timeToFirstByte;
 		long countBytesDone = 0;
 		ListOperation<?> listOpResult = null;
 		int i;
@@ -505,6 +507,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			status = opResult.status();
 			reqDuration = opResult.duration();
 			respLatency = opResult.latency();
+			timeToFirstByte = timeToFirstByte(opResult);
 			if (opResult instanceof DataOperation) {
 				countBytesDone = ((DataOperation) opResult).countBytesDone();
 				listOpResult = null;
@@ -523,7 +526,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			}
 			if (Status.SUCC.equals(status)) {
 				if (opResult instanceof PartialOperation) {
-					resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency);
+					resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				} else {
 					if (!recycleEligible) {
 						// recycled ops should only appear in output.csv only once unless
@@ -560,9 +563,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					// just like regular op
 					outputTimingMetrics(opResult);
 					if (listOpResult != null) {
-						markListSuccess(listOpResult, reqDuration, respLatency);
+						markListSuccess(listOpResult, reqDuration, respLatency, timeToFirstByte);
 					} else {
-						resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency);
+						resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
 					}
 					counterResults.increment();
 				}
@@ -779,7 +782,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	private void markListSuccess(
-					final ListOperation<?> listOp, final long reqDuration, final long respLatency) {
+					final ListOperation<?> listOp,
+					final long reqDuration,
+					final long respLatency,
+					final long timeToFirstByte) {
 		final int objectsListed = listOp.objectsListed();
 		final ListShard shard = listOp.shard();
 		if (shard != null) {
@@ -833,7 +839,24 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						new long[]{reqDuration
 						},
 						new long[]{respLatency
+						},
+						new long[]{timeToFirstByte
 						});
+	}
+
+	private long timeToFirstByte(final O opResult) {
+		if (opResult.type() == OpType.READ && opResult instanceof DataOperation<?> dataOperation) {
+			final long dataLatency = dataOperation.dataLatency();
+			return dataLatency > 0 && dataLatency <= opResult.duration() ? dataLatency : 0L;
+		}
+		if (opResult.type() == OpType.LIST && opResult instanceof PathOperation<?> pathOperation) {
+			final long reqDone = opResult.reqTimeDone();
+			final long dataStart = pathOperation.respDataTimeStart();
+			if (reqDone > 0 && dataStart > reqDone && dataStart - reqDone <= opResult.duration()) {
+				return dataStart - reqDone;
+			}
+		}
+		return 0L;
 	}
 
 	// Returns true if a split has been performed and parent should not be recycled

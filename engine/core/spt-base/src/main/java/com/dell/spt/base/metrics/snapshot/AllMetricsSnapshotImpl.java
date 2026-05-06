@@ -4,6 +4,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 
 	private final TimingMetricSnapshot durSnapshot;
 	private final TimingMetricSnapshot latSnapshot;
+	private final TimingMetricSnapshot ttfbSnapshot;
 	private final ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 	private final RateMetricSnapshot failsSnapshot;
 	private final RateMetricSnapshot successSnapshot;
@@ -18,8 +19,29 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final RateMetricSnapshot successSnapshot,
 					final RateMetricSnapshot bytesSnapshot,
 					final long elapsedTimeMillis) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, "ttfb"),
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis);
+	}
+
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis) {
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
+		this.ttfbSnapshot = ttfbSnapshot;
 		this.actualConcurrencySnapshot = actualConcurrencySnapshot;
 		this.failsSnapshot = failsSnapshot;
 		this.successSnapshot = successSnapshot;
@@ -35,6 +57,11 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	@Override
 	public TimingMetricSnapshot latencySnapshot() {
 		return latSnapshot;
+	}
+
+	@Override
+	public TimingMetricSnapshot ttfbSnapshot() {
+		return ttfbSnapshot;
 	}
 
 	@Override
