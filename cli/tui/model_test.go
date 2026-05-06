@@ -66,6 +66,64 @@ func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	}
 }
 
+func TestSanitizeTUITraceLine_StripsANSIAndControls(t *testing.T) {
+	got := sanitizeTUITraceLine("\x1b[33mhello\x1b[0m \x02x\tok\r\n")
+	if strings.Contains(got, "\x1b[") {
+		t.Fatalf("sanitizeTUITraceLine should strip ANSI escapes, got %q", got)
+	}
+	if strings.Contains(got, "\x02") {
+		t.Fatalf("sanitizeTUITraceLine should strip control chars, got %q", got)
+	}
+	if got != "hello x\tok" {
+		t.Fatalf("unexpected sanitized value: %q", got)
+	}
+}
+
+func TestModelUpdate_WritesTraceForMessageTypes(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "events.trace.log")
+	f, err := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) // #nosec G304 -- test temp file
+	if err != nil {
+		t.Fatalf("open trace file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	m := InitialModel()
+	m.traceSink = newTUITraceSink(f)
+
+	var updated tea.Model
+	updated, _ = m.Update(containerOutputMsg("plain output"))
+	m = updated.(Model)
+	updated, _ = m.Update(containerStderrMsg("oops"))
+	m = updated.(Model)
+	updated, _ = m.Update(sptMessageMsg("starting"))
+	m = updated.(Model)
+	updated, _ = m.Update(containerStatusMsg("API Running"))
+	m = updated.(Model)
+	_ = f.Sync()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	lines := string(content)
+	if !strings.Contains(lines, "plain output\n") {
+		t.Fatalf("missing container output trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[stderr] oops\n") {
+		t.Fatalf("missing stderr trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[spt] starting\n") {
+		t.Fatalf("missing spt trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[status] API Running\n") {
+		t.Fatalf("missing status trace line: %q", lines)
+	}
+	if strings.Contains(lines, "┌") || strings.Contains(lines, "│") {
+		t.Fatalf("trace should not contain tui frame glyphs: %q", lines)
+	}
+}
+
 func TestInitialModel(t *testing.T) {
 	m := InitialModel()
 

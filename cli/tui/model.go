@@ -15,7 +15,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -36,6 +38,7 @@ const (
 
 // Compiled regex for stripping ANSI escape sequences
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var traceEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 // Model represents the TUI state
 type Model struct {
@@ -98,6 +101,47 @@ type Model struct {
 	frameDumpCount       *int
 	frameDumpMinInterval time.Duration
 	frameDumpLast        *time.Time
+	traceSink            *tuiTraceSink
+}
+
+type tuiTraceSink struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+func newTUITraceSink(file *os.File) *tuiTraceSink {
+	if file == nil {
+		return nil
+	}
+	return &tuiTraceSink{file: file}
+}
+
+func sanitizeTUITraceLine(line string) string {
+	if line == "" {
+		return ""
+	}
+	line = traceEscapeRegex.ReplaceAllString(line, "")
+	var b strings.Builder
+	b.Grow(len(line))
+	for _, r := range line {
+		if r == '\t' || !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (s *tuiTraceSink) writeLine(line string) {
+	if s == nil || s.file == nil {
+		return
+	}
+	clean := sanitizeTUITraceLine(line)
+	if clean == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = fmt.Fprintln(s.file, clean)
 }
 
 // Messages
@@ -139,6 +183,7 @@ func InitialModel() Model {
 		frameDumpStrip:       false,
 		frameDumpLiveOnly:    false,
 		frameDumpCount:       nil,
+		traceSink:            nil,
 	}
 
 	// Optional frame dump configuration via env vars
@@ -176,6 +221,30 @@ func InitialModel() Model {
 	}
 
 	return m
+}
+
+func (m *Model) traceContainerOutput(line string) {
+	if m.traceSink != nil {
+		m.traceSink.writeLine(line)
+	}
+}
+
+func (m *Model) traceStderr(msg string) {
+	if m.traceSink != nil {
+		m.traceSink.writeLine("[stderr] " + msg)
+	}
+}
+
+func (m *Model) traceSptMessage(msg string) {
+	if m.traceSink != nil {
+		m.traceSink.writeLine("[spt] " + msg)
+	}
+}
+
+func (m *Model) traceStatus(status string) {
+	if m.traceSink != nil {
+		m.traceSink.writeLine("[status] " + status)
+	}
 }
 
 // Init initializes the model
@@ -219,18 +288,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return mm, nil
 	case containerOutputMsg:
 		mm := m
+		mm.traceContainerOutput(string(mt))
 		mm.handleContainerOutput(string(mt))
 		return mm, nil
 	case containerStderrMsg:
 		mm := m
+		mm.traceStderr(string(mt))
 		mm.addStderrMessage(string(mt))
 		return mm, nil
 	case sptMessageMsg:
 		mm := m
+		mm.traceSptMessage(string(mt))
 		mm.addSptMessage(string(mt))
 		return mm, nil
 	case containerStatusMsg:
 		mm := m
+		mm.traceStatus(string(mt))
 		mm.containerStatus = string(mt)
 		return mm, nil
 	case autoTerminateMsg:
@@ -1053,11 +1126,6 @@ func StartTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestra
 		p.Send(sptMessageMsg(msg))
 	})
 
-	// Route orchestrator progress messages into the TUI messages pane
-	orchestrator.SetNotifier(func(msg string) {
-		p.Send(sptMessageMsg(msg))
-	})
-
 	// Provide a message sink for other orchestrator-driven components (e.g., entry log relay)
 	// Route Spt log lines without the [spt] tag to avoid double-tagging.
 	multiOrchestrator.SetMessageSink(func(msg string) {
@@ -1389,6 +1457,7 @@ func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.
 	if !traceAppend {
 		_, _ = fmt.Fprintf(traceFile, "# TUI trace file: %s\n# Generated: %s\n#\n", tracePath, time.Now().Format("2006-01-02 15:04:05"))
 	}
+	model.traceSink = newTUITraceSink(traceFile)
 	return tea.NewProgram(model, opts...), traceFile, nil
 }
 
