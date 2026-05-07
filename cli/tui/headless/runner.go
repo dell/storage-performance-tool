@@ -12,11 +12,11 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -37,21 +37,6 @@ type HeadlessRunner struct {
 	keepScenario  bool
 	scenarioPath  string
 	apiPort       string
-}
-
-func formatCommandLine(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	parts := make([]string, len(args))
-	for i, arg := range args {
-		if arg == "" || strings.ContainsAny(arg, " \t\n\"'\\") {
-			parts[i] = strconv.Quote(arg)
-			continue
-		}
-		parts[i] = arg
-	}
-	return strings.Join(parts, " ")
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -243,7 +228,7 @@ func (r *MultiHostHeadlessRunner) writeTraceHeader(filename string, hostCount in
 	header += fmt.Sprintf("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	header += fmt.Sprintf("Runtime: %s %s\n", runtime.GOOS, runtime.GOARCH)
 	header += fmt.Sprintf("Trace File: %s\n", filename)
-	header += fmt.Sprintf("Command: %s\n", formatCommandLine(os.Args))
+	header += fmt.Sprintf("Command: %s\n", cmdline.FormatForArtifact(os.Args))
 	header += strings.Repeat("=", 50) + "\n"
 
 	fmt.Print(header)
@@ -498,7 +483,7 @@ func (r *HeadlessRunner) writeTraceHeader(filename string) {
 		return
 	}
 
-	command := formatCommandLine(os.Args)
+	command := cmdline.FormatForArtifact(os.Args)
 	if command == "" {
 		command = "<unknown>"
 	}

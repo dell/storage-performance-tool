@@ -53,6 +53,10 @@ func TestNewMultiHostHeadlessRunner_Success(t *testing.T) {
 }
 
 func TestNewMultiHostHeadlessRunner_WithTraceFile(t *testing.T) {
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "mixed", "-s", "secret", "-a=ACCESS"}
+	defer func() { os.Args = oldArgs }()
+
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
 	}
@@ -102,6 +106,12 @@ func TestNewMultiHostHeadlessRunner_WithTraceFile(t *testing.T) {
 	}
 	if !strings.Contains(contentStr, "Command:") {
 		t.Errorf("Trace file should contain command line, got: %s", contentStr)
+	}
+	if strings.Contains(contentStr, "secret") || strings.Contains(contentStr, "ACCESS") {
+		t.Errorf("Trace file header leaked credentials, got: %s", contentStr)
+	}
+	if !strings.Contains(contentStr, "-s ***") || !strings.Contains(contentStr, "-a=***") {
+		t.Errorf("Trace file should mask command credentials in header, got: %s", contentStr)
 	}
 }
 

@@ -72,11 +72,33 @@ func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	}
 }
 
-func TestFormatCommandLine_QuotesWhitespaceAndSpecialChars(t *testing.T) {
-	got := formatCommandLine([]string{"spt", "run", "--name", "my run", "--note", `a"b`})
-	want := `spt run --name "my run" --note "a\"b"`
-	if got != want {
-		t.Fatalf("formatCommandLine mismatch\nwant: %s\ngot:  %s", want, got)
+func TestNewProgramWithTrace_HeaderMasksCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "tui.trace.log")
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "write", "--secret-key", "supersecret", "-a=AKIA"}
+	defer func() { os.Args = oldArgs }()
+
+	_, f, err := newProgramWithTrace(InitialModel(), tracePath, false)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace error: %v", err)
+	}
+	if f != nil {
+		_ = f.Close()
+	}
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	s := string(content)
+	if !strings.Contains(s, "# Command:") {
+		t.Fatalf("missing command header: %q", s)
+	}
+	if strings.Contains(s, "supersecret") || strings.Contains(s, "AKIA") {
+		t.Fatalf("trace header leaked credential: %q", s)
+	}
+	if !strings.Contains(s, "--secret-key ***") || !strings.Contains(s, "-a=***") {
+		t.Fatalf("trace header missing masked values: %q", s)
 	}
 }
 

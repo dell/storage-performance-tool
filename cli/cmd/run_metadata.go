@@ -6,9 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -208,90 +208,7 @@ func isSensitiveFlag(name string) bool {
 }
 
 func sanitizeCommandArgs(args []string) []string {
-	out := make([]string, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "--") {
-			flag, hasValue := splitLongArg(arg)
-			if isSensitiveLongFlag(flag) {
-				if hasValue {
-					out[i] = flag + "=" + maskedPlaceholder
-				} else {
-					out[i] = flag
-					if i+1 < len(args) {
-						out[i+1] = maskedPlaceholder
-						i++
-					}
-				}
-				continue
-			}
-			out[i] = arg
-			continue
-		}
-		if isSensitiveShortFlag(arg) {
-			out[i] = arg
-			if strings.Contains(arg, "=") {
-				out[i] = sensitiveShortPrefix(arg)
-			} else if i+1 < len(args) {
-				out[i+1] = maskedPlaceholder
-				i++
-			}
-			continue
-		}
-		out[i] = arg
-	}
-	return fillUnsetArgs(out, args)
-}
-
-func fillUnsetArgs(out, original []string) []string {
-	for i := range out {
-		if out[i] == "" {
-			out[i] = original[i]
-		}
-	}
-	return out
-}
-
-func splitLongArg(arg string) (flag string, hasValue bool) {
-	if !strings.HasPrefix(arg, "--") {
-		return "", false
-	}
-	if idx := strings.Index(arg, "="); idx != -1 {
-		return arg[:idx], true
-	}
-	return arg, false
-}
-
-func isSensitiveLongFlag(flag string) bool {
-	switch flag {
-	case "--secret-key", "--access-key":
-		return true
-	default:
-		return false
-	}
-}
-
-func isSensitiveShortFlag(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
-		return false
-	}
-	base := arg
-	if strings.Contains(arg, "=") {
-		base = arg[:strings.Index(arg, "=")]
-	}
-	switch base {
-	case "-s", "-a":
-		return true
-	default:
-		return false
-	}
-}
-
-func sensitiveShortPrefix(arg string) string {
-	if idx := strings.Index(arg, "="); idx != -1 {
-		return arg[:idx+1] + maskedPlaceholder
-	}
-	return arg
+	return cmdline.SanitizeArgs(args)
 }
 
 func copyScenarioForResults(srcPath, destDir string) (string, error) {

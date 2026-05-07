@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -52,6 +53,35 @@ func TestSanitizeCommandArgsMasksSensitiveFlags(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("sanitized args[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestBuildRunMetadata_CommandIsSanitized(t *testing.T) {
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "write", "--secret-key", "verysecret", "--access-key=OPENKEY"}
+	defer func() { os.Args = oldArgs }()
+
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: "write",
+		Params:       scenario.Params{},
+		ScenarioPath: "./tmp/scenario.js",
+		ResultsOptions: ResultsOptions{
+			AutoResults: false,
+			ResultsDir:  "./results",
+			Label:       "mt",
+		},
+		SptImage: "repo/spt:latest",
+	})
+
+	if len(meta.CLI.Command) == 0 {
+		t.Fatalf("CLI command should not be empty")
+	}
+	joined := strings.Join(meta.CLI.Command, " ")
+	if strings.Contains(joined, "verysecret") || strings.Contains(joined, "OPENKEY") {
+		t.Fatalf("metadata command leaked credentials: %q", joined)
+	}
+	if !strings.Contains(joined, "--secret-key ***") || !strings.Contains(joined, "--access-key=***") {
+		t.Fatalf("metadata command missing masked values: %q", joined)
 	}
 }
 

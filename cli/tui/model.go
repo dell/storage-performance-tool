@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/mathutil"
@@ -1455,7 +1456,7 @@ func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.
 		return nil, nil, fmt.Errorf("failed to open trace file: %w", err)
 	}
 	if !traceAppend {
-		command := formatCommandLine(os.Args)
+		command := cmdline.FormatForArtifact(os.Args)
 		if command == "" {
 			command = "<unknown>"
 		}
@@ -1469,21 +1470,6 @@ func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.
 	}
 	model.traceSink = newTUITraceSink(traceFile)
 	return tea.NewProgram(model, opts...), traceFile, nil
-}
-
-func formatCommandLine(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	parts := make([]string, len(args))
-	for i, arg := range args {
-		if arg == "" || strings.ContainsAny(arg, " \t\n\"'\\") {
-			parts[i] = strconv.Quote(arg)
-			continue
-		}
-		parts[i] = arg
-	}
-	return strings.Join(parts, " ")
 }
 
 // StartTUIWithContainer starts the TUI and immediately launches a container
