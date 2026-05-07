@@ -143,6 +143,10 @@ func TestHeadlessRunner_DryRun(t *testing.T) {
 }
 
 func TestHeadlessRunner_TraceFile(t *testing.T) {
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "write", "--secret-key", "verysecret", "--access-key=OPENKEY"}
+	defer func() { os.Args = oldArgs }()
+
 	tempDir := t.TempDir()
 	traceFile := filepath.Join(tempDir, "trace.log")
 
@@ -195,6 +199,15 @@ func TestHeadlessRunner_TraceFile(t *testing.T) {
 	// Check for header
 	if !strings.Contains(traceContent, "# Trace file:") {
 		t.Errorf("Trace file missing header")
+	}
+	if !strings.Contains(traceContent, "# Command:") {
+		t.Errorf("Trace file missing command header")
+	}
+	if strings.Contains(traceContent, "verysecret") || strings.Contains(traceContent, "OPENKEY") {
+		t.Errorf("Trace file leaked credential in header")
+	}
+	if !strings.Contains(traceContent, "--secret-key ***") || !strings.Contains(traceContent, "--access-key=***") {
+		t.Errorf("Trace file should mask command credentials in header")
 	}
 
 	// Check for some expected log entries

@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
@@ -48,12 +51,18 @@ type fakeFetcher struct {
 	output   string
 	manifest *results.Manifest
 	err      error
+	onFetch  func(output string, stepIDs []string) error
 }
 
 func (f *fakeFetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stepIDs = append([]string(nil), stepIDs...)
+	if f.onFetch != nil {
+		if err := f.onFetch(f.output, stepIDs); err != nil {
+			return nil, err
+		}
+	}
 	if f.manifest != nil || f.err != nil {
 		return f.manifest, f.err
 	}
@@ -129,7 +138,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
 
 	select {
 	case <-done:
@@ -211,7 +220,7 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+	done := startAutoResults("http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
 
 	select {
 	case <-done:
@@ -298,7 +307,7 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
 
 	select {
 	case <-done:
@@ -366,7 +375,7 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard)
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
 
 	select {
 	case <-done:
@@ -389,5 +398,99 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 		if !expectedSet[id] {
 			t.Fatalf("unexpected step ID %q in fetcher.stepIDs; got %v", id, fetcher.stepIDs)
 		}
+	}
+}
+
+func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	tracker := &fakeRunTracker{}
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
+
+	stepID := "mt-001-20260506.204108.064-write"
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+		return []string{stepID}, nil
+	}
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+
+	traceSrcDir := t.TempDir()
+	traceFile := filepath.Join(traceSrcDir, "spt-20260506.204108.064.trace.log")
+	if err := os.WriteFile(traceFile, []byte("trace-data\n"), 0o600); err != nil {
+		t.Fatalf("write trace file: %v", err)
+	}
+
+	fetcher := &fakeFetcher{
+		onFetch: func(output string, stepIDs []string) error {
+			if err := os.MkdirAll(output, 0o755); err != nil {
+				return err
+			}
+			manifest := &results.Manifest{
+				BaseURL:   "http://example",
+				OutputDir: output,
+				Steps: []results.StepManifest{
+					{
+						StepID: stepID,
+						Files: []results.FileStatus{
+							{Name: stepID + ".metrics.total.csv", Status: "ok"},
+						},
+					},
+				},
+			}
+			data, err := json.MarshalIndent(manifest, "", "  ")
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(output, constants.ResultsManifestFileName), data, 0o600)
+		},
+	}
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		fetcher.baseURL = baseURL
+		fetcher.output = outputDir
+		return fetcher
+	}
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+
+	tmpDir := t.TempDir()
+	done := startAutoResults("http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+
+	manifestPath := filepath.Join(fetcher.output, constants.ResultsManifestFileName)
+	content, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var got results.Manifest
+	if err := json.Unmarshal(content, &got); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if len(got.RunFiles) != 1 {
+		t.Fatalf("RunFiles length = %d, want 1", len(got.RunFiles))
+	}
+	if got.RunFiles[0].Name != filepath.Base(traceFile) {
+		t.Fatalf("RunFiles[0].Name = %q, want %q", got.RunFiles[0].Name, filepath.Base(traceFile))
+	}
+	if got.RunFiles[0].Status != "ok" {
+		t.Fatalf("RunFiles[0].Status = %q, want ok", got.RunFiles[0].Status)
+	}
+
+	traceCopyPath := filepath.Join(fetcher.output, filepath.Base(traceFile))
+	if _, err := os.Stat(traceCopyPath); err != nil {
+		t.Fatalf("expected trace file copied to results root: %v", err)
 	}
 }

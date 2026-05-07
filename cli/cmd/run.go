@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -116,7 +117,7 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 
 // startAutoResults kicks off background completion tracking and artifact fetching.
 // After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
-func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer) chan struct{} {
+func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string) chan struct{} {
 	done := make(chan struct{}, 1)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -133,8 +134,13 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		}
 		writeProgress("Auto-results: monitoring %s for completion...\n", baseURL)
 		// Precompute output root and announce
-		ts := time.Now().UTC().Format("20060102.150405.000")
-		root := filepath.Join(resultsDir, fmt.Sprintf("%s-%s", label, ts))
+		root := ""
+		if metadata != nil && metadata.ResultsRoot != "" {
+			root = metadata.ResultsRoot
+		} else {
+			ts := time.Now().UTC().Format("20060102.150405.000")
+			root = filepath.Join(resultsDir, fmt.Sprintf("%s-%s", label, ts))
+		}
 		writeProgress("Auto-results: will save results under %s\n", root)
 		if metadata != nil {
 			metadata.ResultsRoot = root
@@ -294,6 +300,11 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			writeProgress("Results fetch encountered errors; see log. Output: %s\n", root)
 			return
 		}
+		if traceFile != "" {
+			if err := appendTraceToResultsManifest(root, traceFile); err != nil {
+				logging.LogError("auto-results", "trace artifact append failed", err, "trace_file", traceFile, "out", root)
+			}
+		}
 		writeProgress("Auto-results: results saved to %s\n", root)
 		writer := summaryOut
 		if writer == nil {
@@ -349,6 +360,171 @@ func uniqueStepIDs(lists ...[]string) []string {
 		}
 	}
 	return out
+}
+
+type traceOptions struct {
+	Path   string
+	Append bool
+	Auto   bool
+}
+
+func prepareTraceOptions(explicitPath string, explicitAppend bool, autoResults bool, plannedResultsRoot string, runToken string, warnOut io.Writer) (traceOptions, error) {
+	path := strings.TrimSpace(explicitPath)
+	if path != "" {
+		if err := ensureTracePathWritable(path, explicitAppend); err != nil {
+			return traceOptions{}, fmt.Errorf("failed to initialize trace file: %w", err)
+		}
+		return traceOptions{Path: path, Append: explicitAppend, Auto: false}, nil
+	}
+	if !autoResults || plannedResultsRoot == "" {
+		return traceOptions{}, nil
+	}
+
+	name := fmt.Sprintf("spt-%s.trace.log", runToken)
+	primaryPath := filepath.Join(plannedResultsRoot, name)
+	primaryErr := ensureTracePathWritable(primaryPath, false)
+	if primaryErr == nil {
+		return traceOptions{Path: primaryPath, Append: false, Auto: true}, nil
+	}
+
+	fallbackPath := filepath.Join(".", name)
+	if warnOut != nil {
+		_, _ = fmt.Fprintf(
+			warnOut,
+			"Warning: could not initialize auto trace file at %s (%v); falling back to %s\n",
+			primaryPath, primaryErr, fallbackPath,
+		)
+	}
+	if fallbackErr := ensureTracePathWritable(fallbackPath, false); fallbackErr != nil {
+		return traceOptions{}, fmt.Errorf("failed to initialize fallback trace file: %w", fallbackErr)
+	}
+	return traceOptions{Path: fallbackPath, Append: false, Auto: true}, nil
+}
+
+func ensureTracePathWritable(path string, appendMode bool) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	flags := os.O_CREATE | os.O_WRONLY
+	if appendMode {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600) // #nosec G304 -- validated local output path
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func appendTraceToResultsManifest(resultsRoot string, tracePath string) error {
+	if resultsRoot == "" || tracePath == "" {
+		return nil
+	}
+	manifestPath := filepath.Join(resultsRoot, constants.ResultsManifestFileName)
+	content, err := os.ReadFile(manifestPath) // #nosec G304 -- path derived from local results root
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read results manifest: %w", err)
+	}
+	manifest := &results.Manifest{}
+	if err := json.Unmarshal(content, manifest); err != nil {
+		return fmt.Errorf("decode results manifest: %w", err)
+	}
+
+	destName := filepath.Base(tracePath)
+	destPath := filepath.Join(resultsRoot, destName)
+	srcAbs, _ := filepath.Abs(tracePath)
+	destAbs, _ := filepath.Abs(destPath)
+	if srcAbs != destAbs {
+		if err := copyFileAtomic(tracePath, destPath); err != nil {
+			return fmt.Errorf("copy trace file into results root: %w", err)
+		}
+	}
+
+	stat, err := os.Stat(destPath)
+	if err != nil {
+		return fmt.Errorf("stat results trace file: %w", err)
+	}
+	traceStatus := results.FileStatus{
+		Name:        destName,
+		Size:        stat.Size(),
+		Status:      "ok",
+		Modified:    stat.ModTime().UTC().Format(time.RFC3339),
+		ContentType: "text/plain",
+	}
+	replaced := false
+	for i := range manifest.RunFiles {
+		if manifest.RunFiles[i].Name == destName {
+			manifest.RunFiles[i] = traceStatus
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		manifest.RunFiles = append(manifest.RunFiles, traceStatus)
+	}
+
+	updated, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal updated results manifest: %w", err)
+	}
+	tmp, err := os.CreateTemp(resultsRoot, ".index.json.trace-*")
+	if err != nil {
+		return fmt.Errorf("create temp manifest: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err = tmp.Write(updated); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp manifest: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp manifest: %w", err)
+	}
+	if err = os.Rename(tmpPath, manifestPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("replace results manifest: %w", err)
+	}
+	return nil
+}
+
+func copyFileAtomic(srcPath string, destPath string) error {
+	src, err := os.Open(srcPath) // #nosec G304 -- validated local trace path
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".trace-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err = io.Copy(tmp, src); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err = os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // requestShutdownAll posts /shutdown to all provided hosts and waits for linger.
@@ -647,6 +823,22 @@ Available workload types:
 		autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds")
 		apiPort := getAPIPort(cmd)
 		baseURL := deriveBaseURL(apiPort, hostInfos)
+		traceFileFlag, _ := cmd.Flags().GetString("trace-file")
+		traceAppendFlag, _ := cmd.Flags().GetBool("trace-append")
+		runToken := time.Now().UTC().Format("20060102.150405.000")
+		plannedResultsRoot := ""
+		if resultsOpts.AutoResults {
+			plannedResultsRoot = filepath.Join(resultsOpts.ResultsDir, fmt.Sprintf("%s-%s", resultsOpts.Label, runToken))
+		}
+		traceOpts, err := prepareTraceOptions(traceFileFlag, traceAppendFlag, resultsOpts.AutoResults, plannedResultsRoot, runToken, os.Stdout)
+		if err != nil {
+			if removeErr := os.Remove(scenarioPath); removeErr != nil {
+				logger.Debug("Failed to clean up scenario file after trace initialization error",
+					"file", scenarioPath,
+					"error", removeErr.Error())
+			}
+			return err
+		}
 		metadata := buildRunMetadata(runMetadataInput{
 			WorkloadType:         workloadType,
 			Params:               params,
@@ -666,6 +858,11 @@ Available workload types:
 			Command:              cmd,
 			AutoTerminateSeconds: autoTerminate,
 		})
+		metadata.TraceFile = traceOpts.Path
+		metadata.TraceAuto = traceOpts.Auto
+		if plannedResultsRoot != "" {
+			metadata.ResultsRoot = plannedResultsRoot
+		}
 
 		headlessMode := shouldRunHeadless(cmd)
 
@@ -687,7 +884,23 @@ Available workload types:
 		// Start background auto-results tracker/fetcher if enabled
 		var autoResultsDone chan struct{}
 		if resultsOpts.AutoResults {
-			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter)
+			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path)
+		}
+		waitForAutoResults := func() {
+			if autoResultsDone != nil {
+				select {
+				case <-autoResultsDone:
+				case <-time.After(2 * time.Second):
+				}
+			}
+		}
+		finalizeTraceArtifact := func() {
+			if err := appendTraceToResultsManifest(plannedResultsRoot, traceOpts.Path); err != nil {
+				logger.Debug("Failed to finalize trace artifact in results manifest",
+					"results_root", plannedResultsRoot,
+					"trace_file", traceOpts.Path,
+					"error", err.Error())
+			}
 		}
 
 		// Get endpoint for display
@@ -744,14 +957,11 @@ Available workload types:
 
 			// Check if we should run in headless mode
 			if headlessMode {
-				// Get headless options from flags
-				traceFile, _ := cmd.Flags().GetString("trace-file")
-				traceAppend, _ := cmd.Flags().GetBool("trace-append")
 				verbose, _ := cmd.Flags().GetBool("verbose")
 
 				options := headless.HeadlessOptions{
-					TraceFile:            traceFile,
-					TraceAppend:          traceAppend,
+					TraceFile:            traceOpts.Path,
+					TraceAppend:          traceOpts.Append,
 					Verbose:              verbose,
 					AutoTerminateSeconds: autoTerminate,
 				}
@@ -761,34 +971,33 @@ Available workload types:
 				}
 
 				err := headless.StartHeadlessModeWithOrchestrator(orchestrator, sptImage, scenarioPath, params, options)
-				if autoResultsDone != nil {
-					select {
-					case <-autoResultsDone:
-					case <-time.After(2 * time.Second):
-					}
-				}
+				waitForAutoResults()
+				finalizeTraceArtifact()
 				return err
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-				return tui.StartTUIWithMultiHostOrchestratorTimeout(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink)
+				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
+				waitForAutoResults()
+				finalizeTraceArtifact()
+				return err
 			}
-			return tui.StartTUIWithMultiHostOrchestrator(orchestrator, sptImage, scenarioPath, params, setSummarySink)
+			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
+			waitForAutoResults()
+			finalizeTraceArtifact()
+			return err
 		}
 
 		// Single host mode (existing logic)
 		// Check if we should run in headless mode
 		if headlessMode {
-			// Get headless options from flags
-			traceFile, _ := cmd.Flags().GetString("trace-file")
-			traceAppend, _ := cmd.Flags().GetBool("trace-append")
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
 			options := headless.HeadlessOptions{
-				TraceFile:            traceFile,
-				TraceAppend:          traceAppend,
+				TraceFile:            traceOpts.Path,
+				TraceAppend:          traceOpts.Append,
 				Verbose:              verbose,
 				APIPort:              apiPort,
 				AutoTerminateSeconds: autoTerminate,
@@ -799,12 +1008,8 @@ Available workload types:
 			}
 
 			err := headless.StartHeadlessModeWithParams(sptImage, scenarioPath, params, options)
-			if autoResultsDone != nil {
-				select {
-				case <-autoResultsDone:
-				case <-time.After(2 * time.Second):
-				}
-			}
+			waitForAutoResults()
+			finalizeTraceArtifact()
 			return err
 		}
 
@@ -812,16 +1017,12 @@ Available workload types:
 		// Launch TUI with the scenario file
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err = tui.StartTUIWithScenarioAndParamsTimeout(sptImage, scenarioPath, params, apiPort, autoTerminate, setSummarySink)
+			err = tui.StartTUIWithScenarioAndParamsTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
 		} else {
-			err = tui.StartTUIWithScenarioAndParams(sptImage, scenarioPath, params, apiPort, setSummarySink)
+			err = tui.StartTUIWithScenarioAndParamsWithTrace(sptImage, scenarioPath, params, apiPort, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
-		if autoResultsDone != nil {
-			select {
-			case <-autoResultsDone:
-			case <-time.After(2 * time.Second):
-			}
-		}
+		waitForAutoResults()
+		finalizeTraceArtifact()
 		return err
 	},
 }

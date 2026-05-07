@@ -6,6 +6,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,150 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
+
+func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "tui.trace.log")
+	model := InitialModel()
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "read", "--trace-file", tracePath}
+	defer func() { os.Args = oldArgs }()
+
+	_, f, err := newProgramWithTrace(model, tracePath, false)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace create error: %v", err)
+	}
+	if f == nil {
+		t.Fatalf("expected trace file handle")
+	}
+	_, _ = f.WriteString("first\n")
+	_ = f.Close()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	s := string(content)
+	if !strings.Contains(s, "# TUI trace file:") {
+		t.Fatalf("trace header missing: %q", s)
+	}
+	if !strings.Contains(s, "# Command: spt run read --trace-file") {
+		t.Fatalf("trace command header missing: %q", s)
+	}
+	if !strings.Contains(s, "first") {
+		t.Fatalf("trace content missing first marker: %q", s)
+	}
+
+	_, f2, err := newProgramWithTrace(model, tracePath, true)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace append error: %v", err)
+	}
+	if f2 == nil {
+		t.Fatalf("expected trace file handle on append")
+	}
+	_, _ = f2.WriteString("second\n")
+	_ = f2.Close()
+
+	content2, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file after append: %v", err)
+	}
+	s2 := string(content2)
+	if strings.Count(s2, "# TUI trace file:") != 1 {
+		t.Fatalf("expected single header after append, got content: %q", s2)
+	}
+	if !strings.Contains(s2, "first") || !strings.Contains(s2, "second") {
+		t.Fatalf("append content missing markers: %q", s2)
+	}
+}
+
+func TestNewProgramWithTrace_HeaderMasksCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "tui.trace.log")
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "write", "--secret-key", "supersecret", "-a=AKIA"}
+	defer func() { os.Args = oldArgs }()
+
+	_, f, err := newProgramWithTrace(InitialModel(), tracePath, false)
+	if err != nil {
+		t.Fatalf("newProgramWithTrace error: %v", err)
+	}
+	if f != nil {
+		_ = f.Close()
+	}
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	s := string(content)
+	if !strings.Contains(s, "# Command:") {
+		t.Fatalf("missing command header: %q", s)
+	}
+	if strings.Contains(s, "supersecret") || strings.Contains(s, "AKIA") {
+		t.Fatalf("trace header leaked credential: %q", s)
+	}
+	if !strings.Contains(s, "--secret-key ***") || !strings.Contains(s, "-a=***") {
+		t.Fatalf("trace header missing masked values: %q", s)
+	}
+}
+
+func TestSanitizeTUITraceLine_StripsANSIAndControls(t *testing.T) {
+	got := sanitizeTUITraceLine("\x1b[33mhello\x1b[0m \x02x\tok\r\n")
+	if strings.Contains(got, "\x1b[") {
+		t.Fatalf("sanitizeTUITraceLine should strip ANSI escapes, got %q", got)
+	}
+	if strings.Contains(got, "\x02") {
+		t.Fatalf("sanitizeTUITraceLine should strip control chars, got %q", got)
+	}
+	if got != "hello x\tok" {
+		t.Fatalf("unexpected sanitized value: %q", got)
+	}
+}
+
+func TestModelUpdate_WritesTraceForMessageTypes(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "events.trace.log")
+	f, err := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) // #nosec G304 -- test temp file
+	if err != nil {
+		t.Fatalf("open trace file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	m := InitialModel()
+	m.traceSink = newTUITraceSink(f)
+
+	var updated tea.Model
+	updated, _ = m.Update(containerOutputMsg("plain output"))
+	m = updated.(Model)
+	updated, _ = m.Update(containerStderrMsg("oops"))
+	m = updated.(Model)
+	updated, _ = m.Update(sptMessageMsg("starting"))
+	m = updated.(Model)
+	updated, _ = m.Update(containerStatusMsg("API Running"))
+	m = updated.(Model)
+	_ = f.Sync()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	lines := string(content)
+	if !strings.Contains(lines, "plain output\n") {
+		t.Fatalf("missing container output trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[stderr] oops\n") {
+		t.Fatalf("missing stderr trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[spt] starting\n") {
+		t.Fatalf("missing spt trace line: %q", lines)
+	}
+	if !strings.Contains(lines, "[status] API Running\n") {
+		t.Fatalf("missing status trace line: %q", lines)
+	}
+	if strings.Contains(lines, "┌") || strings.Contains(lines, "│") {
+		t.Fatalf("trace should not contain tui frame glyphs: %q", lines)
+	}
+}
 
 func TestInitialModel(t *testing.T) {
 	m := InitialModel()
