@@ -1,8 +1,8 @@
 module github.com/dell/storage-performance-tool/cli
 
-go 1.25.0
+go 1.25.10
 
-toolchain go1.25.7
+toolchain go1.25.10
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
