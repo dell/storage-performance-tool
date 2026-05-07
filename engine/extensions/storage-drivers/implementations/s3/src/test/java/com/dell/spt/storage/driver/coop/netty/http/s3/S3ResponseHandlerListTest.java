@@ -11,6 +11,7 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.embedded.EmbeddedChannel;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.AfterEach;
@@ -57,6 +58,24 @@ final class S3ResponseHandlerListTest {
 		assertTrue(op.truncated());
 		assertEquals("token-123", op.options().continuationToken());
 		assertEquals("token-123", op.continuationToken());
+	}
+
+	@Test
+	void firstListContentChunkStartsDataResponseTiming() throws Exception {
+		final var op = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("prefix"), Credential.NONE);
+
+		final ByteBuf payload = content.retainedDuplicate();
+		final var channel = new EmbeddedChannel();
+		try {
+			assertEquals(0L, op.respDataTimeStart());
+
+			handler.handleResponseContentChunk(channel, op, payload);
+
+			assertTrue(op.respDataTimeStart() > 0, "LIST first-byte timestamp should be captured");
+		} finally {
+			channel.close();
+			payload.release();
+		}
 	}
 
 	private static final String LIST_V2_RESPONSE = "<ListBucketResult>"

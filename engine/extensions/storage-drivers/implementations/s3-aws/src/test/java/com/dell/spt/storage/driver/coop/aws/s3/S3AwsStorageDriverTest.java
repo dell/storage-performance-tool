@@ -889,6 +889,28 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
+		void listStartsDataResponseTimingWhenResponseArrives() throws Exception {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			PathItem item = mock(PathItem.class);
+			when(op.type()).thenReturn(OpType.LIST);
+			when(op.srcPath()).thenReturn("/mybucket");
+			when(item.name()).thenReturn("");
+			when(op.item()).thenReturn(item);
+			when(op.options()).thenReturn(ListOptions.DEFAULT);
+			when(op.respDataTimeStart()).thenReturn(0L);
+
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(CompletableFuture.completedFuture(buildListResponse(
+											List.of(S3Object.builder().key("obj1").size(100L).build()),
+											false, null)));
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			verify(op).startDataResponse();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
 		void listsWithPrefixFromItemName() throws Exception {
 			ListOperation<PathItem> op = mock(ListOperation.class);
 			PathItem item = mock(PathItem.class);
