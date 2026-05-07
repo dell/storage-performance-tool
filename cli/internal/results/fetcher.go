@@ -28,7 +28,7 @@ type ArtifactSpec struct {
 var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 	{Loggers: []string{"Config"}, Suffix: constants.ResultsArtifactSuffixConfig, Required: true},
-	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: true},
+	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: false},
 	{Loggers: []string{"Messages"}, Suffix: constants.ResultsArtifactSuffixMessages, Required: true},
 	{Loggers: []string{"Errors"}, Suffix: constants.ResultsArtifactSuffixErrors, Required: true},
 	// Optional below
