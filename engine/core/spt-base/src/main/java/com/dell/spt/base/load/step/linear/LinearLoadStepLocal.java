@@ -151,15 +151,17 @@ public class LinearLoadStepLocal
 						}
 					}
 
-					final Path itemTimingMetricsOutputPath = Paths.get(System.getProperty("java.io.tmpdir"),
-									"spt", "timingMetrics_" + config.stringVal("load-step-id"));
-					try {
-						final Output<? extends Item> itemOutput = new ItemTimingMetricsFileOutput<>(itemTimingMetricsOutputPath);
-						stepCtx.operationsMetricsOutput(itemOutput);
-					} catch (final IOException e) {
-						LogUtil.exception(
-										Level.ERROR, e,
-										"Failed to initialize the item metrics output, the processed items info won't be persisted");
+					if (outputConfig.boolVal("metrics-timing-persist")) {
+						final Path itemTimingMetricsOutputPath = Paths.get(System.getProperty("java.io.tmpdir"),
+										"spt", "timingMetrics_" + config.stringVal("load-step-id"));
+						try {
+							final Output<? extends Item> itemOutput = new ItemTimingMetricsFileOutput<>(itemTimingMetricsOutputPath);
+							stepCtx.operationsMetricsOutput(itemOutput);
+						} catch (final IOException e) {
+							LogUtil.exception(
+											Level.ERROR, e,
+											"Failed to initialize the item metrics output, the processed items info won't be persisted");
+						}
 					}
 
 				} catch (final IllegalConfigurationException e) {

@@ -9,6 +9,10 @@ public interface AllMetricsSnapshot extends Serializable {
 
 	TimingMetricSnapshot latencySnapshot();
 
+	default TimingMetricSnapshot ttfbSnapshot() {
+		return new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, "ttfb");
+	}
+
 	ConcurrencyMetricSnapshot concurrencySnapshot();
 
 	RateMetricSnapshot byteSnapshot();

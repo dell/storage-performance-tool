@@ -97,21 +97,25 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 
 	protected abstract void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders);
 
+	private void startDataResponse(final Operation<?> op, final Runnable startDataResponseAction) {
+		try {
+			startDataResponseAction.run();
+		} catch (final IllegalStateException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}", op.toString());
+		}
+	}
+
 	protected void handleResponseContentChunk(final Channel channel, final O op, final ByteBuf contentChunk)
 					throws IOException {
 		if (OpType.READ.equals(op.type())) {
 			if (op instanceof DataOperation) {
 				final DataOperation dataOp = (DataOperation) op;
 				final long countBytesDone = dataOp.countBytesDone();
-				if (dataOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					try {
-						dataOp.startDataResponse();
-					} catch (final IllegalStateException e) {
-						LogUtil.exception(Level.DEBUG, e, "{}", dataOp.toString());
-					}
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (dataOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						startDataResponse(dataOp, dataOp::startDataResponse);
+					}
 					if (verifyFlag) {
 						if (!RESP_FAIL_CORRUPT.equals(op.status())) {
 							verifyChunk(dataOp, countBytesDone, contentChunk, chunkSize);
@@ -123,21 +127,21 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 			} else if (op instanceof PathOperation) {
 				final PathOperation pathOp = (PathOperation) op;
 				final long countBytesDone = pathOp.countBytesDone();
-				if (pathOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					pathOp.startDataResponse();
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (pathOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						startDataResponse(pathOp, pathOp::startDataResponse);
+					}
 					pathOp.countBytesDone(countBytesDone + chunkSize);
 				}
 			} else if (op instanceof TokenOperation) {
 				final TokenOperation tokenOp = (TokenOperation) op;
 				final long countBytesDone = tokenOp.countBytesDone();
-				if (tokenOp.respDataTimeStart() == 0) { // if not set yet - 1st time
-					tokenOp.startDataResponse();
-				}
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
+					if (tokenOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
+						startDataResponse(tokenOp, tokenOp::startDataResponse);
+					}
 					tokenOp.countBytesDone(countBytesDone + chunkSize);
 				}
 			} else {

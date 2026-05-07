@@ -694,6 +694,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			byte[] buffer = new byte[8192];
 			int n;
 			while ((n = response.read(buffer)) != -1) {
+				if (bytesRead == 0 && n > 0 && op instanceof DataOperation) {
+					((DataOperation) op).startDataResponse();
+				}
 				bytesRead += n;
 			}
 			if (op instanceof DataOperation) {
@@ -1156,6 +1159,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			byte[] buffer = new byte[8192];
 			int n;
 			while ((n = response.read(buffer)) != -1) {
+				if (bytesRead == 0 && n > 0) {
+					op.startDataResponse();
+				}
 				bytesRead += n;
 			}
 			op.countBytesDone(bytesRead);

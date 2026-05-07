@@ -378,9 +378,14 @@ func ExtractOpsPerSec(m PerformanceMetric) int64 {
 	return m.OpsPerSec
 }
 
-// ExtractMeanLatency extracts the mean latency metric
-func ExtractMeanLatency(m PerformanceMetric) int64 {
+// ExtractDisplayLatency extracts the latency value selected for UI display.
+func ExtractDisplayLatency(m PerformanceMetric) int64 {
 	return m.MeanLatency
+}
+
+// ExtractMeanLatency is kept for older tests/helpers that still refer to the legacy name.
+func ExtractMeanLatency(m PerformanceMetric) int64 {
+	return ExtractDisplayLatency(m)
 }
 
 // ExtractFailureIncrement extracts the incremental failure count

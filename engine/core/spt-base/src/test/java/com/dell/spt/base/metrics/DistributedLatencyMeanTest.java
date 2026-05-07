@@ -188,4 +188,131 @@ public class DistributedLatencyMeanTest {
 		assertEquals(KNOWN_DURATION_US, durMean, 1.0, "Duration mean should match");
 		assertEquals(KNOWN_LATENCY_US, latMean, 1.0, "Latency mean should match");
 	}
+
+	@Test
+	void distributedContextMergesTimingHistogramsForPercentiles() {
+		final SizeInBytes size = new SizeInBytes(ITEM_BYTES);
+		final MetricsContextImpl<?> secondWorker = (MetricsContextImpl<?>) MetricsContextImpl.builder()
+						.loadStepId("lat-test")
+						.opType(OpType.CREATE)
+						.actualConcurrencyGauge(() -> 4)
+						.concurrencyLimit(64)
+						.concurrencyThreshold(0)
+						.itemDataSize(size)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.comment("worker-2")
+						.runId(1)
+						.build();
+		secondWorker.start();
+		final DistributedMetricsContextImpl<?> twoWorkerEntry = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("lat-test")
+						.opType(OpType.CREATE)
+						.nodeCountSupplier(() -> 2)
+						.concurrencyLimit(64)
+						.concurrencyThreshold(0)
+						.itemDataSize(size)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(workerCtx.lastSnapshot(), secondWorker.lastSnapshot()))
+						.quantileValues(Arrays.asList(0.5, 0.9, 0.99))
+						.nodeAddrs(List.of("127.0.0.1:1099", "127.0.0.2:1099"))
+						.comment("entry")
+						.runId(1)
+						.build();
+		twoWorkerEntry.start();
+		try {
+			workerCtx.markSucc(ITEM_BYTES, 1000, 100, 150);
+			workerCtx.markSucc(ITEM_BYTES, 1100, 200, 250);
+			secondWorker.markSucc(ITEM_BYTES, 10_000, 9000, 9500);
+			secondWorker.markSucc(ITEM_BYTES, 11_000, 10_000, 10_500);
+			workerCtx.refreshLastSnapshot();
+			secondWorker.refreshLastSnapshot();
+			twoWorkerEntry.refreshLastSnapshot();
+
+			final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) twoWorkerEntry.lastSnapshot();
+
+			assertEquals(4, snap.latencySnapshot().count());
+			assertTrue(snap.latencySnapshot().percentile(0.9) >= 9000);
+			assertTrue(snap.durationSnapshot().percentile(0.9) >= 10_000);
+			assertEquals(4, snap.ttfbSnapshot().count());
+			assertTrue(snap.ttfbSnapshot().percentile(0.9) >= 9500);
+		} finally {
+			twoWorkerEntry.close();
+			secondWorker.close();
+		}
+	}
+
+	@Test
+	void distributedContextWeightsPercentilesByHistogramSampleCounts() {
+		final SizeInBytes size = new SizeInBytes(ITEM_BYTES);
+		final MetricsContextImpl<?> highLatencyWorker = (MetricsContextImpl<?>) MetricsContextImpl.builder()
+						.loadStepId("lat-weighted")
+						.opType(OpType.READ)
+						.actualConcurrencyGauge(() -> 1)
+						.concurrencyLimit(64)
+						.concurrencyThreshold(0)
+						.itemDataSize(size)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.comment("worker-high")
+						.runId(1)
+						.build();
+		final MetricsContextImpl<?> lowLatencyWorker = (MetricsContextImpl<?>) MetricsContextImpl.builder()
+						.loadStepId("lat-weighted")
+						.opType(OpType.READ)
+						.actualConcurrencyGauge(() -> 1)
+						.concurrencyLimit(64)
+						.concurrencyThreshold(0)
+						.itemDataSize(size)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.comment("worker-low")
+						.runId(1)
+						.build();
+		highLatencyWorker.start();
+		lowLatencyWorker.start();
+		final DistributedMetricsContextImpl<?> entry = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("lat-weighted")
+						.opType(OpType.READ)
+						.nodeCountSupplier(() -> 2)
+						.concurrencyLimit(64)
+						.concurrencyThreshold(0)
+						.itemDataSize(size)
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(lowLatencyWorker.lastSnapshot(), highLatencyWorker.lastSnapshot()))
+						.quantileValues(Arrays.asList(0.5, 0.9, 0.99))
+						.nodeAddrs(List.of("127.0.0.1:1099", "127.0.0.2:1099"))
+						.comment("entry")
+						.runId(1)
+						.build();
+		entry.start();
+		try {
+			for (int i = 0; i < 1_900; i++) {
+				lowLatencyWorker.markSucc(ITEM_BYTES, 1_000, 100, 150);
+			}
+			for (int i = 0; i < 100; i++) {
+				highLatencyWorker.markSucc(ITEM_BYTES, 20_000, 10_000, 10_500);
+			}
+			lowLatencyWorker.refreshLastSnapshot();
+			highLatencyWorker.refreshLastSnapshot();
+			entry.refreshLastSnapshot();
+
+			final DistributedAllMetricsSnapshot snap = (DistributedAllMetricsSnapshot) entry.lastSnapshot();
+			assertEquals(2_000, snap.latencySnapshot().count());
+			assertTrue(snap.latencySnapshot().percentile(0.9) < 1_000);
+			assertTrue(snap.latencySnapshot().percentile(0.99) >= 10_000);
+		} finally {
+			entry.close();
+			highLatencyWorker.close();
+			lowLatencyWorker.close();
+		}
+	}
 }

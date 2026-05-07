@@ -4,13 +4,23 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.PathItem;
+import com.dell.spt.base.item.TokenItem;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.path.PathOperation;
+import com.dell.spt.base.item.op.token.TokenOperation;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpStatusClass;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -45,6 +55,24 @@ class HttpResponseHandlerBaseTest {
 	private boolean invokeHandleResponseStatus(
 					DataOperation<DataItemImpl> op, HttpStatusClass statusClass, HttpResponseStatus status) {
 		return handler.handleResponseStatus(op, statusClass, status);
+	}
+
+	@SuppressWarnings("unchecked")
+	private <I extends Item, O extends Operation<I>> void invokeHandleResponseContentChunk(
+					final O op, final ByteBuf contentChunk) throws Exception {
+		final HttpStorageDriverBase<I, O> contentHandlerDriver = mock(HttpStorageDriverBase.class);
+		final HttpResponseHandlerBase<I, O> contentHandler = new HttpResponseHandlerBase<>(contentHandlerDriver, false) {
+			@Override
+			protected void handleResponseHeaders(
+							final Channel channel, final O op, final HttpHeaders respHeaders) {
+				// no-op stub
+			}
+		};
+		contentHandler.handleResponseContentChunk(mock(Channel.class), op, contentChunk);
+	}
+
+	private static ByteBuf contentChunk(final int size) {
+		return Unpooled.wrappedBuffer(new byte[size]);
 	}
 
 	static Stream<Arguments> statusMappings() {
@@ -86,5 +114,80 @@ class HttpResponseHandlerBaseTest {
 
 		assertEquals(expectedReturn, result);
 		verify(op).status(expectedOpStatus);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void startsDataResponseOnlyForFirstNonEmptyReadChunk() throws Exception {
+		final DataOperation<DataItemImpl> op = mock(DataOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+
+		invokeHandleResponseContentChunk(op, Unpooled.EMPTY_BUFFER);
+		verify(op, never()).startDataResponse();
+		verify(op, never()).countBytesDone(anyLong());
+
+		invokeHandleResponseContentChunk(op, contentChunk(3));
+
+		verify(op).startDataResponse();
+		verify(op).countBytesDone(3L);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void startsPathResponseOnlyForFirstNonEmptyReadChunk() throws Exception {
+		final PathOperation<PathItem> op = mock(PathOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+
+		invokeHandleResponseContentChunk(op, Unpooled.EMPTY_BUFFER);
+		verify(op, never()).startDataResponse();
+		verify(op, never()).countBytesDone(anyLong());
+
+		invokeHandleResponseContentChunk(op, contentChunk(3));
+
+		verify(op).startDataResponse();
+		verify(op).countBytesDone(3L);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void ignoresPathStartDataResponseStateRace() throws Exception {
+		final PathOperation<PathItem> op = mock(PathOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+		doThrow(new IllegalStateException("already started")).when(op).startDataResponse();
+
+		assertDoesNotThrow(() -> invokeHandleResponseContentChunk(op, contentChunk(1)));
+		verify(op).countBytesDone(1L);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void startsTokenResponseOnlyForFirstNonEmptyReadChunk() throws Exception {
+		final TokenOperation<TokenItem> op = mock(TokenOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+
+		invokeHandleResponseContentChunk(op, Unpooled.EMPTY_BUFFER);
+		verify(op, never()).startDataResponse();
+		verify(op, never()).countBytesDone(anyLong());
+
+		invokeHandleResponseContentChunk(op, contentChunk(3));
+
+		verify(op).startDataResponse();
+		verify(op).countBytesDone(3L);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void ignoresTokenStartDataResponseStateRace() throws Exception {
+		final TokenOperation<TokenItem> op = mock(TokenOperation.class);
+		when(op.type()).thenReturn(com.dell.spt.base.item.op.OpType.READ);
+		when(op.respDataTimeStart()).thenReturn(0L);
+		doThrow(new IllegalStateException("already started")).when(op).startDataResponse();
+
+		assertDoesNotThrow(() -> invokeHandleResponseContentChunk(op, contentChunk(1)));
+		verify(op).countBytesDone(1L);
 	}
 }

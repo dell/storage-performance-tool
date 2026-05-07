@@ -130,22 +130,73 @@ class MetricsContextImplTest {
 		assertNotNull(ctx.lastSnapshot());
 	}
 
-	/**
-	 * Verifies that timing metrics are ignored when latency is invalid or not less than duration.
-	 */
 	@Test
-	void timingsAreIgnoredWhenLatencyInvalidOrNotLessThanDuration() {
+	void ttfbSamplesAreRecordedSeparatelyFromLatencyAndDuration() {
 		ctx.start();
 
-		// Should be ignored because latency <= 0
-		ctx.markSucc(1, 1_000L, 0L);
+		ctx.markSucc(1024L, 2_000L, 500L, 800L);
+		ctx.markSucc(1024L, 3_000L, 600L, 0L);
 
-		// Should be ignored because duration <= latency
+		ctx.refreshLastSnapshot();
+
+		assertEquals(2, ctx.lastSnapshot().durationSnapshot().count());
+		assertEquals(2, ctx.lastSnapshot().latencySnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().ttfbSnapshot().count());
+		assertEquals(800L, ctx.lastSnapshot().ttfbSnapshot().percentile(0.5));
+	}
+
+	@Test
+	void ttfbSamplesOutsideDurationAreIgnoredAtMetricsBoundary() {
+		ctx.start();
+
+		ctx.markSucc(1024L, 1_000L, 500L, 1_000L);
+		ctx.markSucc(1024L, 1_000L, 500L, 1_001L);
+		ctx.markSucc(1024L, 1_000L, 500L, 0L);
+		ctx.markSucc(1024L, 1_000L, 500L, -1L);
+
+		ctx.refreshLastSnapshot();
+
+		assertEquals(4, ctx.lastSnapshot().durationSnapshot().count());
+		assertEquals(4, ctx.lastSnapshot().latencySnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().ttfbSnapshot().count());
+		assertEquals(1_000L, ctx.lastSnapshot().ttfbSnapshot().percentile(0.5));
+	}
+
+	@Test
+	void arrayTimingOverloadRecordsOnlyProvidedTtfbSamples() {
+		ctx.start();
+
+		ctx.markSucc(
+						3L,
+						1024L,
+						new long[]{1_000L, 2_000L, 3_000L
+						},
+						new long[]{100L, 200L, 300L
+						},
+						new long[]{150L, 250L
+						});
+
+		ctx.refreshLastSnapshot();
+
+		assertEquals(3, ctx.lastSnapshot().durationSnapshot().count());
+		assertEquals(3, ctx.lastSnapshot().latencySnapshot().count());
+		assertEquals(2, ctx.lastSnapshot().ttfbSnapshot().count());
+	}
+
+	/**
+	 * Verifies that non-positive latency is ignored while valid duration samples are still retained.
+	 */
+	@Test
+	void nonPositiveLatencyIsIgnoredWhileDurationIsRecorded() {
+		ctx.start();
+
+		ctx.markSucc(1, 1_000L, 0L);
 		ctx.markSucc(1, 500L, 600L);
 
-		// Still should produce a valid snapshot and not throw
 		ctx.refreshLastSnapshot();
-		assertNotNull(ctx.lastSnapshot());
+		assertEquals(2, ctx.lastSnapshot().durationSnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().latencySnapshot().count());
+		assertEquals(600L, ctx.lastSnapshot().latencySnapshot().percentile(0.5));
 	}
 
 	/**

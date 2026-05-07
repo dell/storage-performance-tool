@@ -320,9 +320,11 @@ spt_elapsed_time_value{load_step_id="linear_20190304.123915.606",load_op_type="R
 Additionally, JSON-formatted endpoints are available for clients that prefer structured data:
 
 - `GET /metrics/json` (always present) returns per-node metrics. Each array element includes:
-  - Metadata: `metrics_schema` (currently `2`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, optional `cluster_id`, and `sample_ts` (RFC 3339 timestamp).
+  - Metadata: `metrics_schema` (currently `3`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, optional `cluster_id`, and `sample_ts` (RFC3339 timestamp).
   - Step data: `step_id`, `op_type`, `timestamp`, `elapsed_time_seconds`, `test_state`.
-  - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing{latency_mean_us,duration_mean_us}`, `concurrency{current,mean}`.
+  - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing`, `concurrency{current,mean}`.
+  - Timing: schema 3 keeps the compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and adds nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
+  - Time to first byte: `timing.ttfb` has the same nested shape when available, or `null` when the operation type has no body timing sample. TTFB is measured from request completion to the first non-empty response body byte.
   - Progress helpers: `completion_percent`, `overall_completion_percent`, `overall_unbounded`, plus `limit{type,op_count?,time_sec?}`.
   - Terminal entries (`"terminal": true`) persist after a step finishes so idle nodes still return context; their rate gauges are set to zero and `timestamp` reflects completion time.
 
@@ -377,7 +379,7 @@ Availability:
 
 | Option | Type | Default Value | Description
 |:--|:--|:--|:--|
-| output-metrics-quantiles | List of numbers each in the range (0; 1] | [0.25,0.5,0.75] | The quantile values to calculate and report for the timing metrics (duration/latency)
+| output-metrics-quantiles | List of numbers each in the range (0; 1] | [0.25,0.5,0.75] | Extra quantile values to calculate and report for timing metrics. The standard final/API set includes p50, p90, p99, and p99.9.
 | run-node | Boolean | `false` | Run in the mode node. Should be enabled to serve the Remote API
 | run-port | Integer in the range (0; 65536) | 9999 | The port to listen the Remote API requests
 | server.metrics.expose_fleet | Boolean | `true` | Controls whether the entry node exposes `/metrics/fleet/json`. Disable when you want only per-node metrics.
@@ -445,18 +447,14 @@ and 3 Primitive Types: Timing, Rate, Concurrency. Depends on the type of metric,
 
 ### 6.1.1. Custom Quantiles
 
-It's possible to export the custom quantile values for both operations durations and latencies via the remote API. The 
-default value makes spt report the same quantiles as the ones used historically to report in the stdandard output
-and the log files (0.25,0.5,0.75 - low quartile, median and high quartile). To specify the custom quantiles values use 
-the `output-metrics-quantiles` configuration option.
+SPT always reports the standard timing percentiles p50, p90, p99, and p99.9 for duration and latency, and for TTFB when a body timing sample is available. It is also possible to export extra quantile values via the `output-metrics-quantiles` configuration option. Timing percentiles are calculated from bounded in-memory histograms and do not require raw per-operation timing files.
 
 CLI example:
 ```bash
 java -jar spt-<VERSION>.jar ... --output-metrics-quantiles=0.5,0.95,0.999
 ``` 
 
-To specify the value of the required quantiles, use the `--output-metrics-quantiles` parameter.
-By default `output-metrics-quantiles=[0.25,0.5,0.75]`.
+To specify extra quantiles, use the `--output-metrics-quantiles` parameter. By default `output-metrics-quantiles=[0.25,0.5,0.75]`, which adds the historical low/median/high quartile columns alongside the standard percentile set.
 
 ### 6.1.2. Labels
 Each metric contains also the following labels/tags:

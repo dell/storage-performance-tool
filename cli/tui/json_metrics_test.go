@@ -815,6 +815,30 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 	}
 }
 
+func TestSchema3TimingPrefersLatencyP50(t *testing.T) {
+	step := newTestStep()
+	step.MetricsSchema = 3
+	step.Timing.LatencyMeanUs = 10_000
+	step.Timing.DurationMeanUs = 20_000
+	step.Timing.Latency = &JSONTimingStat{Count: 3, MeanUs: 10_000, P50Us: 2_500}
+	step.Timing.Duration = &JSONTimingStat{Count: 3, MeanUs: 20_000, P50Us: 3_500}
+
+	client := NewSptAPIClient("http://test")
+	metrics, err := client.ParseJSONMetrics(marshalSteps(t, []JSONMetricsStep{step}))
+	if err != nil {
+		t.Fatalf("ParseJSONMetrics failed: %v", err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(metrics))
+	}
+	if metrics[0].MeanLatency != 2_500 {
+		t.Fatalf("expected schema-v3 latency display value to use p50, got %d", metrics[0].MeanLatency)
+	}
+	if metrics[0].MeanDuration != 3_500 {
+		t.Fatalf("expected schema-v3 duration display value to use p50, got %d", metrics[0].MeanDuration)
+	}
+}
+
 func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 	older := newTestStep()
 	older.StepID = "create-step"

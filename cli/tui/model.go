@@ -173,7 +173,7 @@ func InitialModel() Model {
 		startTime:            time.Now(),
 		metricsCollector:     NewMetricsCollector(),
 		opsChartRenderer:     NewGenericChartRenderer("Operations/sec", "ops/s", ExtractOpsPerSec, FormatOpsValue),
-		latencyChartRenderer: NewGenericChartRenderer("Mean Latency", "", ExtractMeanLatency, FormatLatencyValue),
+		latencyChartRenderer: NewGenericChartRenderer("Latency P50", "", ExtractDisplayLatency, FormatLatencyValue),
 		failureChartRenderer: NewGenericChartRendererWithScale("Failure Rate", "failures", ExtractFailureIncrement, FormatFailureValue, PageScrollSize),
 		historicalIndex:      0, // Start in live mode
 		statusStyle:          lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(lipgloss.Color("255")),

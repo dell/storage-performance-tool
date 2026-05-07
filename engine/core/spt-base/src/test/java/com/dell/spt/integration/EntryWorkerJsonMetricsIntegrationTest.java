@@ -182,7 +182,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		final JsonNode arrFleet = om.readTree(fetch(ENTRY_FLEET_URL));
 		assertTrue(arrWorker.size() > 0, "Worker /metrics/json should be non-empty");
 		final JsonNode workerObj = arrWorker.get(0);
-		assertEquals(2, workerObj.get("metrics_schema").asInt());
+		assertEquals(3, workerObj.get("metrics_schema").asInt());
 		assertEquals("node", workerObj.get("scope").asText());
 		assertEquals("worker", workerObj.get("role").asText());
 		assertEquals("worker-node", workerObj.get("node_id").asText());
@@ -191,7 +191,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		assertEquals(1, arrEntry.size(), "Entry /metrics/json should return a single idle sample when no local contexts exist");
 		assertTrue(arrCluster.size() > 0, "Entry /metrics/cluster/json should contain aggregated metrics");
 		final JsonNode clusterObj = arrCluster.get(0);
-		assertEquals(2, clusterObj.get("metrics_schema").asInt());
+		assertEquals(3, clusterObj.get("metrics_schema").asInt());
 		assertEquals("fleet", clusterObj.get("scope").asText());
 		assertEquals("aggregate", clusterObj.get("role").asText());
 		assertEquals("entry-node", clusterObj.get("node_id").asText());

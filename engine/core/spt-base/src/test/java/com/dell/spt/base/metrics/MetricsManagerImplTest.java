@@ -9,6 +9,7 @@ import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +39,22 @@ public class MetricsManagerImplTest {
 	void tearDown() throws Exception {
 		// Ensure manager is closed between tests
 		mgr.close();
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void quantileValuesPreserveMissingTimingSignal() throws Exception {
+		final Method quantileValues = MetricsManagerImpl.class.getDeclaredMethod(
+						"quantileValues", TimingMetricSnapshot.class, List.class);
+		quantileValues.setAccessible(true);
+		final Map<Double, Long> values = (Map<Double, Long>) quantileValues.invoke(
+						null,
+						new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, MetricsConstants.METRIC_NAME_TTFB),
+						List.of(0.5, 0.9));
+
+		assertTrue(values.containsKey(0.5));
+		assertNull(values.get(0.5));
+		assertNull(values.get(0.9));
 	}
 
 	@Test
@@ -388,13 +405,25 @@ public class MetricsManagerImplTest {
 		public void markSucc(long bytes, long duration, long latency) {}
 
 		@Override
+		public void markSucc(long bytes, long duration, long latency, long ttfb) {}
+
+		@Override
 		public void markPartSucc(long bytes, long duration, long latency) {}
+
+		@Override
+		public void markPartSucc(long bytes, long duration, long latency, long ttfb) {}
 
 		@Override
 		public void markSucc(long count, long bytes, long[] durationValues, long[] latencyValues) {}
 
 		@Override
+		public void markSucc(long count, long bytes, long[] durationValues, long[] latencyValues, long[] ttfbValues) {}
+
+		@Override
 		public void markPartSucc(long bytes, long[] durationValues, long[] latencyValues) {}
+
+		@Override
+		public void markPartSucc(long bytes, long[] durationValues, long[] latencyValues, long[] ttfbValues) {}
 
 		@Override
 		public void markFail() {}

@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -192,6 +193,26 @@ class LoadStepClientBaseTest {
 	@Nested
 	@DisplayName("Start/Await Integration Tests")
 	class StartAwaitIntegrationTests {
+		@Test
+		@DisplayName("timing file aggregation is not initialized when timing persist is disabled")
+		void testTimingAggregatorDisabledWhenTimingPersistFalse() {
+			Config cfg = TestConfigBuilder.config();
+			cfg.val("load-step-id", "timing-aggregator-disabled");
+			cfg.val("output-metrics-timing-persist", false);
+			cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
+			cfg.val("item-data-input-compressibility", 0.0);
+			cfg.val("item-data-dedupable", false);
+			cfg.val("item-data-verify", false);
+			TestLoadStepClient client = new TestLoadStepClient(cfg, extensions, ctxConfigs, mockMetricsManager);
+
+			assertDoesNotThrow(client::start);
+
+			assertEquals(0, timingMetricsAggregatorCount(client));
+			assertDoesNotThrow(client::doStop);
+			assertDoesNotThrow(client::doShutdown);
+			assertDoesNotThrow(client::doClose);
+		}
+
 		@Test
 		@DisplayName("Linear client start executes slice/aggregator init and await returns a boolean")
 		void testLinearClientStartAndAwait() throws Exception {
@@ -839,6 +860,16 @@ class LoadStepClientBaseTest {
 			assertDoesNotThrow(() -> linearClient.doShutdown());
 			assertDoesNotThrow(() -> linearClient.doClose());
 			assertDoesNotThrow(() -> linearClient.doStop());
+		}
+	}
+
+	private static int timingMetricsAggregatorCount(final LoadStepClientBase<?> client) {
+		try {
+			final Field field = LoadStepClientBase.class.getDeclaredField("itemTimingMetricsOutputFileAggregators");
+			field.setAccessible(true);
+			return ((List<?>) field.get(client)).size();
+		} catch (final ReflectiveOperationException e) {
+			throw new LinkageError(e.getMessage(), e);
 		}
 	}
 }

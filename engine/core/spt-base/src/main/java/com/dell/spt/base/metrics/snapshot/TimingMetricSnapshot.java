@@ -10,4 +10,16 @@ public interface TimingMetricSnapshot
 
 	long max();
 
+	default long percentile(final double quantile) {
+		return 0L;
+	}
+
+	default long overflowCount() {
+		return 0L;
+	}
+
+	default byte[] compressedHistogram() {
+		return new byte[0];
+	}
+
 }

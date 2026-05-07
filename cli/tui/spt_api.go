@@ -114,8 +114,24 @@ type JSONMetricsBandwidth struct {
 
 // JSONMetricsTiming contains timing-related metrics
 type JSONMetricsTiming struct {
-	LatencyMeanUs  float64 `json:"latency_mean_us"`
-	DurationMeanUs float64 `json:"duration_mean_us"`
+	LatencyMeanUs  float64         `json:"latency_mean_us"`
+	DurationMeanUs float64         `json:"duration_mean_us"`
+	Latency        *JSONTimingStat `json:"latency,omitempty"`
+	Duration       *JSONTimingStat `json:"duration,omitempty"`
+	TTFB           *JSONTimingStat `json:"ttfb,omitempty"`
+}
+
+// JSONTimingStat contains schema 3 timing distribution fields.
+type JSONTimingStat struct {
+	Count         int64   `json:"count"`
+	MeanUs        float64 `json:"mean_us"`
+	MinUs         int64   `json:"min_us"`
+	P50Us         int64   `json:"p50_us"`
+	P90Us         int64   `json:"p90_us"`
+	P99Us         int64   `json:"p99_us"`
+	P999Us        int64   `json:"p999_us"`
+	MaxUs         int64   `json:"max_us"`
+	OverflowCount int64   `json:"overflow_count"`
 }
 
 // JSONMetricsConcurrency contains concurrency-related metrics
@@ -532,6 +548,14 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 
 // stepToMetric converts a validated JSONMetricsStep into a PerformanceMetric.
 func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time) *PerformanceMetric {
+	latencyUs := step.Timing.LatencyMeanUs
+	if step.MetricsSchema >= 3 && step.Timing.Latency != nil && step.Timing.Latency.P50Us > 0 {
+		latencyUs = float64(step.Timing.Latency.P50Us)
+	}
+	durationUs := step.Timing.DurationMeanUs
+	if step.MetricsSchema >= 3 && step.Timing.Duration != nil && step.Timing.Duration.P50Us > 0 {
+		durationUs = float64(step.Timing.Duration.P50Us)
+	}
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
 		SampleTimestamp:          sampleTimestamp,
@@ -546,8 +570,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		StepTime:                 step.ElapsedTimeSeconds,
 		OpsPerSec:                int64(math.Round(step.Operations.SuccessRateLast)),
 		MBPerSec:                 int64(step.Bandwidth.BytesRateLast / 1_000_000), // Convert bytes to MB
-		MeanLatency:              int64(math.Round(step.Timing.LatencyMeanUs)),    // Already in microseconds
-		MeanDuration:             int64(math.Round(step.Timing.DurationMeanUs)),   // Already in microseconds
+		MeanLatency:              int64(math.Round(latencyUs)),                    // Schema 3 prefers p50.
+		MeanDuration:             int64(math.Round(durationUs)),
 		CompletionPercent:        float64(step.CompletionPercent),
 		OverallCompletionPercent: float64(step.OverallCompletion),
 		Unbounded:                step.Unbounded,

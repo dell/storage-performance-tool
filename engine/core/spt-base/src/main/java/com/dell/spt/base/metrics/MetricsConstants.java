@@ -7,6 +7,7 @@ public interface MetricsConstants {
 
 	String METRIC_NAME_DUR = "duration";
 	String METRIC_NAME_LAT = "latency";
+	String METRIC_NAME_TTFB = "ttfb";
 	String METRIC_NAME_CONC = "concurrency";
 	String METRIC_NAME_SUCC = "success_op";
 	String METRIC_NAME_FAIL = "failed_op";

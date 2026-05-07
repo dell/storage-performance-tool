@@ -430,14 +430,16 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		});
 
 		// ── 16. Timing metrics output ──────────────────────────────────────
-		final Path timingPath = Paths.get(
-						System.getProperty("java.io.tmpdir"),
-						"spt", "timingMetrics_" + stepId + "_mixed");
-		try {
-			final Output timingOut = new ItemTimingMetricsFileOutput<>(timingPath);
-			stepCtx.operationsMetricsOutput(timingOut);
-		} catch (final IOException e) {
-			LogUtil.exception(Level.ERROR, e, "Failed to initialize timing metrics for mixed generator");
+		if (outputConfig.boolVal("metrics-timing-persist")) {
+			final Path timingPath = Paths.get(
+							System.getProperty("java.io.tmpdir"),
+							"spt", "timingMetrics_" + stepId + "_mixed");
+			try {
+				final Output timingOut = new ItemTimingMetricsFileOutput<>(timingPath);
+				stepCtx.operationsMetricsOutput(timingOut);
+			} catch (final IOException e) {
+				LogUtil.exception(Level.ERROR, e, "Failed to initialize timing metrics for mixed generator");
+			}
 		}
 	}
 

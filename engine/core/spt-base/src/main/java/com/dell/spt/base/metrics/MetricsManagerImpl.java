@@ -4,8 +4,6 @@ import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.metrics.MetricsConstants.metricLabelsArray;
-import static com.dell.spt.base.metrics.TimingMetricType.LATENCY;
-import static com.dell.spt.base.metrics.TimingMetricType.DURATION;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
@@ -21,20 +19,20 @@ import com.dell.spt.base.logging.MetricsTotalCsvLogMessage;
 import com.dell.spt.base.logging.StepResultsMetricsLogMessage;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
-import com.dell.spt.base.metrics.snapshot.TimingMetricQuantileResultsImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
 import com.dell.spt.base.metrics.util.CombinedCompletionCollector;
 import io.prometheus.client.Collector;
 import io.prometheus.client.CollectorRegistry;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
 import java.util.Objects;
@@ -67,6 +65,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
 	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
+	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
 	public MetricsManagerImpl(final VirtualThreadExecutor executor) {
 		super(executor);
@@ -200,8 +199,6 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	public void unregister(final MetricsContext metricsCtx) {
 		try (final Instance logCtx = put(KEY_STEP_ID, metricsCtx.loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			if (allMetrics.remove(metricsCtx)) {
-				TimingMetricQuantileResultsImpl latencyQuantiles = null;
-				TimingMetricQuantileResultsImpl durationQuantiles = null;
 				boolean lockAcquired = false;
 				try {
 					lockAcquired = outputLock.tryLock(LOCK_TIMEOUT_NANOS, TimeUnit.NANOSECONDS);
@@ -225,14 +222,16 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 					if (distributedEntry) {
 						final DistributedMetricsContext<?> distributedMetricsCtx = (DistributedMetricsContext<?>) metricsCtx;
-						final String timingMetricsDirPath = System.getProperty("java.io.tmpdir") + "/spt/";
-						final String timingMetricsFilePattern = "timingMetrics_" + metricsCtx.loadStepId();
-						latencyQuantiles = new TimingMetricQuantileResultsImpl(distributedMetricsCtx.quantileValues(),
-										LATENCY, distributedMetricsCtx.nodeCount(), timingMetricsDirPath,
-										timingMetricsFilePattern, metricsCtx.timingPersistEnabled());
-						durationQuantiles = new TimingMetricQuantileResultsImpl(distributedMetricsCtx.quantileValues(),
-										DURATION, distributedMetricsCtx.nodeCount(), timingMetricsDirPath,
-										timingMetricsFilePattern, metricsCtx.timingPersistEnabled());
+						final List<Double> quantileValues = timingQuantiles(distributedMetricsCtx.quantileValues());
+						final Map<Double, Long> latencyQuantiles = snapshot == null
+										? emptyQuantileValues(quantileValues)
+										: quantileValues(snapshot.latencySnapshot(), quantileValues);
+						final Map<Double, Long> durationQuantiles = snapshot == null
+										? emptyQuantileValues(quantileValues)
+										: quantileValues(snapshot.durationSnapshot(), quantileValues);
+						final Map<Double, Long> ttfbQuantiles = snapshot == null
+										? emptyQuantileValues(quantileValues)
+										: quantileValues(snapshot.ttfbSnapshot(), quantileValues);
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
 							if (hasProgress(snapshot)) {
@@ -253,8 +252,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							if (metricsCtx.sumPersistEnabled()) {
 								Loggers.METRICS_FILE_TOTAL.info(
 												new MetricsTotalCsvLogMessage(snapshot, metricsCtx.opType(),
-																metricsCtx.concurrencyLimit(), latencyQuantiles.getMetricsValues(),
-																durationQuantiles.getMetricsValues()));
+																metricsCtx.concurrencyLimit(), latencyQuantiles,
+																durationQuantiles, ttfbQuantiles));
 							}
 						}
 						// console output
@@ -268,8 +267,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 															metricsCtx.loadStepId(),
 															metricsCtx.concurrencyLimit(),
 															aggregSnapshot,
-															latencyQuantiles.getMetricsValues(),
-															durationQuantiles.getMetricsValues()));
+															latencyQuantiles,
+															durationQuantiles,
+															ttfbQuantiles));
 						} else {
 							Loggers.ERR.warn("Metrics snapshot is empty. No metrics were recorded apparently.");
 						}
@@ -332,16 +332,6 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
 					}
-					try {
-						if (null != latencyQuantiles) {
-							latencyQuantiles.close();
-						}
-						if (null != durationQuantiles) {
-							durationQuantiles.close();
-						}
-					} catch (final IOException e) {
-						LogUtil.exception(Level.WARN, e, "Failed to delete one of the temporary timing metrics files");
-					}
 				}
 			} else {
 				Loggers.ERR.debug("Metrics context \"{}\" has not been registered", metricsCtx);
@@ -370,6 +360,35 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							new ExtResultsXmlLogMessage(metricsCtx, snapshot));
 		}
 		metricsCtx.exitThresholdState();
+	}
+
+	private static List<Double> timingQuantiles(final List<Double> configuredQuantiles) {
+		final TreeSet<Double> quantiles = new TreeSet<>(STANDARD_TIMING_QUANTILES);
+		if (configuredQuantiles != null) {
+			for (final Double quantile : configuredQuantiles) {
+				if (quantile != null && quantile > 0.0 && quantile <= 1.0) {
+					quantiles.add(quantile);
+				}
+			}
+		}
+		return new ArrayList<>(quantiles);
+	}
+
+	private static Map<Double, Long> quantileValues(
+					final TimingMetricSnapshot snapshot, final List<Double> quantiles) {
+		final Map<Double, Long> values = new LinkedHashMap<>(quantiles.size());
+		for (final Double quantile : quantiles) {
+			values.put(quantile, snapshot == null || snapshot.count() == 0 ? null : snapshot.percentile(quantile));
+		}
+		return values;
+	}
+
+	private static Map<Double, Long> emptyQuantileValues(final List<Double> quantiles) {
+		final Map<Double, Long> values = new LinkedHashMap<>(quantiles.size());
+		for (final Double quantile : quantiles) {
+			values.put(quantile, 0L);
+		}
+		return values;
 	}
 
 	@Override
@@ -507,6 +526,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						snapshot.byteSnapshot().count(),
 						snapshot.latencySnapshot().mean(),
 						snapshot.durationSnapshot().mean(),
+						snapshot.latencySnapshot(),
+						snapshot.durationSnapshot(),
+						snapshot.ttfbSnapshot(),
 						snapshot.concurrencySnapshot().last(),
 						snapshot.concurrencySnapshot().mean(),
 						countLimit,

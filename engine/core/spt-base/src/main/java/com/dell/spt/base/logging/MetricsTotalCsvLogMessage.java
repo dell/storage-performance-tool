@@ -26,15 +26,24 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 	private final int concurrencyLimit;
 	private final Map<Double, Long> latencies;
 	private final Map<Double, Long> durations;
+	private final Map<Double, Long> ttfbs;
 
 	public MetricsTotalCsvLogMessage(
 					final AllMetricsSnapshot snapshot, final OpType opType, final int concurrencyLimit,
 					final Map<Double, Long> latencyQuantiles, final Map<Double, Long> durationQuantiles) {
+		this(snapshot, opType, concurrencyLimit, latencyQuantiles, durationQuantiles, Map.of());
+	}
+
+	public MetricsTotalCsvLogMessage(
+					final AllMetricsSnapshot snapshot, final OpType opType, final int concurrencyLimit,
+					final Map<Double, Long> latencyQuantiles, final Map<Double, Long> durationQuantiles,
+					final Map<Double, Long> ttfbQuantiles) {
 		this.snapshot = snapshot;
 		this.opType = opType;
 		this.concurrencyLimit = concurrencyLimit;
 		this.latencies = latencyQuantiles;
 		this.durations = durationQuantiles;
+		this.ttfbs = ttfbQuantiles;
 	}
 
 	@Override
@@ -60,7 +69,13 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 							.append(quantile)
 							.append("[us],");
 		}
-		strb.append("LatencyMax[us]")
+		strb.append("LatencyMax[us],TtfbAvg[us],TtfbMin[us],");
+		for (Double quantile : ttfbs.keySet()) {
+			strb.append("TtfbQ_")
+							.append(quantile)
+							.append("[us],");
+		}
+		strb.append("TtfbMax[us]")
 						.append(lineSep);
 
 		final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
@@ -68,6 +83,8 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		final RateMetricSnapshot successCountSnapshot = snapshot.successSnapshot();
 		final RateMetricSnapshot byteCountSnapshot = snapshot.byteSnapshot();
 		final TimingMetricSnapshot latencySnapshot = snapshot.latencySnapshot();
+		final TimingMetricSnapshot ttfbSnapshot = snapshot.ttfbSnapshot();
+		final boolean ttfbAvailable = ttfbSnapshot != null && ttfbSnapshot.count() > 0;
 
 		strb.append('"')
 						.append(DateUtil.formatIso8601(Instant.now()))
@@ -107,8 +124,7 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 						.append(',');
 
 		for (Double quantile : durations.keySet()) {
-			strb.append(durations.get(quantile))
-							.append(',');
+			appendCsvValue(strb, durations.get(quantile)).append(',');
 		}
 
 		strb.append(durationSnapshot.max())
@@ -119,10 +135,30 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 						.append(',');
 
 		for (Double quantile : latencies.keySet()) {
-			strb.append(latencies.get(quantile))
-							.append(',');
+			appendCsvValue(strb, latencies.get(quantile)).append(',');
 		}
 
-		strb.append(latencySnapshot.max());
+		strb.append(latencySnapshot.max())
+						.append(',');
+		if (ttfbAvailable) {
+			strb.append(ttfbSnapshot.mean())
+							.append(',')
+							.append(ttfbSnapshot.min())
+							.append(',');
+			for (Double quantile : ttfbs.keySet()) {
+				appendCsvValue(strb, ttfbs.get(quantile)).append(',');
+			}
+			strb.append(ttfbSnapshot.max());
+		} else {
+			strb.append(',');
+			for (Double ignored : ttfbs.keySet()) {
+				strb.append(',');
+			}
+			strb.append(',');
+		}
+	}
+
+	private static StringBuilder appendCsvValue(final StringBuilder strb, final Long value) {
+		return value == null ? strb : strb.append(value);
 	}
 }

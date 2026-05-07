@@ -139,13 +139,25 @@ public class LoadStepContextSplitGateTest {
 		public void markSucc(long b, long d, long l) {}
 
 		@Override
+		public void markSucc(long b, long d, long l, long ttfb) {}
+
+		@Override
 		public void markPartSucc(long b, long d, long l) {}
+
+		@Override
+		public void markPartSucc(long b, long d, long l, long ttfb) {}
 
 		@Override
 		public void markSucc(long c, long b, long[] d, long[] l) {}
 
 		@Override
+		public void markSucc(long c, long b, long[] d, long[] l, long[] ttfb) {}
+
+		@Override
 		public void markPartSucc(long b, long[] d, long[] l) {}
+
+		@Override
+		public void markPartSucc(long b, long[] d, long[] l, long[] ttfb) {}
 
 		@Override
 		public void markFail() {}

@@ -191,7 +191,7 @@ func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {
 }
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {
-	headers := []string{"Phase", "Object Size", "Success", "Data Moved", "IOPS Avg", "Latency Mean", "Bandwidth Avg"}
+	headers := []string{"Phase", "Object Size", "Success", "Data Moved", "IOPS Avg", "Latency P50", "Bandwidth Avg"}
 	isList := strings.EqualFold(summary.Workload.Type, workloadTypeList)
 	if isList {
 		headers[4] = "Ops/s Avg"
@@ -212,7 +212,7 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			formatInt(m.SuccessCount),
 			formatBytesHuman(m.DataBytes),
 			formatNumber(m.ThroughputAvgOps, "ops/s"),
-			formatNumber(m.LatencyMeanMs, "ms"),
+			formatNumber(m.LatencyHeadlineMs, "ms"),
 			formatNumber(m.BandwidthAvgMBps, "MB/s"),
 		}
 		rows = append(rows, row)

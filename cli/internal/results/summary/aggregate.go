@@ -97,8 +97,15 @@ type PhaseMetrics struct {
 	ThroughputLastOps float64
 	BandwidthAvgMBps  float64
 	BandwidthLastMBps float64
-	LatencyMeanMs     float64
+	LatencyHeadlineMs float64
 	LatencyMedianMs   float64
+	LatencyP90Ms      float64
+	LatencyP99Ms      float64
+	LatencyP999Ms     float64
+	TTFBMedianMs      float64
+	TTFBP90Ms         float64
+	TTFBP99Ms         float64
+	TTFBP999Ms        float64
 	ObjectSizeBytes   int64
 	ObjectSizeMB      float64
 	ObjectSizeGiB     float64
@@ -287,8 +294,15 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		ThroughputLastOps: row.ThroughputLastOps,
 		BandwidthAvgMBps:  row.BandwidthAvgMBps,
 		BandwidthLastMBps: row.BandwidthLastMBps,
-		LatencyMeanMs:     row.LatencyAvgMicros / 1000.0,
+		LatencyHeadlineMs: preferredLatencyMicros(row) / 1000.0,
 		LatencyMedianMs:   row.LatencyP50Micros / 1000.0,
+		LatencyP90Ms:      row.LatencyP90Micros / 1000.0,
+		LatencyP99Ms:      row.LatencyP99Micros / 1000.0,
+		LatencyP999Ms:     row.LatencyP999Micros / 1000.0,
+		TTFBMedianMs:      row.TTFBP50Micros / 1000.0,
+		TTFBP90Ms:         row.TTFBP90Micros / 1000.0,
+		TTFBP99Ms:         row.TTFBP99Micros / 1000.0,
+		TTFBP999Ms:        row.TTFBP999Micros / 1000.0,
 		Concurrency:       row.Concurrency,
 		ConcurrencyMean:   row.ConcurrencyMean,
 		NodeCount:         row.NodeCount,
@@ -302,6 +316,13 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
 	}
 	return metrics
+}
+
+func preferredLatencyMicros(row MetricsTotalsRow) float64 {
+	if row.LatencyP50Micros > 0 {
+		return row.LatencyP50Micros
+	}
+	return row.LatencyAvgMicros
 }
 
 func selectMetricsRow(totals *MetricsTotals, operationHint string) MetricsTotalsRow {

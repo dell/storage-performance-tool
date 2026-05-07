@@ -28,6 +28,7 @@ javaCommons = "2.3.6"
 # Performance and utilities
 disruptor = "3.4.2"
 fastutil = "8.5.18"
+hdrHistogram = "2.2.2"
 javassist = "3.30.2-GA"  # Updated from 3.29.2-GA
 prometheus = "0.16.0"  # Updated from 0.6.0 - significant improvements
 nashorn = "15.7"
@@ -111,6 +112,7 @@ netty-connection-pool = { module = "com.github.akurilov:netty-connection-pool", 
 # Performance and utilities
 disruptor = { module = "com.lmax:disruptor", version.ref = "disruptor" }
 fastutil = { module = "it.unimi.dsi:fastutil", version.ref = "fastutil" }
+hdr-histogram = { module = "org.hdrhistogram:HdrHistogram", version.ref = "hdrHistogram" }
 javassist = { module = "org.javassist:javassist", version.ref = "javassist" }
 prometheus-simpleclient = { module = "io.prometheus:simpleclient", version.ref = "prometheus" }
 prometheus-simpleclient-common = { module = "io.prometheus:simpleclient_common", version.ref = "prometheus" }
