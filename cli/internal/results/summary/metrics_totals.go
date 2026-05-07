@@ -34,8 +34,19 @@ type MetricsTotalsRow struct {
 	BandwidthLastMBps   float64
 	DurationAvgMicros   float64
 	DurationP50Micros   float64
+	DurationP90Micros   float64
+	DurationP99Micros   float64
+	DurationP999Micros  float64
 	LatencyAvgMicros    float64
 	LatencyP50Micros    float64
+	LatencyP90Micros    float64
+	LatencyP99Micros    float64
+	LatencyP999Micros   float64
+	TTFBAvgMicros       float64
+	TTFBP50Micros       float64
+	TTFBP90Micros       float64
+	TTFBP99Micros       float64
+	TTFBP999Micros      float64
 	SampleTimestamp     string
 }
 
@@ -56,8 +67,19 @@ const (
 	columnBWLast          = "BWLast[MB/s]"
 	columnDurationAvg     = "DurationAvg[us]"
 	columnDurationP50     = "DurationQ_0.5[us]"
+	columnDurationP90     = "DurationQ_0.9[us]"
+	columnDurationP99     = "DurationQ_0.99[us]"
+	columnDurationP999    = "DurationQ_0.999[us]"
 	columnLatencyAvg      = "LatencyAvg[us]"
 	columnLatencyP50      = "LatencyQ_0.5[us]"
+	columnLatencyP90      = "LatencyQ_0.9[us]"
+	columnLatencyP99      = "LatencyQ_0.99[us]"
+	columnLatencyP999     = "LatencyQ_0.999[us]"
+	columnTTFBAvg         = "TtfbAvg[us]"
+	columnTTFBP50         = "TtfbQ_0.5[us]"
+	columnTTFBP90         = "TtfbQ_0.9[us]"
+	columnTTFBP99         = "TtfbQ_0.99[us]"
+	columnTTFBP999        = "TtfbQ_0.999[us]"
 )
 
 var requiredColumns = []string{
@@ -176,12 +198,23 @@ func parseMetricsTotalsRow(record []string, index map[string]int) (MetricsTotals
 	if row.DurationP50Micros, err = parseFloat(record, index, columnDurationP50); err != nil {
 		return row, err
 	}
+	row.DurationP90Micros, _ = parseFloat(record, index, columnDurationP90)
+	row.DurationP99Micros, _ = parseFloat(record, index, columnDurationP99)
+	row.DurationP999Micros, _ = parseFloat(record, index, columnDurationP999)
 	if row.LatencyAvgMicros, err = parseFloat(record, index, columnLatencyAvg); err != nil {
 		return row, err
 	}
 	if row.LatencyP50Micros, err = parseFloat(record, index, columnLatencyP50); err != nil {
 		return row, err
 	}
+	row.LatencyP90Micros, _ = parseFloat(record, index, columnLatencyP90)
+	row.LatencyP99Micros, _ = parseFloat(record, index, columnLatencyP99)
+	row.LatencyP999Micros, _ = parseFloat(record, index, columnLatencyP999)
+	row.TTFBAvgMicros, _ = parseFloat(record, index, columnTTFBAvg)
+	row.TTFBP50Micros, _ = parseFloat(record, index, columnTTFBP50)
+	row.TTFBP90Micros, _ = parseFloat(record, index, columnTTFBP90)
+	row.TTFBP99Micros, _ = parseFloat(record, index, columnTTFBP99)
+	row.TTFBP999Micros, _ = parseFloat(record, index, columnTTFBP999)
 
 	return row, nil
 }
