@@ -149,6 +149,8 @@ func TestBuildRunMetadataPopulatesCoreFields(t *testing.T) {
 		SptImage:        "repo/spt:latest",
 		Command:         cmd,
 	})
+	meta.TraceFile = "results/mt-20260506.204108.064/spt-20260506.204108.064.trace.log"
+	meta.TraceAuto = true
 
 	if meta.ScenarioFile != "scenario.js" {
 		t.Fatalf("ScenarioFile = %q, want scenario.js", meta.ScenarioFile)
@@ -164,5 +166,11 @@ func TestBuildRunMetadataPopulatesCoreFields(t *testing.T) {
 	}
 	if len(meta.ExpectedStepIDs) != 1 || meta.ExpectedStepIDs[0] != "step-001" {
 		t.Fatalf("ExpectedStepIDs = %+v, want [step-001]", meta.ExpectedStepIDs)
+	}
+	if meta.TraceFile == "" {
+		t.Fatalf("TraceFile should be populated")
+	}
+	if !meta.TraceAuto {
+		t.Fatalf("TraceAuto should be true")
 	}
 }

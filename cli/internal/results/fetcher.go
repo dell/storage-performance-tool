@@ -72,6 +72,7 @@ type Manifest struct {
 	OutputDir   string         `json:"outputDir"`
 	GeneratedAt time.Time      `json:"generatedAt"`
 	Steps       []StepManifest `json:"steps"`
+	RunFiles    []FileStatus   `json:"runFiles,omitempty"`
 }
 
 // Fetcher downloads artifacts for steps via the /logs endpoints.

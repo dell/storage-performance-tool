@@ -23,6 +23,8 @@ type runMetadata struct {
 	SptImage             string                 `json:"sptImage"`
 	APIPort              string                 `json:"apiPort"`
 	BaseURL              string                 `json:"baseUrl"`
+	TraceFile            string                 `json:"traceFile,omitempty"`
+	TraceAuto            bool                   `json:"traceAuto,omitempty"`
 	Label                string                 `json:"label"`
 	ResultsDir           string                 `json:"resultsDir"`
 	ResultsRoot          string                 `json:"resultsRoot"`

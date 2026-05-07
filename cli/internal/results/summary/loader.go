@@ -267,6 +267,8 @@ type RunParams struct {
 	SptImage           string            `json:"sptImage"`
 	APIPort            string            `json:"apiPort"`
 	BaseURL            string            `json:"baseUrl"`
+	TraceFile          string            `json:"traceFile"`
+	TraceAuto          bool              `json:"traceAuto"`
 	Label              string            `json:"label"`
 	ResultsDir         string            `json:"resultsDir"`
 	ResultsRoot        string            `json:"resultsRoot"`
