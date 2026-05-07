@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -227,6 +228,7 @@ func (r *MultiHostHeadlessRunner) writeTraceHeader(filename string, hostCount in
 	header += fmt.Sprintf("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	header += fmt.Sprintf("Runtime: %s %s\n", runtime.GOOS, runtime.GOARCH)
 	header += fmt.Sprintf("Trace File: %s\n", filename)
+	header += fmt.Sprintf("Command: %s\n", cmdline.FormatForArtifact(os.Args))
 	header += strings.Repeat("=", 50) + "\n"
 
 	fmt.Print(header)
@@ -481,11 +483,16 @@ func (r *HeadlessRunner) writeTraceHeader(filename string) {
 		return
 	}
 
+	command := cmdline.FormatForArtifact(os.Args)
+	if command == "" {
+		command = "<unknown>"
+	}
 	header := fmt.Sprintf(`# Trace file: %s
 # Generated: %s
+# Command: %s
 # System: %s/%s
 #
-`, filename, time.Now().Format("2006-01-02 15:04:05"), runtime.GOOS, runtime.GOARCH)
+`, filename, time.Now().Format("2006-01-02 15:04:05"), command, runtime.GOOS, runtime.GOARCH)
 
 	_, _ = r.traceFile.WriteString(header) //nolint:errcheck
 }

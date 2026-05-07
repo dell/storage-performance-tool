@@ -614,6 +614,13 @@ Trace files include:
 - System metadata and command information
 - Execution timeline with precise timestamps
 
+When `--auto-results` is enabled and `--trace-file` is not set, spt now auto-creates a per-run trace file:
+- Path: `<results-root>/spt-<runTimestamp>.trace.log`
+- Applies to both headless and TUI runs
+- Auto traces always start fresh (no append)
+- If the results-root trace path cannot be initialized, spt falls back to `./spt-<runTimestamp>.trace.log` and prints a warning
+- The trace is recorded in the results bundle manifest (`index.json` → `runFiles`) and run metadata (`spt_run_params.json` → `traceFile`, `traceAuto`)
+
 ### Logging and Debugging
 
 `spt` provides multiple debugging approaches depending on your needs:
