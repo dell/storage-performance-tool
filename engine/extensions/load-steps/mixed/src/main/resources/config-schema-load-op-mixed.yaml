@@ -3,7 +3,8 @@
 # Mixed workload operation weight distribution (must sum to 100).
 load:
   op:
-    weight:
+    # Plural to avoid colliding with WeightedLoad's scalar load.op.weight.
+    weights:
       get: int
       put: int
       delete: int

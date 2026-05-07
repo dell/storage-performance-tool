@@ -3,7 +3,7 @@
 # the command line arguments or load step configurations in the scenario files instead.
 load:
   op:
-    weight:
+    weights:
       get: 45
       stat: 30
       put: 15

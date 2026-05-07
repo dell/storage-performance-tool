@@ -200,7 +200,7 @@ MixedLoad
                 "id": "${STEP_MIXED}"
             },
             "op": {
-                "weight": {
+                "weights": {
                     "get": ${MIXED_GET},
                     "put": ${MIXED_PUT},
                     "delete": ${MIXED_DELETE},

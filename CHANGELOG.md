@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- **Mixed workload distribution config key** — renamed the mixed workload engine config from `load.op.weight.{get,put,delete,stat}` to `load.op.weights.{get,put,delete,stat}` to avoid colliding with `WeightedLoad`'s scalar `load.op.weight` key. CLI-generated `spt run mixed` scenarios use the new key automatically; hand-written `MixedLoad` scenarios should be updated.
+
 ## [5.9.2] - 2026-05-05
 
 ### Fixed
