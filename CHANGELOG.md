@@ -6,9 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.10.0] - 2026-05-07
+
+### Added
+
+- **Real-time latency percentiles** — latency is now tracked in memory and reported as percentiles (`p50`, `p90`, `p99`, `p99.9`) through the Metrics API and final CLI/TUI summaries. The TUI now shows `p50` in place of mean.
+- **Time-to-first-byte tracking** — TTFB is now recorded for body-returning operations, including LIST, and included in final reporting when available.
+
 ### Changed
 
 - **Mixed workload distribution config key** — renamed the mixed workload engine config from `load.op.weight.{get,put,delete,stat}` to `load.op.weights.{get,put,delete,stat}` to avoid colliding with `WeightedLoad`'s scalar `load.op.weight` key. CLI-generated `spt run mixed` scenarios use the new key automatically; hand-written `MixedLoad` scenarios should be updated.
+- **Trace output capture** — trace runs now record invocation details and attach trace output to run metadata and auto-results.
+
+### Fixed
+
+- **Mixed workload weighting and TTFB edge cases** — corrected mixed workload weighting behavior and tightened TTFB start timing so valid zero-length body-returning operations are not dropped.
 
 ## [5.9.2] - 2026-05-05
 
