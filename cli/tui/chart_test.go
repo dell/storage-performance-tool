@@ -195,7 +195,7 @@ func TestGenericChartRenderer_NarrowWidth(t *testing.T) {
 }
 
 func TestLatencyChartRenderer(t *testing.T) {
-	cr := NewGenericChartRenderer("Mean Latency", "", ExtractMeanLatency, FormatLatencyValue)
+	cr := NewGenericChartRenderer("Display Latency", "", ExtractDisplayLatency, FormatLatencyValue)
 	mc := NewMetricsCollector()
 
 	// Add some test data with latency values

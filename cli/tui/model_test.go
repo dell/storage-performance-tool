@@ -911,8 +911,8 @@ func TestChartIntegrationInTUI(t *testing.T) {
 	if !strings.Contains(view, "Operations/sec") {
 		t.Error("Expected view to contain Operations/sec chart title")
 	}
-	if !strings.Contains(view, "Mean Latency") {
-		t.Error("Expected view to contain Mean Latency chart title")
+	if !strings.Contains(view, "Latency P50") {
+		t.Error("Expected view to contain Latency P50 chart title")
 	}
 
 	// Should contain ops/s in the chart area
