@@ -97,6 +97,14 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 
 	protected abstract void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders);
 
+	private void startDataResponse(final Operation<?> op, final Runnable startDataResponseAction) {
+		try {
+			startDataResponseAction.run();
+		} catch (final IllegalStateException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}", op.toString());
+		}
+	}
+
 	protected void handleResponseContentChunk(final Channel channel, final O op, final ByteBuf contentChunk)
 					throws IOException {
 		if (OpType.READ.equals(op.type())) {
@@ -106,11 +114,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
 					if (dataOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
-						try {
-							dataOp.startDataResponse();
-						} catch (final IllegalStateException e) {
-							LogUtil.exception(Level.DEBUG, e, "{}", dataOp.toString());
-						}
+						startDataResponse(dataOp, dataOp::startDataResponse);
 					}
 					if (verifyFlag) {
 						if (!RESP_FAIL_CORRUPT.equals(op.status())) {
@@ -126,7 +130,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
 					if (pathOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
-						pathOp.startDataResponse();
+						startDataResponse(pathOp, pathOp::startDataResponse);
 					}
 					pathOp.countBytesDone(countBytesDone + chunkSize);
 				}
@@ -136,7 +140,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
 					if (tokenOp.respDataTimeStart() == 0) { // if not set yet - 1st non-empty chunk
-						tokenOp.startDataResponse();
+						startDataResponse(tokenOp, tokenOp::startDataResponse);
 					}
 					tokenOp.countBytesDone(countBytesDone + chunkSize);
 				}
