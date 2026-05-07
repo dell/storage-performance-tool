@@ -103,7 +103,7 @@ MixedLoad
                 "id": "{{.StepIDMixed}}"
             },
             "op": {
-                "weight": {
+                "weights": {
                     "get": {{.GetDistrib}},
                     "put": {{.PutDistrib}},
                     "delete": {{.DeleteDistrib}},

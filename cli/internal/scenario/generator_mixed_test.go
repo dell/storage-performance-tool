@@ -41,6 +41,7 @@ func TestGenerateMixedScenario(t *testing.T) {
 				`PreconditionLoad`,
 				`"count": seedCount`,
 				`MixedLoad`,
+				`"weights": {`,
 				`"get": 45`,
 				`"put": 30`,
 				`"delete": 15`,

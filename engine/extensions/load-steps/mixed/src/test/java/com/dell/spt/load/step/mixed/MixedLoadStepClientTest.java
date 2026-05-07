@@ -52,11 +52,13 @@ class MixedLoadStepClientTest {
 		opLimit.put("fail", opLimitFail);
 		op.put("limit", opLimit);
 		op.put("type", String.class);
-		final Map<String, Object> weight = new HashMap<>();
-		weight.put("get", Integer.class);
-		weight.put("put", Integer.class);
-		weight.put("delete", Integer.class);
-		op.put("weight", weight);
+		op.put("weight", Integer.class); // WeightedLoad scalar key; MixedLoad uses weights below.
+		final Map<String, Object> weights = new HashMap<>();
+		weights.put("get", Integer.class);
+		weights.put("put", Integer.class);
+		weights.put("delete", Integer.class);
+		weights.put("stat", Integer.class);
+		op.put("weights", weights);
 		load.put("op", op);
 
 		final Map<String, Object> batch = new HashMap<>();
@@ -165,11 +167,13 @@ class MixedLoadStepClientTest {
 		opLimit.put("fail", opLimitFail);
 		op.put("limit", opLimit);
 		op.put("type", "create");
-		final Map<String, Object> weight = new HashMap<>();
-		weight.put("get", 60);
-		weight.put("put", 25);
-		weight.put("delete", 15);
-		op.put("weight", weight);
+		op.put("weight", 1); // WeightedLoad scalar key; MixedLoad uses weights below.
+		final Map<String, Object> weights = new HashMap<>();
+		weights.put("get", 60);
+		weights.put("put", 25);
+		weights.put("delete", 15);
+		weights.put("stat", 0);
+		op.put("weights", weights);
 		load.put("op", op);
 
 		final Map<String, Object> batch = new HashMap<>();
@@ -288,6 +292,30 @@ class MixedLoadStepClientTest {
 		assertEquals("base-step", client.loadStepId());
 		assertEquals("base-step", withCtx.loadStepId());
 		assertEquals(MixedLoadStepExtension.TYPE, withCtx.getTypeName());
+	}
+
+	@Test
+	@DisplayName("config(Map) accepts mixed weights when weighted scalar weight is present")
+	void testConfigAcceptsMixedWeightsWithWeightedScalarPresent() {
+		final Config cfg = newBaseConfig();
+		final MixedLoadStepClient client = new MixedLoadStepClient(
+						cfg, Collections.<Extension> emptyList(), null, null);
+
+		final MixedLoadStepClient copy = assertDoesNotThrow(
+						() -> client.config(
+										Map.of(
+														"load",
+														Map.of(
+																		"op",
+																		Map.of(
+																						"weights",
+																						Map.of(
+																										"get", 45,
+																										"put", 15,
+																										"delete", 10,
+																										"stat", 30))))));
+
+		assertDoesNotThrow(copy::init);
 	}
 
 	/** Minimal {@link com.dell.spt.base.item.Item} stub for queue tests. */

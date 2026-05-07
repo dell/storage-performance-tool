@@ -149,10 +149,10 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final ItemFactory itemFactory = ItemType.getItemFactory(itemType);
 
 		// ── 4. Read weights → build OpSchedule ─────────────────────────────
-		final int getWeight = mergedConfig.intVal("load-op-weight-get");
-		final int putWeight = mergedConfig.intVal("load-op-weight-put");
-		final int deleteWeight = mergedConfig.intVal("load-op-weight-delete");
-		final int statWeight = mergedConfig.intVal("load-op-weight-stat");
+		final int getWeight = mergedConfig.intVal("load-op-weights-get");
+		final int putWeight = mergedConfig.intVal("load-op-weights-put");
+		final int deleteWeight = mergedConfig.intVal("load-op-weights-delete");
+		final int statWeight = mergedConfig.intVal("load-op-weights-stat");
 
 		final int nonZero = (getWeight > 0 ? 1 : 0) + (putWeight > 0 ? 1 : 0)
 						+ (deleteWeight > 0 ? 1 : 0) + (statWeight > 0 ? 1 : 0);
