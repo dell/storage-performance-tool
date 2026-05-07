@@ -1,3 +1,4 @@
+// Package cmdline provides helpers to sanitize and render CLI args for logs/artifacts.
 package cmdline
 
 import (

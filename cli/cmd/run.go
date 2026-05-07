@@ -382,22 +382,23 @@ func prepareTraceOptions(explicitPath string, explicitAppend bool, autoResults b
 
 	name := fmt.Sprintf("spt-%s.trace.log", runToken)
 	primaryPath := filepath.Join(plannedResultsRoot, name)
-	if err := ensureTracePathWritable(primaryPath, false); err == nil {
+	primaryErr := ensureTracePathWritable(primaryPath, false)
+	if primaryErr == nil {
 		return traceOptions{Path: primaryPath, Append: false, Auto: true}, nil
-	} else {
-		fallbackPath := filepath.Join(".", name)
-		if warnOut != nil {
-			_, _ = fmt.Fprintf(
-				warnOut,
-				"Warning: could not initialize auto trace file at %s (%v); falling back to %s\n",
-				primaryPath, err, fallbackPath,
-			)
-		}
-		if fallbackErr := ensureTracePathWritable(fallbackPath, false); fallbackErr != nil {
-			return traceOptions{}, fmt.Errorf("failed to initialize fallback trace file: %w", fallbackErr)
-		}
-		return traceOptions{Path: fallbackPath, Append: false, Auto: true}, nil
 	}
+
+	fallbackPath := filepath.Join(".", name)
+	if warnOut != nil {
+		_, _ = fmt.Fprintf(
+			warnOut,
+			"Warning: could not initialize auto trace file at %s (%v); falling back to %s\n",
+			primaryPath, primaryErr, fallbackPath,
+		)
+	}
+	if fallbackErr := ensureTracePathWritable(fallbackPath, false); fallbackErr != nil {
+		return traceOptions{}, fmt.Errorf("failed to initialize fallback trace file: %w", fallbackErr)
+	}
+	return traceOptions{Path: fallbackPath, Append: false, Auto: true}, nil
 }
 
 func ensureTracePathWritable(path string, appendMode bool) error {
