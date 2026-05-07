@@ -96,6 +96,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				extends HttpStorageDriverBase<I, O>
 				implements com.dell.spt.base.storage.driver.ListDiscoveryProbe {
 
+	private static final String REDACTED_HEADER_VALUE = "<redacted>";
+
 	protected static final Base64.Encoder BASE64_ENCODER = Base64.getEncoder();
 	protected static final ThreadLocal<SAXParser> THREAD_LOCAL_XML_PARSER = new ThreadLocal<>();
 	protected static final ThreadLocal<StringBuilder> BUFF_CANONICAL = ThreadLocal.withInitial(StringBuilder::new),
@@ -445,7 +447,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var bucketPath = SLASH + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
 		final var uriQuery = uriQuery();
 		final var uri = uriQuery == null || uriQuery.isEmpty() ? bucketPath : bucketPath + uriQuery;
-		Loggers.MSG.info(
+		Loggers.MSG.debug(
 						"requestNewPath: path={}, relPath={}, bucketPath={}, uri={}",
 						path,
 						relPath,
@@ -460,8 +462,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applySharedHeaders(reqHeaders);
 		final var credential = pathToCredMap.getOrDefault(uri, this.credential);
 		applyAuthHeaders(reqHeaders, HttpMethod.HEAD, uri, credential);
-		for (final var header : reqHeaders) {
-			Loggers.MSG.info("requestNewPath HEAD header {}: {}", header.getKey(), header.getValue());
+		if (Loggers.MSG.isDebugEnabled()) {
+			for (final var header : reqHeaders) {
+				Loggers.MSG.debug(
+								"requestNewPath HEAD header {}: {}",
+								header.getKey(),
+								safeHeaderValueForLogging(header.getKey(), header.getValue()));
+			}
 		}
 		final FullHttpRequest checkBucketReq = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
@@ -561,6 +568,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		}
 		return path;
+	}
+
+	static String safeHeaderValueForLogging(final String headerName, final String headerValue) {
+		final String normalizedHeaderName = headerName.toLowerCase(Locale.ROOT);
+		if (HttpHeaderNames.AUTHORIZATION.contentEqualsIgnoreCase(headerName) ||
+						HttpHeaderNames.COOKIE.contentEqualsIgnoreCase(headerName) ||
+						"x-amz-security-token".equals(normalizedHeaderName)) {
+			return REDACTED_HEADER_VALUE;
+		}
+		return headerValue;
 	}
 
 	protected void handleCheckBucketVersioningResponse(

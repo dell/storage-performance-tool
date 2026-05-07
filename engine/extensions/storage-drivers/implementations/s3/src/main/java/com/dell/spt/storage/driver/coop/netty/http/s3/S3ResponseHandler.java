@@ -87,9 +87,21 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		if (op instanceof CompositeDataOperation) {
 			handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
 		} else if (op instanceof ListOperation) {
+			final ListOperation<?> listOp = (ListOperation<?>) op;
+			markListDataResponseStart(listOp, contentChunk.readableBytes());
 			bufferListContent(channel, contentChunk);
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
+		}
+	}
+
+	private void markListDataResponseStart(final ListOperation<?> op, final int chunkSize) {
+		if (chunkSize > 0 && op.respDataTimeStart() == 0) {
+			try {
+				op.startDataResponse();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(Level.DEBUG, e, "{}", op.toString());
+			}
 		}
 	}
 

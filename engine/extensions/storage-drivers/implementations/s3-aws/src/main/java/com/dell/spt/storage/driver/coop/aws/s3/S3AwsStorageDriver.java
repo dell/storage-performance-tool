@@ -780,6 +780,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return s3AsyncClient.listObjectsV2(reqBuilder.build())
 						.thenAccept(resp -> {
+							markListDataResponseStart(listOp);
 							int objectCount = 0;
 							long bytesTotal = 0;
 							String firstKey = null;
@@ -817,6 +818,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							}
 							listOp.countBytesDone(listOp.bytesListed());
 						});
+	}
+
+	private void markListDataResponseStart(final ListOperation<? extends PathItem> op) {
+		if (op.respDataTimeStart() == 0) {
+			try {
+				op.startDataResponse();
+			} catch (final IllegalStateException e) {
+				LOG.debug("{}: failed to mark LIST data response start", op, e);
+			}
+		}
 	}
 
 	/**

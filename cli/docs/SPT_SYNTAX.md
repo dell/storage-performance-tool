@@ -636,7 +636,7 @@ spt run mixed \
 **How it works:**
 
 1. **Seed phase** — writes `--seed-objects` objects to populate the read/delete pools. Skipped when `--read-items-file` is provided.
-2. **Mixed benchmark** — runs for `--duration`, issuing operations at the specified weights. The engine's `MixedLoad` step draws from the item set for GETs, STATs, and DELETEs while PUTs create new objects. Objects created by PUT that are not consumed by DELETE during the benchmark are tracked in a `put-remaining.csv` artifact (fetched to the results directory), giving you an exact inventory of objects left behind.
+2. **Mixed benchmark** — runs for `--duration`, issuing operations at the specified weights. The engine's `MixedLoad` step draws from the item set for GETs, STATs, and DELETEs while PUTs create new objects. PUT-created objects are eligible for DELETE during the benchmark. Exact final reporting of PUT-created objects that remain after mixed DELETEs is deferred.
 3. **Cleanup** (optional, `--cleanup`) — deletes the seed objects and any objects created by PUT operations during the benchmark.
 
 ### Distributed / Attach Mode

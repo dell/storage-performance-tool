@@ -308,6 +308,26 @@ public class S3StorageDriverTest {
 
 	// ---------- requestNewPath ----------
 	@Test
+	void requestNewPathLogHeaderValue_redactsSensitiveHeaders() {
+		assertEquals(
+						"<redacted>",
+						S3StorageDriver.safeHeaderValueForLogging(
+										HttpHeaderNames.AUTHORIZATION.toString(), "AWS access:signature"));
+		assertEquals(
+						"<redacted>",
+						S3StorageDriver.safeHeaderValueForLogging(
+										HttpHeaderNames.COOKIE.toString(), "session=secret"));
+		assertEquals(
+						"<redacted>",
+						S3StorageDriver.safeHeaderValueForLogging(
+										"x-amz-security-token", "temporary-token"));
+		assertEquals(
+						"bucket.example.com",
+						S3StorageDriver.safeHeaderValueForLogging(
+										HttpHeaderNames.HOST.toString(), "bucket.example.com"));
+	}
+
+	@Test
 	void requestNewPath_createsBucketWhenMissing() throws Exception {
 		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);

@@ -62,7 +62,8 @@ import static com.github.akurilov.confuse.Config.deepToMap;
  *
  * <p>PUT-created items are:
  * <ol>
- *   <li>Written to {@code put-remaining.csv} so the cleanup phase can delete them.
+ *   <li>Written to {@code put-remaining.csv} for post-run cleanup. Exact remaining-set
+ *       generation is deferred.
  *   <li>Pushed into the {@link PoolItemInput} delete queue so freshly-written objects
  *       are eligible for deletion in the same run.
  * </ol>
