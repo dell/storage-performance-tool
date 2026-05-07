@@ -20,6 +20,9 @@ func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	tmpDir := t.TempDir()
 	tracePath := filepath.Join(tmpDir, "tui.trace.log")
 	model := InitialModel()
+	oldArgs := os.Args
+	os.Args = []string{"spt", "run", "read", "--trace-file", tracePath}
+	defer func() { os.Args = oldArgs }()
 
 	_, f, err := newProgramWithTrace(model, tracePath, false)
 	if err != nil {
@@ -38,6 +41,9 @@ func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	s := string(content)
 	if !strings.Contains(s, "# TUI trace file:") {
 		t.Fatalf("trace header missing: %q", s)
+	}
+	if !strings.Contains(s, "# Command: spt run read --trace-file") {
+		t.Fatalf("trace command header missing: %q", s)
 	}
 	if !strings.Contains(s, "first") {
 		t.Fatalf("trace content missing first marker: %q", s)
@@ -63,6 +69,14 @@ func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	}
 	if !strings.Contains(s2, "first") || !strings.Contains(s2, "second") {
 		t.Fatalf("append content missing markers: %q", s2)
+	}
+}
+
+func TestFormatCommandLine_QuotesWhitespaceAndSpecialChars(t *testing.T) {
+	got := formatCommandLine([]string{"spt", "run", "--name", "my run", "--note", `a"b`})
+	want := `spt run --name "my run" --note "a\"b"`
+	if got != want {
+		t.Fatalf("formatCommandLine mismatch\nwant: %s\ngot:  %s", want, got)
 	}
 }
 

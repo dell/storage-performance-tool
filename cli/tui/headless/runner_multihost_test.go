@@ -100,6 +100,9 @@ func TestNewMultiHostHeadlessRunner_WithTraceFile(t *testing.T) {
 	if !strings.Contains(contentStr, "1 hosts") {
 		t.Errorf("Trace file should contain host count, got: %s", contentStr)
 	}
+	if !strings.Contains(contentStr, "Command:") {
+		t.Errorf("Trace file should contain command line, got: %s", contentStr)
+	}
 }
 
 func TestNewMultiHostHeadlessRunner_TraceFileAppend(t *testing.T) {
@@ -152,6 +155,9 @@ func TestNewMultiHostHeadlessRunner_TraceFileAppend(t *testing.T) {
 
 	if !strings.Contains(contentStr, "Multi-Host") {
 		t.Errorf("Trace file should contain new multi-host header when appending, got: %s", contentStr)
+	}
+	if !strings.Contains(contentStr, "Command:") {
+		t.Errorf("Trace file should contain command line in header when appending, got: %s", contentStr)
 	}
 }
 

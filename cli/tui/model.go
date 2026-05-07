@@ -1455,10 +1455,35 @@ func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.
 		return nil, nil, fmt.Errorf("failed to open trace file: %w", err)
 	}
 	if !traceAppend {
-		_, _ = fmt.Fprintf(traceFile, "# TUI trace file: %s\n# Generated: %s\n#\n", tracePath, time.Now().Format("2006-01-02 15:04:05"))
+		command := formatCommandLine(os.Args)
+		if command == "" {
+			command = "<unknown>"
+		}
+		_, _ = fmt.Fprintf(
+			traceFile,
+			"# TUI trace file: %s\n# Generated: %s\n# Command: %s\n#\n",
+			tracePath,
+			time.Now().Format("2006-01-02 15:04:05"),
+			command,
+		)
 	}
 	model.traceSink = newTUITraceSink(traceFile)
 	return tea.NewProgram(model, opts...), traceFile, nil
+}
+
+func formatCommandLine(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		if arg == "" || strings.ContainsAny(arg, " \t\n\"'\\") {
+			parts[i] = strconv.Quote(arg)
+			continue
+		}
+		parts[i] = arg
+	}
+	return strings.Join(parts, " ")
 }
 
 // StartTUIWithContainer starts the TUI and immediately launches a container

@@ -196,6 +196,9 @@ func TestHeadlessRunner_TraceFile(t *testing.T) {
 	if !strings.Contains(traceContent, "# Trace file:") {
 		t.Errorf("Trace file missing header")
 	}
+	if !strings.Contains(traceContent, "# Command:") {
+		t.Errorf("Trace file missing command header")
+	}
 
 	// Check for some expected log entries
 	if !strings.Contains(traceContent, "[INIT]") {
