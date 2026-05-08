@@ -279,7 +279,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		}
 		final String itemNameRaw = item.name();
 		final String itemName = itemNameRaw.startsWith(SLASH) ? itemNameRaw : SLASH + itemNameRaw;
-		return (itemPath == null || itemName.startsWith(itemPath)) ? itemName : itemPath + itemName;
+		if (itemPath == null || itemName.startsWith(itemPath)) {
+			return itemName;
+		}
+		return itemPath.endsWith(SLASH) ? itemPath + itemName.substring(1) : itemPath + itemName;
 	}
 
 	protected abstract String tokenUriPath(

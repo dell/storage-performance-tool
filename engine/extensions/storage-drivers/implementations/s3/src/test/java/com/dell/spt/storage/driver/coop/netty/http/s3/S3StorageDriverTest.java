@@ -804,6 +804,12 @@ public class S3StorageDriverTest {
 		return listOp;
 	}
 
+	private static String objectUri(final HttpRequest request) {
+		final var uri = request.uri();
+		final var queryStart = uri.indexOf('?');
+		return queryStart < 0 ? uri : uri.substring(0, queryStart);
+	}
+
 	// MPU signing tests (inserted inside class)
 	@Test
 	void mpu_init_signsWithV4() throws Exception {
@@ -848,6 +854,48 @@ public class S3StorageDriverTest {
 		assertEquals(HttpMethod.POST, req.method());
 		assertTrue(req.uri().contains("?uploadId="));
 		assertNotNull(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void mpuLifecycle_trailingSlashOutputPath_usesSameObjectUriForAllPhases() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var item = new com.dell.spt.base.item.DataItemImpl("ldypc1g3fjmr", 0, 20_971_520);
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<com.dell.spt.base.item.DataItem>(
+						0,
+						OpType.CREATE,
+						item,
+						null,
+						"streaming/20MB/109/",
+						TEST_CRED,
+						null,
+						0,
+						10_485_760);
+
+		final var initReq = drv.initMultipartUploadRequest(
+						(Operation<Item>) (Operation<?>) parent,
+						"s3.us-east-1.amazonaws.com");
+
+		parent.result(); // mirrors StorageDriverBase.handleCompleted() after MPU init
+		parent.put(S3Api.KEY_UPLOAD_ID, "upload-1");
+		final var subOps = parent.subOperations();
+		parent.put("1", "\"etag-1\"");
+		parent.put("2", "\"etag-2\"");
+
+		final var partReq = drv.partUploadRequest(
+						(com.dell.spt.base.item.op.partial.data.PartialDataOperation) subOps.get(0),
+						"s3.us-east-1.amazonaws.com");
+		final var completeReq = drv.completeMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+		final var abortReq = drv.abortMultipartUploadRequest(parent, "s3.us-east-1.amazonaws.com");
+
+		final var expectedObjectUri = "/streaming/20MB/109/ldypc1g3fjmr";
+		assertAll(
+						"MPU lifecycle object URI",
+						() -> assertEquals(expectedObjectUri, objectUri(initReq), "init"),
+						() -> assertEquals(expectedObjectUri, objectUri(partReq), "part upload"),
+						() -> assertEquals(expectedObjectUri, objectUri(completeReq), "complete"),
+						() -> assertEquals(expectedObjectUri, objectUri(abortReq), "abort"));
 	}
 
 	@Test
