@@ -299,6 +299,15 @@ class HttpStorageDriverBaseTest {
 		assertEquals("/dst/file.dat", drv.exposeDataUriPath(item, "/src", "/dst", OpType.CREATE));
 	}
 
+	@Test
+	void dataUriPath_trailingSlashDstPath_bareItemName_noDoubleSlash() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("ldypc1g3fjmr", 0, 10_485_760);
+		assertEquals(
+						"/streaming/20MB/109/ldypc1g3fjmr",
+						drv.exposeDataUriPath(item, null, "streaming/20MB/109/", OpType.CREATE));
+	}
+
 	// --- applyRangesHeaders + rangeListToStringBuff tests ---
 
 	@Test
