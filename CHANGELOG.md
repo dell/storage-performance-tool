@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.10.1] - 2026-05-08
+
+### Fixed
+
+- **S3 MPU object URI mismatch with trailing output paths** — fixed HTTP data URI joining when `item-output-path` ends with `/` and generated item names are bare. MPU init, part upload, complete, and abort requests now use the same object URI, avoiding backend-specific `404 Not Found` failures on storage systems that treat repeated slashes as significant object key characters. (PR #115)
+
 ## [5.10.0] - 2026-05-07
 
 ### Added
