@@ -20,11 +20,11 @@ storage:
     mediumObjectThresholdBytes: 8388608   # 8MB
     largeObjectThresholdBytes: 104857600  # 100MB
 
-    # CRT performance parameters optimized for small objects
-    targetThroughputGbps: 1.0
-    minimumPartSizeBytes: 524288           # 512KB
-    maxConcurrency: 128
-    maxConcurrentRequestStreams: 4
+    # CRT performance parameters (factory defaults used when optimizeForSmallObjects: true)
+    targetThroughputGbps: 10.0           # High target for small object workloads
+    minimumPartSizeBytes: 8388608        # 8MB - optimal for small objects
+    maxConcurrency: 512                   # High concurrency for small objects
+    maxConcurrentRequestStreams: 16       # Optimal value tested: better connection utilization
 
     # Connection pool settings
     connectionTimeoutMs: 2000
@@ -40,6 +40,6 @@ storage:
     byteBufferThresholdBytes: 65536       # 64KB
     readBufferSizeBytes: 8192             # 8KB
 
-    # Adaptive tuning (disabled by default, can be enabled for dynamic optimization)
-    enableAdaptiveTuning: false
+    # Adaptive tuning (enabled for performance optimization)
+    enableAdaptiveTuning: true
     adaptiveTuningIntervalSeconds: 30

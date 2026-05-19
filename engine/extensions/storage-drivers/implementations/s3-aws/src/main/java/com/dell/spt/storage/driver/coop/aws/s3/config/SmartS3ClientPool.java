@@ -98,9 +98,7 @@ public class SmartS3ClientPool {
 						.forcePathStyle(pathStyle)
 						.targetThroughputInGbps(config.getTargetThroughputInGbps())
 						.minimumPartSizeInBytes(config.getMinimumPartSizeInBytes())
-						.maxConcurrency(config.getMaxConcurrency())
-
-		;
+						.maxConcurrency(config.getMaxConcurrency());
 
 		return crtBuilder.build();
 	}
@@ -133,9 +131,7 @@ public class SmartS3ClientPool {
 						.forcePathStyle(pathStyle)
 						.targetThroughputInGbps(config.getTargetThroughputInGbps())
 						.minimumPartSizeInBytes(config.getMinimumPartSizeInBytes())
-						.maxConcurrency(config.getMaxConcurrency())
-
-		;
+						.maxConcurrency(config.getMaxConcurrency());
 
 		return crtBuilder.build();
 	}

@@ -45,8 +45,8 @@ avro = "1.11.4"
 hadoop = "3.3.6"
 
 # AWS SDK
-awsSdk = "2.42.28"
-awsCrt = "0.45.1"  # Latest stable version for AWS SDK 2.42.28
+awsSdk = "2.42.28"  # Original version before upgrade
+awsCrt = "0.45.1"  # Latest stable version for AWS SDK
 
 # Crypto / TLS
 bouncycastle = "1.78.1"

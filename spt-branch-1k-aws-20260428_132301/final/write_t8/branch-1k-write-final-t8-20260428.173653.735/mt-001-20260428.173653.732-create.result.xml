@@ -1,0 +1,3 @@
+<result>
+<result id="mt-001-20260428.173653.732-create" StartDate="2026-04-28 17:36:56" StartTimestamp="1777397816289" EndDate="2026-04-28 17:38:57" EndTimestamp="1777397937301" operation="CREATE" threads="8" RequestThreads="8" clients="1" error="0" runtime="121.012" filesize="1KB" tps="0.4049586776859504" tps_unit="Fileps" bw="3.9546745867768593E-4" bw_unit="MBps" latency="1.466806081632653E7" latency_unit="us" latency_min="3128" latency_max="119235043" duration="1.4668062040816326E7" duration_unit="us" duration_min="3128" duration_max="119235043" />
+</result>

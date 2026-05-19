@@ -1,0 +1,9 @@
+operation	threads	total_error_lines	fail_io_lines	fail_unknown_lines	metrics_ctx_lines	first_error_sample
+write	1	16	15	0	1	2026-04-28T17:32:31,855 | DEBUG | NioStorageDriverBase |  | CREATE,/spttest/3odbyixced1,2fc2d0c7fffcb5,1024,0/0,/spttest,: FAIL_IO
+write	4	66	65	0	1	2026-04-28T17:34:42,142 | DEBUG | NioStorageDriverBase |  | CREATE,/spttest/s5htnfmcar71,336c9367d6bffc2d,1024,0/0,/spttest,: FAIL_IO
+write	8	1	0	0	1	2026-04-28T17:38:57,305 | DEBUG | MetricsManagerImpl | single_task_executor_#1 | Metrics context "DistributedMetricsContextImpl(CREATE-8x1@mt-001-20260428.173653.732-create)" has not been registered
+write	32	2	0	1	1	2026-04-28T17:41:13,018 | DEBUG | NioStorageDriverBase |  | CREATE,/spttest/quaof7r9gkg4,31078058d160f084,1024,0/0,/spttest,: FAIL_UNKNOWN
+read	1	6	3	1	2	2026-04-28T17:41:41,530 | DEBUG | NioStorageDriverBase |  | CREATE,/spttest/5olduc5w7lzd,a61879f9b3fff09,1024,0/0,/spttest,: FAIL_IO
+read	4	6	0	4	2	2026-04-28T17:44:45,772 | DEBUG | MetricsManagerImpl | single_task_executor_#1 | Metrics context "DistributedMetricsContextImpl(CREATE-4x1@mt-001-20260428.174430.939-seed)" has not been registered
+read	8	10	2	6	2	2026-04-28T17:47:28,078 | DEBUG | NioStorageDriverBase |  | CREATE,/spttest/noxweknwk7ia,2b471a07a43fff02,1024,0/0,/spttest,: FAIL_IO
+read	32	8	0	6	2	2026-04-28T17:50:11,693 | DEBUG | MetricsManagerImpl | single_task_executor_#1 | Metrics context "DistributedMetricsContextImpl(CREATE-32x1@mt-001-20260428.174957.167-seed)" has not been registered

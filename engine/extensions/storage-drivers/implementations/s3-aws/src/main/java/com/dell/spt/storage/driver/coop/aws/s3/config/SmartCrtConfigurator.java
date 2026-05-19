@@ -20,15 +20,15 @@ public class SmartCrtConfigurator {
 						// Small Objects (< 64KB): Optimized for low latency and high operation count
 						Map.entry(ObjectSizeProfile.SMALL, new CrtConfigurationProfile(
 										ObjectSizeProfile.SMALL,
-										0.5,  // targetThroughputInGbps - realistic for 1KB objects
+										10.0,  // targetThroughputInGbps - match baseline performance
 										256 * 1024,  // minimumPartSizeInBytes - 256KB
-										128,  // maxConcurrency - moderate to prevent pool exhaustion
-										4,  // maxConcurrentRequestStreams - multiple requests per connection
+										512,  // maxConcurrency - match baseline for high throughput
+										16,  // maxConcurrentRequestStreams - match baseline
 										Duration.ofMillis(2000),  // connectionTimeout
 										Duration.ofMillis(1000),  // connectionAcquisitionTimeout
 										Duration.ofSeconds(60),  // connectionMaxIdleTime
 										Duration.ofMinutes(5),  // connectionTimeToLive
-										false,  // useVirtualThreads - platform threads for small objects
+										true,  // useVirtualThreads - match baseline
 										128,  // smallObjectThreadCount
 										64 * 1024,  // byteBufferThresholdBytes - 64KB
 										8192  // readBufferSizeBytes - 8KB

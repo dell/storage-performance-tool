@@ -1,0 +1,55 @@
+# SPT Configuration for S3-AWS Single Client Performance Test - 100KB Objects
+# This configuration tests the reverted single client implementation
+
+name: s3-aws-single-client-100kb-test
+description: Test S3-AWS driver with single client (no smart pool) - 100KB objects
+
+# Storage driver configuration
+storage:
+  driver: s3-aws
+  auth-uid: minioadmin
+  auth-secret: minioadmin
+  region: us-east-1
+  net:
+    node:
+      addrs:
+        - 10.246.190.64
+      port: 8333
+    ssl:
+      enabled: false
+  crt:
+    targetThroughputGbps: 10.0
+    minimumPartSizeBytes: 8388608
+    maxConcurrency: 256
+    partSizeBytes: 8388608
+    smallObjectThresholdBytes: 102400
+    byteBufferThresholdBytes: 65536
+
+# Load generation configuration
+load:
+  type: fixed
+  op:
+    type: create
+    # 100KB objects
+    size:
+      min: 102400
+      max: 102400
+  # T32 concurrency
+  concurrency: 32
+  # 30 second test
+  duration: 30
+  # Use random names to avoid conflicts
+  names:
+    type: random
+    prefix: test-100kb-
+    length: 16
+
+# Output configuration
+output:
+  # Print results to console
+  console:
+    enabled: true
+  # Save results to file
+  file:
+    enabled: true
+    path: s3-aws-single-client-100kb-results.json

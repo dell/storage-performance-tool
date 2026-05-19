@@ -1,0 +1,4 @@
+operation	object_size	concurrency	throughput_ops	mb_per_sec	latency_mean_ms	latency_min_ms	latency_max_ms	total_ops	duration_seconds
+create	10K	1	242	2	4.00	4.00	4.00	1	60
+create	10K	8	222	2	4.17	4.17	4.17	1	60
+create	10K	32	235	2	3.74	3.74	3.74	1	60

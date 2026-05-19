@@ -143,13 +143,17 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # - UseNUMA: NUMA-aware allocation for multi-socket servers
 # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
 # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
-# - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
-#   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # Override: SPT_JAVA_OPTS="-Xmx8g" ./run.sh ...
-SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions}"
+SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--XX:+UnlockExperimentalVMOptions -XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2}"
 
 # Run Spt with all arguments passed to this script
-java $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"
+# Use JAVA_HOME if set, otherwise use system java
+if [ -n "\$JAVA_HOME" ]; then
+    JAVA="\$JAVA_HOME/bin/java"
+else
+    JAVA="java"
+fi
+\$JAVA $SPT_JAVA_OPTS -jar "\$SCRIPT_DIR/spt.jar" "\$@"
 '''
 		scriptFile.setExecutable(true)
 		
@@ -162,7 +166,7 @@ rem Get the directory where this script is located
 set SCRIPT_DIR=%~dp0
 
 rem Default JVM options for Spt (JDK 21+)
-if not defined SPT_JAVA_OPTS set SPT_JAVA_OPTS=-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions
+if not defined SPT_JAVA_OPTS set SPT_JAVA_OPTS=-XX:+UnlockExperimentalVMOptions -XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -Xshare:off -XX:UseAVX=2
 
 rem Run Spt with all arguments passed to this script
 java %SPT_JAVA_OPTS% -jar "%SCRIPT_DIR%spt.jar" %*

@@ -1,0 +1,103 @@
+{
+  "baseUrl": "http://localhost:9999",
+  "outputDir": "/tmp/spt-branch-1k-aws-20260428_132301/smoke/write_t8/branch-1k-write-smoke-t8-20260428.172509.687",
+  "generatedAt": "2026-04-28T17:25:43.651279928Z",
+  "steps": [
+    {
+      "stepId": "mt-001-20260428.172509.683-create",
+      "completedAt": "2026-04-28T17:25:43.65128041Z",
+      "files": [
+        {
+          "name": "mt-001-20260428.172509.683-create.metrics.total.csv",
+          "size": 640,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "text/csv"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.config.yaml",
+          "size": 7902,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:12 GMT",
+          "content_type": "application/octet-stream"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.cli.args.log",
+          "size": 0,
+          "status": "missing",
+          "error": "not listed in index.json"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.messages.log",
+          "size": 1216,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "text/plain"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.errors.log",
+          "size": 199,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "text/plain"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.metrics.csv",
+          "size": 912,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "text/csv"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.scenario.txt",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.metrics.threshold.total.csv",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.op.trace.csv",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.multipart.csv",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.tables.metrics.log",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.items.csv",
+          "size": 1341,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "text/csv"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.put-remaining.csv",
+          "size": 0,
+          "status": "missing"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.result.xml",
+          "size": 550,
+          "status": "ok",
+          "modified": "Tue, 28 Apr 2026 17:25:43 GMT",
+          "content_type": "application/xml"
+        },
+        {
+          "name": "mt-001-20260428.172509.683-create.result-threshold.xml",
+          "size": 0,
+          "status": "missing"
+        }
+      ]
+    }
+  ]
+}

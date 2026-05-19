@@ -1,0 +1,32 @@
+===============================================================================================
+ SPT Run Summary  •  branch-1k-write-final-t4-20260428.173437.929  •  2026-04-28 17:36:41 UTC
+===============================================================================================
+
+Environment
+  • Spt image          ghcr.io/dell/storage-performance-tool:spt_ab_branch
+  • API endpoint       http://localhost:9999
+  • Hosts (1)          127.0.0.1
+  • Runtime            auto-results on, shutdown-on-complete (linger 5s)
+  • Scenario file      spt-scenario-1777397677.js
+
+Workload Configuration
+  • Workload           Write
+  • Object size        1.00 KiB (0 objects)
+  • Threads            4
+  • Endpoints          http://10.246.190.64:8333
+  • Bucket             spttest
+  • Duration           2m
+
+Performance by Phase
+┌────────┬─────────────┬─────────┬────────────┬────────────┬──────────────┬───────────────┐
+│ Phase  │ Object Size │ Success │ Data Moved │   IOPS Avg │ Latency Mean │ Bandwidth Avg │
+├────────┼─────────────┼─────────┼────────────┼────────────┼──────────────┼───────────────┤
+│ Create │ 1.00 KiB    │  247106 │ 241.31 MiB │ 2042 ops/s │      1.86 ms │     1.99 MB/s │
+└────────┴─────────────┴─────────┴────────────┴────────────┴──────────────┴───────────────┘
+
+Run Totals
+  • Duration           2m 1.02s
+  • Data moved         241.31 MiB
+
+Artifact Health
+  • mt-001-20260428.173437.926-create missing required artifacts: cli.args.log

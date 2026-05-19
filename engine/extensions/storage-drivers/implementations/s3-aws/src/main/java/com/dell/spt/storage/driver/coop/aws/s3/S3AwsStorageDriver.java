@@ -18,14 +18,12 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
-import com.dell.spt.storage.driver.coop.aws.s3.config.SmartS3ClientPool;
 import com.dell.spt.storage.driver.coop.aws.s3.metrics.WorkloadMetrics;
 import com.github.akurilov.confuse.Config;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.util.Locale;
@@ -74,8 +72,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final long partSizeBytes;
 	private final long byteBufferThresholdBytes;
 	private final WorkloadMetrics metrics;
-	private final SmartS3ClientPool clientPool;
-	private final boolean useSmartConfig;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -87,9 +83,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes,
 					final long byteBufferThresholdBytes,
-					final WorkloadMetrics metrics,
-					final SmartS3ClientPool clientPool,
-					final boolean useSmartConfig)
+					final WorkloadMetrics metrics)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
@@ -101,16 +95,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.partSizeBytes = partSizeBytes;
 		this.byteBufferThresholdBytes = byteBufferThresholdBytes;
 		this.metrics = metrics != null ? metrics : new WorkloadMetrics();
-		this.clientPool = clientPool;
-		this.useSmartConfig = useSmartConfig;
 
-		if (useSmartConfig && clientPool != null) {
-			LOG.info("S3-AWS driver initialized with smart configuration (client pool enabled)");
-		} else if (useSmartConfig) {
-			LOG.warn("S3-AWS driver smart configuration requested but client pool is null, using single client");
-		} else {
-			LOG.info("S3-AWS driver initialized with single client (smart configuration disabled)");
-		}
+		LOG.info("S3-AWS driver initialized with single client");
 
 		// Use virtual threads to support high concurrency without OS-level thread explosion
 		// This allows thousands of blocking operations while honoring user's --concurrency limit
@@ -317,20 +303,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
 			}
 		}
-	}
-
-	/**
-	 * Get the object size for metrics collection.
-	 */
-	private long getObjectSize(final O op) {
-		if (op.item() instanceof DataItem) {
-			try {
-				return ((DataItem) op.item()).size();
-			} catch (IOException e) {
-				return 0;
-			}
-		}
-		return 0;
 	}
 
 	/**
@@ -652,15 +624,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final long size = dataItem.size();
 
 				if (size <= byteBufferThresholdBytes) {
-					ByteBuffer buffer = ByteBuffer.allocate((int) size);
-					int bytesRead = dataItem.read(buffer);
-					if (bytesRead != size) {
-						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
-					}
-					buffer.flip();
+					// Use DataItemInputStream for small objects
+					LOG.trace(
+									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
+									size, smallObjectThresholdBytes, partSizeBytes);
+					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 					return s3AsyncClient.putObject(
 									reqBuilder.build(),
-									AsyncRequestBody.fromByteBuffer(buffer))
+									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
 									.thenApply(response -> null);
 				} else if (size <= smallObjectThresholdBytes) {
 					LOG.trace(
@@ -715,7 +686,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			reqBuilder.versionId(versionId);
 		}
 
-		// Get the response asynchronously - this completes when headers arrive
 		// Since invokeNio already blocks, we can join() here and read synchronously
 		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
 		try (var response = s3AsyncClient.getObject(
@@ -750,6 +720,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private CompletableFuture<Void> deleteObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
+		// DELETE doesn't have object size info, use default client
 
 		return s3AsyncClient.deleteObject(
 						DeleteObjectRequest.builder()
@@ -761,6 +732,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private CompletableFuture<Void> headObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
+		// STAT doesn't have object size info, use default client
 
 		return s3AsyncClient.headObject(
 						HeadObjectRequest.builder()
@@ -813,6 +785,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				reqBuilder.startAfter(startAfter);
 			}
 		}
+
+		// LIST doesn't have object size info, use default client
 
 		return s3AsyncClient.listObjectsV2(reqBuilder.build())
 						.thenAccept(resp -> {
@@ -910,6 +884,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				reqBuilder.startAfter(startAfter);
 			}
 
+			// LIST doesn't have object size info, use default client
+
 			ListObjectsV2Response resp = s3AsyncClient.listObjectsV2(reqBuilder.build()).join();
 
 			List<I> result = new ArrayList<>(maxKeys);
@@ -999,6 +975,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (delimiter != null && !delimiter.isEmpty()) {
 				reqBuilder.delimiter(delimiter);
 			}
+
+			// LIST doesn't have object size info, use default client
 
 			ListObjectsV2Response resp = s3AsyncClient.listObjectsV2(reqBuilder.build()).join();
 
@@ -1158,6 +1136,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		final var bk = resolveBucketAndKey((O) op);
+
 		return s3AsyncClient.abortMultipartUpload(
 						AbortMultipartUploadRequest.builder()
 										.bucket(bk[0])
@@ -1251,6 +1230,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	protected void doClose()
 					throws IOException {
+		// Note: SmartS3ClientPool is shared across all driver instances and managed by the factory
+		// Do not close it here - it will be closed when the factory shuts down
+
 		try {
 			// Close the S3AsyncClient to release native CRT resources
 			// This closes the underlying event loops and connection pools

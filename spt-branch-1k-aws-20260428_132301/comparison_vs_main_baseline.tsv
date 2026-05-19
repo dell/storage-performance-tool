@@ -1,0 +1,9 @@
+operation	threads	branch_tp_ops	main_baseline_median_ops	ratio_vs_main	branch_fail	branch_lat_ms	assessment
+read	1	488.587	1095.000	44.620%	1	1.929	LOW
+read	4	1797.843	4769.000	37.699%	4	1.887	LOW
+read	8	0.281	6456.000	0.004%	6	8.142	HORRIBLE
+read	32	0.058	3710.000	0.002%	6	17167.601	HORRIBLE
+write	1	476.975	557.000	85.633%	15	1.995	ok
+write	4	2042.198	2213.000	92.282%	65	1.863	ok
+write	8	0.405	3388.000	0.012%	0	14668.061	HORRIBLE
+write	32	0.273	3460.000	0.008%	1	21787.492	HORRIBLE
