@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Config YAML load.op key confusion** — config.yaml dumps now trim irrelevant `load.op.weight` keys based on step type. `MixedLoad` steps show only `load.op.weights` (distribution map); non-mixed steps (CreateLoad, ReadLoad, etc.) show only scalar `load.op.weight`. This eliminates the confusing dual-key output that made it impossible to distinguish step types from config dumps alone. (PR #118)
+
 ## [5.10.1] - 2026-05-08
 
 ### Fixed
