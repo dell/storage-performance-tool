@@ -602,6 +602,87 @@ func TestMultiHostTestOrchestrator_StartTest_MultiHost_Logic(t *testing.T) {
 	}
 }
 
+func TestMultiHostTestOrchestrator_CompletionCh_ClosesOnTerminalStatus(t *testing.T) {
+	var runStarted atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"n0"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"n0"}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runStarted.Store(true)
+				w.Header().Set("ETag", "\"run-123\"")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"runId":"run-123"}`))
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"COMPLETED","message":"all steps done","runId":"run-123"}`))
+		case "/metrics/json":
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			payload := fmt.Sprintf(`[{"metrics_schema":2,"scope":"node","role":"entry","node_id":"n0","run_id":"run-123","sample_ts":"%s","step_id":"s-create","op_type":"CREATE","timestamp":%d,"elapsed_time_seconds":0.1,"test_state":2,"completion_percent":100,"overall_completion_percent":100,"unbounded":false,"overall_unbounded":false,"operations":{"success_count":1,"failed_count":0,"success_rate_last":1,"failed_rate_last":0},"bandwidth":{"bytes_total":1024,"bytes_rate_last":1024},"timing":{"latency_mean_us":1000,"duration_mean_us":1000},"concurrency":{"current":0,"mean":0}}]`, now, time.Now().UnixMilli())
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(payload))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	_, port, _ := net.SplitHostPort(u.Host)
+
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "127.0.0.1", IsLocal: true, Original: "primary"},
+		{Host: "127.0.0.1", IsLocal: true, Original: "worker1"},
+	}
+
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.apiPort = port
+
+	primary := orchestrator.hosts[0]
+	worker := orchestrator.hosts[1]
+	primary.SetStatus(HostStatusReady)
+	worker.SetStatus(HostStatusReady)
+	primary.DockerManager = NewMockDockerManager()
+	worker.DockerManager = NewMockDockerManager()
+
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(
+		func(*TestStatus) {},
+		func(*MultiNodeMetricsUpdate) {},
+		func(string) {},
+		func(string) {},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "demo", Endpoint: "http://minio:9000"}
+	if err := wrapper.StartTest(ctx, "test-image", params); err != nil {
+		t.Fatalf("StartTest returned error: %v", err)
+	}
+	if !runStarted.Load() {
+		t.Fatalf("expected run to be started via /run API")
+	}
+
+	select {
+	case <-wrapper.CompletionCh():
+	case <-time.After(6 * time.Second):
+		t.Fatal("CompletionCh did not close after terminal status")
+	}
+
+	if err := wrapper.StopTest(); err != nil {
+		t.Fatalf("StopTest returned error: %v", err)
+	}
+}
+
 func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:1099")
 	if err != nil {

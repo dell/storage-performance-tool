@@ -757,6 +757,9 @@ type MultiHostTestOrchestrator struct {
 	onOutput       func(line string)
 	onError        func(err string)
 
+	completionCh   chan struct{}
+	completionOnce sync.Once
+
 	// New fields for multi-node metrics
 	aggregator    *MetricsAggregator
 	metricsPoller MetricsPoller
@@ -808,6 +811,7 @@ func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTe
 
 	return &MultiHostTestOrchestrator{
 		multiHost:     multiHost,
+		completionCh:  make(chan struct{}),
 		aggregator:    entryAggregator,
 		metricsPoller: NewAPIMetricsPoller(),         // Default implementation
 		pollInterval:  constants.MetricsPollInterval, // Default poll interval
@@ -978,6 +982,9 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			update := m.collectAllMetrics(ctx)
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
+			}
+			if update != nil && update.Aggregated != nil && update.Aggregated.TestState >= constants.TestStateCompleted {
+				m.signalCompletion()
 			}
 		case <-ctx.Done():
 			return
@@ -1565,8 +1572,19 @@ func (m *MultiHostTestOrchestrator) StopTest() error {
 			Message: "Multi-host test monitoring stopped",
 		})
 	}
+	m.signalCompletion()
 
 	return nil
+}
+
+func (m *MultiHostTestOrchestrator) signalCompletion() {
+	m.completionOnce.Do(func() {
+		close(m.completionCh)
+	})
+}
+
+func (m *MultiHostTestOrchestrator) CompletionCh() <-chan struct{} {
+	return m.completionCh
 }
 
 // attachWorkerNode marks a prestarted worker node as ready for orchestration.
