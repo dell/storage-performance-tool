@@ -174,6 +174,8 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 		select {
 		case <-ctx.Done():
 			done <- ctx.Err()
+		case <-testOrchestrator.CompletionCh():
+			done <- nil
 		case sig := <-sigChan:
 			r.output("SIGNAL", fmt.Sprintf("Received signal: %v", sig))
 			done <- fmt.Errorf("interrupted by signal: %v", sig)
