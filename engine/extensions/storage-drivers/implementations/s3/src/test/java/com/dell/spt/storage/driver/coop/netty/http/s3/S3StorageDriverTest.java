@@ -295,6 +295,10 @@ public class S3StorageDriverTest {
 			return requests;
 		}
 
+		int submitBatchForTest(List<Operation<Item>> ops, int from, int to) {
+			return submit(ops, from, to);
+		}
+
 		@Override
 		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest) {
 			requests.add(httpRequest);
@@ -1398,6 +1402,24 @@ public class S3StorageDriverTest {
 		// handleCompleted() should have dispatched sub-ops to the child queue
 		var queue = childQueueOf(drv);
 		assertEquals(4, queue.size(), "4 range-read sub-ops should be dispatched");
+	}
+
+	@Test
+	void submit_batchCompositeRead_dispatchesSubOps() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var readOp = newCompositeOp(OpType.READ, 4096, 1024);
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) readOp;
+
+		int submitted = drv.submitBatchForTest(List.of(op), 0, 1);
+
+		assertEquals(1, submitted, "Batch submit should accept the composite READ parent");
+		assertEquals(Operation.Status.SUCC, op.status(), "Composite READ parent should be marked SUCC");
+		var queue = childQueueOf(drv);
+		assertEquals(4, queue.size(), "Batch submit should dispatch 4 range-read sub-ops");
 	}
 
 	@Test
