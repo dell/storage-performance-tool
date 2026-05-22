@@ -823,7 +823,7 @@ func TestGenerateDefaults(t *testing.T) {
 		checkOutput func(t *testing.T, data []byte)
 	}{
 		{
-			name: "write with part-size sets batch size 1",
+			name: "write with part-size has no batch override",
 			params: Params{
 				WorkloadType: "write",
 				Endpoint:     "http://s3.example.com",
@@ -836,18 +836,9 @@ func TestGenerateDefaults(t *testing.T) {
 			wantErr: false,
 			checkOutput: func(t *testing.T, data []byte) {
 				t.Helper()
-				var config DefaultsConfig
-				if err := yaml.Unmarshal(data, &config); err != nil {
-					t.Fatalf("Failed to unmarshal YAML: %v", err)
-				}
-				if config.Load == nil {
-					t.Fatal("Expected Load config to be set")
-				}
-				if config.Load.Batch == nil {
-					t.Fatal("Expected Load.Batch config to be set for MPU")
-				}
-				if config.Load.Batch.Size != 1 {
-					t.Errorf("Expected batch size 1 for MPU, got %d", config.Load.Batch.Size)
+				yamlStr := string(data)
+				if strings.Contains(yamlStr, "batch:") {
+					t.Error("Expected no batch config when part-size is set")
 				}
 			},
 		},
@@ -871,7 +862,7 @@ func TestGenerateDefaults(t *testing.T) {
 			},
 		},
 		{
-			name: "part-size with service-threads sets both",
+			name: "part-size with service-threads sets service threads only",
 			params: Params{
 				WorkloadType:   "write",
 				Endpoint:       "http://s3.example.com",
@@ -892,11 +883,12 @@ func TestGenerateDefaults(t *testing.T) {
 				if config.Load == nil {
 					t.Fatal("Expected Load config")
 				}
-				if config.Load.Batch == nil || config.Load.Batch.Size != 1 {
-					t.Error("Expected batch size 1 for MPU")
-				}
 				if config.Load.Service == nil || config.Load.Service.Threads != 8 {
 					t.Error("Expected service threads 8")
+				}
+				yamlStr := string(data)
+				if strings.Contains(yamlStr, "batch:") {
+					t.Error("Expected no batch config when part-size is set")
 				}
 			},
 		},
