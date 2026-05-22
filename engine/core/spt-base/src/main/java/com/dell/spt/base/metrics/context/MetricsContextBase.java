@@ -121,6 +121,13 @@ public abstract class MetricsContextBase<S extends AllMetricsSnapshot>
 	}
 
 	@Override
+	public void refreshLastSnapshot(final boolean force) {
+		if (thresholdMetricsCtx != null) {
+			thresholdMetricsCtx.refreshLastSnapshot(force);
+		}
+	}
+
+	@Override
 	public final MetricsContext thresholdMetrics() throws IllegalStateException {
 		if (thresholdMetricsCtx == null) {
 			throw new IllegalStateException("Nested metrics context is not exist");

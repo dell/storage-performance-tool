@@ -207,7 +207,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 										"Acquire lock timeout while unregistering the metrics context \"{}\"", metricsCtx);
 					}
 					final AllMetricsSnapshot snapshotBefore = metricsCtx.lastSnapshot();
-					metricsCtx.refreshLastSnapshot(); // one last time
+					metricsCtx.refreshLastSnapshot(true); // one last time, including throttled timing snapshots
 					final AllMetricsSnapshot snapshotAfter = metricsCtx.lastSnapshot();
 					final AllMetricsSnapshot snapshot = preferTerminalSnapshot(snapshotAfter, snapshotBefore);
 					// check for the metrics threshold state if entered
