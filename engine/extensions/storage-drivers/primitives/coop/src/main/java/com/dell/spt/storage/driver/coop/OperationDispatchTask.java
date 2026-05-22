@@ -66,7 +66,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doWork() throws Exception {
 		try {
-			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty() && storageDriver.tryAcquireMpuObjectPermit()) {
+			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
+							&& storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
 				buff.add(deferredMpuQueue.poll());
 			}
 
@@ -89,7 +90,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						dispatchLock.unlock();
 					}
 					// Drain again after waking
-					while (buff.size() < batchSize && !deferredMpuQueue.isEmpty() && storageDriver.tryAcquireMpuObjectPermit()) {
+					while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
+									&& storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
 						buff.add(deferredMpuQueue.poll());
 					}
 					if (buff.size() < batchSize) {
@@ -107,7 +109,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
 
 						if (childEmpty && (inEmpty || !canDrainIn)) {
-							if (!storageDriver.tryAcquireMpuObjectPermit()) {
+							if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
 								dispatchReady.await();
 							} else {
 								// We acquired a permit just now, we can process a deferred op
@@ -134,7 +136,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			for (int i = 0; i < tempInOps.size(); i++) {
 				O op = tempInOps.get(i);
 				if (storageDriver.isMpuInit(op)) {
-					if (storageDriver.tryAcquireMpuObjectPermit()) {
+					if (storageDriver.tryAcquireMpuObjectPermit(op)) {
 						buff.add(op);
 					} else {
 						deferredMpuQueue.add(op);

@@ -53,7 +53,7 @@ class OperationDispatchTaskTest {
 	}
 
 	private void configurePermitGate(final AtomicInteger availableMpuPermits) {
-		when(driverMock.tryAcquireMpuObjectPermit()).thenAnswer(inv -> {
+		when(driverMock.tryAcquireMpuObjectPermit(any(Operation.class))).thenAnswer(inv -> {
 			final int permits = availableMpuPermits.get();
 			if (permits > 0) {
 				availableMpuPermits.decrementAndGet();
@@ -313,7 +313,7 @@ class OperationDispatchTaskTest {
 		final Operation<Item> op4 = mock(Operation.class);
 		final Operation<Item> op5 = mock(Operation.class);
 		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
-		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+		when(driverMock.tryAcquireMpuObjectPermit(any(Operation.class))).thenReturn(false);
 
 		inOpQueue.add(op1);
 		inOpQueue.add(op2);
@@ -331,7 +331,7 @@ class OperationDispatchTaskTest {
 	void deferredMpuOnlyWorkAwaitsWhenPermitsUnavailable() throws Exception {
 		final Operation<Item> mpuOp = mock(Operation.class);
 		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
-		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+		when(driverMock.tryAcquireMpuObjectPermit(any(Operation.class))).thenReturn(false);
 
 		inOpQueue.add(mpuOp);
 		task.doWork();
@@ -366,7 +366,7 @@ class OperationDispatchTaskTest {
 		final Operation<Item> op2 = mock(Operation.class);
 		final Operation<Item> op3 = mock(Operation.class);
 		when(driverMock.isMpuInit(any(Operation.class))).thenReturn(true);
-		when(driverMock.tryAcquireMpuObjectPermit()).thenReturn(false);
+		when(driverMock.tryAcquireMpuObjectPermit(any(Operation.class))).thenReturn(false);
 
 		inOpQueue.add(op1);
 		inOpQueue.add(op2);
