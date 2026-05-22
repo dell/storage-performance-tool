@@ -28,6 +28,14 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+const (
+	dockerBindAllInterfaces    = "0.0.0.0"
+	dockerCgroupPermissionsRWM = "rwm"
+	dockerLabelTrue            = "true"
+	dockerMemlockUlimitName    = "memlock"
+	dockerNodeModeArg          = "--run-node=true"
+)
+
 // DockerManager handles Docker operations for the TUI
 // dockerClient defines the subset of the Docker SDK we use, enabling tests to mock behavior.
 type dockerClient interface {
@@ -85,7 +93,7 @@ func (dm *DockerManager) baseLabels(role string) map[string]string {
 		hostName = dm.hostInfo.Host
 	}
 	return map[string]string{
-		constants.DockerLabelManaged: "true",
+		constants.DockerLabelManaged: dockerLabelTrue,
 		constants.DockerLabelRole:    role,
 		constants.DockerLabelHost:    hostName,
 	}
@@ -256,7 +264,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 
 	// Build command for node mode
 	cmd := []string{
-		"--run-node=true",
+		dockerNodeModeArg,
 		"--run-port=" + apiPort,
 	}
 
@@ -296,11 +304,11 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
 			PathOnHost:        constants.RdmaDevicePath,
 			PathInContainer:   constants.RdmaDevicePath,
-			CgroupPermissions: "rwm",
+			CgroupPermissions: dockerCgroupPermissionsRWM,
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
 		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
-			Name: "memlock",
+			Name: dockerMemlockUlimitName,
 			Soft: -1,
 			Hard: -1,
 		})
@@ -354,7 +362,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 
 	// Build command for worker node mode
 	cmd := []string{
-		"--run-node=true",
+		dockerNodeModeArg,
 		"--run-port=" + constants.SptAPIPort, // REST API port
 	}
 
@@ -364,12 +372,12 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	portBindings := nat.PortMap{
 		// RMI Registry port
 		constants.RMIRegistryPort + "/tcp": []nat.PortBinding{{
-			HostIP:   "0.0.0.0",
+			HostIP:   dockerBindAllInterfaces,
 			HostPort: constants.RMIRegistryPort,
 		}},
 		// REST API port
 		constants.SptAPIPort + "/tcp": []nat.PortBinding{{
-			HostIP:   "0.0.0.0",
+			HostIP:   dockerBindAllInterfaces,
 			HostPort: constants.SptAPIPort,
 		}},
 	}
@@ -379,7 +387,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 		port := rmiPortStart + i
 		portKey := fmt.Sprintf("%d/tcp", port)
 		portBindings[nat.Port(portKey)] = []nat.PortBinding{{
-			HostIP:   "0.0.0.0",
+			HostIP:   dockerBindAllInterfaces,
 			HostPort: fmt.Sprintf("%d", port),
 		}}
 	}
@@ -425,11 +433,11 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
 			PathOnHost:        constants.RdmaDevicePath,
 			PathInContainer:   constants.RdmaDevicePath,
-			CgroupPermissions: "rwm",
+			CgroupPermissions: dockerCgroupPermissionsRWM,
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
 		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
-			Name: "memlock",
+			Name: dockerMemlockUlimitName,
 			Soft: -1,
 			Hard: -1,
 		})
@@ -481,7 +489,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	cmd := make([]string, 0, 3+len(additionalArgs))
 	cmd = append(cmd,
 		"--load-step-node-addrs="+strings.Join(workerAddresses, ","),
-		"--run-node=true",
+		dockerNodeModeArg,
 		"--run-port="+constants.SptAPIPort,
 	)
 
@@ -508,7 +516,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 		// Only REST API port binding for entry node
 		PortBindings: nat.PortMap{
 			constants.SptAPIPort + "/tcp": []nat.PortBinding{{
-				HostIP:   "0.0.0.0",
+				HostIP:   dockerBindAllInterfaces,
 				HostPort: constants.SptAPIPort,
 			}},
 		},
@@ -519,11 +527,11 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
 			PathOnHost:        constants.RdmaDevicePath,
 			PathInContainer:   constants.RdmaDevicePath,
-			CgroupPermissions: "rwm",
+			CgroupPermissions: dockerCgroupPermissionsRWM,
 		})
 		hostConfig.CapAdd = append(hostConfig.CapAdd, constants.RdmaCapIpcLock)
 		hostConfig.Ulimits = append(hostConfig.Ulimits, &units.Ulimit{
-			Name: "memlock",
+			Name: dockerMemlockUlimitName,
 			Soft: -1,
 			Hard: -1,
 		})
