@@ -862,6 +862,35 @@ public class S3StorageDriverTest {
 
 	@Test
 	@SuppressWarnings("unchecked")
+	void httpRequest_mpuComplete_preservesSubmitTiming() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final var parent = newCompositeOp(OpType.CREATE, 4096, 1024);
+		parent.put(S3Api.KEY_UPLOAD_ID, "u-complete-timing");
+		parent.put("1", "etag-1");
+		parent.put("2", "etag-2");
+		parent.put("3", "etag-3");
+		parent.put("4", "etag-4");
+		parent.subOperations();
+		for (int i = 0; i < 4; i++) {
+			parent.markSubTaskCompleted();
+		}
+
+		final var op = (Operation<Item>) (Operation<?>) parent;
+		op.startRequest();
+		final long reqTimeStart = op.reqTimeStart();
+
+		final var req = (HttpRequest) drv.httpRequest(op, "s3.us-east-1.amazonaws.com");
+
+		assertEquals(HttpMethod.POST, req.method());
+		assertTrue(req.uri().contains("?uploadId=u-complete-timing"));
+		assertEquals(reqTimeStart, op.reqTimeStart(),
+						"MPU completion request construction must not clear Netty submit timing");
+		assertTrue(op.reqTimeStart() > 0, "request start timestamp must remain publishable");
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
 	void mpuLifecycle_trailingSlashOutputPath_usesSameObjectUriForAllPhases() throws Exception {
 		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		TestS3Driver drv = new TestS3Driver(cfg);
