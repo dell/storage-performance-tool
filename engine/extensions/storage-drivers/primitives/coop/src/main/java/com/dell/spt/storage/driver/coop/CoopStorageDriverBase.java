@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -209,6 +210,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	boolean tryAcquireMpuObjectPermit(final O op) {
+		if (!isMpuInit(op)) {
+			return true;
+		}
 		ensureMpuScheduling(op);
 		return mpuObjectThrottle == null || mpuObjectThrottle.tryAcquire();
 	}
@@ -317,19 +321,41 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	private boolean enqueueChildOp(final O childOp, final O permitOwner, final String failureContext) {
+		if (childOpQueue.offer(childOp)) {
+			signalDispatch();
+			return true;
+		}
+		try {
+			ServiceTaskExecutor.VT_EXECUTOR.submit(() -> enqueueChildOpWithTimeout(childOp, permitOwner, failureContext));
+			return true;
+		} catch (final RejectedExecutionException e) {
+			Loggers.ERR.error(
+							"{}: Failed to schedule MPU {} enqueue; failing affected MPU",
+							toString(), failureContext, e);
+			childOp.status(Operation.Status.FAIL_TIMEOUT);
+			safeReleaseMpuObjectPermit(permitOwner);
+			return false;
+		}
+	}
+
+	private void enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
 		try {
 			if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
-				return true;
+				signalDispatch();
+				return;
 			}
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
 		}
+		failChildOpEnqueue(childOp, permitOwner, failureContext);
+	}
+
+	private void failChildOpEnqueue(final O childOp, final O permitOwner, final String failureContext) {
 		Loggers.ERR.error(
 						"{}: Timed out enqueueing MPU {} after {} ms; failing affected MPU",
 						toString(), failureContext, childOpEnqueueTimeoutMillis());
 		childOp.status(Operation.Status.FAIL_TIMEOUT);
 		safeReleaseMpuObjectPermit(permitOwner);
-		return false;
 	}
 
 	private static long childOpEnqueueTimeoutMillis() {
@@ -366,45 +392,42 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else if (op instanceof PartialOperation) {
 			final var subOp = (PartialOperation) op;
 			final var parentOp = subOp.parent();
-			if (op.status() != Operation.Status.SUCC) {
-				if (subOp.retryCount() < MAX_PART_RETRIES) {
-					// retry the individual part instead of aborting the whole MPU
-					final var failStatus = op.status();
-					subOp.incrementRetryCount();
-					parentOp.undoMarkSubTaskCompleted();
-					op.status(Operation.Status.PENDING);
-					if (op.item() instanceof DataItem dataItem) {
-						dataItem.reset();
-					}
-					Loggers.ERR.warn(
-									"{}: part #{} failed ({}), retry {}/{}",
-									toString(), subOp.partNumber(), failStatus,
-									subOp.retryCount(), MAX_PART_RETRIES);
-					if (!enqueueChildOp(op, op, "part retry")) {
-						return false;
-					}
-				} else {
-					// retries exhausted — abort the MPU
-					synchronized (parentOp) {
+			List<O> nextChildOps = List.of();
+			String childFailureContext = "part operation";
+			boolean enqueueFinalization;
+			synchronized (parentOp) {
+				if (op.status() != Operation.Status.SUCC) {
+					if (subOp.retryCount() < MAX_PART_RETRIES) {
+						// retry the individual part instead of aborting the whole MPU
+						final var failStatus = op.status();
+						subOp.incrementRetryCount();
+						parentOp.undoMarkSubTaskCompleted();
+						op.status(Operation.Status.PENDING);
+						if (op.item() instanceof DataItem dataItem) {
+							dataItem.reset();
+						}
+						Loggers.ERR.warn(
+										"{}: part #{} failed ({}), retry {}/{}",
+										toString(), subOp.partNumber(), failStatus,
+										subOp.retryCount(), MAX_PART_RETRIES);
+						nextChildOps = List.of(op);
+						childFailureContext = "part retry";
+					} else {
+						// retries exhausted — abort the MPU
 						parentOp.put("mpuAbort", "true");
 					}
-				}
-			} else {
-				boolean isAborted;
-				synchronized (parentOp) {
-					isAborted = parentOp.get("mpuAbort") != null;
-				}
-				if (!isAborted) {
+				} else if (parentOp.get("mpuAbort") == null) {
 					// Part succeeded, fetch next part if any
-					final List<O> nextSubOps = (List<O>) parentOp.nextSubOperations(1);
-					for (final O nextSubOp : nextSubOps) {
-						if (!enqueueChildOp(nextSubOp, op, "part operation")) {
-							return false;
-						}
-					}
+					nextChildOps = (List<O>) parentOp.nextSubOperations(1);
+				}
+				enqueueFinalization = shouldEnqueueFinalization(parentOp);
+			}
+			for (final O nextChildOp : nextChildOps) {
+				if (!enqueueChildOp(nextChildOp, op, childFailureContext)) {
+					return false;
 				}
 			}
-			if (parentOp.allSubOperationsDone() && markFinalizationEnqueued(parentOp)) {
+			if (enqueueFinalization) {
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
@@ -415,6 +438,22 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		signalDispatch();
 		return true;
+	}
+
+	private boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
+		if (parentOp.get("mpuAbort") != null) {
+			return markFinalizationEnqueued(parentOp);
+		}
+		if (!parentOp.allSubOperationsDone()) {
+			return false;
+		}
+		for (final var rawSubOp : parentOp.subOperations()) {
+			final var subOp = (PartialOperation) rawSubOp;
+			if (subOp.status() != Operation.Status.SUCC) {
+				return false;
+			}
+		}
+		return markFinalizationEnqueued(parentOp);
 	}
 
 	private boolean markFinalizationEnqueued(final CompositeOperation parentOp) {

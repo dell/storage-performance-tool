@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
@@ -130,6 +131,16 @@ class CoopStorageDriverBaseTest {
 		while (appender.events().size() < minCount && System.nanoTime() < deadlineNanos) {
 			Thread.sleep(10);
 		}
+	}
+
+	private static void awaitCondition(
+					final BooleanSupplier condition, final String failureMessage, final long timeoutMillis)
+					throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+		while (!condition.getAsBoolean() && System.nanoTime() < deadlineNanos) {
+			Thread.sleep(10);
+		}
+		assertTrue(condition.getAsBoolean(), failureMessage);
 	}
 
 	@Test
@@ -239,6 +250,22 @@ class CoopStorageDriverBaseTest {
 			assertEquals(0, throttle.availablePermits(), "5000-part object should allow one active MPU at 100 threads");
 			assertEquals(100, mpuMaxPartsOf(driver), "large MPU should use all 100 threads as the part window");
 		}
+	}
+
+	@Test
+	void tryAcquireMpuObjectPermitIgnoresNonMpuOperations() throws Exception {
+		final var driver = newRetryTestDriver();
+		final var mpuThrottle = new Semaphore(1, true);
+		mpuThrottle.acquire();
+		final var mpuField = CoopStorageDriverBase.class.getDeclaredField("mpuObjectThrottle");
+		mpuField.setAccessible(true);
+		mpuField.set(driver, mpuThrottle);
+
+		final Operation<Item> op = mock(Operation.class);
+		when(op.type()).thenReturn(OpType.CREATE);
+
+		assertTrue(driver.tryAcquireMpuObjectPermit(op), "non-MPU operations should not consume MPU object permits");
+		assertEquals(0, mpuThrottle.availablePermits(), "non-MPU operation should leave MPU permits unchanged");
 	}
 
 	@Test
@@ -944,7 +971,11 @@ class CoopStorageDriverBaseTest {
 
 			boolean result = driver.handleCompleted((Operation<Item>) (Operation<?>) part);
 
-			assertFalse(result, "handleCompleted should return false when bounded enqueue times out");
+			assertTrue(result, "handleCompleted should accept the completion without blocking on a full child queue");
+			awaitCondition(
+							() -> mpuThrottle.availablePermits() == 1,
+							"MPU object permit should be safely released after asynchronous enqueue timeout",
+							2000);
 			assertEquals(1, mpuThrottle.availablePermits(), "MPU object permit should be safely released on timeout");
 			assertEquals("true", parent.get("permitReleased"));
 		} finally {
@@ -987,7 +1018,11 @@ class CoopStorageDriverBaseTest {
 
 			boolean result = driver.handleCompleted((Operation<Item>) (Operation<?>) part);
 
-			assertFalse(result, "handleCompleted should return false when bounded enqueue times out");
+			assertTrue(result, "handleCompleted should accept the completion without blocking on a full child queue");
+			awaitCondition(
+							() -> mpuThrottle.availablePermits() == 1,
+							"MPU object permit should be safely released after asynchronous parent enqueue timeout",
+							2000);
 			assertEquals(1, mpuThrottle.availablePermits(), "MPU object permit should be safely released on parent enqueue timeout");
 		} finally {
 			System.clearProperty(CoopStorageDriverBase.CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY);
@@ -1018,32 +1053,67 @@ class CoopStorageDriverBaseTest {
 	}
 
 	@Test
-	void handleCompleted_waitsForChildQueueCapacityBeforeFailing() throws Exception {
-		final var driver = newRetryTestDriver(1);
+	void handleCompleted_doesNotFinalizeWhileFailedPartWillBeRetried() throws Exception {
+		final var driver = newRetryTestDriver();
 		final var queue = childQueueOf(driver);
-		final Operation<Item> filler = mock(Operation.class);
-		queue.add(filler);
-
-		final var parent = newCompositeParent("backpressure", 2048, 1024);
+		final var parent = newCompositeParent("retry-race", 2048, 1024);
 		parent.subOperations(); // pendingSubTasksCount = 2
-		final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
-		part.status(Operation.Status.SUCC);
-		parent.markSubTaskCompleted(); // pending = 1, so handleCompleted should enqueue the next part
 
-		final boolean[] result = {false
-		};
-		final var worker = Thread.ofVirtual().start(() -> result[0] = driver.handleCompleted((Operation<Item>) (Operation<?>) part));
+		final var parts = parent.nextSubOperations(0);
+		assertEquals(2, parts.size(), "test setup should yield both part operations");
+		final var successfulPart = (PartialDataOperationImpl<DataItem>) parts.get(0);
+		final var failedPart = (PartialDataOperationImpl<DataItem>) parts.get(1);
+		successfulPart.status(Operation.Status.SUCC);
+		failedPart.status(Operation.Status.FAIL_IO);
+		parent.markSubTaskCompleted();
+		parent.markSubTaskCompleted();
+		assertTrue(parent.allSubOperationsDone(), "test setup should expose the completion race window");
 
-		Thread.sleep(50);
-		assertTrue(worker.isAlive(), "handleCompleted should wait while the child queue is full");
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) successfulPart));
 
-		assertSame(filler, queue.take(), "test should free exactly one queue slot");
-		worker.join(5000);
+		assertFalse(queue.contains(parent),
+						"parent finalization must not be enqueued while another failed part can still be retried");
 
-		assertFalse(worker.isAlive(), "handleCompleted should finish after queue capacity appears");
-		assertTrue(result[0], "handleCompleted should succeed when bounded backpressure clears");
-		assertEquals(1, queue.size(), "next MPU child operation should be enqueued");
-		assertNotSame(filler, queue.peek(), "queued operation should be the next MPU child, not the filler");
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) failedPart));
+
+		assertEquals(1, failedPart.retryCount(), "failed part should be scheduled for retry");
+		assertEquals(Operation.Status.PENDING, failedPart.status(), "failed part should be reset before retry");
+		assertFalse(parent.allSubOperationsDone(), "retry should restore the pending subtask count");
+		assertTrue(queue.contains(failedPart), "failed part should be re-enqueued for retry");
+		assertFalse(queue.contains(parent), "parent finalization should remain blocked until the retry succeeds");
+	}
+
+	@Test
+	void handleCompleted_doesNotBlockWhenChildQueueIsFull() throws Exception {
+		final var driver = newRetryTestDriver(1);
+		System.setProperty(CoopStorageDriverBase.CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, "1000");
+		try {
+			final var queue = childQueueOf(driver);
+			final Operation<Item> filler = mock(Operation.class);
+			queue.add(filler);
+
+			final var parent = newCompositeParent("backpressure", 2048, 1024);
+			parent.subOperations(); // pendingSubTasksCount = 2
+			final var part = (PartialDataOperationImpl<DataItem>) parent.nextSubOperations(1).get(0);
+			part.status(Operation.Status.SUCC);
+			parent.markSubTaskCompleted(); // pending = 1, so handleCompleted should enqueue the next part
+
+			final long startNanos = System.nanoTime();
+			final boolean result = driver.handleCompleted((Operation<Item>) (Operation<?>) part);
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+			assertTrue(result, "completion handling should accept asynchronous child enqueue");
+			assertTrue(elapsedMillis < 500, "handleCompleted should not wait while the child queue is full");
+			assertSame(filler, queue.take(), "test should free exactly one queue slot");
+			awaitCondition(
+							() -> queue.size() == 1 && queue.peek() != filler,
+							"asynchronous enqueue should publish the next MPU child after queue capacity appears",
+							5000);
+			assertEquals(1, queue.size(), "next MPU child operation should be enqueued");
+			assertNotSame(filler, queue.peek(), "queued operation should be the next MPU child, not the filler");
+		} finally {
+			System.clearProperty(CoopStorageDriverBase.CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY);
+		}
 	}
 
 	@Test
