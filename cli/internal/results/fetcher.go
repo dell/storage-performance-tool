@@ -17,6 +17,8 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
+const fileStatusMissing = "missing"
+
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
 	Loggers  []string
@@ -173,7 +175,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		// Without index.json we consider this a failure in the current server contract; mark missing
 		for _, a := range f.Artifacts {
 			name := fmt.Sprintf("%s.%s", stepID, a.Suffix)
-			st := FileStatus{Name: name, Size: 0, Status: "missing"}
+			st := FileStatus{Name: name, Size: 0, Status: fileStatusMissing}
 			if a.Required {
 				if idxErr != nil {
 					st.Error = fmt.Sprintf("index.json fetch failed: %v", idxErr)
@@ -199,9 +201,9 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 			// If none of the expected aliases were listed but index is present, treat as missing
 			if selected == "" {
 				if a.Required {
-					sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: "missing", Error: "not listed in index.json"})
+					sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: fileStatusMissing, Error: "not listed in index.json"})
 				} else {
-					sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: "missing"})
+					sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: fileStatusMissing})
 				}
 				continue
 			}
@@ -210,7 +212,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		outPath := filepath.Join(f.OutputDir, name)
 		size, err := f.downloadOne(ctx, stepID, selected, outPath)
 		if err != nil {
-			status := "missing"
+			status := fileStatusMissing
 			if !errors.Is(err, errNotFound) {
 				status = "error"
 			}

@@ -20,6 +20,8 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 )
 
+const dockerExecCommand = "exec"
+
 // NewVerifier creates a new verifier instance with default implementations
 func NewVerifier(hosts []*hostparse.HostInfo, config Config) *Verifier {
 	return NewVerifierWithDeps(hosts, config, command.NewCommandExecutor(), &RealNetworkChecker{}, &RealTimeProvider{})
@@ -459,7 +461,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 
 	// Discover RDMA devices visible inside the container via sysfs
 	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		"docker", "exec", containerID, "ls", "/sys/class/infiniband/",
+		constants.DockerCommand, dockerExecCommand, containerID, "ls", "/sys/class/infiniband/",
 	})
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		return Check{
@@ -475,7 +477,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 
 	// Read port state — expect "4: ACTIVE"
 	portState, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/state", device),
+		constants.DockerCommand, dockerExecCommand, containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/state", device),
 	})
 	if err != nil {
 		return Check{
@@ -499,7 +501,7 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 
 	// Read link layer (Ethernet = RoCE, InfiniBand = IB)
 	linkLayer, _, _ := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		"docker", "exec", containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/link_layer", device),
+		constants.DockerCommand, dockerExecCommand, containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/link_layer", device),
 	})
 	linkLayer = strings.TrimSpace(linkLayer)
 
@@ -567,7 +569,7 @@ func (v *Verifier) checkRdmaDriver(host *hostparse.HostInfo, containerID string)
 	// We run ldconfig -p without a shell pipe and check the output in Go to
 	// avoid quoting issues between local exec and remote SSH execution.
 	stdout, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		"docker", "exec", containerID, "ldconfig", "-p",
+		constants.DockerCommand, dockerExecCommand, containerID, "ldconfig", "-p",
 	})
 	if err != nil {
 		return Check{
@@ -616,7 +618,7 @@ func (v *Verifier) checkSSHDocker(host *hostparse.HostInfo) Check {
 		"host", host.Host,
 		"ssh_target", sshTarget)
 
-	_, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{"true"})
+	_, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{sshProbeCommand})
 	if err != nil {
 		msg := fmt.Sprintf("SSH connection failed for %s", sshTarget)
 		if stderr != "" {
@@ -711,9 +713,9 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		NetworkMode:  networkMode,
 		PortMappings: portMappings,
 		Labels: map[string]string{
-			"spt.verify":                 "true",
+			"spt.verify":                 stringTrue,
 			"spt.verify.host":            host.Host,
-			constants.DockerLabelManaged: "true",
+			constants.DockerLabelManaged: stringTrue,
 			constants.DockerLabelRole:    constants.DockerRoleVerify,
 			constants.DockerLabelHost:    host.Host,
 		},

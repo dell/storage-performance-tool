@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const loopbackIPv4 = "127.0.0.1"
+
 // HostInfo represents a parsed host specification
 type HostInfo struct {
 	User     string // SSH user (empty for local or current user)
@@ -23,9 +25,9 @@ type HostInfo struct {
 func ParseTestHosts(hostString string) ([]*HostInfo, error) {
 	if hostString == "" {
 		return []*HostInfo{{
-			Host:     "127.0.0.1",
+			Host:     loopbackIPv4,
 			IsLocal:  true,
-			Original: "127.0.0.1",
+			Original: loopbackIPv4,
 		}}, nil
 	}
 
@@ -76,9 +78,9 @@ func ParseSingleHost(hostSpec string) (*HostInfo, error) {
 	}
 
 	// Check if local
-	if info.Host == "127.0.0.1" || info.Host == "localhost" {
+	if info.Host == loopbackIPv4 || info.Host == "localhost" {
 		info.IsLocal = true
-		info.Host = "127.0.0.1" // Normalize to IPv4
+		info.Host = loopbackIPv4 // Normalize to IPv4
 	}
 
 	// Validate host

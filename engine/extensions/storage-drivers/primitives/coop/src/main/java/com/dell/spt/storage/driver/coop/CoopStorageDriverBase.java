@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -34,10 +35,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
 
 	static final int MAX_PART_RETRIES = 3;
+	static final String CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY = "spt.mpu.child.enqueue.timeout.millis";
+	static final long DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS = 30_000L;
+	private static final String KEY_FINALIZATION_ENQUEUED = "sptFinalizationEnqueued";
 
 	protected final Semaphore concurrencyThrottle;
-	protected final Semaphore mpuObjectThrottle;
-	protected final int mpuMaxParts;
+	protected volatile Semaphore mpuObjectThrottle;
+	protected volatile int mpuMaxParts;
 	protected final BlockingQueue<O> childOpQueue;
 	private final BlockingQueue<O> inOpQueue;
 	private final LongAdder scheduledOpCount = new LongAdder();
@@ -45,6 +49,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final ReentrantLock dispatchLock = new ReentrantLock();
 	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask opDispatchTask;
+	private final Object mpuSchedulingLock = new Object();
+	private final int configuredMpuObjectLimit;
+	private final int configuredMpuPartLimit;
+	private volatile boolean mpuSchedulingInitialized = false;
 	protected volatile int fastRecycleConcurrencyThreshold = 0;
 	private volatile boolean fastRecycleQuiesceActive = false;
 
@@ -74,8 +82,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
 		}
 
-		this.mpuMaxParts = maxParts;
-		this.mpuObjectThrottle = mpuObjects > 0 ? new Semaphore(mpuObjects, true) : null;
+		this.configuredMpuObjectLimit = Math.max(0, mpuObjects);
+		this.configuredMpuPartLimit = Math.max(0, maxParts);
+		this.mpuMaxParts = configuredMpuPartLimit;
+		this.mpuObjectThrottle = configuredMpuObjectLimit > 0 ? new Semaphore(configuredMpuObjectLimit, true) : null;
 
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
@@ -199,7 +209,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return false;
 	}
 
-	boolean tryAcquireMpuObjectPermit() {
+	boolean tryAcquireMpuObjectPermit(final O op) {
+		if (!isMpuInit(op)) {
+			return true;
+		}
+		ensureMpuScheduling(op);
 		return mpuObjectThrottle == null || mpuObjectThrottle.tryAcquire();
 	}
 
@@ -232,6 +246,122 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	private void ensureMpuScheduling(final O op) {
+		if (mpuSchedulingInitialized || !isMpuInit(op) || !(op instanceof CompositeOperation)) {
+			return;
+		}
+		synchronized (mpuSchedulingLock) {
+			if (mpuSchedulingInitialized) {
+				return;
+			}
+			final int partsPerObject = Math.max(1, ((CompositeOperation<?>) op).subOperations().size());
+			final int concurrency = effectiveMpuSchedulingConcurrency();
+			final int activeMpuObjects;
+			final int partWindowPerObject;
+
+			if (configuredMpuObjectLimit > 0 && configuredMpuPartLimit > 0) {
+				activeMpuObjects = configuredMpuObjectLimit;
+				partWindowPerObject = configuredMpuPartLimit;
+			} else if (configuredMpuObjectLimit > 0) {
+				activeMpuObjects = configuredMpuObjectLimit;
+				partWindowPerObject = Math.min(partsPerObject, ceilDiv(concurrency, activeMpuObjects));
+			} else if (configuredMpuPartLimit > 0) {
+				partWindowPerObject = Math.min(partsPerObject, configuredMpuPartLimit);
+				activeMpuObjects = ceilDiv(concurrency, partWindowPerObject);
+			} else {
+				partWindowPerObject = Math.min(partsPerObject, concurrency);
+				activeMpuObjects = ceilDiv(concurrency, partWindowPerObject);
+			}
+
+			mpuMaxParts = Math.max(1, partWindowPerObject);
+			if (mpuObjectThrottle == null) {
+				mpuObjectThrottle = new Semaphore(Math.max(1, activeMpuObjects), true);
+			}
+
+			logEffectiveMpuScheduling(partsPerObject, concurrency, Math.max(1, activeMpuObjects), mpuMaxParts);
+			mpuSchedulingInitialized = true;
+		}
+	}
+
+	private int effectiveMpuSchedulingConcurrency() {
+		if (concurrencyLimit > 0) {
+			return concurrencyLimit;
+		}
+		return Math.max(1, ioWorkerCount);
+	}
+
+	private static int ceilDiv(final int dividend, final int divisor) {
+		return Math.max(1, (dividend + Math.max(1, divisor) - 1) / Math.max(1, divisor));
+	}
+
+	private void logEffectiveMpuScheduling(
+					final int partsPerObject, final int concurrency, final int activeMpuObjects,
+					final int partWindowPerObject) {
+		Loggers.MSG.info(
+						"{}: effective MPU scheduling: mpu_enabled=true, service_threads={}, parts_per_object={}, "
+										+ "active_mpu_objects={}, part_window_per_object={}, explicit_object_limit={}, "
+										+ "explicit_part_limit={}",
+						toString(), concurrency, partsPerObject, activeMpuObjects, partWindowPerObject,
+						configuredMpuObjectLimit > 0, configuredMpuPartLimit > 0);
+
+		if (configuredMpuObjectLimit > 0 || configuredMpuPartLimit > 0) {
+			final long theoreticalInFlightParts = (long) activeMpuObjects * partWindowPerObject;
+			if (theoreticalInFlightParts < concurrency) {
+				Loggers.MSG.warn(
+								"{}: explicit MPU limits allow at most {} in-flight parts for {} service threads; "
+												+ "some threads may be idle",
+								toString(), theoreticalInFlightParts, concurrency);
+			} else if (theoreticalInFlightParts > concurrency) {
+				Loggers.MSG.warn(
+								"{}: explicit MPU limits allow up to {} ready parts for {} service threads; "
+												+ "extra work may increase queue pressure",
+								toString(), theoreticalInFlightParts, concurrency);
+			}
+		}
+	}
+
+	private boolean enqueueChildOp(final O childOp, final O permitOwner, final String failureContext) {
+		if (childOpQueue.offer(childOp)) {
+			signalDispatch();
+			return true;
+		}
+		try {
+			ServiceTaskExecutor.VT_EXECUTOR.submit(() -> enqueueChildOpWithTimeout(childOp, permitOwner, failureContext));
+			return true;
+		} catch (final RejectedExecutionException e) {
+			Loggers.ERR.error(
+							"{}: Failed to schedule MPU {} enqueue; failing affected MPU",
+							toString(), failureContext, e);
+			childOp.status(Operation.Status.FAIL_TIMEOUT);
+			safeReleaseMpuObjectPermit(permitOwner);
+			return false;
+		}
+	}
+
+	private void enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
+		try {
+			if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
+				signalDispatch();
+				return;
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		failChildOpEnqueue(childOp, permitOwner, failureContext);
+	}
+
+	private void failChildOpEnqueue(final O childOp, final O permitOwner, final String failureContext) {
+		Loggers.ERR.error(
+						"{}: Timed out enqueueing MPU {} after {} ms; failing affected MPU",
+						toString(), failureContext, childOpEnqueueTimeoutMillis());
+		childOp.status(Operation.Status.FAIL_TIMEOUT);
+		safeReleaseMpuObjectPermit(permitOwner);
+	}
+
+	private static long childOpEnqueueTimeoutMillis() {
+		return Long.getLong(CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS);
+	}
+
 	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op) {
 		final boolean accepted = super.handleCompleted(op);
@@ -249,10 +379,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				if (op.status() == Operation.Status.SUCC) {
 					final List<O> subOps = (List<O>) parentOp.nextSubOperations(mpuMaxParts > 0 ? mpuMaxParts : Integer.MAX_VALUE);
 					for (final O nextSubOp : subOps) {
-						if (!childOpQueue.offer(nextSubOp)) {
-							Loggers.ERR.warn(
-											"{}: Child operations queue overflow, dropping the operation", toString());
-							safeReleaseMpuObjectPermit(op);
+						if (!enqueueChildOp(nextSubOp, op, "part operation")) {
 							return false;
 						}
 					}
@@ -265,62 +392,78 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else if (op instanceof PartialOperation) {
 			final var subOp = (PartialOperation) op;
 			final var parentOp = subOp.parent();
-			if (op.status() != Operation.Status.SUCC) {
-				if (subOp.retryCount() < MAX_PART_RETRIES) {
-					// retry the individual part instead of aborting the whole MPU
-					final var failStatus = op.status();
-					subOp.incrementRetryCount();
-					parentOp.undoMarkSubTaskCompleted();
-					op.status(Operation.Status.PENDING);
-					if (op.item() instanceof DataItem dataItem) {
-						dataItem.reset();
-					}
-					Loggers.ERR.warn(
-									"{}: part #{} failed ({}), retry {}/{}",
-									toString(), subOp.partNumber(), failStatus,
-									subOp.retryCount(), MAX_PART_RETRIES);
-					if (!childOpQueue.offer(op)) {
+			List<O> nextChildOps = List.of();
+			String childFailureContext = "part operation";
+			boolean enqueueFinalization;
+			synchronized (parentOp) {
+				if (op.status() != Operation.Status.SUCC) {
+					if (subOp.retryCount() < MAX_PART_RETRIES) {
+						// retry the individual part instead of aborting the whole MPU
+						final var failStatus = op.status();
+						subOp.incrementRetryCount();
+						parentOp.undoMarkSubTaskCompleted();
+						op.status(Operation.Status.PENDING);
+						if (op.item() instanceof DataItem dataItem) {
+							dataItem.reset();
+						}
 						Loggers.ERR.warn(
-										"{}: Child operations queue overflow, dropping retry", toString());
-						safeReleaseMpuObjectPermit(op);
-					}
-				} else {
-					// retries exhausted — abort the MPU
-					synchronized (parentOp) {
+										"{}: part #{} failed ({}), retry {}/{}",
+										toString(), subOp.partNumber(), failStatus,
+										subOp.retryCount(), MAX_PART_RETRIES);
+						nextChildOps = List.of(op);
+						childFailureContext = "part retry";
+					} else {
+						// retries exhausted — abort the MPU
 						parentOp.put("mpuAbort", "true");
 					}
-				}
-			} else {
-				boolean isAborted;
-				synchronized (parentOp) {
-					isAborted = parentOp.get("mpuAbort") != null;
-				}
-				if (!isAborted) {
+				} else if (parentOp.get("mpuAbort") == null) {
 					// Part succeeded, fetch next part if any
-					final List<O> nextSubOps = (List<O>) parentOp.nextSubOperations(1);
-					for (final O nextSubOp : nextSubOps) {
-						if (!childOpQueue.offer(nextSubOp)) {
-							Loggers.ERR.warn(
-											"{}: Child operations queue overflow, dropping the operation", toString());
-							safeReleaseMpuObjectPermit(op);
-							return false;
-						}
-					}
+					nextChildOps = (List<O>) parentOp.nextSubOperations(1);
+				}
+				enqueueFinalization = shouldEnqueueFinalization(parentOp);
+			}
+			for (final O nextChildOp : nextChildOps) {
+				if (!enqueueChildOp(nextChildOp, op, childFailureContext)) {
+					return false;
 				}
 			}
-			if (parentOp.allSubOperationsDone()) {
-				// execute once again to finalize the things if necessary:
-				// complete the multipart upload, for example
-				if (!childOpQueue.offer((O) parentOp)) {
-					Loggers.ERR.warn(
-									"{}: Child operations queue overflow, dropping the operation", toString());
-					safeReleaseMpuObjectPermit(op);
+			if (enqueueFinalization) {
+				// Execute once again to finalize the composite operation, for example
+				// completing the multipart upload. The finalization gate prevents
+				// concurrent part completions from enqueueing the same parent twice.
+				if (!enqueueChildOp((O) parentOp, op, "completion operation")) {
 					return false;
 				}
 			}
 		}
 		signalDispatch();
 		return true;
+	}
+
+	private boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
+		if (parentOp.get("mpuAbort") != null) {
+			return markFinalizationEnqueued(parentOp);
+		}
+		if (!parentOp.allSubOperationsDone()) {
+			return false;
+		}
+		for (final var rawSubOp : parentOp.subOperations()) {
+			final var subOp = (PartialOperation) rawSubOp;
+			if (subOp.status() != Operation.Status.SUCC) {
+				return false;
+			}
+		}
+		return markFinalizationEnqueued(parentOp);
+	}
+
+	private boolean markFinalizationEnqueued(final CompositeOperation parentOp) {
+		synchronized (parentOp) {
+			if (parentOp.get(KEY_FINALIZATION_ENQUEUED) != null) {
+				return false;
+			}
+			parentOp.put(KEY_FINALIZATION_ENQUEUED, Boolean.TRUE.toString());
+			return true;
+		}
 	}
 
 	/**

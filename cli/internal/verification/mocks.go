@@ -16,6 +16,13 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
+const (
+	mockContainerID    = "abc123def456"
+	noPortsFoundStderr = "exit status 1"
+	sshProbeCommand    = "true"
+	stringTrue         = "true"
+)
+
 // MockCommandExecutor implements CommandExecutor for testing
 type MockCommandExecutor struct {
 	// Commands maps command strings to expected responses
@@ -60,12 +67,12 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 	}
 
 	// Allow SSH probe command to succeed by default so tests don't need explicit setup.
-	if cmdStr == "true" {
+	if cmdStr == sshProbeCommand {
 		return "", "", nil
 	}
 
 	if len(command) >= 2 && command[0] == constants.DockerCommand && command[1] == constants.DockerCmdRun {
-		return "abc123def456", "", nil
+		return mockContainerID, "", nil
 	}
 
 	// Default response if not found
@@ -110,20 +117,20 @@ func (m *MockCommandExecutor) SetupDockerSuccess() {
 	// Add common netstat commands for port checking
 	m.Commands["sh -c netstat -ln | grep ':1099 '"] = MockCommandResponse{
 		Stdout: "",
-		Stderr: "exit status 1",
+		Stderr: noPortsFoundStderr,
 		Error:  fmt.Errorf("grep exit 1"), // No ports found (success case)
 	}
 
 	m.Commands["sh -c netstat -ln | grep ':9999 '"] = MockCommandResponse{
 		Stdout: "",
-		Stderr: "exit status 1",
+		Stderr: noPortsFoundStderr,
 		Error:  fmt.Errorf("grep exit 1"), // No ports found (success case)
 	}
 
 	// Add netstat command for port 0 (used in some edge case tests)
 	m.Commands["sh -c netstat -ln | grep ':0 '"] = MockCommandResponse{
 		Stdout: "",
-		Stderr: "exit status 1",
+		Stderr: noPortsFoundStderr,
 		Error:  fmt.Errorf("grep exit 1"), // No ports found (success case)
 	}
 }
@@ -140,7 +147,7 @@ func (m *MockCommandExecutor) SetupContainerSuccess() {
 	for cmdStr := range m.Commands {
 		if strings.HasPrefix(cmdStr, constants.DockerCommand+" "+constants.DockerCmdRun) {
 			m.Commands[cmdStr] = MockCommandResponse{
-				Stdout: "abc123def456",
+				Stdout: mockContainerID,
 				Stderr: "",
 				Error:  nil,
 			}
@@ -149,14 +156,14 @@ func (m *MockCommandExecutor) SetupContainerSuccess() {
 
 	// Add a generic docker run response
 	m.Commands[fmt.Sprintf("%s %s %s %s spt-verify", constants.DockerCommand, constants.DockerCmdRun, constants.DockerFlagDetached, constants.DockerFlagName)] = MockCommandResponse{
-		Stdout: "abc123def456",
+		Stdout: mockContainerID,
 		Stderr: "",
 		Error:  nil,
 	}
 
 	// Mock container cleanup
-	m.Commands[fmt.Sprintf("%s %s %s abc123def456", constants.DockerCommand, constants.DockerCmdRM, constants.DockerFlagForce)] = MockCommandResponse{
-		Stdout: "abc123def456",
+	m.Commands[fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdRM, constants.DockerFlagForce, mockContainerID)] = MockCommandResponse{
+		Stdout: mockContainerID,
 		Stderr: "",
 		Error:  nil,
 	}

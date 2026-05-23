@@ -1583,6 +1583,7 @@ func (m *MultiHostTestOrchestrator) signalCompletion() {
 	})
 }
 
+// CompletionCh returns a channel that closes when orchestration is complete.
 func (m *MultiHostTestOrchestrator) CompletionCh() <-chan struct{} {
 	return m.completionCh
 }
