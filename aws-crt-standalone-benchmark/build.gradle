@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // AWS CRT S3 Client
+    implementation 'software.amazon.awssdk:s3:2.25.0'
+    
+    // AWS CRT HTTP Client
+    implementation 'software.amazon.awssdk:aws-crt-client:2.25.0'
+    
+    // SLF4J for logging
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+}
+
+application {
+    mainClass = 'com.example.benchmark.Main'
+    applicationDefaultJvmArgs = ['-Xmx2g']
+}
