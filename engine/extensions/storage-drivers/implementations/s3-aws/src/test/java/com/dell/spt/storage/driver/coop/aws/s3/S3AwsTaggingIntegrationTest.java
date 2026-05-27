@@ -115,9 +115,7 @@ public class S3AwsTaggingIntegrationTest {
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
 						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
 						8 * 1024L,  // byteBufferThresholdBytes
-						null,  // metrics
-						null,  // clientPool
-						false  // useSmartConfig
+						null  // metrics
 		);
 	}
 
@@ -173,9 +171,7 @@ public class S3AwsTaggingIntegrationTest {
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
 						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
 						8 * 1024L,  // byteBufferThresholdBytes
-						null,  // metrics
-						null,  // clientPool
-						false  // useSmartConfig
+						null  // metrics
 		);
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
@@ -217,9 +213,7 @@ public class S3AwsTaggingIntegrationTest {
 						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
 						8 * 1024 * 1024L,  // partSizeBytes (8MB default)
 						8 * 1024L,  // byteBufferThresholdBytes
-						null,  // metrics
-						null,  // clientPool
-						false  // useSmartConfig
+						null  // metrics
 		);
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
