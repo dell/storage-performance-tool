@@ -15,10 +15,11 @@ import (
 // Legacy shell command candidates kept for test compatibility and as a final fallback.
 // These mirror the logic proven in tools/nodes-up.sh.
 const (
-	routeCmd  = "ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i==\"src\"){print $(i+1); exit}}'"
-	ifaceCmd  = "ip -br -4 addr show scope global 2>/dev/null | awk '$1!~/(docker|br|veth|lo)/{print $3}' | cut -d/ -f1 | head -n1"
-	hostIPCmd = "hostname -I 2>/dev/null | awk '{print $1}'"
-	getentCmd = "getent hosts \"$(hostname -f)\" 2>/dev/null | awk '{print $1}' | head -n1"
+	shellLoginFlag = "-lc"
+	routeCmd       = "ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i==\"src\"){print $(i+1); exit}}'"
+	ifaceCmd       = "ip -br -4 addr show scope global 2>/dev/null | awk '$1!~/(docker|br|veth|lo)/{print $3}' | cut -d/ -f1 | head -n1"
+	hostIPCmd      = "hostname -I 2>/dev/null | awk '{print $1}'"
+	getentCmd      = "getent hosts \"$(hostname -f)\" 2>/dev/null | awk '{print $1}' | head -n1"
 )
 
 // DetectAdvertisedIP determines a stable, routable IPv4 address on the target host
@@ -125,7 +126,7 @@ func DetectAdvertisedIP(ctx context.Context, exec cmdpkg.CommandExecutor, host *
 	}
 
 	// Final fallback: execute legacy single-string shell pipelines via sh -lc
-	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", "-lc", routeCmd}); out != "" || err != nil || errStderr != "" {
+	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", shellLoginFlag, routeCmd}); out != "" || err != nil || errStderr != "" {
 		logging.LogDebug("remoteip", "probe output (fallback)",
 			"host", host.Original,
 			"step", "routeCmd",
@@ -137,7 +138,7 @@ func DetectAdvertisedIP(ctx context.Context, exec cmdpkg.CommandExecutor, host *
 			return ip, nil
 		}
 	}
-	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", "-lc", ifaceCmd}); out != "" || err != nil || errStderr != "" {
+	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", shellLoginFlag, ifaceCmd}); out != "" || err != nil || errStderr != "" {
 		logging.LogDebug("remoteip", "probe output (fallback)",
 			"host", host.Original,
 			"step", "ifaceCmd",
@@ -149,7 +150,7 @@ func DetectAdvertisedIP(ctx context.Context, exec cmdpkg.CommandExecutor, host *
 			return ip, nil
 		}
 	}
-	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", "-lc", hostIPCmd}); out != "" || err != nil || errStderr != "" {
+	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", shellLoginFlag, hostIPCmd}); out != "" || err != nil || errStderr != "" {
 		logging.LogDebug("remoteip", "probe output (fallback)",
 			"host", host.Original,
 			"step", "hostIPCmd",
@@ -161,7 +162,7 @@ func DetectAdvertisedIP(ctx context.Context, exec cmdpkg.CommandExecutor, host *
 			return ip, nil
 		}
 	}
-	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", "-lc", getentCmd}); out != "" || err != nil || errStderr != "" {
+	if out, errStderr, err := exec.ExecuteCommand(ctx, host, []string{"sh", shellLoginFlag, getentCmd}); out != "" || err != nil || errStderr != "" {
 		logging.LogDebug("remoteip", "probe output (fallback)",
 			"host", host.Original,
 			"step", "getentCmd",

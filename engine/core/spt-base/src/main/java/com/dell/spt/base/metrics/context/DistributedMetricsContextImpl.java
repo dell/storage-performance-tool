@@ -140,6 +140,12 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	@Override
 	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot() {
+		refreshLastSnapshot(false);
+	}
+
+	@Override
+	@SuppressWarnings("unchecked")
+	public void refreshLastSnapshot(final boolean force) {
 
 		final var snapshots = snapshotsSupplier.get();
 		final var snapshotsCount = snapshots.size();
@@ -209,7 +215,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				metricsListener.notify(lastSnapshot);
 			}
 			if (thresholdMetricsCtx != null) {
-				thresholdMetricsCtx.refreshLastSnapshot();
+				thresholdMetricsCtx.refreshLastSnapshot(force);
 			}
 		}
 	}

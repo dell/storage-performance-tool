@@ -9,9 +9,9 @@ Storage-side concatenation (further - ***SSC***).
 2. In the distributed mode, all data item parts are processed by the single storage driver.
 3. "Create" load type is used to split the *large* data items into the parts to write them
  separately.
-4. `load-batch-size` **must** be set to `1` for SSC operations. The CLI does this automatically
- when `--part-size` is set. Using the default of 4096 causes the internal child-operation queue
- to overflow, silently dropping part uploads and degrading throughput.
+4. Cooperative storage drivers derive composite operation scheduling limits and apply bounded
+ child-operation backpressure. Setting `load-batch-size=1` remains a conservative troubleshooting
+ option, but it is no longer required to prevent dropped child operations.
 
 # Approach
 

@@ -91,7 +91,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MB`, `256KB`, `4GB`). Ignored for `list` |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). When set, `load.batch.size` is automatically forced to `1`. Applies to `write` workloads and `read` seed phases |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). Applies to `write` workloads and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
@@ -334,7 +334,7 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 
 - `--part-size` must be smaller than `--object-size` (multipart with a single part is pointless).
 - No minimum part size is enforced by the CLI -- different S3-compatible storage systems have varying constraints, so the storage system reports errors for invalid sizes at runtime.
-- When `--part-size` is set, the engine's `load.batch.size` is automatically forced to `1`. This is required because each multipart upload spawns N sub-operations for its parts; the default batch size of 4096 would flood the internal operation queue and cause silently dropped operations.
+- Multipart upload scheduling is handled by the engine. The CLI does not override `load.batch.size` when `--part-size` is set; direct JAR users also do not need `load-batch-size=1` for MPU correctness.
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
 - `--part-size` also applies to the seed (precondition) phase of `read` workloads, so large seed objects are written using multipart upload.

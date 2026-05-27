@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **MPU completion race handling** — fixed race condition in multipart upload completion logic that could cause incorrect finalization timing. (PR #121)
+- **CLI lint issues** — resolved linting warnings in CLI code. (PR #121)
+- **CLI MPU batch override removal** — removed unnecessary CLI-level MPU batch override that conflicted with engine-level configuration. (PR #121)
+- **MPU completion timing** — corrected timing logic in MPU completion operations to ensure accurate metrics reporting. (PR #121)
+- **Terminal metrics refresh** — fixed TUI metrics display refresh to ensure real-time updates are rendered correctly. (PR #121)
+- **Composite read batch dispatch** — fixed dispatch logic for composite read operations to prevent batch handling errors. (PR #121)
+- **MPU scheduling and finalization** — improved MPU task scheduling and finalization to handle edge cases in distributed runs. (PR #121)
+- **Jar-based MPU test helpers** — updated test helper utilities for jar-based MPU testing to improve reliability. (PR #121)
+- **Multi-host headless completion hangs** — fixed issue where multi-host headless runs would hang after completion instead of exiting cleanly. (PR #120)
+
+## [5.10.2] - 2026-05-19
+
+### Fixed
+
+- **Config YAML load.op key confusion** — config.yaml dumps now trim irrelevant `load.op.weight` keys based on step type. `MixedLoad` steps show only `load.op.weights` (distribution map); non-mixed steps (CreateLoad, ReadLoad, etc.) show only scalar `load.op.weight`. This eliminates the confusing dual-key output that made it impossible to distinguish step types from config dumps alone. (PR #118)
+
 ## [5.10.1] - 2026-05-08
 
 ### Fixed

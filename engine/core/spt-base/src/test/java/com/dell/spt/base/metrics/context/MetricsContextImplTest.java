@@ -146,6 +146,22 @@ class MetricsContextImplTest {
 	}
 
 	@Test
+	void forcedRefreshWithinSnapshotThrottleWindowPublishesTimingSamples() throws Exception {
+		ctx.start();
+		ctx.lastSnapshot();
+		setLastSnapshotsUpdateTs(ctx, System.currentTimeMillis());
+
+		ctx.markSucc(1024L, 2_000L, 500L, 800L);
+		ctx.refreshLastSnapshot(true);
+
+		assertEquals(1, ctx.lastSnapshot().successSnapshot().count());
+		assertEquals(1024L, ctx.lastSnapshot().byteSnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().durationSnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().latencySnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().ttfbSnapshot().count());
+	}
+
+	@Test
 	void ttfbSamplesOutsideDurationAreIgnoredAtMetricsBoundary() {
 		ctx.start();
 
@@ -307,5 +323,14 @@ class MetricsContextImplTest {
 			Thread.currentThread().interrupt();
 			fail("Sleep interrupted in test helper", e);
 		}
+	}
+
+	private static void setLastSnapshotsUpdateTs(
+					final MetricsContext<AllMetricsSnapshotImpl> ctx,
+					final long timestamp)
+					throws ReflectiveOperationException {
+		final var field = MetricsContextImpl.class.getDeclaredField("lastSnapshotsUpdateTs");
+		field.setAccessible(true);
+		field.setLong(ctx, timestamp);
 	}
 }

@@ -138,7 +138,7 @@ func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort strin
 		Cmd   []string
 	}{
 		Image: image,
-		Cmd:   []string{"--run-node=true", "--run-port=" + apiPort},
+		Cmd:   []string{dockerNodeModeArg, "--run-port=" + apiPort},
 	})
 
 	return m.containerID, nil

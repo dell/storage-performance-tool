@@ -798,10 +798,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			if (OpType.CREATE.equals(opType)) {
 				final var mpuOp = (CompositeDataOperation) op;
 				if (mpuOp.get(S3Api.KEY_MPU_ABORT) != null) {
-					mpuOp.resetTiming();
 					httpRequest = abortMultipartUploadRequest(mpuOp, nodeAddr);
 				} else if (mpuOp.allSubOperationsDone()) {
-					mpuOp.resetTiming();
 					httpRequest = completeMultipartUploadRequest(mpuOp, nodeAddr);
 				} else { // this is the initial state of the task
 					httpRequest = initMultipartUploadRequest(op, nodeAddr);
@@ -1383,7 +1381,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
-		if (op instanceof CompositeDataOperation && OpType.READ.equals(op.type())) {
+		if (isCompositeRead(op)) {
 			final var compositeReadOp = (CompositeDataOperation) op;
 			// Ensure sub-tasks exist. For recycled ops (result() copy), the subTasks
 			// list is empty and pendingSubTasksCount==0 from the previous cycle.
@@ -1416,6 +1414,38 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		}
 		return super.submit(op);
+	}
+
+	@Override
+	protected int submit(final List<O> ops, final int from, final int to)
+					throws IllegalStateException {
+		var submitted = 0;
+		var i = from;
+		while (i < to) {
+			final var op = ops.get(i);
+			if (isCompositeRead(op)) {
+				if (!submit(op)) {
+					break;
+				}
+				submitted++;
+				i++;
+			} else {
+				final var segmentStart = i;
+				while (i < to && !isCompositeRead(ops.get(i))) {
+					i++;
+				}
+				final var segmentSubmitted = super.submit(ops, segmentStart, i);
+				submitted += segmentSubmitted;
+				if (segmentSubmitted < i - segmentStart) {
+					break;
+				}
+			}
+		}
+		return submitted;
+	}
+
+	private boolean isCompositeRead(final O op) {
+		return op instanceof CompositeDataOperation && OpType.READ.equals(op.type());
 	}
 
 	@Override

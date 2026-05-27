@@ -204,8 +204,8 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			if (sizeThreshold > 0 && batchSize > 1) {
 				Loggers.MSG.warn(
 								"Multipart upload threshold is set ({} bytes) but batch size is {}. "
-												+ "Batch size > 1 with multipart upload causes child operation queue overflow "
-												+ "and silently dropped operations. Set load.batch.size=1 for reliable multipart uploads.",
+												+ "Cooperative storage drivers apply MPU scheduling and bounded child-operation "
+												+ "backpressure; load.batch.size=1 remains a conservative troubleshooting setting.",
 								sizeThreshold, batchSize);
 			}
 			opsBuilder = (OperationsBuilder<I, O>) new DataOperationsBuilderImpl(originIndex)

@@ -61,7 +61,7 @@ func generateRemoteContainerName(prefix, host string) string {
 func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
 	hostName := m.host.Host
 	return map[string]string{
-		constants.DockerLabelManaged: "true",
+		constants.DockerLabelManaged: dockerLabelTrue,
 		constants.DockerLabelRole:    role,
 		constants.DockerLabelHost:    hostName,
 	}
@@ -124,7 +124,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 		Detached:     true,
 		PortMappings: []command.PortMapping{{HostPort: port, ContainerPort: port}},
 		Labels:       m.baseLabels(constants.DockerRoleNode),
-		Command:      []string{"--run-node=true", "--run-port=" + apiPort},
+		Command:      []string{dockerNodeModeArg, "--run-port=" + apiPort},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
@@ -163,7 +163,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 		},
-		Command: []string{"--run-node=true", "--run-port=9999", "--load-step-node-port=1099"},
+		Command: []string{dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099"},
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -204,7 +204,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 	if len(workerAddresses) > 0 {
 		cmd = append(cmd, "--load-step-node-addrs="+strings.Join(workerAddresses, ","))
 	}
-	cmd = append(cmd, "--run-node=true", "--run-port="+constants.SptAPIPort)
+	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
 	cmd = append(cmd, additionalArgs...)
 
 	name := generateRemoteContainerName("entry", m.host.Host)

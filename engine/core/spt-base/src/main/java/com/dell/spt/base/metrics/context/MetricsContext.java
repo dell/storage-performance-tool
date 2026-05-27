@@ -65,6 +65,10 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 
 	void refreshLastSnapshot();
 
+	default void refreshLastSnapshot(final boolean force) {
+		refreshLastSnapshot();
+	}
+
 	S lastSnapshot();
 
 	// threshold-related accounting methods below

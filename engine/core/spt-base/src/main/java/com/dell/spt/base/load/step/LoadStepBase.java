@@ -48,7 +48,15 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.extensions = extensions;
 		this.ctxConfigs = ctxConfigs;
 		this.metricsMgr = metricsMgr;
-		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML));
+		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
+	}
+
+	private String resolveStepTypeName() {
+		try {
+			return getTypeName();
+		} catch (final Exception e) {
+			return null;
+		}
 	}
 
 	@Override

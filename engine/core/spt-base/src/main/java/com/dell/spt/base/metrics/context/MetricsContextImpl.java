@@ -205,8 +205,14 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	@Override
 	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot() {
+		refreshLastSnapshot(false);
+	}
+
+	@Override
+	@SuppressWarnings("unchecked")
+	public void refreshLastSnapshot(final boolean force) {
 		final var currentTimeMillis = System.currentTimeMillis();
-		if (currentTimeMillis - lastSnapshotsUpdateTs > DEFAULT_SNAPSHOT_UPDATE_PERIOD_MILLIS) {
+		if (force || currentTimeMillis - lastSnapshotsUpdateTs > DEFAULT_SNAPSHOT_UPDATE_PERIOD_MILLIS) {
 			lastSnapshotsUpdateTs = currentTimeMillis;
 			updateTimingSnapshots();
 			actualConcurrency.update(actualConcurrencyGauge.getAsInt());
@@ -221,7 +227,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 						throughputSuccess.snapshot(),
 						reqBytes.snapshot(),
 						elapsedTimeMillis());
-		super.refreshLastSnapshot();
+		super.refreshLastSnapshot(force);
 	}
 
 	private void updateTimingSnapshots() {
