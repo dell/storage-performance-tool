@@ -972,6 +972,103 @@ func TestParsePortFromString(t *testing.T) {
 	}
 }
 
+func TestDockerOperationsImpl_DevImagePullSkipping(t *testing.T) {
+	t.Run("shouldSkipImagePull for dev image", func(t *testing.T) {
+		// Env SPT_SKIP_IMAGE_PULL=false, but dev image should still skip
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		// We expect IsImageAvailable to be called to check if dev image is present locally
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "sha256:abc1234")
+		// The run command succeeds
+		expectedCmd := "docker run -d --name test-dev-container " + devImage
+		mockExecutor.SetCommandSuccess(expectedCmd, "devcontainer123")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host)
+		ctx := context.Background()
+
+		config := ContainerConfig{
+			Image:    devImage,
+			Name:     "test-dev-container",
+			Detached: true,
+		}
+		// StartContainer should NOT call PullImage (which executes "docker pull")
+		_, _, err := ops.StartContainer(ctx, config)
+		if err != nil {
+			t.Fatalf("StartContainer failed: %v", err)
+		}
+
+		// Verify no docker pull was attempted
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for dev image, but got: %q", cmdStr)
+			}
+		}
+	})
+
+	t.Run("StartWorkerNodeContainer skips pull for dev image", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		// IsImageAvailable succeeds
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "sha256:abc1234")
+		// docker run succeeds
+		expectedCmd := "docker run -d --name worker-dev -e JAVA_OPTS=-Djava.rmi.server.hostname=localhost -e JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=localhost --network host " +
+			devImage + " --run-node=true --run-port=9999 --load-step-node-port=1099"
+		mockExecutor.SetCommandSuccess(expectedCmd, "workerdev123")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host).(*DockerOperationsImpl)
+		ctx := context.Background()
+
+		_, err := ops.StartWorkerNodeContainer(ctx, devImage, "worker-dev", "localhost", 1099, 1)
+		if err != nil {
+			t.Fatalf("StartWorkerNodeContainer failed: %v", err)
+		}
+
+		// Verify no docker pull was attempted
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for dev image, but got: %q", cmdStr)
+			}
+		}
+	})
+
+	t.Run("StartEntryNodeContainer skips pull for dev image", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		// IsImageAvailable succeeds
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "sha256:abc1234")
+		// docker run succeeds
+		expectedCmd := "docker run -d --name entry-dev -p 9999:9999/tcp " + devImage + " --load-step-node-addrs=192.168.1.100 --run-node=true"
+		mockExecutor.SetCommandSuccess(expectedCmd, "entrydev123")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host).(*DockerOperationsImpl)
+		ctx := context.Background()
+
+		_, err := ops.StartEntryNodeContainer(ctx, devImage, "entry-dev", []string{"192.168.1.100"}, NetworkModeBridge)
+		if err != nil {
+			t.Fatalf("StartEntryNodeContainer failed: %v", err)
+		}
+
+		// Verify no docker pull was attempted
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for dev image, but got: %q", cmdStr)
+			}
+		}
+	})
+}
+
 // Helper functions
 
 func compareStringSlices(a, b []string) bool {

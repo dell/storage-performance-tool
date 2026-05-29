@@ -75,6 +75,34 @@ func TestEnsureImageAvailable_SkipPullWhenPresent(t *testing.T) {
 	}
 }
 
+func TestEnsureImageAvailable_DevImagePresent(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "false")
+	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	if err := dm.ensureImageAvailable(devImage); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dm.client.(*fakeDockerClient).pulled {
+		t.Fatalf("did not expect pull for present dev image")
+	}
+}
+
+func TestEnsureImageAvailable_DevImageMissing(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "false")
+	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+	dm := &DockerManager{client: &fakeDockerClient{inspectErr: io.EOF}, ctx: context.Background()}
+	err := dm.ensureImageAvailable(devImage)
+	if err == nil {
+		t.Fatal("expected error when dev image is missing locally")
+	}
+	if !strings.Contains(err.Error(), "dev image") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if dm.client.(*fakeDockerClient).pulled {
+		t.Fatalf("did not expect pull attempt for missing dev image")
+	}
+}
+
 func TestCleanup_UsesClientToStopAndRemove(t *testing.T) {
 	f := &fakeDockerClient{}
 	dm := &DockerManager{client: f, containerID: "xyz", ctx: context.Background()}

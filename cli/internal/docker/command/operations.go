@@ -24,7 +24,12 @@ type DockerOperationsImpl struct {
 	builder  DockerCommandBuilder
 }
 
-func shouldSkipImagePull() bool {
+func shouldSkipImagePull(image string) bool {
+	// Local-only dev images (spt_dev) are never in a registry; skip the pull so the
+	// run uses the image distributed via engine/tools/push-worker-image.sh.
+	if constants.IsDevImage(image) {
+		return true
+	}
 	val := strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull))
 	if val == "" {
 		return false
@@ -48,7 +53,7 @@ func NewDockerOperations(executor CommandExecutor, host *hostparse.HostInfo) Doc
 // StartContainer starts a container and returns container ID plus detailed command results
 func (d *DockerOperationsImpl) StartContainer(ctx context.Context, config ContainerConfig) (string, CommandResult, error) {
 	// Build the docker run command
-	skipPull := shouldSkipImagePull()
+	skipPull := shouldSkipImagePull(config.Image)
 	if !skipPull {
 		if _, err := d.PullImage(ctx, config.Image); err != nil {
 			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdPull + " " + config.Image, Error: err}
@@ -293,7 +298,7 @@ func (d *DockerOperationsImpl) StartContainerWithBuilder(ctx context.Context, im
 // StartWorkerNodeContainer starts a worker node container with RMI configuration
 func (d *DockerOperationsImpl) StartWorkerNodeContainer(ctx context.Context, image, containerName, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error) {
 	// Ensure image is available locally; attempt auto-pull if not
-	skipPull := shouldSkipImagePull()
+	skipPull := shouldSkipImagePull(image)
 	if !skipPull {
 		if _, err := d.PullImage(ctx, image); err != nil {
 			return "", fmt.Errorf("failed to pull image %s: %w", image, err)
@@ -330,7 +335,7 @@ func (d *DockerOperationsImpl) StartWorkerNodeContainer(ctx context.Context, ima
 // StartEntryNodeContainer starts an entry node container with worker addresses
 func (d *DockerOperationsImpl) StartEntryNodeContainer(ctx context.Context, image, containerName string, workerAddresses []string, networkMode NetworkMode) (string, error) {
 	// Ensure image is available locally; attempt auto-pull if not
-	skipPull := shouldSkipImagePull()
+	skipPull := shouldSkipImagePull(image)
 	if !skipPull {
 		if _, err := d.PullImage(ctx, image); err != nil {
 			return "", fmt.Errorf("failed to pull image %s: %w", image, err)

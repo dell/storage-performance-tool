@@ -30,6 +30,7 @@ import (
 
 const (
 	flagSkipImagePull         = "skip-image-pull"
+	flagSptImage              = "spt-image"
 	flagAttachExistingWorkers = "attach-existing"
 )
 
@@ -750,6 +751,12 @@ Available workload types:
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
 
+		// --spt-image overrides the engine image (precedence: flag > SPT_IMAGE env >
+		// version-matched default). Set the env so constants.EffectiveSptImage picks it up.
+		if sptImageFlag, _ := cmd.Flags().GetString(flagSptImage); strings.TrimSpace(sptImageFlag) != "" {
+			_ = os.Setenv(constants.EnvSptImage, strings.TrimSpace(sptImageFlag))
+		}
+
 		switch params.S3Driver {
 		case scenario.S3DriverRdma:
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
@@ -1077,6 +1084,7 @@ func init() {
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
 	// Results Retrieval Options (Phase 1: flags + parsing only)
 	runCmd.Flags().Bool("auto-results", true, "Automatically retrieve results artifacts at end of run")
