@@ -222,6 +222,12 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	}
 	result.Timestamp = latestTimestamp
 
+	nodeList := make([]*PerformanceMetric, 0, len(nodeMetrics))
+	for _, metric := range nodeMetrics {
+		nodeList = append(nodeList, metric)
+	}
+	applyProgressAndLimitFields(&result, nodeList)
+
 	return &result
 }
 
@@ -358,5 +364,60 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	agg.Unbounded = first.Unbounded
 	agg.OverallUnbounded = first.OverallUnbounded
 
+	applyProgressAndLimitFields(&agg, metrics)
+
 	return &agg, perOp
+}
+
+// applyProgressAndLimitFields propagates per-step progress and limit metadata
+// from the per-node metrics onto an aggregate result so that completion
+// detection (shouldSignalCompletion) has the data it needs.
+//
+//   - StepTime: MAX across nodes (the most-progressed elapsed time).
+//   - CompletionPercent: MIN across nodes (the slowest node represents true
+//     fleet completion).
+//   - HasLimit/LimitType/LimitTimeSec/LimitOpCount: taken from any node that
+//     reports a limit (these are identical per-step across nodes).
+//   - Unbounded: true if any node reports it.
+func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*PerformanceMetric) {
+	if result == nil || len(metrics) == 0 {
+		return
+	}
+
+	var (
+		maxStepTime   float64
+		minCompletion float64
+		completionSet bool
+		limitSet      bool
+	)
+
+	for _, m := range metrics {
+		if m == nil {
+			continue
+		}
+		if m.StepTime > maxStepTime {
+			maxStepTime = m.StepTime
+		}
+		if !completionSet || m.CompletionPercent < minCompletion {
+			minCompletion = m.CompletionPercent
+			completionSet = true
+		}
+		if m.Unbounded {
+			result.Unbounded = true
+		}
+		// Limit metadata is identical per-step across nodes; take it from the
+		// first node that actually reports a limit.
+		if !limitSet && m.HasLimit {
+			result.HasLimit = m.HasLimit
+			result.LimitType = m.LimitType
+			result.LimitTimeSec = m.LimitTimeSec
+			result.LimitOpCount = m.LimitOpCount
+			limitSet = true
+		}
+	}
+
+	result.StepTime = maxStepTime
+	if completionSet {
+		result.CompletionPercent = minCompletion
+	}
 }

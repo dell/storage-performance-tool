@@ -1012,6 +1012,13 @@ func shouldSignalCompletion(agg *PerformanceMetric) bool {
 	if agg.HasLimit && agg.LimitType == constants.LimitTypeTime && agg.LimitTimeSec > 0 {
 		return agg.StepTime >= float64(agg.LimitTimeSec)
 	}
+	// For op-count-bounded runs, require the fleet to have reached 100% completion
+	// before trusting the Completed state. CompletionPercent is normalization-safe
+	// across N nodes (it is the slowest node's progress); comparing a summed
+	// SuccessCount against a per-node LimitOpCount would be wrong once aggregated.
+	if agg.HasLimit && agg.LimitType == constants.LimitTypeOpCount {
+		return agg.CompletionPercent >= 100
+	}
 	return true
 }
 
