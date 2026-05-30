@@ -66,13 +66,22 @@ func TestShouldSignalCompletion(t *testing.T) {
 			want: true,
 		},
 		{
-			// Op-count and unbounded runs are covered by the engine-side fix;
-			// the CLI guard preserves the prior trust-the-state behavior for them.
-			name: "completed op-count run completes",
+			name: "completed op-count below 100 percent does not complete",
 			agg: &PerformanceMetric{
-				TestState: constants.TestStateCompleted,
-				HasLimit:  true,
-				LimitType: constants.LimitTypeOpCount,
+				TestState:         constants.TestStateCompleted,
+				HasLimit:          true,
+				LimitType:         constants.LimitTypeOpCount,
+				CompletionPercent: 99,
+			},
+			want: false,
+		},
+		{
+			name: "completed op-count at 100 percent completes",
+			agg: &PerformanceMetric{
+				TestState:         constants.TestStateCompleted,
+				HasLimit:          true,
+				LimitType:         constants.LimitTypeOpCount,
+				CompletionPercent: 100,
 			},
 			want: true,
 		},

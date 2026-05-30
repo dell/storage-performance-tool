@@ -374,21 +374,16 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 // detection (shouldSignalCompletion) has the data it needs.
 //
 //   - StepTime: MAX across nodes (the most-progressed elapsed time).
-//   - CompletionPercent: MIN across nodes (the slowest node represents true
-//     fleet completion).
-//   - HasLimit/LimitType/LimitTimeSec/LimitOpCount: taken from any node that
-//     reports a limit (these are identical per-step across nodes).
-//   - Unbounded: true if any node reports it.
+//   - HasLimit/LimitType/LimitTimeSec/LimitOpCount: filled from a node only when
+//     the aggregate has not already computed them.
 func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*PerformanceMetric) {
 	if result == nil || len(metrics) == 0 {
 		return
 	}
 
 	var (
-		maxStepTime   float64
-		minCompletion float64
-		completionSet bool
-		limitSet      bool
+		maxStepTime float64
+		limitSet    = result.HasLimit
 	)
 
 	for _, m := range metrics {
@@ -398,15 +393,8 @@ func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*Performan
 		if m.StepTime > maxStepTime {
 			maxStepTime = m.StepTime
 		}
-		if !completionSet || m.CompletionPercent < minCompletion {
-			minCompletion = m.CompletionPercent
-			completionSet = true
-		}
-		if m.Unbounded {
-			result.Unbounded = true
-		}
-		// Limit metadata is identical per-step across nodes; take it from the
-		// first node that actually reports a limit.
+		// Limit metadata is identical per-step across nodes. Preserve any aggregate
+		// values already computed by the caller, such as summed op-count limits.
 		if !limitSet && m.HasLimit {
 			result.HasLimit = m.HasLimit
 			result.LimitType = m.LimitType
@@ -417,7 +405,4 @@ func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*Performan
 	}
 
 	result.StepTime = maxStepTime
-	if completionSet {
-		result.CompletionPercent = minCompletion
-	}
 }
