@@ -112,7 +112,7 @@ jobs:
           cache-dependency-path: cli/go.sum
 
       - name: Build multi-platform binaries
-        run: make -C cli build-all
+        run: make -C cli build-all VERSION=${{ needs.prepare-version.outputs.version }}
 
       - name: Package binaries
         run: |

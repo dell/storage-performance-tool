@@ -3,8 +3,89 @@ package constants
 import (
 	"os"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 )
 
+func TestEffectiveSptImage(t *testing.T) {
+	t.Run("SPT_IMAGE override is used verbatim", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "myregistry.example.com/spt:custom")
+		if got := EffectiveSptImage(); got != "myregistry.example.com/spt:custom" {
+			t.Fatalf("EffectiveSptImage() = %q, want override value", got)
+		}
+	})
+
+	t.Run("override is trimmed", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "  myregistry.example.com/spt:custom  ")
+		if got := EffectiveSptImage(); got != "myregistry.example.com/spt:custom" {
+			t.Fatalf("EffectiveSptImage() = %q, want trimmed override", got)
+		}
+	})
+
+	t.Run("release build maps to v-prefixed version tag", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "")
+		restore := buildinfo.Version
+		buildinfo.Version = "5.10.3"
+		t.Cleanup(func() { buildinfo.Version = restore })
+		want := DefaultSptImage + ":v5.10.3"
+		if got := EffectiveSptImage(); got != want {
+			t.Fatalf("EffectiveSptImage() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("pre-release build maps to v-prefixed tag", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "")
+		restore := buildinfo.Version
+		buildinfo.Version = "5.10.0-rc.1"
+		t.Cleanup(func() { buildinfo.Version = restore })
+		want := DefaultSptImage + ":v5.10.0-rc.1"
+		if got := EffectiveSptImage(); got != want {
+			t.Fatalf("EffectiveSptImage() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("bare dev default maps to spt_dev tag", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "")
+		restore := buildinfo.Version
+		buildinfo.Version = "dev"
+		t.Cleanup(func() { buildinfo.Version = restore })
+		want := DefaultSptImage + ":" + DevImageTag
+		if got := EffectiveSptImage(); got != want {
+			t.Fatalf("EffectiveSptImage() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("dev-marked local build maps to spt_dev tag", func(t *testing.T) {
+		t.Setenv(EnvSptImage, "")
+		restore := buildinfo.Version
+		buildinfo.Version = "5.10.3-dev+abc1234"
+		t.Cleanup(func() { buildinfo.Version = restore })
+		want := DefaultSptImage + ":" + DevImageTag
+		if got := EffectiveSptImage(); got != want {
+			t.Fatalf("EffectiveSptImage() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestIsDevImage(t *testing.T) {
+	cases := []struct {
+		ref  string
+		want bool
+	}{
+		{"ghcr.io/dell/storage-performance-tool:spt_dev", true},
+		{"ghcr.io/dell/storage-performance-tool:spt_dev-baseline", true},
+		{"ghcr.io/dell/storage-performance-tool:v5.10.3", false},
+		{"ghcr.io/dell/storage-performance-tool:latest", false},
+		{"ghcr.io/dell/storage-performance-tool", false},
+		{"localhost:5000/spt:spt_dev", true},
+		{"localhost:5000/spt:v5.10.3", false},
+	}
+	for _, c := range cases {
+		if got := IsDevImage(c.ref); got != c.want {
+			t.Errorf("IsDevImage(%q) = %v, want %v", c.ref, got, c.want)
+		}
+	}
+}
 func TestIsRdmaEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -35,8 +116,8 @@ func TestIsRdmaEnabled(t *testing.T) {
 		{name: "garbage string", envValue: "garbage", want: false},
 		{name: "no", envValue: "no", want: false},
 		{name: "NO", envValue: "NO", want: false},
-		{name: "2", envValue: "2", want: false},             // strconv.ParseBool rejects "2"
-		{name: "enabled", envValue: "enabled", want: false}, // only "yes" is special-cased
+		{name: "2", envValue: "2", want: false},
+		{name: "enabled", envValue: "enabled", want: false},
 	}
 
 	for _, tt := range tests {
@@ -51,36 +132,6 @@ func TestIsRdmaEnabled(t *testing.T) {
 			got := IsRdmaEnabled()
 			if got != tt.want {
 				t.Errorf("IsRdmaEnabled() with SPT_RDMA=%q = %v, want %v", tt.envValue, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEffectiveSptImage(t *testing.T) {
-	tests := []struct {
-		name     string
-		envValue string
-		unset    bool
-		want     string
-	}{
-		{name: "default when unset", unset: true, want: DefaultSptImage},
-		{name: "default when empty", envValue: "", want: DefaultSptImage},
-		{name: "custom image", envValue: "myregistry/spt:v2", want: "myregistry/spt:v2"},
-		{name: "whitespace trimmed", envValue: "  myregistry/spt:v3  ", want: "myregistry/spt:v3"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.unset {
-				os.Unsetenv(EnvSptImage)
-			} else {
-				os.Setenv(EnvSptImage, tt.envValue)
-			}
-			t.Cleanup(func() { os.Unsetenv(EnvSptImage) })
-
-			got := EffectiveSptImage()
-			if got != tt.want {
-				t.Errorf("EffectiveSptImage() = %q, want %q", got, tt.want)
 			}
 		})
 	}

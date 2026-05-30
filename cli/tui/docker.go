@@ -62,7 +62,11 @@ type DockerManager struct {
 	remote      *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
 }
 
-func skipImagePull() bool {
+func skipImagePull(image string) bool {
+	// Local-only dev images (spt_dev) are never in a registry; never try to pull them.
+	if constants.IsDevImage(image) {
+		return true
+	}
 	val := strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull))
 	if val == "" {
 		return false
@@ -119,7 +123,7 @@ func NewDockerManager() (*DockerManager, error) {
 
 // ensureImageAvailable checks for the image locally and pulls it if missing
 func (dm *DockerManager) ensureImageAvailable(imageName string) error {
-	if !skipImagePull() {
+	if !skipImagePull(imageName) {
 		logging.LogInfo("docker", "Pulling Docker image before start", "image", imageName)
 		return dm.pullImage(imageName)
 	}
@@ -127,6 +131,10 @@ func (dm *DockerManager) ensureImageAvailable(imageName string) error {
 	if _, err := dm.client.ImageInspect(dm.ctx, imageName); err == nil {
 		logging.LogInfo("docker", "Using cached Docker image", "image", imageName)
 		return nil
+	}
+
+	if constants.IsDevImage(imageName) {
+		return fmt.Errorf("dev image %s not present locally; build it with `make docker-local` inside the engine directory", imageName)
 	}
 
 	logging.LogInfo("docker", "Cached Docker image missing; pulling despite skip request", "image", imageName)
