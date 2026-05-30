@@ -644,6 +644,14 @@ final class MetricsJsonResponder {
 		if (timeLimitSec > 0 && elapsedMillis < timeLimitSec * 1000L) {
 			return 1; // still within the configured duration: transient gap, not done
 		}
+		// Op-count-bounded runs hit the same transient concurrency==0 gap. countLimit
+		// is per-node/per-context here (calculateTestState runs per context), matching
+		// the per-context totalOps, so do not report Completed until the configured
+		// operation count has actually been reached.
+		final long countLimit = metadataLong(meta, MetricsConstants.METADATA_LIMIT_OP_COUNT);
+		if (countLimit > 0 && totalOps < countLimit) {
+			return 1; // still below the configured op count: transient gap, not done
+		}
 		return 2; // completed
 	}
 

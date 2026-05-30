@@ -672,6 +672,34 @@ public class MetricsJsonResponderTest {
 	}
 
 	@Test
+	void clusterMetricsStayRunningWhenConcurrencyTransientlyZeroBeforeOpCountLimit() throws Exception {
+		// Regression: the same transient concurrency==0 gap also occurs for an
+		// op-count-bounded run. With only 80 of 1000 ops issued the engine must
+		// report Running, not Completed, or headless coordinators abort early.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-count-transient", OpType.CREATE, snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1000L));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ArrayNode payload = responder.buildClusterMetrics(false);
+
+		JsonNode obj = null;
+		for (final JsonNode node : payload) {
+			if ("step-count-transient".equals(node.get("step_id").asText())) {
+				obj = node;
+			}
+		}
+		assertNotNull(obj, "expected metrics for step-count-transient");
+		assertEquals(1, obj.get("test_state").asInt(),
+						"transient concurrency==0 with only 80 of 1000 ops must report Running, not Completed");
+	}
+
+	@Test
 	void clusterMetricsReportCompletedWhenConcurrencyZeroAfterTimeLimit() throws Exception {
 		// Positive path: once the configured duration has elapsed, concurrency==0
 		// with operations issued is a genuine completion.
