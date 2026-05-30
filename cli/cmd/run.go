@@ -893,13 +893,21 @@ Available workload types:
 		if resultsOpts.AutoResults {
 			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path)
 		}
-		waitForAutoResults := func() {
+		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
 				select {
 				case <-autoResultsDone:
-				case <-time.After(2 * time.Second):
+					return true
+				case <-time.After(func() time.Duration {
+					if required {
+						return 2 * time.Minute
+					}
+					return 2 * time.Second
+				}()):
+					return false
 				}
 			}
+			return true
 		}
 		finalizeTraceArtifact := func() {
 			if err := appendTraceToResultsManifest(plannedResultsRoot, traceOpts.Path); err != nil {
@@ -966,11 +974,13 @@ Available workload types:
 			if headlessMode {
 				verbose, _ := cmd.Flags().GetBool("verbose")
 
+				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 				options := headless.HeadlessOptions{
-					TraceFile:            traceOpts.Path,
-					TraceAppend:          traceOpts.Append,
-					Verbose:              verbose,
-					AutoTerminateSeconds: autoTerminate,
+					TraceFile:              traceOpts.Path,
+					TraceAppend:            traceOpts.Append,
+					Verbose:                verbose,
+					AutoTerminateSeconds:   autoTerminate,
+					DelegateNormalShutdown: delegateShutdownToAutoResults,
 				}
 
 				if autoTerminate > 0 {
@@ -978,7 +988,14 @@ Available workload types:
 				}
 
 				err := headless.StartHeadlessModeWithOrchestrator(orchestrator, sptImage, scenarioPath, params, options)
-				waitForAutoResults()
+				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
+					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
+					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if stopErr := orchestrator.StopAllContainers(cleanupCtx); stopErr != nil {
+						logger.Error("Failed to clean up containers after auto-results timeout", "error", stopErr.Error())
+					}
+					cleanupCancel()
+				}
 				finalizeTraceArtifact()
 				return err
 			}
@@ -987,12 +1004,12 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				waitForAutoResults()
+				waitForAutoResults(false)
 				finalizeTraceArtifact()
 				return err
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
-			waitForAutoResults()
+			waitForAutoResults(false)
 			finalizeTraceArtifact()
 			return err
 		}
@@ -1015,7 +1032,7 @@ Available workload types:
 			}
 
 			err := headless.StartHeadlessModeWithParams(sptImage, scenarioPath, params, options)
-			waitForAutoResults()
+			waitForAutoResults(false)
 			finalizeTraceArtifact()
 			return err
 		}
@@ -1028,7 +1045,7 @@ Available workload types:
 		} else {
 			err = tui.StartTUIWithScenarioAndParamsWithTrace(sptImage, scenarioPath, params, apiPort, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
-		waitForAutoResults()
+		waitForAutoResults(false)
 		finalizeTraceArtifact()
 		return err
 	},
