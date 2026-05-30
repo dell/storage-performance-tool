@@ -86,7 +86,6 @@ func TestIsDevImage(t *testing.T) {
 		}
 	}
 }
-
 func TestIsRdmaEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -137,4 +136,3 @@ func TestIsRdmaEnabled(t *testing.T) {
 		})
 	}
 }
-

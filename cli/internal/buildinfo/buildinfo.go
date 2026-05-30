@@ -17,7 +17,7 @@ var (
 // releaseVersionRE matches a clean semver core (major.minor.patch), optionally
 // followed by a standard pre-release suffix (e.g. "5.10.0-rc.1"). It is used by
 // IsRelease together with an explicit dev-marker check.
-var releaseVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+`)
+var releaseVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$`)
 
 // IsRelease reports whether this binary is an official release build (a clean
 // semver version injected at release time) rather than a local/dev build.

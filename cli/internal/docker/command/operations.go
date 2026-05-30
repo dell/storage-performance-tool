@@ -41,6 +41,16 @@ func shouldSkipImagePull(image string) bool {
 	return parsed
 }
 
+func missingDevImageError(image string, host *hostparse.HostInfo) error {
+	hostName := "local host"
+	if host != nil && strings.TrimSpace(host.Original) != "" {
+		hostName = host.Original
+	} else if host != nil && strings.TrimSpace(host.Host) != "" {
+		hostName = host.Host
+	}
+	return fmt.Errorf("dev image %s not present on %s; build it with `make docker-local` and distribute it with engine/tools/push-worker-image.sh", image, hostName)
+}
+
 // NewDockerOperations creates a new DockerOperations instance
 func NewDockerOperations(executor CommandExecutor, host *hostparse.HostInfo) DockerOperations {
 	return &DockerOperationsImpl{
@@ -60,6 +70,11 @@ func (d *DockerOperationsImpl) StartContainer(ctx context.Context, config Contai
 			return "", result, fmt.Errorf("failed to pull image %s: %w", config.Image, err)
 		}
 	} else if available, err := d.IsImageAvailable(ctx, config.Image); err == nil && !available {
+		if constants.IsDevImage(config.Image) {
+			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdImages + " -q " + config.Image}
+			result.Error = missingDevImageError(config.Image, d.host)
+			return "", result, result.Error
+		}
 		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", config.Image)
 		if _, perr := d.PullImage(ctx, config.Image); perr != nil {
 			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdPull + " " + config.Image, Error: perr}
@@ -304,6 +319,9 @@ func (d *DockerOperationsImpl) StartWorkerNodeContainer(ctx context.Context, ima
 			return "", fmt.Errorf("failed to pull image %s: %w", image, err)
 		}
 	} else if available, err := d.IsImageAvailable(ctx, image); err == nil && !available {
+		if constants.IsDevImage(image) {
+			return "", missingDevImageError(image, d.host)
+		}
 		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", image)
 		if _, perr := d.PullImage(ctx, image); perr != nil {
 			return "", fmt.Errorf("image %s not available and pull failed: %w", image, perr)
@@ -341,6 +359,9 @@ func (d *DockerOperationsImpl) StartEntryNodeContainer(ctx context.Context, imag
 			return "", fmt.Errorf("failed to pull image %s: %w", image, err)
 		}
 	} else if available, err := d.IsImageAvailable(ctx, image); err == nil && !available {
+		if constants.IsDevImage(image) {
+			return "", missingDevImageError(image, d.host)
+		}
 		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", image)
 		if _, perr := d.PullImage(ctx, image); perr != nil {
 			return "", fmt.Errorf("image %s not available and pull failed: %w", image, perr)

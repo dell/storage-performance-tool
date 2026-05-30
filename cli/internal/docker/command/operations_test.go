@@ -1067,6 +1067,92 @@ func TestDockerOperationsImpl_DevImagePullSkipping(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("StartContainer fails without pulling when dev image missing", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host)
+		ctx := context.Background()
+
+		config := ContainerConfig{
+			Image:    devImage,
+			Name:     "missing-dev-container",
+			Detached: true,
+		}
+		_, _, err := ops.StartContainer(ctx, config)
+		if err == nil {
+			t.Fatal("expected missing dev image error")
+		}
+		if !strings.Contains(err.Error(), "dev image") {
+			t.Fatalf("expected dev image error, got %v", err)
+		}
+
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for missing dev image, but got: %q", cmdStr)
+			}
+		}
+	})
+
+	t.Run("StartWorkerNodeContainer fails without pulling when dev image missing", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host).(*DockerOperationsImpl)
+		ctx := context.Background()
+
+		_, err := ops.StartWorkerNodeContainer(ctx, devImage, "worker-dev", "localhost", 1099, 1)
+		if err == nil {
+			t.Fatal("expected missing dev image error")
+		}
+		if !strings.Contains(err.Error(), "dev image") {
+			t.Fatalf("expected dev image error, got %v", err)
+		}
+
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for missing dev image, but got: %q", cmdStr)
+			}
+		}
+	})
+
+	t.Run("StartEntryNodeContainer fails without pulling when dev image missing", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
+
+		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandSuccess("docker images -q "+devImage, "")
+
+		host := CreateLocalHost()
+		ops := NewDockerOperations(mockExecutor, host).(*DockerOperationsImpl)
+		ctx := context.Background()
+
+		_, err := ops.StartEntryNodeContainer(ctx, devImage, "entry-dev", []string{"192.168.1.100"}, NetworkModeBridge)
+		if err == nil {
+			t.Fatal("expected missing dev image error")
+		}
+		if !strings.Contains(err.Error(), "dev image") {
+			t.Fatalf("expected dev image error, got %v", err)
+		}
+
+		for _, cmd := range mockExecutor.ExecutedCommands {
+			cmdStr := strings.Join(cmd.Command, " ")
+			if strings.Contains(cmdStr, "pull") {
+				t.Fatalf("docker pull should not be executed for missing dev image, but got: %q", cmdStr)
+			}
+		}
+	})
 }
 
 // Helper functions

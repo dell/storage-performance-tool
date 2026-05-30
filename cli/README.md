@@ -368,7 +368,8 @@ Executes a benchmark test with the specified workload type.
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Automatically resolve port conflicts without user interaction. Spt uses port 9999 for its API - if another Spt instance is running, this flag will automatically stop it before starting the new test
 - `--api-port`: Specify custom Spt API port (defaults to 9999, legacy: 43234)
-- `--skip-image-pull`: Use the locally cached Spt image instead of pulling `latest` before each run (default: always pull)
+- `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
+- `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
 
 Multi-endpoint options:
@@ -550,8 +551,9 @@ Environment configuration
 - Variable expansion follows `godotenv` rules. Use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
 - Hosts: if `--test-hosts` is not specified, spt will use the `HOSTS` environment variable (from OS or `.env`). If neither is set, it falls back to localhost.
 - S3 defaults: you can provide `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), plus `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, and (optionally) `S3_AUTH_VERSION` via environment or `.env`. `S3_AUTH_VERSION` defaults to `4`; set it to `2` only when targeting legacy services that cannot accept SigV4.
-- Image override (optional): set `SPT_IMAGE` to override the default Docker image spt uses for verify and run.
-- Image pull control: set `SPT_SKIP_IMAGE_PULL=1` to skip pulling the Spt image before each run (spt still pulls if the image is missing locally). Default behaviour is to pull `latest` every run.
+- Image selection: by default, release CLIs run the matching engine image tag (`ghcr.io/dell/storage-performance-tool:v<version>`), while local/dev builds use the local-only `ghcr.io/dell/storage-performance-tool:spt_dev` image.
+- Image override (optional): set `SPT_IMAGE` or pass `--spt-image` to override the default Docker image spt uses for verify and run. Overrides are used verbatim, including floating tags such as `:latest`.
+- Image pull control: set `SPT_SKIP_IMAGE_PULL=1` to skip pulling the Spt image before each run. For non-dev images, spt still pulls if the image is missing locally. Dev images such as `spt_dev` are never pulled; if missing, build them with `make docker-local` and distribute them to workers with `engine/tools/push-worker-image.sh`.
 - Data shaping: `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0) sets target compressibility; `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true) controls anti-dedupe stamping.
 - Precedence: CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`. For authentication: CLI flag `--auth-version` overrides `S3_AUTH_VERSION`.
 - Quick start: copy `.env.example` to `.env` and edit placeholders for your environment.

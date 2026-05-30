@@ -13,6 +13,9 @@ func TestIsRelease(t *testing.T) {
 		{"dev", false},
 		{"", false},
 		{"5.10.3-dev+abc1234", false},
+		{"5.10.3+local", false},
+		{"5.10.3junk", false},
+		{"5.10.3-rc.1+local", false},
 		{"0.0.0-dev+local", false},
 		{"not-a-version", false},
 	}
