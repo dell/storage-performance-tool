@@ -222,6 +222,12 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	}
 	result.Timestamp = latestTimestamp
 
+	nodeList := make([]*PerformanceMetric, 0, len(nodeMetrics))
+	for _, metric := range nodeMetrics {
+		nodeList = append(nodeList, metric)
+	}
+	applyProgressAndLimitFields(&result, nodeList)
+
 	return &result
 }
 
@@ -358,5 +364,45 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	agg.Unbounded = first.Unbounded
 	agg.OverallUnbounded = first.OverallUnbounded
 
+	applyProgressAndLimitFields(&agg, metrics)
+
 	return &agg, perOp
+}
+
+// applyProgressAndLimitFields propagates per-step progress and limit metadata
+// from the per-node metrics onto an aggregate result so that completion
+// detection (shouldSignalCompletion) has the data it needs.
+//
+//   - StepTime: MAX across nodes (the most-progressed elapsed time).
+//   - HasLimit/LimitType/LimitTimeSec/LimitOpCount: filled from a node only when
+//     the aggregate has not already computed them.
+func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*PerformanceMetric) {
+	if result == nil || len(metrics) == 0 {
+		return
+	}
+
+	var (
+		maxStepTime float64
+		limitSet    = result.HasLimit
+	)
+
+	for _, m := range metrics {
+		if m == nil {
+			continue
+		}
+		if m.StepTime > maxStepTime {
+			maxStepTime = m.StepTime
+		}
+		// Limit metadata is identical per-step across nodes. Preserve any aggregate
+		// values already computed by the caller, such as summed op-count limits.
+		if !limitSet && m.HasLimit {
+			result.HasLimit = m.HasLimit
+			result.LimitType = m.LimitType
+			result.LimitTimeSec = m.LimitTimeSec
+			result.LimitOpCount = m.LimitOpCount
+			limitSet = true
+		}
+	}
+
+	result.StepTime = maxStepTime
 }

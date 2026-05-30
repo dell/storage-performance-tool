@@ -983,13 +983,43 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
 			}
-			if update != nil && update.Aggregated != nil && update.Aggregated.TestState >= constants.TestStateCompleted {
+			if update != nil && shouldSignalCompletion(update.Aggregated) {
 				m.signalCompletion()
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// shouldSignalCompletion reports whether an aggregated metrics sample indicates
+// the distributed test has truly finished and the headless coordinator should
+// stop.
+//
+// The engine reports test_state=Completed whenever operations have started but
+// the instantaneous concurrency is 0. The asynchronous Netty S3 driver hits that
+// transiently between operations at low thread counts, so a single Completed
+// sample is not a reliable end-of-test signal: in headless mode it caused
+// duration-bounded runs to abort within seconds of starting. For a time-bounded
+// run we therefore only honor completion once the configured duration has
+// actually elapsed (StepTime carries the engine-reported elapsed_time_seconds).
+// Op-count and unbounded runs are guarded by the engine-side fix and keep the
+// prior trust-the-state behavior here.
+func shouldSignalCompletion(agg *PerformanceMetric) bool {
+	if agg == nil || agg.TestState < constants.TestStateCompleted {
+		return false
+	}
+	if agg.HasLimit && agg.LimitType == constants.LimitTypeTime && agg.LimitTimeSec > 0 {
+		return agg.StepTime >= float64(agg.LimitTimeSec)
+	}
+	// For op-count-bounded runs, require the fleet to have reached 100% completion
+	// before trusting the Completed state. CompletionPercent is normalization-safe
+	// across N nodes (it is the slowest node's progress); comparing a summed
+	// SuccessCount against a per-node LimitOpCount would be wrong once aggregated.
+	if agg.HasLimit && agg.LimitType == constants.LimitTypeOpCount {
+		return agg.CompletionPercent >= 100
+	}
+	return true
 }
 
 // collectAllMetrics polls all ready hosts and creates a MultiNodeMetricsUpdate

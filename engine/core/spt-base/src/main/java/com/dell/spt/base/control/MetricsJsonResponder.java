@@ -137,7 +137,7 @@ final class MetricsJsonResponder {
 			cachedProgress = true;
 		}
 
-		final int testState = calculateTestState(snapshot, successCount, failCount);
+		final int testState = calculateTestState(ctx.metadata(), elapsedMillis, snapshot, successCount, failCount);
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
@@ -205,7 +205,7 @@ final class MetricsJsonResponder {
 			cachedProgress = true;
 		}
 
-		final int testState = calculateTestState(snapshot, successCount, failCount);
+		final int testState = calculateTestState(ctx.metadata(), elapsedMillis, snapshot, successCount, failCount);
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
@@ -624,13 +624,35 @@ final class MetricsJsonResponder {
 		}
 	}
 
-	private int calculateTestState(final AllMetricsSnapshot snapshot, final long successCount, final long failsCount) {
+	private int calculateTestState(
+					final java.util.Map meta, final long elapsedMillis,
+					final AllMetricsSnapshot snapshot, final long successCount, final long failsCount) {
 		final long totalOps = successCount + failsCount;
-		if (totalOps > 0) {
-			final long concurrency = snapshot.concurrencySnapshot().last();
-			return concurrency > 0 ? 1 : 2;
+		if (totalOps <= 0) {
+			return 1; // running: no operations issued yet
 		}
-		return 1;
+		final long concurrency = snapshot.concurrencySnapshot().last();
+		if (concurrency > 0) {
+			return 1; // running: operations in flight
+		}
+		// concurrency == 0 with operations already issued is ambiguous: it can be a
+		// genuine end-of-test, or merely a transient gap between asynchronous
+		// operations (e.g. the Netty S3 driver releases its concurrency permit
+		// between ops at low thread counts). For a duration-bounded run, do not
+		// report Completed until the configured time limit has actually elapsed.
+		final long timeLimitSec = metadataLong(meta, MetricsConstants.METADATA_LIMIT_TIME_SEC);
+		if (timeLimitSec > 0 && elapsedMillis < timeLimitSec * 1000L) {
+			return 1; // still within the configured duration: transient gap, not done
+		}
+		// Op-count-bounded runs hit the same transient concurrency==0 gap. countLimit
+		// is per-node/per-context here (calculateTestState runs per context), matching
+		// the per-context totalOps, so do not report Completed until the configured
+		// operation count has actually been reached.
+		final long countLimit = metadataLong(meta, MetricsConstants.METADATA_LIMIT_OP_COUNT);
+		if (countLimit > 0 && totalOps < countLimit) {
+			return 1; // still below the configured op count: transient gap, not done
+		}
+		return 2; // completed
 	}
 
 	private int calculateCompletionPercent(

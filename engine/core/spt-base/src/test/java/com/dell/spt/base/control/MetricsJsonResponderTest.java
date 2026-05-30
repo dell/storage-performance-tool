@@ -641,6 +641,91 @@ public class MetricsJsonResponderTest {
 		return snapshot;
 	}
 
+	@Test
+	void clusterMetricsStayRunningWhenConcurrencyTransientlyZeroBeforeTimeLimit() throws Exception {
+		// Regression: the Netty S3 driver releases its concurrency permit between
+		// asynchronous operations, so concurrency momentarily hits 0 with ops
+		// already issued. For a duration-bounded run the engine must NOT report
+		// Completed until the configured time has elapsed, or headless coordinators
+		// abort the run within seconds of starting.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-transient", OpType.CREATE, snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_TIME_SEC, 60L));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ArrayNode payload = responder.buildClusterMetrics(false);
+
+		JsonNode obj = null;
+		for (final JsonNode node : payload) {
+			if ("step-transient".equals(node.get("step_id").asText())) {
+				obj = node;
+			}
+		}
+		assertNotNull(obj, "expected metrics for step-transient");
+		assertEquals(1, obj.get("test_state").asInt(),
+						"transient concurrency==0 only 5s into a 60s run must report Running, not Completed");
+	}
+
+	@Test
+	void clusterMetricsStayRunningWhenConcurrencyTransientlyZeroBeforeOpCountLimit() throws Exception {
+		// Regression: the same transient concurrency==0 gap also occurs for an
+		// op-count-bounded run. With only 80 of 1000 ops issued the engine must
+		// report Running, not Completed, or headless coordinators abort early.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-count-transient", OpType.CREATE, snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1000L));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ArrayNode payload = responder.buildClusterMetrics(false);
+
+		JsonNode obj = null;
+		for (final JsonNode node : payload) {
+			if ("step-count-transient".equals(node.get("step_id").asText())) {
+				obj = node;
+			}
+		}
+		assertNotNull(obj, "expected metrics for step-count-transient");
+		assertEquals(1, obj.get("test_state").asInt(),
+						"transient concurrency==0 with only 80 of 1000 ops must report Running, not Completed");
+	}
+
+	@Test
+	void clusterMetricsReportCompletedWhenConcurrencyZeroAfterTimeLimit() throws Exception {
+		// Positive path: once the configured duration has elapsed, concurrency==0
+		// with operations issued is a genuine completion.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 0L, 65_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-done", OpType.CREATE, snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_TIME_SEC, 60L));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ArrayNode payload = responder.buildClusterMetrics(false);
+
+		JsonNode obj = null;
+		for (final JsonNode node : payload) {
+			if ("step-done".equals(node.get("step_id").asText())) {
+				obj = node;
+			}
+		}
+		assertNotNull(obj, "expected metrics for step-done");
+		assertEquals(2, obj.get("test_state").asInt(),
+						"concurrency==0 after the configured duration must report Completed");
+	}
+
 	private static AllMetricsSnapshot mockNodeSnapshot(
 					final long succCount,
 					final long failCount,
