@@ -103,3 +103,43 @@ func TestShouldSignalCompletion(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldSignalCompletionForExpectedSteps(t *testing.T) {
+	expectedSteps := []string{
+		"mt-001-20260531.002657.899-seed",
+		"mt-002-20260531.002657.899-read",
+	}
+
+	seedComplete := &PerformanceMetric{
+		StepID:            expectedSteps[0],
+		TestState:         constants.TestStateCompleted,
+		HasLimit:          true,
+		LimitType:         constants.LimitTypeOpCount,
+		CompletionPercent: 100,
+	}
+	if shouldSignalCompletionForExpectedSteps(seedComplete, expectedSteps) {
+		t.Fatal("seed step completion must not signal whole-scenario completion")
+	}
+
+	readComplete := &PerformanceMetric{
+		StepID:       expectedSteps[1],
+		TestState:    constants.TestStateCompleted,
+		HasLimit:     true,
+		LimitType:    constants.LimitTypeTime,
+		LimitTimeSec: 120,
+		StepTime:     120,
+	}
+	if !shouldSignalCompletionForExpectedSteps(readComplete, expectedSteps) {
+		t.Fatal("final read step completion should signal whole-scenario completion")
+	}
+}
+
+func TestShouldSignalCompletionForExpectedStepsFallback(t *testing.T) {
+	complete := &PerformanceMetric{
+		TestState: constants.TestStateCompleted,
+		HasLimit:  false,
+	}
+	if !shouldSignalCompletionForExpectedSteps(complete, nil) {
+		t.Fatal("missing expected step IDs should preserve existing completion behavior")
+	}
+}

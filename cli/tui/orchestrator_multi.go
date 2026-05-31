@@ -780,6 +780,8 @@ type MultiHostTestOrchestrator struct {
 	// Message sink for TUI (e.g., p.Send(sptMessageMsg(...)))
 	messageSink func(string)
 
+	expectedStepIDs []string
+
 	compatOnce sync.Once
 }
 
@@ -820,6 +822,13 @@ func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTe
 		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- jitter only
 		logJSONBodies: os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
+}
+
+// SetExpectedStepIDs constrains completion detection to the final step in the
+// generated scenario. This prevents a precondition/seed step from ending a
+// multi-step headless run.
+func (m *MultiHostTestOrchestrator) SetExpectedStepIDs(stepIDs []string) {
+	m.expectedStepIDs = append([]string(nil), stepIDs...)
 }
 
 // BuildBaselineUpdate constructs a status-only update for all configured hosts (no per-node samples).
@@ -983,7 +992,7 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
 			}
-			if update != nil && shouldSignalCompletion(update.Aggregated) {
+			if update != nil && shouldSignalCompletionForExpectedSteps(update.Aggregated, m.expectedStepIDs) {
 				m.signalCompletion()
 			}
 		case <-ctx.Done():
@@ -1020,6 +1029,20 @@ func shouldSignalCompletion(agg *PerformanceMetric) bool {
 		return agg.CompletionPercent >= 100
 	}
 	return true
+}
+
+func shouldSignalCompletionForExpectedSteps(agg *PerformanceMetric, expectedStepIDs []string) bool {
+	if len(expectedStepIDs) == 0 {
+		return shouldSignalCompletion(agg)
+	}
+	if agg == nil {
+		return false
+	}
+	finalStepID := expectedStepIDs[len(expectedStepIDs)-1]
+	if finalStepID == "" || agg.StepID != finalStepID {
+		return false
+	}
+	return shouldSignalCompletion(agg)
 }
 
 // collectAllMetrics polls all ready hosts and creates a MultiNodeMetricsUpdate

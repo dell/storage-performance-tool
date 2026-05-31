@@ -52,6 +52,35 @@ func TestNewMultiHostHeadlessRunner_Success(t *testing.T) {
 	}
 }
 
+func TestNewMultiHostHeadlessRunner_CopiesExpectedStepIDs(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "host1", IsLocal: false, Original: "host1"},
+	}
+	orchestrator := tui.NewMultiHostOrchestrator(hostInfos, 1)
+	expectedStepIDs := []string{"mt-001-seed", "mt-002-read"}
+
+	runner, err := NewMultiHostHeadlessRunner(orchestrator, HeadlessOptions{
+		ExpectedStepIDs: expectedStepIDs,
+	})
+	if err != nil {
+		t.Fatalf("NewMultiHostHeadlessRunner returned error: %v", err)
+	}
+
+	if len(runner.expectedStepIDs) != len(expectedStepIDs) {
+		t.Fatalf("expectedStepIDs length = %d, want %d", len(runner.expectedStepIDs), len(expectedStepIDs))
+	}
+	for i, want := range expectedStepIDs {
+		if runner.expectedStepIDs[i] != want {
+			t.Fatalf("expectedStepIDs[%d] = %q, want %q", i, runner.expectedStepIDs[i], want)
+		}
+	}
+
+	expectedStepIDs[1] = "mutated"
+	if runner.expectedStepIDs[1] != "mt-002-read" {
+		t.Fatalf("expectedStepIDs was aliased to caller slice, got %q", runner.expectedStepIDs[1])
+	}
+}
+
 func TestNewMultiHostHeadlessRunner_WithTraceFile(t *testing.T) {
 	oldArgs := os.Args
 	os.Args = []string{"spt", "run", "mixed", "-s", "secret", "-a=ACCESS"}
