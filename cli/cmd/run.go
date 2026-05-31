@@ -369,6 +369,18 @@ type traceOptions struct {
 	Auto   bool
 }
 
+func buildHeadlessOptions(traceOpts traceOptions, verbose bool, apiPort string, autoTerminate int, delegateNormalShutdown bool, expectedStepIDs []string) headless.HeadlessOptions {
+	return headless.HeadlessOptions{
+		TraceFile:              traceOpts.Path,
+		TraceAppend:            traceOpts.Append,
+		Verbose:                verbose,
+		APIPort:                apiPort,
+		AutoTerminateSeconds:   autoTerminate,
+		DelegateNormalShutdown: delegateNormalShutdown,
+		ExpectedStepIDs:        append([]string(nil), expectedStepIDs...),
+	}
+}
+
 func prepareTraceOptions(explicitPath string, explicitAppend bool, autoResults bool, plannedResultsRoot string, runToken string, warnOut io.Writer) (traceOptions, error) {
 	path := strings.TrimSpace(explicitPath)
 	if path != "" {
@@ -975,13 +987,7 @@ Available workload types:
 				verbose, _ := cmd.Flags().GetBool("verbose")
 
 				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
-				options := headless.HeadlessOptions{
-					TraceFile:              traceOpts.Path,
-					TraceAppend:            traceOpts.Append,
-					Verbose:                verbose,
-					AutoTerminateSeconds:   autoTerminate,
-					DelegateNormalShutdown: delegateShutdownToAutoResults,
-				}
+				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
 
 				if autoTerminate > 0 {
 					fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1019,14 +1025,8 @@ Available workload types:
 		if headlessMode {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
-			options := headless.HeadlessOptions{
-				TraceFile:            traceOpts.Path,
-				TraceAppend:          traceOpts.Append,
-				Verbose:              verbose,
-				APIPort:              apiPort,
-				AutoTerminateSeconds: autoTerminate,
-				// KeepScenario is now passed via params, not options
-			}
+			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
+			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}

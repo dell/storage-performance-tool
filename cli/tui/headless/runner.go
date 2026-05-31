@@ -55,6 +55,7 @@ type HeadlessOptions struct {
 	// In multi-host runs, let auto-results fetch artifacts and request shutdown
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
+	ExpectedStepIDs        []string
 }
 
 // NewHeadlessRunner creates a new headless runner
@@ -104,6 +105,7 @@ type MultiHostHeadlessRunner struct {
 	traceFile              *os.File
 	verbose                bool
 	delegateNormalShutdown bool
+	expectedStepIDs        []string
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
@@ -112,6 +114,7 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 		orchestrator:           orchestrator,
 		verbose:                options.Verbose,
 		delegateNormalShutdown: options.DelegateNormalShutdown,
+		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
 	}
 
 	// Set up trace file if specified
@@ -149,6 +152,7 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 
 	// Start the distributed test on all hosts via orchestrator wrapper
 	testOrchestrator := tui.NewMultiHostTestOrchestrator(r.orchestrator)
+	testOrchestrator.SetExpectedStepIDs(r.expectedStepIDs)
 	// Standardize progress output in headless mode as well
 	r.orchestrator.SetNotifier(func(msg string) {
 		r.output("spt", msg)
