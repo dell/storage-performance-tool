@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
@@ -67,6 +68,39 @@ func (f *fakeFetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []stri
 		return f.manifest, f.err
 	}
 	return &results.Manifest{}, nil
+}
+
+type eventWriter struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (w *eventWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, line := range strings.Split(string(p), "\n") {
+		if strings.TrimSpace(line) != "" {
+			w.events = append(w.events, line)
+		}
+	}
+	return len(p), nil
+}
+
+func (w *eventWriter) snapshot() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, len(w.events))
+	copy(out, w.events)
+	return out
+}
+
+func indexOfEventContaining(events []string, needle string) int {
+	for i, event := range events {
+		if strings.Contains(event, needle) {
+			return i
+		}
+	}
+	return -1
 }
 
 // TestStartAutoResults_StaleDiscoveredIDsFromPriorRun reproduces the bug where the background
@@ -492,5 +526,74 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	traceCopyPath := filepath.Join(fetcher.output, filepath.Base(traceFile))
 	if _, err := os.Stat(traceCopyPath); err != nil {
 		t.Fatalf("expected trace file copied to results root: %v", err)
+	}
+}
+
+func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	}()
+
+	stepID := "mt-001-20260604.195722.504-mixed"
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{output: outputDir}
+	}
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+		return nil
+	}
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error {
+		_, err := io.WriteString(out, "FINAL SUMMARY\n")
+		return err
+	}
+
+	events := &eventWriter{}
+	done := startAutoResults(
+		"http://example",
+		"mt",
+		t.TempDir(),
+		[]string{stepID},
+		false,
+		nil,
+		"9999",
+		true,
+		1,
+		"",
+		nil,
+		events,
+		events,
+		"",
+	)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+
+	got := events.snapshot()
+	summaryIndex := indexOfEventContaining(got, "FINAL SUMMARY")
+	shutdownIndex := indexOfEventContaining(got, "Shutdown completed successfully.")
+	if summaryIndex < 0 {
+		t.Fatalf("summary was not emitted; events=%v", got)
+	}
+	if shutdownIndex < 0 {
+		t.Fatalf("shutdown completion was not emitted; events=%v", got)
+	}
+	if summaryIndex <= shutdownIndex {
+		t.Fatalf("summary should be emitted after shutdown completion; events=%v", got)
 	}
 }
