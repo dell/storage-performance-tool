@@ -60,6 +60,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	// Used to emit opening/closing wrapper tags as explicit log events so that both
 	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
 	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
+	private final Set<String> openMetricsTotalCsvSteps = ConcurrentHashMap.newKeySet();
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
@@ -250,10 +251,13 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
 							// class instance. though this flag is only enabled for distributed context.
 							if (metricsCtx.sumPersistEnabled()) {
-								Loggers.METRICS_FILE_TOTAL.info(
-												new MetricsTotalCsvLogMessage(snapshot, metricsCtx.opType(),
-																metricsCtx.concurrencyLimit(), latencyQuantiles,
-																durationQuantiles, ttfbQuantiles));
+								final boolean includeHeader = openMetricsTotalCsvSteps.add(metricsCtx.loadStepId());
+								final MetricsTotalCsvLogMessage message = new MetricsTotalCsvLogMessage(
+												snapshot, metricsCtx.opType(), metricsCtx.concurrencyLimit(), latencyQuantiles,
+												durationQuantiles, ttfbQuantiles);
+								final StringBuilder csvOutput = new StringBuilder();
+								message.formatTo(csvOutput, includeHeader);
+								Loggers.METRICS_FILE_TOTAL.info(csvOutput.toString());
 							}
 						}
 						// console output
@@ -288,6 +292,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 														ctx -> metricsCtx.loadStepId().equals(ctx.loadStepId()))) {
 							Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
 							openResultXmlSteps.remove(metricsCtx.loadStepId());
+							openMetricsTotalCsvSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);

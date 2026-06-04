@@ -46,12 +46,20 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		this.ttfbs = ttfbQuantiles;
 	}
 
-	@Override
-	public final void formatTo(final StringBuilder strb) {
-		final String lineSep = System.lineSeparator();
-		// log4j2 supports file headers to avoid this, but we need a dynamic header based on the provided quantiles
-		// headers are printed every time formatTo is called because each time we call it for a new step, hence
-		// for a new file
+ 	@Override
+ 	public final void formatTo(final StringBuilder strb) {
+		formatTo(strb, true);
+	}
+
+	public final void formatTo(final StringBuilder strb, final boolean includeHeader) {
+		if (includeHeader) {
+			appendHeader(strb);
+			strb.append(System.lineSeparator());
+		}
+		appendValueRow(strb);
+	}
+
+	private void appendHeader(final StringBuilder strb) {
 		strb.append("DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,")
 						.append("CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],")
 						.append("BWLast[MB/s],DurationAvg[us],DurationMin[us],");
@@ -63,7 +71,6 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		}
 		strb.append("DurationMax[us],LatencyAvg[us],LatencyMin[us],");
 
-		// not like quantiles are different for duration and latency, but just to be precise
 		for (Double quantile : latencies.keySet()) {
 			strb.append("LatencyQ_")
 							.append(quantile)
@@ -75,9 +82,10 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 							.append(quantile)
 							.append("[us],");
 		}
-		strb.append("TtfbMax[us]")
-						.append(lineSep);
+		strb.append("TtfbMax[us]");
+	}
 
+	private void appendValueRow(final StringBuilder strb) {
 		final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
 		final TimingMetricSnapshot durationSnapshot = snapshot.durationSnapshot();
 		final RateMetricSnapshot successCountSnapshot = snapshot.successSnapshot();
