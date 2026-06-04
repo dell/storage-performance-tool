@@ -54,39 +54,40 @@ type HostSummary struct {
 
 // WorkloadSummary records key scenario parameters.
 type WorkloadSummary struct {
-	Type            string
-	ObjectSizeBytes int64
-	ObjectSizeMB    float64
-	ObjectSizeGiB   float64
-	ObjectSizeHuman string
-	ObjectCount     int64
-	Threads         int
-	Endpoints       []string
-	Bucket          string
-	Prefix          string
-	DurationRequest string
-	CleanupEnabled  bool
-	KeepScenario    bool
-	SliceEndpoints  bool
+	Type              string
+	ObjectSizeBytes   int64
+	ObjectSizeMB      float64
+	ObjectSizeGiB     float64
+	ObjectSizeHuman   string
+	ObjectCount       int64
+	Threads           int
+	Endpoints         []string
+	Bucket            string
+	Prefix            string
+	DurationRequest   string
+	CleanupEnabled    bool
+	KeepScenario      bool
+	SliceEndpoints    bool
 	MixedDistribution MixedDistribution
 }
 
 // StepSummary aggregates per-step metrics and artifact health.
 type StepSummary struct {
-	Ordinal         int
-	StepID          string
-	PhaseLabel      string
-	Operation       string
-	Status          StepStatus
-	Metrics         *PhaseMetrics
-	IsMixed         bool
+	Ordinal            int
+	StepID             string
+	PhaseLabel         string
+	Operation          string
+	Status             StepStatus
+	Metrics            *PhaseMetrics
+	IsMixed            bool
 	OperationBreakdown []OperationBreakdown
-	MixedLatencyNote string
-	MissingRequired []string
-	MissingOptional []string
-	Notes           []string
+	MixedLatencyNote   string
+	MissingRequired    []string
+	MissingOptional    []string
+	Notes              []string
 }
 
+// MixedDistribution stores the configured mixed-workload share for each known operation.
 type MixedDistribution struct {
 	Available     bool
 	ReadPercent   int
@@ -95,6 +96,7 @@ type MixedDistribution struct {
 	DeletePercent int
 }
 
+// OperationBreakdown holds one operation-specific row within a mixed step summary.
 type OperationBreakdown struct {
 	Operation       string
 	ConfiguredShare *float64
@@ -146,10 +148,21 @@ type RunTotals struct {
 }
 
 const (
-	bytesInKB = 1024
-	bytesInMB = bytesInKB * 1024
-	bytesInGB = bytesInMB * 1024
+	bytesInKB             = 1024
+	bytesInMB             = bytesInKB * 1024
+	bytesInGB             = bytesInMB * 1024
+	reportOperationRead   = "READ"
+	reportOperationStat   = "STAT"
+	reportOperationCreate = "CREATE"
+	reportOperationDelete = "DELETE"
 )
+
+var mixedOperationOrder = []string{
+	reportOperationRead,
+	reportOperationStat,
+	reportOperationCreate,
+	reportOperationDelete,
+}
 
 // Aggregate builds a RunSummary from Loader output.
 func Aggregate(data *RunData) (*RunSummary, error) {
@@ -224,23 +237,27 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	if sizeWarn != nil {
 		warnings = append(warnings, fmt.Sprintf("object size parse error: %v", sizeWarn))
 	}
-	isList := strings.EqualFold(data.Params.WorkloadType, workloadTypeList)
+	workloadType := strings.ToLower(strings.TrimSpace(data.Params.WorkloadType))
+	if workloadType == "" {
+		workloadType = strings.ToLower(strings.TrimSpace(params.WorkloadType))
+	}
+	isList := strings.EqualFold(workloadType, workloadTypeList)
 	summary := WorkloadSummary{
-		Type:            strings.ToLower(data.Params.WorkloadType),
-		ObjectSizeBytes: sizeBytes,
-		ObjectSizeMB:    bytesToMB(sizeBytes),
-		ObjectSizeGiB:   bytesToGiB(sizeBytes),
-		ObjectSizeHuman: formatBytes(sizeBytes),
-		ObjectCount:     params.ObjectCount,
-		Threads:         params.Threads,
-		Endpoints:       append([]string(nil), params.Endpoints...),
-		Bucket:          params.Bucket,
-		Prefix:          params.Prefix,
-		DurationRequest: params.Duration,
-		CleanupEnabled:  params.Cleanup,
-		KeepScenario:    params.KeepScenario,
-		SliceEndpoints:  params.SliceEndpoints,
-		MixedDistribution: mixedDistributionFromParams(data.Params.WorkloadType, params),
+		Type:              workloadType,
+		ObjectSizeBytes:   sizeBytes,
+		ObjectSizeMB:      bytesToMB(sizeBytes),
+		ObjectSizeGiB:     bytesToGiB(sizeBytes),
+		ObjectSizeHuman:   formatBytes(sizeBytes),
+		ObjectCount:       params.ObjectCount,
+		Threads:           params.Threads,
+		Endpoints:         append([]string(nil), params.Endpoints...),
+		Bucket:            params.Bucket,
+		Prefix:            params.Prefix,
+		DurationRequest:   params.Duration,
+		CleanupEnabled:    params.Cleanup,
+		KeepScenario:      params.KeepScenario,
+		SliceEndpoints:    params.SliceEndpoints,
+		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 	}
 	if isList {
 		summary.ObjectSizeHuman = ""
@@ -311,6 +328,9 @@ func mixedDistributionFromParams(workloadType string, params ScenarioParams) Mix
 	if !strings.EqualFold(workloadType, "mixed") && !strings.EqualFold(params.WorkloadType, "mixed") {
 		return MixedDistribution{}
 	}
+	if params.GetDistrib == 0 && params.StatDistrib == 0 && params.PutDistrib == 0 && params.DeleteDistrib == 0 {
+		return MixedDistribution{}
+	}
 	return MixedDistribution{
 		Available:     true,
 		ReadPercent:   params.GetDistrib,
@@ -318,27 +338,23 @@ func mixedDistributionFromParams(workloadType string, params ScenarioParams) Mix
 		CreatePercent: params.PutDistrib,
 		DeletePercent: params.DeleteDistrib,
 	}
-	}
+}
 
 func isMixedStep(stepID string, workload WorkloadSummary, totals *MetricsTotals) bool {
 	if totals == nil || len(totals.Rows) < 2 {
 		return false
 	}
-	if !strings.EqualFold(workload.Type, "mixed") {
+	seen, allKnown := mixedOperationSet(totals.Rows)
+	if len(seen) < 2 {
 		return false
 	}
-	if !strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
-		return false
+	if strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
+		return true
 	}
-	seen := make(map[string]struct{}, len(totals.Rows))
-	for _, row := range totals.Rows {
-		op := normalizeReportOperation(row.Operation)
-		if op == "" {
-			continue
-		}
-		seen[op] = struct{}{}
+	if strings.EqualFold(workload.Type, "mixed") {
+		return true
 	}
-	return len(seen) >= 2
+	return allKnown
 }
 
 func deriveMixedMetrics(stepData *StepData, workload WorkloadSummary, objectSizeBytes int64) (*PhaseMetrics, []OperationBreakdown, []string) {
@@ -349,9 +365,12 @@ func deriveMixedMetrics(stepData *StepData, workload WorkloadSummary, objectSize
 	for _, row := range stepData.Metrics.Rows {
 		op := normalizeReportOperation(row.Operation)
 		if op == "" {
-			op = strings.ToUpper(strings.TrimSpace(row.Operation))
+			continue
 		}
 		groups[op] = append(groups[op], row)
+	}
+	if len(groups) == 0 {
+		return nil, nil, nil
 	}
 
 	warnings := make([]string, 0, 1)
@@ -479,13 +498,13 @@ func operationConfiguredShare(op string, dist MixedDistribution) *float64 {
 	}
 	var value float64
 	switch normalizeReportOperation(op) {
-	case "READ":
+	case reportOperationRead:
 		value = float64(dist.ReadPercent)
-	case "STAT":
+	case reportOperationStat:
 		value = float64(dist.StatPercent)
-	case "CREATE":
+	case reportOperationCreate:
 		value = float64(dist.CreatePercent)
-	case "DELETE":
+	case reportOperationDelete:
 		value = float64(dist.DeletePercent)
 	default:
 		return nil
@@ -495,17 +514,14 @@ func operationConfiguredShare(op string, dist MixedDistribution) *float64 {
 
 func orderedOperationKeys(groups map[string][]MetricsTotalsRow) []string {
 	ordered := make([]string, 0, len(groups))
-	for _, op := range []string{"READ", "STAT", "CREATE", "DELETE"} {
+	for _, op := range mixedOperationOrder {
 		if _, ok := groups[op]; ok {
 			ordered = append(ordered, op)
 		}
 	}
 	unknown := make([]string, 0, len(groups))
 	for op := range groups {
-		switch op {
-		case "READ", "STAT", "CREATE", "DELETE":
-			continue
-		default:
+		if !isKnownMixedOperation(op) {
 			unknown = append(unknown, op)
 		}
 	}
@@ -517,16 +533,41 @@ func orderedOperationKeys(groups map[string][]MetricsTotalsRow) []string {
 
 func normalizeReportOperation(op string) string {
 	switch strings.ToUpper(strings.TrimSpace(op)) {
-	case "GET", "READ":
-		return "READ"
-	case "HEAD", "STAT":
-		return "STAT"
-	case "PUT", "CREATE", "WRITE":
-		return "CREATE"
-	case "DELETE":
-		return "DELETE"
+	case "GET", reportOperationRead:
+		return reportOperationRead
+	case "HEAD", reportOperationStat:
+		return reportOperationStat
+	case "PUT", reportOperationCreate, "WRITE":
+		return reportOperationCreate
+	case reportOperationDelete:
+		return reportOperationDelete
 	default:
 		return strings.ToUpper(strings.TrimSpace(op))
+	}
+}
+
+func mixedOperationSet(rows []MetricsTotalsRow) (map[string]struct{}, bool) {
+	seen := make(map[string]struct{}, len(rows))
+	allKnown := true
+	for _, row := range rows {
+		op := normalizeReportOperation(row.Operation)
+		if op == "" {
+			continue
+		}
+		seen[op] = struct{}{}
+		if !isKnownMixedOperation(op) {
+			allKnown = false
+		}
+	}
+	return seen, allKnown && len(seen) > 0
+}
+
+func isKnownMixedOperation(op string) bool {
+	switch op {
+	case reportOperationRead, reportOperationStat, reportOperationCreate, reportOperationDelete:
+		return true
+	default:
+		return false
 	}
 }
 

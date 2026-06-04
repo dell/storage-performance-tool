@@ -365,6 +365,15 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 	if mixed.OperationBreakdown[3].ConfiguredShare == nil || *mixed.OperationBreakdown[3].ConfiguredShare != 10 {
 		t.Fatalf("delete configured share = %v", mixed.OperationBreakdown[3].ConfiguredShare)
 	}
+	if got := mixed.OperationBreakdown[0].ActualOps; got != 450 {
+		t.Fatalf("read actual ops = %d, want 450", got)
+	}
+	if !approxEqual(*mixed.OperationBreakdown[0].ActualShare, 44.47, 0.01) {
+		t.Fatalf("read actual share = %.4f, want about 44.47", *mixed.OperationBreakdown[0].ActualShare)
+	}
+	if !approxEqual(*mixed.OperationBreakdown[3].ActualShare, 10.57, 0.01) {
+		t.Fatalf("delete actual share = %.4f, want about 10.57", *mixed.OperationBreakdown[3].ActualShare)
+	}
 	var shareSum float64
 	for _, row := range mixed.OperationBreakdown {
 		if row.ActualShare == nil {
@@ -383,6 +392,137 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 	}
 	if len(summary.Warnings) != 0 {
 		t.Fatalf("expected no warnings, got %v", summary.Warnings)
+	}
+}
+
+func TestAggregateBuildsMixedSummaryFromScenarioWorkloadType(t *testing.T) {
+	t.Parallel()
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	runData := &RunData{
+		RunID:     "mt-20260604.180000.000",
+		StepOrder: []string{stepID},
+		Steps:     make(map[string]*StepData),
+		Params: &RunParams{
+			ScenarioParams: ScenarioParams{
+				WorkloadType: "mixed",
+				ObjectSize:   "4MB",
+				Duration:     "30s",
+			},
+		},
+	}
+
+	runData.Steps[stepID] = &StepData{
+		StepID: stepID,
+		Status: StepStatusComplete,
+		Metrics: &MetricsTotals{
+			StepID: stepID,
+			Rows: []MetricsTotalsRow{
+				{Operation: "READ", SuccessCount: 10, SizeBytes: 40960, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
+				{Operation: "CREATE", SuccessCount: 5, SizeBytes: 20480, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
+			},
+		},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatalf("Aggregate returned error: %v", err)
+	}
+	if summary.Workload.Type != "mixed" {
+		t.Fatalf("workload type = %q, want mixed", summary.Workload.Type)
+	}
+	if len(summary.Steps) != 1 || !summary.Steps[0].IsMixed {
+		t.Fatalf("expected mixed step summary, got %+v", summary.Steps)
+	}
+}
+
+func TestAggregateMixedSummaryHidesZeroConfiguredDistribution(t *testing.T) {
+	t.Parallel()
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	runData := &RunData{
+		RunID:     "mt-20260604.180000.000",
+		StepOrder: []string{stepID},
+		Steps:     make(map[string]*StepData),
+		Params: &RunParams{
+			WorkloadType: "mixed",
+			ScenarioParams: ScenarioParams{
+				WorkloadType: "mixed",
+				ObjectSize:   "4MB",
+				Duration:     "30s",
+			},
+		},
+	}
+
+	runData.Steps[stepID] = &StepData{
+		StepID: stepID,
+		Status: StepStatusComplete,
+		Metrics: &MetricsTotals{
+			StepID: stepID,
+			Rows: []MetricsTotalsRow{
+				{Operation: "READ", SuccessCount: 12, SizeBytes: 49152, StepDurationSeconds: 30, ThroughputAvgOps: 0.4, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4200, LatencyP50Micros: 3100},
+				{Operation: "STAT", SuccessCount: 8, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0, LatencyAvgMicros: 2800, LatencyP50Micros: 2000},
+			},
+		},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatalf("Aggregate returned error: %v", err)
+	}
+	if summary.Workload.MixedDistribution.Available {
+		t.Fatalf("expected mixed distribution to be unavailable when all values are zero")
+	}
+	for _, row := range summary.Steps[0].OperationBreakdown {
+		if row.ConfiguredShare != nil {
+			t.Fatalf("expected nil configured share for %s, got %v", row.Operation, *row.ConfiguredShare)
+		}
+	}
+}
+
+func TestAggregateBuildsMixedSummaryOrdersKnownOpsBeforeUnknowns(t *testing.T) {
+	t.Parallel()
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	runData := &RunData{
+		RunID:     "mt-20260604.180000.000",
+		StepOrder: []string{stepID},
+		Steps:     make(map[string]*StepData),
+		Params: &RunParams{
+			WorkloadType: "mixed",
+			ScenarioParams: ScenarioParams{
+				WorkloadType: "mixed",
+				ObjectSize:   "4MB",
+				Duration:     "30s",
+			},
+		},
+	}
+
+	runData.Steps[stepID] = &StepData{
+		StepID: stepID,
+		Status: StepStatusComplete,
+		Metrics: &MetricsTotals{
+			StepID: stepID,
+			Rows: []MetricsTotalsRow{
+				{Operation: "DELETE", SuccessCount: 5, StepDurationSeconds: 30, ThroughputAvgOps: 0.1, LatencyAvgMicros: 3000, LatencyP50Micros: 2000},
+				{Operation: "LIST", SuccessCount: 3, StepDurationSeconds: 30, ThroughputAvgOps: 0.1, LatencyAvgMicros: 2000, LatencyP50Micros: 1500},
+				{Operation: "CREATE", SuccessCount: 7, SizeBytes: 28672, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
+				{Operation: "READ", SuccessCount: 11, SizeBytes: 45056, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
+				{Operation: "STAT", SuccessCount: 9, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, LatencyAvgMicros: 2500, LatencyP50Micros: 1800},
+			},
+		},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatalf("Aggregate returned error: %v", err)
+	}
+	gotOps := make([]string, 0, len(summary.Steps[0].OperationBreakdown))
+	for _, row := range summary.Steps[0].OperationBreakdown {
+		gotOps = append(gotOps, row.Operation)
+	}
+	if strings.Join(gotOps, ",") != "READ,STAT,CREATE,DELETE,LIST" {
+		t.Fatalf("unexpected operation order: %v", gotOps)
 	}
 }
 

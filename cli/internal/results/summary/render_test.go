@@ -225,6 +225,23 @@ func TestRendererCompactSnippetIncludesMixedOperationDetail(t *testing.T) {
 	mustContain(t, snippet, "Totals: duration 30s")
 }
 
+func TestRendererMixedBreakdownOmitsConfiguredDistributionWhenUnavailable(t *testing.T) {
+	t.Parallel()
+
+	summary := mixedSummaryFixture()
+	summary.Workload.MixedDistribution = MixedDistribution{}
+	for i := range summary.Steps[0].OperationBreakdown {
+		summary.Steps[0].OperationBreakdown[i].ConfiguredShare = nil
+	}
+
+	renderer := NewRenderer(RenderOptions{MaxWidth: 120})
+	report := renderer.FullReport(summary)
+	snippet := renderer.CompactSnippet(summary)
+
+	mustNotContain(t, report, "Configured distribution:")
+	mustNotContain(t, snippet, "cfg ")
+}
+
 func TestRendererConsoleSnippetKeepsMixedDetailWithElevatedCap(t *testing.T) {
 	t.Parallel()
 
@@ -270,10 +287,10 @@ func mixedSummaryFixture() *RunSummary {
 		},
 		Steps: []StepSummary{
 			{
-				StepID:          "mt-002-20260604.180001.000-mixed",
-				PhaseLabel:      "Mixed",
-				Operation:       "MIXED",
-				IsMixed:         true,
+				StepID:           "mt-002-20260604.180001.000-mixed",
+				PhaseLabel:       "Mixed",
+				Operation:        "MIXED",
+				IsMixed:          true,
 				MixedLatencyNote: "Mixed latency is shown per operation; no combined p50 is derived from per-op quantiles.",
 				Metrics: &PhaseMetrics{
 					SuccessCount:     1000,
@@ -301,5 +318,12 @@ func mustContain(t *testing.T, s, sub string) {
 	t.Helper()
 	if !strings.Contains(s, sub) {
 		t.Fatalf("expected %q to contain %q", s, sub)
+	}
+}
+
+func mustNotContain(t *testing.T, s, sub string) {
+	t.Helper()
+	if strings.Contains(s, sub) {
+		t.Fatalf("expected %q not to contain %q", s, sub)
 	}
 }
