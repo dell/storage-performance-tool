@@ -249,12 +249,17 @@ func TestRendererConsoleSnippetKeepsMixedDetailWithElevatedCap(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		summary.Warnings = append(summary.Warnings, "warning line for mixed report truncation coverage")
 	}
+	summary.Steps[0].MissingRequired = []string{"metrics.total.csv"}
 
 	renderer := NewRenderer(RenderOptions{MaxWidth: 120, SnippetLineCap: 40})
 	snippet := renderer.ConsoleSnippet(summary)
 
 	mustContain(t, snippet, "Mixed Operation Breakdown")
 	mustContain(t, snippet, "Run Totals")
+	mustContain(t, snippet, "Warnings")
+	mustContain(t, snippet, "warning line for mixed report truncation coverage")
+	mustContain(t, snippet, "Artifact Health")
+	mustContain(t, snippet, "missing required artifacts: metrics.total.csv")
 	if strings.Contains(snippet, "report truncated") {
 		t.Fatalf("expected elevated mixed cap to avoid truncation, got:\n%s", snippet)
 	}

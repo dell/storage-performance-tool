@@ -335,6 +335,15 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 	if !approxEqual(mixed.Metrics.ThroughputAvgOps, 33.5, 0.001) {
 		t.Fatalf("mixed avg throughput = %.3f", mixed.Metrics.ThroughputAvgOps)
 	}
+	if !approxEqual(mixed.Metrics.ThroughputLastOps, 31.3, 0.001) {
+		t.Fatalf("mixed last throughput = %.3f", mixed.Metrics.ThroughputLastOps)
+	}
+	if !approxEqual(mixed.Metrics.BandwidthAvgMBps, 80.4, 0.001) {
+		t.Fatalf("mixed avg bandwidth = %.3f", mixed.Metrics.BandwidthAvgMBps)
+	}
+	if !approxEqual(mixed.Metrics.BandwidthLastMBps, 75.6, 0.001) {
+		t.Fatalf("mixed last bandwidth = %.3f", mixed.Metrics.BandwidthLastMBps)
+	}
 	if !approxEqual(summary.Totals.DurationSeconds, 30, 0.001) {
 		t.Fatalf("totals duration seconds = %.3f, want 30", summary.Totals.DurationSeconds)
 	}

@@ -46,8 +46,8 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		this.ttfbs = ttfbQuantiles;
 	}
 
- 	@Override
- 	public final void formatTo(final StringBuilder strb) {
+	@Override
+	public final void formatTo(final StringBuilder strb) {
 		formatTo(strb, true);
 	}
 
