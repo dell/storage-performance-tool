@@ -2,6 +2,7 @@ package summary
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderEnvironment(b, summary)
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
 
@@ -62,10 +64,14 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 func (r *Renderer) ConsoleSnippet(summary *RunSummary) string {
 	full := r.FullReport(summary)
 	lines := strings.Split(full, "\n")
-	if len(lines) <= r.SnippetLineCap {
+	lineCap := r.SnippetLineCap
+	if hasMixedSteps(summary) && lineCap < 60 {
+		lineCap = 60
+	}
+	if len(lines) <= lineCap {
 		return full
 	}
-	truncated := lines[:r.SnippetLineCap-1]
+	truncated := lines[:lineCap-1]
 	truncated = append(truncated, "… (report truncated; see file for full details)")
 	return strings.Join(truncated, "\n") + "\n"
 }
@@ -93,6 +99,12 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
+	for _, line := range compactMixedLines(summary) {
+		for _, wrapped := range textutil.WrapWords(line, wrapWidth) {
+			sb.WriteString(wrapped)
+			sb.WriteByte('\n')
+		}
+	}
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
 		sb.WriteString("Warnings:\n")
@@ -212,7 +224,7 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			formatInt(m.SuccessCount),
 			formatBytesHuman(m.DataBytes),
 			formatNumber(m.ThroughputAvgOps, "ops/s"),
-			formatNumber(m.LatencyHeadlineMs, "ms"),
+			mixedLatencyCell(step, m),
 			formatNumber(m.BandwidthAvgMBps, "MB/s"),
 		}
 		rows = append(rows, row)
@@ -221,6 +233,39 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—"})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
+	if !hasMixedSteps(summary) {
+		return
+	}
+	b.WriteString("Mixed Operation Breakdown\n")
+	for _, step := range summary.Steps {
+		if !step.IsMixed || len(step.OperationBreakdown) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "Step: %s\n", step.StepID)
+		if configured := configuredDistributionText(summary.Workload.MixedDistribution); configured != "" {
+			fmt.Fprintf(b, "Configured distribution: %s\n", configured)
+		}
+		headers := []string{"Operation", "Configured", "Actual Ops", "Success", "Failure", "Data Moved", "IOPS Avg", "Bandwidth Avg", "Latency P50"}
+		rows := make([][]string, 0, len(step.OperationBreakdown))
+		for _, op := range step.OperationBreakdown {
+			rows = append(rows, []string{
+				op.Operation,
+				formatConfiguredShare(op.ConfiguredShare),
+				formatActualOps(op.ActualShare, op.ActualOps),
+				formatInt(op.Metrics.SuccessCount),
+				formatInt(op.Metrics.FailureCount),
+				formatBytesHuman(op.Metrics.DataBytes),
+				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
+				formatNumber(op.Metrics.BandwidthAvgMBps, "MB/s"),
+				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
+			})
+		}
+		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight}))
+		b.WriteString("\n\n")
+	}
 }
 
 func (r *Renderer) renderTotals(b *strings.Builder, summary *RunSummary) {
@@ -342,8 +387,99 @@ func formatNumber(value float64, suffix string) string {
 	}
 }
 
+func formatPercent(value float64) string {
+	if value == 0 {
+		return "0%"
+	}
+	if value == math.Trunc(value) {
+		return fmt.Sprintf("%.0f%%", value)
+	}
+	return fmt.Sprintf("%.1f%%", value)
+}
+
 func formatBytesHuman(bytes int64) string {
 	return formatBytes(bytes)
+}
+
+func hasMixedSteps(summary *RunSummary) bool {
+	if summary == nil {
+		return false
+	}
+	for _, step := range summary.Steps {
+		if step.IsMixed && len(step.OperationBreakdown) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mixedLatencyCell(step StepSummary, metrics *PhaseMetrics) string {
+	if step.IsMixed {
+		return "see ops"
+	}
+	return formatNumber(metrics.LatencyHeadlineMs, "ms")
+}
+
+func configuredDistributionText(dist MixedDistribution) string {
+	if !dist.Available {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	for _, item := range []struct {
+		label string
+		value int
+	}{
+		{label: "READ", value: dist.ReadPercent},
+		{label: "STAT", value: dist.StatPercent},
+		{label: "CREATE", value: dist.CreatePercent},
+		{label: "DELETE", value: dist.DeletePercent},
+	} {
+		if item.value <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d%%", item.label, item.value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatConfiguredShare(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return formatPercent(*value)
+}
+
+func formatActualOps(share *float64, count int64) string {
+	if share == nil {
+		return formatInt(count)
+	}
+	return fmt.Sprintf("%s (%s)", formatPercent(*share), formatInt(count))
+}
+
+func compactMixedLines(summary *RunSummary) []string {
+	if !hasMixedSteps(summary) {
+		return nil
+	}
+	lines := make([]string, 0, len(summary.Steps))
+	for _, step := range summary.Steps {
+		if !step.IsMixed || len(step.OperationBreakdown) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(step.OperationBreakdown))
+		for _, op := range step.OperationBreakdown {
+			part := op.Operation
+			if op.ActualShare != nil {
+				part += " " + formatPercent(*op.ActualShare)
+			}
+			if op.ConfiguredShare != nil {
+				part += fmt.Sprintf(" (cfg %s)", formatPercent(*op.ConfiguredShare))
+			}
+			part += " " + formatNumber(op.Metrics.ThroughputAvgOps, "ops/s")
+			parts = append(parts, part)
+		}
+		lines = append(lines, "Mixed operations: "+strings.Join(parts, ", "))
+	}
+	return lines
 }
 
 func collectIncompleteSteps(summary *RunSummary) []string {

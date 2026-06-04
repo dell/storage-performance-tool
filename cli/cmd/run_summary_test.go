@@ -193,6 +193,106 @@ func TestGenerateRunSummaryHandlesListWorkload(t *testing.T) {
 	}
 }
 
+func TestGenerateRunSummaryMixedWorkloadIncludesBreakdown(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	runID := "mt-20260604.180000.000"
+	runDir := filepath.Join(tempDir, runID)
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+		"\"2026-06-04T18:00:10Z\",READ,8,4,8,8,445,5,1866465280,30,20,14.8,13.9,59.3,55.6,8100,2200,4300,6200,9100,18000,8100,2200,4300,6200,9100,18000\n" +
+		"\"2026-06-04T18:00:10Z\",STAT,8,4,8,8,301,1,0,30,8,10.0,9.5,0,0,4200,1000,2100,3100,5000,9000,4200,1000,2100,3100,5000,9000\n" +
+		"\"2026-06-04T18:00:10Z\",CREATE,8,4,8,8,151,2,633339904,30,11,5.1,4.8,21.1,20.0,11200,3000,6200,8700,13000,25000,11200,3000,6200,8700,13000,25000\n" +
+		"\"2026-06-04T18:00:10Z\",DELETE,8,4,8,8,103,4,0,30,6,3.6,3.1,0,0,7300,1700,3000,5200,8600,14000,7300,1700,3000,5200,8600,14000\n"
+	if err := os.WriteFile(filepath.Join(runDir, metricsName), []byte(metricsCSV), 0o644); err != nil {
+		t.Fatalf("write metrics csv: %v", err)
+	}
+
+	manifest := &results.Manifest{
+		BaseURL:     "http://localhost:9999",
+		OutputDir:   runDir,
+		GeneratedAt: time.Now().UTC(),
+		Steps: []results.StepManifest{
+			{
+				StepID:      stepID,
+				CompletedAt: time.Now().UTC(),
+				Files: []results.FileStatus{{Name: metricsName, Size: int64(len(metricsCSV)), Status: "ok"}},
+			},
+		},
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, constants.ResultsManifestFileName), manifestBytes, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	meta := &runMetadata{
+		GeneratedAt:        time.Date(2026, 6, 4, 18, 0, 0, 0, time.UTC),
+		WorkloadType:       "mixed",
+		SptImage:           "ghcr.io/dell/storage-performance-tool",
+		APIPort:            "9999",
+		BaseURL:            "http://localhost:9999",
+		Label:              "mt",
+		ResultsDir:         "./results",
+		ResultsRoot:        filepath.Base(runDir),
+		ScenarioFile:       "scenario.js",
+		ScenarioStoredPath: "scenario.js",
+		ScenarioParams: scenario.Params{
+			WorkloadType:  "mixed",
+			ObjectSize:    "4MB",
+			Threads:       8,
+			Duration:      "30s",
+			GetDistrib:    45,
+			StatDistrib:   30,
+			PutDistrib:    15,
+			DeleteDistrib: 10,
+		},
+		Hosts: []runHostMetadata{{Host: "localhost", User: "tester", Original: "tester@localhost"}},
+		ExpectedStepIDs: []string{stepID},
+		ActualStepIDs:   []string{stepID},
+	}
+	if err := writeRunMetadata(meta, runDir); err != nil {
+		t.Fatalf("write run metadata: %v", err)
+	}
+
+	var buf strings.Builder
+	if err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+		t.Fatalf("generateRunSummary error: %v", err)
+	}
+
+	snippet := buf.String()
+	if !strings.Contains(snippet, "Mixed Operation Breakdown") {
+		t.Fatalf("snippet missing mixed section: %q", snippet)
+	}
+	if !strings.Contains(snippet, "Configured distribution: READ 45%, STAT 30%, CREATE 15%, DELETE 10%") {
+		t.Fatalf("snippet missing configured mixed detail: %q", snippet)
+	}
+
+	summaryPath := filepath.Join(runDir, fmt.Sprintf(constants.ResultsSummaryFilePattern, runID))
+	content, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary file: %v", err)
+	}
+	report := string(content)
+	if !strings.Contains(report, "Mixed Operation Breakdown") {
+		t.Fatalf("summary file missing mixed section: %s", report)
+	}
+	if !strings.Contains(report, "Configured distribution: READ 45%, STAT 30%, CREATE 15%, DELETE 10%") {
+		t.Fatalf("summary file missing configured distribution: %s", report)
+	}
+	if !strings.Contains(report, "see ops") {
+		t.Fatalf("summary file missing mixed latency marker: %s", report)
+	}
+}
+
 func TestGenerateRunSummaryErrorOnMissingManifest(t *testing.T) {
 	t.Parallel()
 

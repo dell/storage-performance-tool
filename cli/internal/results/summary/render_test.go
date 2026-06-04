@@ -198,6 +198,105 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 	}
 }
 
+func TestRendererFullReportIncludesMixedBreakdown(t *testing.T) {
+	t.Parallel()
+
+	summary := mixedSummaryFixture()
+	renderer := NewRenderer(RenderOptions{MaxWidth: 120})
+	report := renderer.FullReport(summary)
+
+	mustContain(t, report, "Mixed Operation Breakdown")
+	mustContain(t, report, "Step: mt-002-20260604.180001.000-mixed")
+	mustContain(t, report, "Configured distribution: READ 45%, STAT 30%, CREATE 15%, DELETE 10%")
+	mustContain(t, report, "see ops")
+	mustContain(t, report, "│ READ")
+	mustContain(t, report, "│ DELETE")
+}
+
+func TestRendererCompactSnippetIncludesMixedOperationDetail(t *testing.T) {
+	t.Parallel()
+
+	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
+	snippet := renderer.CompactSnippet(mixedSummaryFixture())
+
+	mustContain(t, snippet, "Mixed operations: READ")
+	mustContain(t, snippet, "cfg 45%")
+	mustContain(t, snippet, "CREATE")
+	mustContain(t, snippet, "Totals: duration 30s")
+}
+
+func TestRendererConsoleSnippetKeepsMixedDetailWithElevatedCap(t *testing.T) {
+	t.Parallel()
+
+	summary := mixedSummaryFixture()
+	for i := 0; i < 10; i++ {
+		summary.Warnings = append(summary.Warnings, "warning line for mixed report truncation coverage")
+	}
+
+	renderer := NewRenderer(RenderOptions{MaxWidth: 120, SnippetLineCap: 40})
+	snippet := renderer.ConsoleSnippet(summary)
+
+	mustContain(t, snippet, "Mixed Operation Breakdown")
+	mustContain(t, snippet, "Run Totals")
+	if strings.Contains(snippet, "report truncated") {
+		t.Fatalf("expected elevated mixed cap to avoid truncation, got:\n%s", snippet)
+	}
+}
+
+func mixedSummaryFixture() *RunSummary {
+	configuredRead := 45.0
+	configuredStat := 30.0
+	configuredCreate := 15.0
+	configuredDelete := 10.0
+	actualRead := 44.5
+	actualStat := 29.8
+	actualCreate := 15.1
+	actualDelete := 10.6
+
+	return &RunSummary{
+		RunID:       "mt-20260604.180000.000",
+		GeneratedAt: time.Date(2026, 6, 4, 18, 0, 0, 0, time.UTC),
+		Workload: WorkloadSummary{
+			Type:            "mixed",
+			ObjectSizeHuman: "4.00 MiB",
+			DurationRequest: "30s",
+			MixedDistribution: MixedDistribution{
+				Available:     true,
+				ReadPercent:   45,
+				StatPercent:   30,
+				CreatePercent: 15,
+				DeletePercent: 10,
+			},
+		},
+		Steps: []StepSummary{
+			{
+				StepID:          "mt-002-20260604.180001.000-mixed",
+				PhaseLabel:      "Mixed",
+				Operation:       "MIXED",
+				IsMixed:         true,
+				MixedLatencyNote: "Mixed latency is shown per operation; no combined p50 is derived from per-op quantiles.",
+				Metrics: &PhaseMetrics{
+					SuccessCount:     1000,
+					FailureCount:     12,
+					DataBytes:        2499805184,
+					ThroughputAvgOps: 33.5,
+					BandwidthAvgMBps: 80.4,
+					DurationSeconds:  30,
+					DurationHuman:    "30s",
+					ObjectSizeHuman:  "4.00 MiB",
+				},
+				OperationBreakdown: []OperationBreakdown{
+					{Operation: "READ", ConfiguredShare: &configuredRead, ActualShare: &actualRead, ActualOps: 450, Metrics: PhaseMetrics{SuccessCount: 445, FailureCount: 5, DataBytes: 1866465280, ThroughputAvgOps: 14.8, BandwidthAvgMBps: 59.3, LatencyMedianMs: 6.2}},
+					{Operation: "STAT", ConfiguredShare: &configuredStat, ActualShare: &actualStat, ActualOps: 302, Metrics: PhaseMetrics{SuccessCount: 301, FailureCount: 1, DataBytes: 0, ThroughputAvgOps: 10.0, BandwidthAvgMBps: 0, LatencyMedianMs: 3.1}},
+					{Operation: "CREATE", ConfiguredShare: &configuredCreate, ActualShare: &actualCreate, ActualOps: 153, Metrics: PhaseMetrics{SuccessCount: 151, FailureCount: 2, DataBytes: 633339904, ThroughputAvgOps: 5.1, BandwidthAvgMBps: 21.1, LatencyMedianMs: 8.7}},
+					{Operation: "DELETE", ConfiguredShare: &configuredDelete, ActualShare: &actualDelete, ActualOps: 107, Metrics: PhaseMetrics{SuccessCount: 103, FailureCount: 4, DataBytes: 0, ThroughputAvgOps: 3.6, BandwidthAvgMBps: 0, LatencyMedianMs: 5.2}},
+				},
+			},
+		},
+		Totals: RunTotals{DurationHuman: "30s", DataBytes: 2499805184},
+	}
+}
+
 func mustContain(t *testing.T, s, sub string) {
 	t.Helper()
 	if !strings.Contains(s, sub) {
