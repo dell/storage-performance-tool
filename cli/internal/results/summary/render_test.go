@@ -213,16 +213,26 @@ func TestRendererFullReportIncludesMixedBreakdown(t *testing.T) {
 	mustContain(t, report, "│ DELETE")
 }
 
-func TestRendererCompactSnippetIncludesMixedOperationDetail(t *testing.T) {
+func TestRendererCompactSnippetIncludesMixedOperationTable(t *testing.T) {
 	t.Parallel()
 
 	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
 	snippet := renderer.CompactSnippet(mixedSummaryFixture())
 
-	mustContain(t, snippet, "Mixed operations: READ")
-	mustContain(t, snippet, "cfg 45%")
-	mustContain(t, snippet, "CREATE")
+	mustContain(t, snippet, "Mixed Operation Breakdown")
+	mustContain(t, snippet, "│ Operation")
+	mustContain(t, snippet, "│ READ")
+	mustContain(t, snippet, "│ STAT")
+	mustContain(t, snippet, "│ CREATE")
+	mustContain(t, snippet, "│ DELETE")
 	mustContain(t, snippet, "Totals: duration 30s")
+	mustNotContain(t, snippet, "Mixed operations:")
+	perfIndex := strings.Index(snippet, "Performance by Phase")
+	mixedIndex := strings.Index(snippet, "Mixed Operation Breakdown")
+	totalsIndex := strings.Index(snippet, "Totals: duration 30s")
+	if perfIndex < 0 || mixedIndex < 0 || totalsIndex < 0 || !(perfIndex < mixedIndex && mixedIndex < totalsIndex) {
+		t.Fatalf("expected mixed table after performance table and before totals, got:\n%s", snippet)
+	}
 }
 
 func TestRendererMixedBreakdownOmitsConfiguredDistributionWhenUnavailable(t *testing.T) {
