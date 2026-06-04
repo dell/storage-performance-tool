@@ -297,6 +297,10 @@ type ScenarioParams struct {
 	Threads        int      `json:"Threads"`
 	ObjectSize     string   `json:"ObjectSize"`
 	ObjectCount    int64    `json:"ObjectCount"`
+	GetDistrib     int      `json:"GetDistrib"`
+	PutDistrib     int      `json:"PutDistrib"`
+	DeleteDistrib  int      `json:"DeleteDistrib"`
+	StatDistrib    int      `json:"StatDistrib"`
 	Duration       string   `json:"Duration"`
 	Cleanup        bool     `json:"Cleanup"`
 	KeepScenario   bool     `json:"KeepScenario"`
