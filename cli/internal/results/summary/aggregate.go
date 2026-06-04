@@ -303,7 +303,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 			summary.Metrics = metrics
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
-		} else {
+		} else if !stepData.MetricsSuppressed {
 			statusLabel := string(stepData.Status)
 			if statusLabel == "" {
 				statusLabel = string(StepStatusUnknown)

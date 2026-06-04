@@ -184,6 +184,39 @@ func TestAggregateHandlesMissingMetrics(t *testing.T) {
 	}
 }
 
+func TestAggregateSuppressesMissingMetricsWarningForSuppressedStep(t *testing.T) {
+	t.Parallel()
+
+	runData := &RunData{
+		RunID:        "run-1",
+		StepOrder:    []string{"mt-001-20260604.195722.504-seed"},
+		Steps:        make(map[string]*StepData),
+		Params:       &RunParams{},
+		ManifestPath: "index.json",
+		MetadataPath: "params.json",
+	}
+	runData.Params.ScenarioParams.ObjectSize = "4k"
+	runData.Steps["mt-001-20260604.195722.504-seed"] = &StepData{
+		StepID:            "mt-001-20260604.195722.504-seed",
+		Status:            StepStatusComplete,
+		MetricsSuppressed: true,
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatalf("Aggregate returned error: %v", err)
+	}
+	if len(summary.Steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(summary.Steps))
+	}
+	if summary.Steps[0].Metrics != nil {
+		t.Fatalf("expected nil metrics for suppressed step")
+	}
+	if len(summary.Warnings) != 0 {
+		t.Fatalf("expected no warnings for suppressed metrics, got %v", summary.Warnings)
+	}
+}
+
 func TestAggregateListWorkloadOmitsObjectSize(t *testing.T) {
 	t.Parallel()
 

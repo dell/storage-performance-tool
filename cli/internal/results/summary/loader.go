@@ -13,6 +13,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"gopkg.in/yaml.v3"
 )
 
 // Loader ingests fetched run artifacts into structured data for later aggregation.
@@ -45,13 +46,14 @@ type RunData struct {
 
 // StepData captures per-step artifact availability and metrics totals.
 type StepData struct {
-	StepID          string
-	Manifest        *results.StepManifest
-	Metrics         *MetricsTotals
-	Status          StepStatus
-	MissingRequired []string
-	MissingOptional []string
-	Notes           []string
+	StepID            string
+	Manifest          *results.StepManifest
+	Metrics           *MetricsTotals
+	Status            StepStatus
+	MetricsSuppressed bool
+	MissingRequired   []string
+	MissingOptional   []string
+	Notes             []string
 }
 
 // StepStatus indicates ingestion completeness for a step.
@@ -125,9 +127,13 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			Manifest: sm,
 			Status:   StepStatusUnknown,
 		}
+		step.MetricsSuppressed = l.metricsSummaryPersistSuppressed(runDir, sm)
 		required, optional := l.categorizeMissing(sm)
 		if len(required) > 0 {
 			step.MissingRequired = append([]string(nil), required...)
+		}
+		if step.MetricsSuppressed {
+			step.MissingRequired = removeString(step.MissingRequired, constants.ResultsArtifactSuffixMetricsTotal)
 		}
 		if len(optional) > 0 {
 			step.MissingOptional = append([]string(nil), optional...)
@@ -144,7 +150,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			} else {
 				step.Metrics = totals
 			}
-		} else {
+		} else if !step.MetricsSuppressed {
 			step.MissingRequired = appendUnique(step.MissingRequired, constants.ResultsArtifactSuffixMetricsTotal)
 			if metricsEntry != nil && metricsEntry.Status != fileStatusOK && metricsEntry.Error != "" {
 				step.Notes = append(step.Notes, metricsEntry.Error)
@@ -251,6 +257,42 @@ func (l *Loader) findMetricsEntry(sm *results.StepManifest) *results.FileStatus 
 	return nil
 }
 
+func (l *Loader) findConfigEntry(sm *results.StepManifest) *results.FileStatus {
+	for i := range sm.Files {
+		fs := &sm.Files[i]
+		if strings.HasSuffix(fs.Name, constants.ResultsArtifactSuffixConfig) {
+			return fs
+		}
+	}
+	return nil
+}
+
+type stepConfigProbe struct {
+	Output struct {
+		Metrics struct {
+			Summary struct {
+				Persist *bool `yaml:"persist"`
+			} `yaml:"summary"`
+		} `yaml:"metrics"`
+	} `yaml:"output"`
+}
+
+func (l *Loader) metricsSummaryPersistSuppressed(runDir string, sm *results.StepManifest) bool {
+	entry := l.findConfigEntry(sm)
+	if entry == nil || entry.Status != fileStatusOK {
+		return false
+	}
+	content, err := os.ReadFile(filepath.Join(runDir, entry.Name)) // #nosec G304 -- path restricted to fetched results directory
+	if err != nil {
+		return false
+	}
+	var config stepConfigProbe
+	if err := yaml.Unmarshal(content, &config); err != nil {
+		return false
+	}
+	return config.Output.Metrics.Summary.Persist != nil && !*config.Output.Metrics.Summary.Persist
+}
+
 func appendUnique(list []string, value string) []string {
 	for _, v := range list {
 		if v == value {
@@ -258,6 +300,19 @@ func appendUnique(list []string, value string) []string {
 		}
 	}
 	return append(list, value)
+}
+
+func removeString(list []string, value string) []string {
+	if len(list) == 0 {
+		return list
+	}
+	out := list[:0]
+	for _, item := range list {
+		if item != value {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // RunParams mirrors the structure of spt_run_params.json for ingestion purposes.

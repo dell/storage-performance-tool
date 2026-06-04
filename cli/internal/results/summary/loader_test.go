@@ -234,6 +234,65 @@ func TestLoaderLoadMissingMetrics(t *testing.T) {
 	}
 }
 
+func TestLoaderLoadMetricsSuppressedStepDoesNotRequireMetricsTotal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	runDir := filepath.Join(tempDir, "mt-20260604.195722.505")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	stepID := "mt-001-20260604.195722.504-seed"
+	configName := stepID + "." + constants.ResultsArtifactSuffixConfig
+	configContent := []byte("output:\n  metrics:\n    summary:\n      persist: false\n")
+	if err := os.WriteFile(filepath.Join(runDir, configName), configContent, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	manifest := &results.Manifest{
+		BaseURL:     "http://example",
+		OutputDir:   runDir,
+		GeneratedAt: time.Now().UTC(),
+		Steps: []results.StepManifest{
+			{
+				StepID: stepID,
+				Files: []results.FileStatus{
+					{
+						Name:   stepID + "." + constants.ResultsArtifactSuffixMetricsTotal,
+						Status: "missing",
+						Error:  "not listed in index.json",
+					},
+					{
+						Name:   configName,
+						Status: fileStatusOK,
+					},
+				},
+			},
+		},
+	}
+	writeManifest(t, runDir, manifest)
+	writeParams(t, runDir, &RunParams{ExpectedStepIDs: []string{stepID}})
+
+	loader := NewLoader()
+	data, err := loader.Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	step := data.Steps[stepID]
+	if step == nil {
+		t.Fatalf("step not found")
+	}
+	if !step.MetricsSuppressed {
+		t.Fatalf("expected metrics to be marked suppressed")
+	}
+	if step.Status != StepStatusComplete {
+		t.Fatalf("expected complete status for metrics-suppressed step, got %s", step.Status)
+	}
+	if len(step.MissingRequired) != 0 {
+		t.Fatalf("metrics-suppressed step should not have missing required artifacts: %v", step.MissingRequired)
+	}
+}
+
 func TestLoaderLoadMalformedMetrics(t *testing.T) {
 	t.Parallel()
 
