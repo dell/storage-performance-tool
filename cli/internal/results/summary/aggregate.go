@@ -68,6 +68,7 @@ type WorkloadSummary struct {
 	CleanupEnabled  bool
 	KeepScenario    bool
 	SliceEndpoints  bool
+	MixedDistribution MixedDistribution
 }
 
 // StepSummary aggregates per-step metrics and artifact health.
@@ -78,9 +79,28 @@ type StepSummary struct {
 	Operation       string
 	Status          StepStatus
 	Metrics         *PhaseMetrics
+	IsMixed         bool
+	OperationBreakdown []OperationBreakdown
+	MixedLatencyNote string
 	MissingRequired []string
 	MissingOptional []string
 	Notes           []string
+}
+
+type MixedDistribution struct {
+	Available     bool
+	ReadPercent   int
+	StatPercent   int
+	CreatePercent int
+	DeletePercent int
+}
+
+type OperationBreakdown struct {
+	Operation       string
+	ConfiguredShare *float64
+	ActualShare     *float64
+	ActualOps       int64
+	Metrics         PhaseMetrics
 }
 
 // PhaseMetrics holds derived statistics for a single run phase.
@@ -154,7 +174,7 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 	summary.Workload = workload
 	summary.Warnings = append(summary.Warnings, workloadWarnings...)
 
-	steps, totals, stepWarnings := buildStepSummaries(data, workload.ObjectSizeBytes)
+	steps, totals, stepWarnings := buildStepSummaries(data, workload)
 	summary.Steps = steps
 	summary.Totals = totals
 	summary.Warnings = append(summary.Warnings, stepWarnings...)
@@ -220,6 +240,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		CleanupEnabled:  params.Cleanup,
 		KeepScenario:    params.KeepScenario,
 		SliceEndpoints:  params.SliceEndpoints,
+		MixedDistribution: mixedDistributionFromParams(data.Params.WorkloadType, params),
 	}
 	if isList {
 		summary.ObjectSizeHuman = ""
@@ -227,7 +248,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	return summary, warnings
 }
 
-func buildStepSummaries(data *RunData, objectSizeBytes int64) ([]StepSummary, RunTotals, []string) {
+func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary, RunTotals, []string) {
 	steps := make([]StepSummary, 0, len(data.StepOrder))
 	totals := RunTotals{}
 	warnings := make([]string, 0)
@@ -248,7 +269,19 @@ func buildStepSummaries(data *RunData, objectSizeBytes int64) ([]StepSummary, Ru
 			Notes:           append([]string(nil), stepData.Notes...),
 		}
 
-		metrics := deriveMetrics(stepData, objectSizeBytes)
+		var metrics *PhaseMetrics
+		if isMixedStep(stepData.StepID, workload, stepData.Metrics) {
+			var mixedWarnings []string
+			metrics, summary.OperationBreakdown, mixedWarnings = deriveMixedMetrics(stepData, workload, workload.ObjectSizeBytes)
+			summary.IsMixed = metrics != nil
+			if summary.IsMixed {
+				summary.Operation = "MIXED"
+				summary.MixedLatencyNote = "Mixed latency is shown per operation; no combined p50 is derived from per-op quantiles."
+			}
+			warnings = append(warnings, mixedWarnings...)
+		} else {
+			metrics = deriveMetrics(stepData, workload.ObjectSizeBytes)
+		}
 		if metrics != nil {
 			summary.Metrics = metrics
 			totals.DurationSeconds += metrics.DurationSeconds
@@ -272,6 +305,229 @@ func buildStepSummaries(data *RunData, objectSizeBytes int64) ([]StepSummary, Ru
 	totals.DataMB = bytesToMB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
+}
+
+func mixedDistributionFromParams(workloadType string, params ScenarioParams) MixedDistribution {
+	if !strings.EqualFold(workloadType, "mixed") && !strings.EqualFold(params.WorkloadType, "mixed") {
+		return MixedDistribution{}
+	}
+	return MixedDistribution{
+		Available:     true,
+		ReadPercent:   params.GetDistrib,
+		StatPercent:   params.StatDistrib,
+		CreatePercent: params.PutDistrib,
+		DeletePercent: params.DeleteDistrib,
+	}
+	}
+
+func isMixedStep(stepID string, workload WorkloadSummary, totals *MetricsTotals) bool {
+	if totals == nil || len(totals.Rows) < 2 {
+		return false
+	}
+	if !strings.EqualFold(workload.Type, "mixed") {
+		return false
+	}
+	if !strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
+		return false
+	}
+	seen := make(map[string]struct{}, len(totals.Rows))
+	for _, row := range totals.Rows {
+		op := normalizeReportOperation(row.Operation)
+		if op == "" {
+			continue
+		}
+		seen[op] = struct{}{}
+	}
+	return len(seen) >= 2
+}
+
+func deriveMixedMetrics(stepData *StepData, workload WorkloadSummary, objectSizeBytes int64) (*PhaseMetrics, []OperationBreakdown, []string) {
+	if stepData == nil || stepData.Metrics == nil || len(stepData.Metrics.Rows) == 0 {
+		return nil, nil, nil
+	}
+	groups := make(map[string][]MetricsTotalsRow, len(stepData.Metrics.Rows))
+	for _, row := range stepData.Metrics.Rows {
+		op := normalizeReportOperation(row.Operation)
+		if op == "" {
+			op = strings.ToUpper(strings.TrimSpace(row.Operation))
+		}
+		groups[op] = append(groups[op], row)
+	}
+
+	warnings := make([]string, 0, 1)
+	if workload.MixedDistribution.Available {
+		sum := workload.MixedDistribution.ReadPercent + workload.MixedDistribution.StatPercent + workload.MixedDistribution.CreatePercent + workload.MixedDistribution.DeletePercent
+		if sum != 100 {
+			warnings = append(warnings, fmt.Sprintf("mixed configured distribution sums to %d%%, expected 100%%", sum))
+		}
+	}
+
+	orderedOps := orderedOperationKeys(groups)
+	breakdown := make([]OperationBreakdown, 0, len(orderedOps))
+	metrics := &PhaseMetrics{}
+	var totalActualOps int64
+	for _, op := range orderedOps {
+		opMetrics := deriveOperationMetrics(groups[op], objectSizeBytes)
+		actualOps := opMetrics.SuccessCount + opMetrics.FailureCount
+		totalActualOps += actualOps
+		breakdown = append(breakdown, OperationBreakdown{
+			Operation:       op,
+			ConfiguredShare: operationConfiguredShare(op, workload.MixedDistribution),
+			ActualOps:       actualOps,
+			Metrics:         opMetrics,
+		})
+		metrics.SuccessCount += opMetrics.SuccessCount
+		metrics.FailureCount += opMetrics.FailureCount
+		metrics.DataBytes += opMetrics.DataBytes
+		metrics.ThroughputAvgOps += opMetrics.ThroughputAvgOps
+		metrics.ThroughputLastOps += opMetrics.ThroughputLastOps
+		metrics.BandwidthAvgMBps += opMetrics.BandwidthAvgMBps
+		metrics.BandwidthLastMBps += opMetrics.BandwidthLastMBps
+		if opMetrics.DurationSeconds > metrics.DurationSeconds {
+			metrics.DurationSeconds = opMetrics.DurationSeconds
+		}
+		if opMetrics.Concurrency > metrics.Concurrency {
+			metrics.Concurrency = opMetrics.Concurrency
+		}
+		if opMetrics.ConcurrencyMean > metrics.ConcurrencyMean {
+			metrics.ConcurrencyMean = opMetrics.ConcurrencyMean
+		}
+		if opMetrics.NodeCount > metrics.NodeCount {
+			metrics.NodeCount = opMetrics.NodeCount
+		}
+		if opMetrics.SampleTimestamp > metrics.SampleTimestamp {
+			metrics.SampleTimestamp = opMetrics.SampleTimestamp
+		}
+	}
+	metrics.DurationHuman = formatSeconds(metrics.DurationSeconds)
+	metrics.DataMB = bytesToMB(metrics.DataBytes)
+	metrics.DataGiB = bytesToGiB(metrics.DataBytes)
+	metrics.HasDataTransfer = metrics.DataBytes > 0
+	if objectSizeBytes > 0 {
+		metrics.ObjectSizeBytes = objectSizeBytes
+		metrics.ObjectSizeMB = bytesToMB(objectSizeBytes)
+		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
+		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
+	}
+	if totalActualOps > 0 {
+		for i := range breakdown {
+			share := float64(breakdown[i].ActualOps) * 100 / float64(totalActualOps)
+			breakdown[i].ActualShare = &share
+		}
+	}
+	return metrics, breakdown, warnings
+}
+
+func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) PhaseMetrics {
+	if len(rows) == 0 {
+		return PhaseMetrics{}
+	}
+	best := rows[0]
+	metrics := PhaseMetrics{}
+	for _, row := range rows {
+		metrics.SuccessCount += row.SuccessCount
+		metrics.FailureCount += row.FailureCount
+		metrics.DataBytes += row.SizeBytes
+		metrics.ThroughputAvgOps += row.ThroughputAvgOps
+		metrics.ThroughputLastOps += row.ThroughputLastOps
+		metrics.BandwidthAvgMBps += row.BandwidthAvgMBps
+		metrics.BandwidthLastMBps += row.BandwidthLastMBps
+		if row.StepDurationSeconds > metrics.DurationSeconds {
+			metrics.DurationSeconds = row.StepDurationSeconds
+		}
+		if row.Concurrency > metrics.Concurrency {
+			metrics.Concurrency = row.Concurrency
+		}
+		if row.ConcurrencyMean > metrics.ConcurrencyMean {
+			metrics.ConcurrencyMean = row.ConcurrencyMean
+		}
+		if row.NodeCount > metrics.NodeCount {
+			metrics.NodeCount = row.NodeCount
+		}
+		if row.SampleTimestamp > metrics.SampleTimestamp {
+			metrics.SampleTimestamp = row.SampleTimestamp
+		}
+		if row.SuccessCount+row.FailureCount > best.SuccessCount+best.FailureCount {
+			best = row
+		}
+	}
+	metrics.DataMB = bytesToMB(metrics.DataBytes)
+	metrics.DataGiB = bytesToGiB(metrics.DataBytes)
+	metrics.HasDataTransfer = metrics.DataBytes > 0
+	metrics.DurationHuman = formatSeconds(metrics.DurationSeconds)
+	metrics.LatencyHeadlineMs = preferredLatencyMicros(best) / 1000.0
+	metrics.LatencyMedianMs = best.LatencyP50Micros / 1000.0
+	metrics.LatencyP90Ms = best.LatencyP90Micros / 1000.0
+	metrics.LatencyP99Ms = best.LatencyP99Micros / 1000.0
+	metrics.LatencyP999Ms = best.LatencyP999Micros / 1000.0
+	metrics.TTFBMedianMs = best.TTFBP50Micros / 1000.0
+	metrics.TTFBP90Ms = best.TTFBP90Micros / 1000.0
+	metrics.TTFBP99Ms = best.TTFBP99Micros / 1000.0
+	metrics.TTFBP999Ms = best.TTFBP999Micros / 1000.0
+	if objectSizeBytes > 0 {
+		metrics.ObjectSizeBytes = objectSizeBytes
+		metrics.ObjectSizeMB = bytesToMB(objectSizeBytes)
+		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
+		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
+	}
+	return metrics
+}
+
+func operationConfiguredShare(op string, dist MixedDistribution) *float64 {
+	if !dist.Available {
+		return nil
+	}
+	var value float64
+	switch normalizeReportOperation(op) {
+	case "READ":
+		value = float64(dist.ReadPercent)
+	case "STAT":
+		value = float64(dist.StatPercent)
+	case "CREATE":
+		value = float64(dist.CreatePercent)
+	case "DELETE":
+		value = float64(dist.DeletePercent)
+	default:
+		return nil
+	}
+	return &value
+}
+
+func orderedOperationKeys(groups map[string][]MetricsTotalsRow) []string {
+	ordered := make([]string, 0, len(groups))
+	for _, op := range []string{"READ", "STAT", "CREATE", "DELETE"} {
+		if _, ok := groups[op]; ok {
+			ordered = append(ordered, op)
+		}
+	}
+	unknown := make([]string, 0, len(groups))
+	for op := range groups {
+		switch op {
+		case "READ", "STAT", "CREATE", "DELETE":
+			continue
+		default:
+			unknown = append(unknown, op)
+		}
+	}
+	if len(unknown) > 1 {
+		sort.Strings(unknown)
+	}
+	return append(ordered, unknown...)
+}
+
+func normalizeReportOperation(op string) string {
+	switch strings.ToUpper(strings.TrimSpace(op)) {
+	case "GET", "READ":
+		return "READ"
+	case "HEAD", "STAT":
+		return "STAT"
+	case "PUT", "CREATE", "WRITE":
+		return "CREATE"
+	case "DELETE":
+		return "DELETE"
+	default:
+		return strings.ToUpper(strings.TrimSpace(op))
+	}
 }
 
 func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
@@ -351,6 +607,15 @@ func phaseLabelFromStep(stepID string) string {
 	if stepID == "" {
 		return ""
 	}
+	lowerStepID := strings.ToLower(stepID)
+	switch {
+	case strings.HasSuffix(lowerStepID, "-cleanup-seed"):
+		return "Cleanup seed"
+	case strings.HasSuffix(lowerStepID, "-cleanup-put"):
+		return "Cleanup CREATE"
+	case strings.HasSuffix(lowerStepID, "-mixed"):
+		return "Mixed"
+	}
 	parts := strings.Split(stepID, "-")
 	if len(parts) == 0 {
 		return ""
@@ -363,17 +628,26 @@ func phaseLabelFromStep(stepID string) string {
 }
 
 func operationFromStep(stepID string, totals *MetricsTotals) string {
+	if strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
+		return "MIXED"
+	}
+	if totals != nil && len(totals.Rows) == 1 {
+		op := normalizeReportOperation(totals.Rows[0].Operation)
+		if op != "" {
+			return op
+		}
+	}
 	if stepID != "" {
 		parts := strings.Split(stepID, "-")
 		if len(parts) > 0 {
 			op := parts[len(parts)-1]
 			if op != "" {
-				return strings.ToUpper(op)
+				return normalizeReportOperation(op)
 			}
 		}
 	}
 	if totals != nil && len(totals.Rows) > 0 {
-		return strings.ToUpper(strings.TrimSpace(totals.Rows[0].Operation))
+		return normalizeReportOperation(totals.Rows[0].Operation)
 	}
 	return ""
 }

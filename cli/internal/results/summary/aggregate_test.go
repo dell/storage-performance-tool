@@ -261,6 +261,145 @@ func TestAggregateListWorkloadOmitsObjectSize(t *testing.T) {
 	}
 }
 
+func TestAggregateBuildsMixedSummary(t *testing.T) {
+	t.Parallel()
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	runData := &RunData{
+		RunID:     "mt-20260604.180000.000",
+		StepOrder: []string{stepID},
+		Steps:     make(map[string]*StepData),
+		Params: &RunParams{
+			WorkloadType: "mixed",
+			ScenarioParams: ScenarioParams{
+				WorkloadType:  "mixed",
+				ObjectSize:    "4MB",
+				Duration:      "30s",
+				GetDistrib:    45,
+				StatDistrib:   30,
+				PutDistrib:    15,
+				DeleteDistrib: 10,
+			},
+		},
+	}
+
+	runData.Steps[stepID] = &StepData{
+		StepID: stepID,
+		Status: StepStatusComplete,
+		Metrics: &MetricsTotals{
+			StepID: stepID,
+			Rows: []MetricsTotalsRow{
+				{Operation: "READ", SuccessCount: 445, FailureCount: 5, SizeBytes: 1866465280, StepDurationSeconds: 30, ThroughputAvgOps: 14.8, ThroughputLastOps: 13.9, BandwidthAvgMBps: 59.3, BandwidthLastMBps: 55.6, LatencyAvgMicros: 8100, LatencyP50Micros: 6200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "STAT", SuccessCount: 301, FailureCount: 1, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 10.0, ThroughputLastOps: 9.5, BandwidthAvgMBps: 0, BandwidthLastMBps: 0, LatencyAvgMicros: 4200, LatencyP50Micros: 3100, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "CREATE", SuccessCount: 151, FailureCount: 2, SizeBytes: 633339904, StepDurationSeconds: 30, ThroughputAvgOps: 5.1, ThroughputLastOps: 4.8, BandwidthAvgMBps: 21.1, BandwidthLastMBps: 20.0, LatencyAvgMicros: 11200, LatencyP50Micros: 8700, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "DELETE", SuccessCount: 103, FailureCount: 4, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 3.6, ThroughputLastOps: 3.1, BandwidthAvgMBps: 0, BandwidthLastMBps: 0, LatencyAvgMicros: 7300, LatencyP50Micros: 5200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+			},
+		},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatalf("Aggregate returned error: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("Aggregate returned nil summary")
+	}
+	if len(summary.Steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(summary.Steps))
+	}
+	mixed := summary.Steps[0]
+	if !mixed.IsMixed {
+		t.Fatal("expected mixed step")
+	}
+	if mixed.PhaseLabel != "Mixed" {
+		t.Fatalf("phase label = %q, want Mixed", mixed.PhaseLabel)
+	}
+	if mixed.Operation != "MIXED" {
+		t.Fatalf("operation = %q, want MIXED", mixed.Operation)
+	}
+	if mixed.Metrics == nil {
+		t.Fatal("mixed metrics missing")
+	}
+	if got := mixed.Metrics.DurationSeconds; got != 30 {
+		t.Fatalf("mixed duration seconds = %.2f, want 30", got)
+	}
+	if got := mixed.Metrics.SuccessCount; got != 1000 {
+		t.Fatalf("mixed success count = %d, want 1000", got)
+	}
+	if got := mixed.Metrics.FailureCount; got != 12 {
+		t.Fatalf("mixed failure count = %d, want 12", got)
+	}
+	if got := mixed.Metrics.DataBytes; got != 2499805184 {
+		t.Fatalf("mixed data bytes = %d", got)
+	}
+	if !approxEqual(mixed.Metrics.ThroughputAvgOps, 33.5, 0.001) {
+		t.Fatalf("mixed avg throughput = %.3f", mixed.Metrics.ThroughputAvgOps)
+	}
+	if !approxEqual(summary.Totals.DurationSeconds, 30, 0.001) {
+		t.Fatalf("totals duration seconds = %.3f, want 30", summary.Totals.DurationSeconds)
+	}
+	if got := summary.Totals.DataBytes; got != 2499805184 {
+		t.Fatalf("totals data bytes = %d", got)
+	}
+	if len(mixed.OperationBreakdown) != 4 {
+		t.Fatalf("expected 4 breakdown rows, got %d", len(mixed.OperationBreakdown))
+	}
+	gotOps := []string{
+		mixed.OperationBreakdown[0].Operation,
+		mixed.OperationBreakdown[1].Operation,
+		mixed.OperationBreakdown[2].Operation,
+		mixed.OperationBreakdown[3].Operation,
+	}
+	if strings.Join(gotOps, ",") != "READ,STAT,CREATE,DELETE" {
+		t.Fatalf("unexpected breakdown order: %v", gotOps)
+	}
+	if mixed.OperationBreakdown[0].ConfiguredShare == nil || *mixed.OperationBreakdown[0].ConfiguredShare != 45 {
+		t.Fatalf("read configured share = %v", mixed.OperationBreakdown[0].ConfiguredShare)
+	}
+	if mixed.OperationBreakdown[1].ConfiguredShare == nil || *mixed.OperationBreakdown[1].ConfiguredShare != 30 {
+		t.Fatalf("stat configured share = %v", mixed.OperationBreakdown[1].ConfiguredShare)
+	}
+	if mixed.OperationBreakdown[2].ConfiguredShare == nil || *mixed.OperationBreakdown[2].ConfiguredShare != 15 {
+		t.Fatalf("create configured share = %v", mixed.OperationBreakdown[2].ConfiguredShare)
+	}
+	if mixed.OperationBreakdown[3].ConfiguredShare == nil || *mixed.OperationBreakdown[3].ConfiguredShare != 10 {
+		t.Fatalf("delete configured share = %v", mixed.OperationBreakdown[3].ConfiguredShare)
+	}
+	var shareSum float64
+	for _, row := range mixed.OperationBreakdown {
+		if row.ActualShare == nil {
+			t.Fatalf("actual share missing for %s", row.Operation)
+		}
+		shareSum += *row.ActualShare
+	}
+	if !approxEqual(shareSum, 100, 0.01) {
+		t.Fatalf("actual share sum = %.4f", shareSum)
+	}
+	if mixed.MixedLatencyNote == "" {
+		t.Fatal("expected mixed latency note")
+	}
+	if mixed.Metrics.LatencyMedianMs != 0 {
+		t.Fatalf("expected no combined latency median, got %.3f", mixed.Metrics.LatencyMedianMs)
+	}
+	if len(summary.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", summary.Warnings)
+	}
+}
+
+func TestPhaseLabelFromStepHandlesMixedCleanupSteps(t *testing.T) {
+	t.Parallel()
+
+	if got := phaseLabelFromStep("mt-003-20260604.180001.000-cleanup-seed"); got != "Cleanup seed" {
+		t.Fatalf("cleanup-seed label = %q", got)
+	}
+	if got := phaseLabelFromStep("mt-004-20260604.180001.000-cleanup-put"); got != "Cleanup CREATE" {
+		t.Fatalf("cleanup-put label = %q", got)
+	}
+	if got := phaseLabelFromStep("mt-002-20260604.180001.000-mixed"); got != "Mixed" {
+		t.Fatalf("mixed label = %q", got)
+	}
+}
+
 func TestParseSizeString(t *testing.T) {
 	t.Parallel()
 
