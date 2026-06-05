@@ -92,9 +92,6 @@ func (o *TestOrchestrator) SetCallbacks(
 
 // StartTest starts a Spt test using the API approach
 func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params scenario.Params) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
 	// Generate scenario
 	scenarioContent, err := scenario.GenerateScenario(params)
 	if err != nil {
@@ -107,10 +104,22 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		return fmt.Errorf("failed to generate defaults: %w", err)
 	}
 
+	return o.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
+}
+
+// StartTestWithContent starts a Spt test with caller-provided scenario and defaults content.
+func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if len(scenarioContent) == 0 {
+		return fmt.Errorf("scenario content is empty")
+	}
+
 	// Save scenario to file if requested
 	if params.KeepScenario {
 		o.scenarioPath = fmt.Sprintf("spt-scenario-%d.js", time.Now().Unix())
-		if err := os.WriteFile(o.scenarioPath, []byte(scenarioContent), 0600); err != nil {
+		if err := os.WriteFile(o.scenarioPath, scenarioContent, 0600); err != nil {
 			logging.LogError("orchestrator", "failed to save scenario file", err)
 		} else {
 			o.keepScenario = true
@@ -127,7 +136,9 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 	o.containerID = containerID
 
 	// Create API client
-	o.apiClient = NewSptAPIClient(fmt.Sprintf("http://localhost:%s", o.apiPort))
+	if o.apiClient == nil {
+		o.apiClient = NewSptAPIClient(fmt.Sprintf("http://localhost:%s", o.apiPort))
+	}
 
 	// Wait for API to be ready
 	logging.LogInfo("orchestrator", "waiting for Spt API to be ready")
@@ -158,7 +169,7 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		o.onOutput("Starting test via API...")
 	}
 
-	runID, err := o.apiClient.StartTest([]byte(scenarioContent), defaultsContent)
+	runID, err := o.apiClient.StartTest(scenarioContent, defaultsContent)
 	if err != nil {
 		// Clean up the started container since API test start failed
 		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)

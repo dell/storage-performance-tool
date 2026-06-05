@@ -55,11 +55,18 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 		Threads:      maxConcurrency(generated.Steps),
 		AuthVersion:  opts.AuthVersion,
 		S3Driver:     opts.S3Driver,
+		// Legacy Mongoose scenarios use the engine's repeatable data stream by default;
+		// replay should not opt into SPT's anti-dedupe stamping unless explicitly designed.
+		ObjectDataDedupable: true,
+	}
+	if len(opts.Endpoints) == 1 {
+		params.Endpoint = opts.Endpoints[0]
 	}
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		return generated, fmt.Errorf("generate replay defaults: %w", err)
 	}
+	generated.Params = params
 	generated.DefaultsYAML = defaults
 	generated.MetadataJSON = buildMetadata(generated)
 	generated.Preflight = BuildPreflight(generated, opts)
@@ -122,47 +129,47 @@ func BuildPreflight(g *Generated, opts Options) string {
 	var b strings.Builder
 	b.WriteString("Replay preflight\n")
 	b.WriteString("\nSource\n")
-	b.WriteString(fmt.Sprintf("  Folder: %s\n", g.Artifacts.FolderURL))
-	b.WriteString(fmt.Sprintf("  Run script: %s\n", g.Artifacts.RunScriptName))
-	b.WriteString(fmt.Sprintf("  Scenario: %s\n", g.Artifacts.ScenarioName))
-	b.WriteString(fmt.Sprintf("  Format: %s\n", strings.ToUpper(g.Artifacts.ScenarioFormat)))
+	fmt.Fprintf(&b, "  Folder: %s\n", g.Artifacts.FolderURL)
+	fmt.Fprintf(&b, "  Run script: %s\n", g.Artifacts.RunScriptName)
+	fmt.Fprintf(&b, "  Scenario: %s\n", g.Artifacts.ScenarioName)
+	fmt.Fprintf(&b, "  Format: %s\n", strings.ToUpper(g.Artifacts.ScenarioFormat))
 	b.WriteString("\nTarget\n")
 	b.WriteString("  Protocol: S3\n")
-	b.WriteString(fmt.Sprintf("  Endpoints: %d configured locally\n", len(opts.Endpoints)))
+	fmt.Fprintf(&b, "  Endpoints: %d configured locally\n", len(opts.Endpoints))
 	if archivedNodes := splitCSV(g.Artifacts.RunScript.StorageNodeAddrs); len(archivedNodes) > 0 {
-		b.WriteString(fmt.Sprintf("  Archived storage nodes: %d\n", len(archivedNodes)))
+		fmt.Fprintf(&b, "  Archived storage nodes: %d\n", len(archivedNodes))
 	}
 	localHosts := splitCSV(opts.TestHosts)
 	if len(localHosts) == 0 {
 		localHosts = []string{"127.0.0.1"}
 	}
-	b.WriteString(fmt.Sprintf("  Local test hosts: %d\n", len(localHosts)))
+	fmt.Fprintf(&b, "  Local test hosts: %d\n", len(localHosts))
 	if archivedClients := splitCSV(g.Artifacts.RunScript.ClientAddrs); len(archivedClients) > 0 {
-		b.WriteString(fmt.Sprintf("  Archived clients: %d\n", len(archivedClients)))
+		fmt.Fprintf(&b, "  Archived clients: %d\n", len(archivedClients))
 	}
-	b.WriteString(fmt.Sprintf("  Bucket: %s\n", g.EffectiveBucket))
+	fmt.Fprintf(&b, "  Bucket: %s\n", g.EffectiveBucket)
 	b.WriteString("  Auth: local environment\n")
 	b.WriteString("\nWorkload\n")
 	for _, step := range g.Steps {
-		b.WriteString(fmt.Sprintf("  %s -> %s  %s", step.ArchiveID, step.StepID, step.Operation))
+		fmt.Fprintf(&b, "  %s -> %s  %s", step.ArchiveID, step.StepID, step.Operation)
 		if step.Size != "" {
-			b.WriteString(fmt.Sprintf("  size=%s", step.Size))
+			fmt.Fprintf(&b, "  size=%s", step.Size)
 		}
 		if step.Concurrency > 0 {
-			b.WriteString(fmt.Sprintf("  concurrency=%d", step.Concurrency))
+			fmt.Fprintf(&b, "  concurrency=%d", step.Concurrency)
 		}
 		if step.Duration != "" {
-			b.WriteString(fmt.Sprintf("  duration=%s", step.Duration))
+			fmt.Fprintf(&b, "  duration=%s", step.Duration)
 		}
 		if step.Count > 0 {
-			b.WriteString(fmt.Sprintf("  count=%d", step.Count))
+			fmt.Fprintf(&b, "  count=%d", step.Count)
 		}
 		b.WriteByte('\n')
 	}
 	if len(g.PathRewrites) > 0 {
 		b.WriteString("\nPath rewrites\n")
 		for _, rewrite := range g.PathRewrites {
-			b.WriteString(fmt.Sprintf("  %s -> %s\n", rewrite.ArchiveID, rewrite.StepID))
+			fmt.Fprintf(&b, "  %s -> %s\n", rewrite.ArchiveID, rewrite.StepID)
 		}
 	}
 	if len(g.Diagnostics) > 0 {
@@ -179,13 +186,13 @@ func BuildPreflight(g *Generated, opts Options) string {
 }
 
 func maxConcurrency(steps []StepSummary) int {
-	max := 1
+	maxValue := 1
 	for _, step := range steps {
-		if step.Concurrency > max {
-			max = step.Concurrency
+		if step.Concurrency > maxValue {
+			maxValue = step.Concurrency
 		}
 	}
-	return max
+	return maxValue
 }
 
 func buildMetadata(g *Generated) []byte {

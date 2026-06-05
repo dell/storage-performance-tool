@@ -13,14 +13,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestReplayCommandRequiresGenerateOnlyForNow(t *testing.T) {
+func TestReplayCommandRejectsMultiHostLaunchForNow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"item": {"data": {"size": "10KB"}}, "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
 	cmd := newReplayCommandForTest(t)
-	cmd.SetArgs([]string{"--from", "http://example.invalid/archive/"})
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--endpoints", "http://10.0.0.1:9020",
+		"--test-hosts", "127.0.0.1,127.0.0.2",
+	})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("Execute() error = nil, want not implemented")
+		t.Fatal("Execute() error = nil, want multi-host not implemented")
 	}
-	if !strings.Contains(err.Error(), "replay execution is not implemented yet") {
+	if !strings.Contains(err.Error(), "multi-host replay execution is not implemented yet") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -88,6 +112,103 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestReplayCommandLaunchStagesArtifactsInResultsDirWhenAutoResultsDisabled(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"item": {"data": {"size": "10KB"}}, "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resultsDir := filepath.Join(t.TempDir(), "results")
+	var out bytes.Buffer
+	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--endpoints", "http://10.0.0.1:9020",
+		"--auto-results=false",
+		"--results-dir", resultsDir,
+		"--label", "replaycase",
+		"--s3-driver", "rdma",
+	})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "RDMA replay launch is not implemented yet") {
+		t.Fatalf("Execute() error = %v, want RDMA launch not implemented", err)
+	}
+	if !strings.Contains(out.String(), "  Directory: "+filepath.Join(resultsDir, "replaycase-")) {
+		t.Fatalf("generated directory should be staged under results dir, output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "/tmp/spt-replay-") {
+		t.Fatalf("launch path should not use transient replay temp dir when results-dir is available:\n%s", out.String())
+	}
+}
+
+func TestConfirmReplayLaunch(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{name: "enter starts", input: "\n"},
+		{name: "q aborts", input: "q\n", wantErr: "replay aborted by user"},
+		{name: "esc aborts", input: "\x1b\n", wantErr: "replay aborted by user"},
+		{name: "other aborts", input: "x\n", wantErr: "press Enter to start"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := confirmReplayLaunch(&out, func(_ string, _ int, _ os.FileMode) (*os.File, error) {
+				f, createErr := os.CreateTemp(t.TempDir(), "tty-*")
+				if createErr != nil {
+					return nil, createErr
+				}
+				if _, writeErr := f.WriteString(tt.input); writeErr != nil {
+					_ = f.Close()
+					return nil, writeErr
+				}
+				if _, seekErr := f.Seek(0, 0); seekErr != nil {
+					_ = f.Close()
+					return nil, seekErr
+				}
+				return f, nil
+			})
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("confirmReplayLaunch() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("confirmReplayLaunch() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfirmReplayLaunchNoTTY(t *testing.T) {
+	var out bytes.Buffer
+	err := confirmReplayLaunch(&out, func(_ string, _ int, _ os.FileMode) (*os.File, error) {
+		return nil, fmt.Errorf("no tty")
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires an interactive terminal") {
+		t.Fatalf("confirmReplayLaunch() error = %v", err)
+	}
+}
+
 func newReplayCommandForTest(t *testing.T) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{
@@ -107,5 +228,20 @@ func newReplayCommandForTest(t *testing.T) *cobra.Command {
 	cmd.Flags().String("test-hosts", "127.0.0.1", "")
 	cmd.Flags().String("label", "replay", "")
 	cmd.Flags().String("s3-driver", "default", "")
+	cmd.Flags().Bool("headless", false, "")
+	cmd.Flags().Bool("minimal", false, "")
+	cmd.Flags().Int("auto-terminate-seconds", 0, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().String("api-port", "", "")
+	cmd.Flags().Bool(flagSkipImagePull, false, "")
+	cmd.Flags().String(flagSptImage, "", "")
+	cmd.Flags().String("trace-file", "", "")
+	cmd.Flags().Bool("trace-append", false, "")
+	cmd.Flags().Bool("verbose", false, "")
+	cmd.Flags().Bool("auto-results", true, "")
+	cmd.Flags().String("results-dir", "./results", "")
+	cmd.Flags().Bool("auto-results-debug", false, "")
+	cmd.Flags().Bool("shutdown-on-complete", true, "")
+	cmd.Flags().Int("shutdown-linger", 5, "")
 	return cmd
 }

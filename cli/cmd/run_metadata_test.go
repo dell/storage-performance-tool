@@ -134,6 +134,29 @@ func TestCopyScenarioForResults(t *testing.T) {
 	}
 }
 
+func TestCopyScenarioForResultsSkipsSelfCopy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "scenario.js")
+	if err := os.WriteFile(src, []byte("content"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	rel, err := copyScenarioForResults(src, dir)
+	if err != nil {
+		t.Fatalf("copyScenarioForResults error = %v", err)
+	}
+	if rel != "scenario.js" {
+		t.Fatalf("relative name = %q, want scenario.js", rel)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read scenario: %v", err)
+	}
+	if string(data) != "content" {
+		t.Fatalf("scenario content = %q, want content", string(data))
+	}
+}
+
 func TestWriteRunMetadata(t *testing.T) {
 	dir := t.TempDir()
 	meta := &runMetadata{

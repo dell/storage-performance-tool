@@ -1,6 +1,10 @@
 package replay
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+)
 
 const (
 	defaultLabel = "replay"
@@ -71,6 +75,7 @@ type PathRewrite struct {
 // Generated is the complete generate-only replay output.
 type Generated struct {
 	Artifacts       Artifacts
+	Params          scenario.Params `json:"-"`
 	ScenarioJS      []byte
 	DefaultsYAML    []byte
 	MetadataJSON    []byte

@@ -1,3 +1,4 @@
+// Package replay imports archived benchmark artifacts and converts them into SPT replay workloads.
 package replay
 
 import (
@@ -39,6 +40,23 @@ type itemFileExpr struct {
 	To           string
 }
 
+const (
+	legacyStepTypeLoad         = "load"
+	legacyStepTypeParallel     = "parallel"
+	legacyStepTypePrecondition = "precondition"
+
+	legacyKeyConcurrency = "concurrency"
+	legacyKeyCount       = "count"
+	legacyKeyDriver      = "driver"
+	legacyKeyLimit       = "limit"
+	legacyKeyStorage     = "storage"
+	legacyKeyType        = "type"
+
+	opTypeCreate = "create"
+
+	errParallelReplayUnimplemented = "parallel scenarios are not implemented for replay"
+)
+
 var itemFileRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/log/([^/]+)/([^"'\s]+)`)
 var mongoosePathRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/([^"'\s]+)`)
 var (
@@ -71,8 +89,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	}
 
 	diagnostics = append(diagnostics, detectUnsupportedProtocols(legacy)...)
-	if strings.EqualFold(legacy.Type, "parallel") {
-		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "parallel scenarios are not implemented for replay"})
+	if strings.EqualFold(legacy.Type, legacyStepTypeParallel) {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: errParallelReplayUnimplemented})
 	}
 
 	legacySteps := legacy.Steps
@@ -116,7 +134,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	for i, step := range legacySteps {
 		stepType := strings.ToLower(strings.TrimSpace(step.Type))
 		switch stepType {
-		case "load", "precondition":
+		case legacyStepTypeLoad, legacyStepTypePrecondition:
 			loadStepNumber++
 			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
@@ -131,13 +149,13 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			seconds, ok := parseSleepCommand(step.Value, effectiveVars)
 			if !ok {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported command step: %s", step.Value)})
-				body.WriteString(fmt.Sprintf("// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value)))
+				fmt.Fprintf(&body, "// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value))
 				continue
 			}
 			waitNumber++
-			body.WriteString(fmt.Sprintf("pauseSeconds(%d, %s);\n\n", seconds, jsQuote(fmt.Sprintf("Archived wait %d", waitNumber))))
-		case "parallel":
-			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "parallel scenarios are not implemented for replay"})
+			fmt.Fprintf(&body, "pauseSeconds(%d, %s);\n\n", seconds, jsQuote(fmt.Sprintf("Archived wait %d", waitNumber)))
+		case legacyStepTypeParallel:
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: errParallelReplayUnimplemented})
 		default:
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("unsupported step type %q skipped", step.Type)})
 		}
@@ -156,9 +174,9 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		for _, key := range itemVarOrder {
 			item := itemVars[key]
 			if item.StepID != "" && item.FileName != "" {
-				defs.WriteString(fmt.Sprintf("var %s = sptHomeDir + \"/log/\" + %s + \"/%s\";\n", item.VarName, jsQuote(item.StepID), jsEscape(item.FileName)))
+				fmt.Fprintf(&defs, "var %s = sptHomeDir + \"/log/\" + %s + \"/%s\";\n", item.VarName, jsQuote(item.StepID), jsEscape(item.FileName))
 			} else {
-				defs.WriteString(fmt.Sprintf("var %s = sptHomeDir + \"/%s\";\n", item.VarName, jsEscape(item.HomeRelative)))
+				fmt.Fprintf(&defs, "var %s = sptHomeDir + \"/%s\";\n", item.VarName, jsEscape(item.HomeRelative))
 			}
 		}
 		defs.WriteString("\n")
@@ -189,20 +207,20 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		archiveID = fmt.Sprintf("archive-step-%03d", index+1)
 	}
 	opType := strings.ToLower(resolveString(firstPath(step.Config,
-		[]string{"load", "op", "type"},
-		[]string{"load", "type"},
+		[]string{legacyStepTypeLoad, "op", legacyKeyType},
+		[]string{legacyStepTypeLoad, legacyKeyType},
 	), vars))
 	opSuffix := opType
-	loadFactory := "Load"
-	if strings.EqualFold(step.Type, "precondition") {
-		opType = "create"
+	var loadFactory string
+	if strings.EqualFold(step.Type, legacyStepTypePrecondition) {
+		opType = opTypeCreate
 		opSuffix = "seed"
 		loadFactory = "PreconditionLoad"
 	} else {
 		switch opType {
-		case "", "create", "write":
-			opType = "create"
-			opSuffix = "create"
+		case "", opTypeCreate, "write":
+			opType = opTypeCreate
+			opSuffix = opTypeCreate
 			loadFactory = "Load"
 		case "read":
 			loadFactory = "ReadLoad"
@@ -217,16 +235,16 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	archiveToStepID[archiveID] = stepID
 
 	concurrency := intValue(firstPath(step.Config,
-		[]string{"load", "limit", "concurrency"},
-		[]string{"storage", "driver", "limit", "concurrency"},
-		[]string{"storage", "driver", "concurrency"},
+		[]string{legacyStepTypeLoad, legacyKeyLimit, legacyKeyConcurrency},
+		[]string{legacyKeyStorage, legacyKeyDriver, legacyKeyLimit, legacyKeyConcurrency},
+		[]string{legacyKeyStorage, legacyKeyDriver, legacyKeyConcurrency},
 	), vars)
 	itemSize := resolveString(getPath(step.Config, "item", "data", "size"), vars)
-	limitTimeRaw := getPath(step.Config, "test", "step", "limit", "time")
+	limitTimeRaw := getPath(step.Config, "test", "step", legacyKeyLimit, "time")
 	limitCountRaw := firstPath(step.Config,
-		[]string{"test", "step", "limit", "count"},
-		[]string{"load", "op", "limit", "count"},
-		[]string{"load", "limit", "count"},
+		[]string{"test", "step", legacyKeyLimit, legacyKeyCount},
+		[]string{legacyStepTypeLoad, "op", legacyKeyLimit, legacyKeyCount},
+		[]string{legacyStepTypeLoad, legacyKeyLimit, legacyKeyCount},
 	)
 	if missing := unresolvedVars(limitTimeRaw, vars); len(missing) > 0 {
 		return convertedStep{}, fmt.Errorf("step %s has unresolved variable %s in time limit", archiveID, missing[0])
@@ -241,9 +259,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	}
 
 	config := map[string]any{
-		"storage": map[string]any{
-			"driver": map[string]any{
-				"type": s3DriverType(opts.S3Driver),
+		legacyKeyStorage: map[string]any{
+			legacyKeyDriver: map[string]any{
+				legacyKeyType: s3DriverType(opts.S3Driver),
 			},
 		},
 		"item": map[string]any{
@@ -251,9 +269,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 				"path": "/" + strings.TrimPrefix(bucket, "/"),
 			},
 		},
-		"load": map[string]any{
+		legacyStepTypeLoad: map[string]any{
 			"op": map[string]any{
-				"type": opType,
+				legacyKeyType: opType,
 			},
 			"step": map[string]any{
 				"id": stepID,
@@ -261,7 +279,7 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		},
 	}
 	if concurrency > 0 {
-		setPath(config, concurrency, "storage", "driver", "limit", "concurrency")
+		setPath(config, concurrency, legacyKeyStorage, legacyKeyDriver, legacyKeyLimit, legacyKeyConcurrency)
 	}
 	if itemSize != "" {
 		setPath(config, itemSize, "item", "data", "size")
@@ -269,20 +287,20 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if verify, ok := boolValue(getPath(step.Config, "item", "data", "verify"), vars); ok {
 		setPath(config, verify, "item", "data", "verify")
 	}
-	if queueInput := int64Value(getPath(step.Config, "storage", "driver", "queue", "input"), vars); queueInput > 0 {
-		setPath(config, queueInput, "storage", "driver", "queue", "input")
+	if queueInput := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyDriver, "queue", "input"), vars); queueInput > 0 {
+		setPath(config, queueInput, legacyKeyStorage, legacyKeyDriver, "queue", "input")
 	}
 	if duration != "" {
-		setPath(config, duration, "load", "step", "limit", "time")
+		setPath(config, duration, legacyStepTypeLoad, "step", legacyKeyLimit, "time")
 	}
 	if count > 0 {
-		setPath(config, count, "load", "op", "limit", "count")
+		setPath(config, count, legacyStepTypeLoad, "op", legacyKeyLimit, legacyKeyCount)
 	}
-	if recycle, ok := boolValue(getPath(step.Config, "load", "generator", "recycle", "enabled"), vars); ok {
-		setPath(config, recycle, "load", "op", "recycle", "mode")
+	if recycle, ok := boolValue(getPath(step.Config, legacyStepTypeLoad, "generator", "recycle", "enabled"), vars); ok {
+		setPath(config, recycle, legacyStepTypeLoad, "op", "recycle", "mode")
 	}
-	if shuffle, ok := boolValue(getPath(step.Config, "load", "generator", "shuffle"), vars); ok {
-		setPath(config, shuffle, "load", "op", "shuffle")
+	if shuffle, ok := boolValue(getPath(step.Config, legacyStepTypeLoad, "generator", "shuffle"), vars); ok {
+		setPath(config, shuffle, legacyStepTypeLoad, "op", "shuffle")
 	}
 
 	var rewrites []PathRewrite
@@ -322,7 +340,7 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		return convertedStep{}, err
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("print(\"[\" + new Date().toISOString() + \"] Starting replay step %s (%s)\");\n", stepID, opType))
+	fmt.Fprintf(&b, "print(\"[\" + new Date().toISOString() + \"] Starting replay step %s (%s)\");\n", stepID, opType)
 	b.WriteString(loadFactory)
 	b.WriteString("\n  .config(")
 	b.WriteString(configJS)
@@ -547,12 +565,12 @@ func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported storage.driver.type %q", driver)})
 		}
 	}
-	check(getPath(legacy.Config, "storage", "driver", "type"))
+	check(getPath(legacy.Config, legacyKeyStorage, legacyKeyDriver, legacyKeyType))
 	for _, step := range append(append([]legacyStep{}, legacy.Steps...), legacy.Jobs...) {
-		if strings.EqualFold(step.Type, "parallel") {
-			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "parallel scenarios are not implemented for replay"})
+		if strings.EqualFold(step.Type, legacyStepTypeParallel) {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: errParallelReplayUnimplemented})
 		}
-		check(getPath(step.Config, "storage", "driver", "type"))
+		check(getPath(step.Config, legacyKeyStorage, legacyKeyDriver, legacyKeyType))
 	}
 	return diagnostics
 }
@@ -689,7 +707,7 @@ func unresolvedVars(v any, vars map[string]string) []string {
 
 func requiresExplicitLimit(opType string) bool {
 	switch opType {
-	case "create", "read":
+	case opTypeCreate, "read":
 		return true
 	default:
 		return false

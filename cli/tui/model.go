@@ -953,6 +953,15 @@ func StartTUIWithScenarioAndParams(image string, scenarioPath string, params sce
 
 // StartTUIWithScenarioAndParamsWithTrace starts the TUI with optional full-output trace capture.
 func StartTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
+	return startTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, nil, nil)
+}
+
+// StartTUIWithScenarioContentAndParamsWithTrace starts the TUI with caller-provided scenario/defaults content.
+func StartTUIWithScenarioContentAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+	return startTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+}
+
+func startTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1027,9 +1036,15 @@ func StartTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, p
 		// Create a context for the test
 		ctx := context.Background()
 
-		if err := orchestrator.StartTest(ctx, image, params); err != nil {
-			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", err)))
-			logging.LogError("tui", "failed to start test", err)
+		var startErr error
+		if scenarioContent != nil {
+			startErr = orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		} else {
+			startErr = orchestrator.StartTest(ctx, image, params)
+		}
+		if startErr != nil {
+			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", startErr)))
+			logging.LogError("tui", "failed to start test", startErr)
 			// Try to clean up any partially created resources
 			if stopErr := orchestrator.StopTest(); stopErr != nil {
 				logging.LogError("tui", "failed to cleanup after start failure", stopErr)
@@ -1224,6 +1239,18 @@ func StartTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath st
 	if autoTerminateSeconds <= 0 {
 		return StartTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend)
 	}
+	return startTUIWithScenarioAndParamsTimeoutWithTrace(image, scenarioPath, params, apiPort, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
+}
+
+// StartTUIWithScenarioContentAndParamsTimeoutWithTrace starts the TUI with caller-provided content and optional timeout.
+func StartTUIWithScenarioContentAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+	if autoTerminateSeconds <= 0 {
+		return StartTUIWithScenarioContentAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	}
+	return startTUIWithScenarioAndParamsTimeoutWithTrace(image, scenarioPath, params, apiPort, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+}
+
+func startTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1279,9 +1306,15 @@ func StartTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath st
 		p.Send(sptMessageMsg("Starting Spt in API mode..."))
 		p.Send(containerStatusMsg("Starting"))
 		ctx := context.Background()
-		if err := orchestrator.StartTest(ctx, image, params); err != nil {
-			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", err)))
-			logging.LogError("tui", "failed to start test", err)
+		var startErr error
+		if scenarioContent != nil {
+			startErr = orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		} else {
+			startErr = orchestrator.StartTest(ctx, image, params)
+		}
+		if startErr != nil {
+			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", startErr)))
+			logging.LogError("tui", "failed to start test", startErr)
 			if stopErr := orchestrator.StopTest(); stopErr != nil {
 				logging.LogError("tui", "failed to cleanup after start failure", stopErr)
 			}

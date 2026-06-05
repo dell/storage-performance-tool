@@ -262,6 +262,15 @@ func (r *HeadlessRunner) Run(ctx context.Context, image string, scenarioPath str
 
 // RunWithParams executes the benchmark in headless mode with scenario parameters
 func (r *HeadlessRunner) RunWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
+	return r.runWithParams(ctx, image, scenarioPath, params, nil, nil)
+}
+
+// RunWithScenarioContentAndParams executes the benchmark with caller-provided scenario and defaults content.
+func (r *HeadlessRunner) RunWithScenarioContentAndParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	return r.runWithParams(ctx, image, scenarioPath, params, scenarioContent, defaultsContent)
+}
+
+func (r *HeadlessRunner) runWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
 	r.scenarioPath = scenarioPath
 	r.keepScenario = params.KeepScenario // Get from params
 
@@ -288,10 +297,17 @@ func (r *HeadlessRunner) RunWithParams(ctx context.Context, image string, scenar
 
 	// Dry run mode - just show what would be executed
 	if r.dryRun {
+		if scenarioContent != nil {
+			r.runDryModeWithContent(image, scenarioPath, scenarioContent, defaultsContent)
+			return nil
+		}
 		return r.runDryModeWithParams(image, scenarioPath, params)
 	}
 
 	// Start the actual benchmark
+	if scenarioContent != nil {
+		return r.runBenchmarkWithContent(runCtx, image, scenarioPath, params, scenarioContent, defaultsContent)
+	}
 	return r.runBenchmarkWithParams(runCtx, image, scenarioPath, params)
 }
 
@@ -339,10 +355,48 @@ func (r *HeadlessRunner) runDryModeWithParams(image string, scenarioPath string,
 	return nil
 }
 
+func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string, scenarioContent, defaultsContent []byte) {
+	r.output("DRY-RUN", "Would execute benchmark with API mode:")
+	r.output("DRY-RUN", "  Image: %s", image)
+	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
+	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
+
+	r.output("DRY-RUN", "Provided scenario content:")
+	r.output("DRY-RUN", "%s", string(scenarioContent))
+
+	if defaultsContent != nil {
+		r.output("DRY-RUN", "Provided defaults configuration:")
+		r.output("DRY-RUN", "%s", string(defaultsContent))
+	} else {
+		r.output("DRY-RUN", "Defaults configuration: (none)")
+	}
+
+	r.output("DRY-RUN", "Would start container with --run-node")
+	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
+	r.output("DRY-RUN", "Would POST scenario and defaults to /run endpoint")
+	r.output("DRY-RUN", "Would poll /status every 2 seconds")
+	r.output("DRY-RUN", "Would poll /metrics every 500ms")
+	r.output("DRY-RUN", "Would POST /shutdown for graceful node termination")
+
+	r.output("COMPLETE", "Dry run completed")
+}
+
 // runBenchmark removed as unused (dead code); use runBenchmarkWithParams instead
 
 // runBenchmarkWithParams executes the actual benchmark with scenario parameters
 func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
+	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
+		return orchestrator.StartTest(ctx, image, params)
+	})
+}
+
+func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
+		return orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+	})
+}
+
+func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, startTest func(*tui.TestOrchestrator) error) error {
 	// Create the orchestrator for API-based control
 	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort)
 
@@ -397,7 +451,7 @@ func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image strin
 	// Start the test via orchestrator
 	r.output("INIT", "Starting Spt in API mode...")
 
-	if err := r.orchestrator.StartTest(ctx, image, params); err != nil {
+	if err := startTest(r.orchestrator); err != nil {
 		r.output("ERROR", "Failed to start test: %v", err)
 		// Try to clean up any partially created resources
 		if stopErr := r.orchestrator.StopTest(); stopErr != nil {
@@ -530,6 +584,15 @@ func StartHeadlessMode(image string, scenarioPath string, options HeadlessOption
 
 // StartHeadlessModeWithParams is the entry point for headless mode with scenario parameters
 func StartHeadlessModeWithParams(image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
+	return startHeadlessModeWithParams(image, scenarioPath, params, options, nil, nil)
+}
+
+// StartHeadlessModeWithScenarioContentAndParams runs headless mode with caller-provided scenario/defaults content.
+func StartHeadlessModeWithScenarioContentAndParams(image string, scenarioPath string, params scenario.Params, options HeadlessOptions, scenarioContent, defaultsContent []byte) error {
+	return startHeadlessModeWithParams(image, scenarioPath, params, options, scenarioContent, defaultsContent)
+}
+
+func startHeadlessModeWithParams(image string, scenarioPath string, params scenario.Params, options HeadlessOptions, scenarioContent, defaultsContent []byte) error {
 	// Create Docker manager
 	dockerManager, err := tui.NewDockerManager()
 	if err != nil {
@@ -549,7 +612,13 @@ func StartHeadlessModeWithParams(image string, scenarioPath string, params scena
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()
+		if scenarioContent != nil {
+			return runner.RunWithScenarioContentAndParams(tctx, image, scenarioPath, params, scenarioContent, defaultsContent)
+		}
 		return runner.RunWithParams(tctx, image, scenarioPath, params)
+	}
+	if scenarioContent != nil {
+		return runner.RunWithScenarioContentAndParams(baseCtx, image, scenarioPath, params, scenarioContent, defaultsContent)
 	}
 	return runner.RunWithParams(baseCtx, image, scenarioPath, params)
 }

@@ -50,6 +50,12 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	if !strings.Contains(string(got.DefaultsYAML), "local_access_key") {
 		t.Fatalf("defaults should contain placeholder auth for generate-only without local credentials")
 	}
+	if !got.Params.ObjectDataDedupable {
+		t.Fatalf("replay params should keep dedupe-friendly data by default")
+	}
+	if strings.Contains(string(got.DefaultsYAML), "dedupable: false") {
+		t.Fatalf("defaults should not enable anti-dedupe stamping for replay:\n%s", string(got.DefaultsYAML))
+	}
 
 	outDir := filepath.Join(t.TempDir(), "generated")
 	paths, err := WriteGenerated(got, outDir)
