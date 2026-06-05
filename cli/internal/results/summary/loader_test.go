@@ -109,6 +109,86 @@ func TestLoaderLoadSuccess(t *testing.T) {
 	}
 }
 
+func TestLoaderLoadMixedDistributionAndMultiRowMetrics(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	runDir := filepath.Join(tempDir, "mt-20260604.180000.000")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	stepID := "mt-002-20260604.180001.000-mixed"
+	manifest := makeManifest(t, runDir, []stepFixture{
+		{
+			ID: stepID,
+			MetricsContent: sampleMetricsCSV([]string{
+				`"2026-06-04T18:00:10Z",READ,8,4,8,8,445,5,1866465280,30.0,20.0,14.8,13.9,59.3,55.6,8100,2200,4300,6200,9100,18000,8100,2200,4300,6200,9100,18000`,
+				`"2026-06-04T18:00:10Z",STAT,8,4,8,8,301,1,0,30.0,8.0,10.0,9.5,0.0,0.0,4200,1000,2100,3100,5000,9000,4200,1000,2100,3100,5000,9000`,
+				`"2026-06-04T18:00:10Z",CREATE,8,4,8,8,151,2,633339904,30.0,11.0,5.1,4.8,21.1,20.0,11200,3000,6200,8700,13000,25000,11200,3000,6200,8700,13000,25000`,
+				`"2026-06-04T18:00:10Z",DELETE,8,4,8,8,103,4,0,30.0,6.0,3.6,3.1,0.0,0.0,7300,1700,3000,5200,8600,14000,7300,1700,3000,5200,8600,14000`,
+			}),
+		},
+	})
+	writeManifest(t, runDir, manifest)
+
+	params := RunParams{
+		GeneratedAt:  time.Date(2026, 6, 4, 18, 0, 0, 0, time.UTC),
+		WorkloadType: "mixed",
+		ResultsRoot:  "results/mt-20260604.180000.000",
+		ScenarioParams: ScenarioParams{
+			WorkloadType:  "mixed",
+			Bucket:        "mixed-bucket",
+			Threads:       8,
+			ObjectSize:    "4MB",
+			Duration:      "30s",
+			GetDistrib:    45,
+			StatDistrib:   30,
+			PutDistrib:    15,
+			DeleteDistrib: 10,
+		},
+		ExpectedStepIDs: []string{stepID},
+	}
+	writeParams(t, runDir, &params)
+
+	loader := NewLoader()
+	data, err := loader.Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	step := data.Steps[stepID]
+	if step == nil {
+		t.Fatalf("step %s missing", stepID)
+	}
+	if step.Metrics == nil {
+		t.Fatalf("expected metrics for %s", stepID)
+	}
+	if len(step.Metrics.Rows) != 4 {
+		t.Fatalf("expected 4 mixed metrics rows, got %d", len(step.Metrics.Rows))
+	}
+	gotOps := []string{
+		step.Metrics.Rows[0].Operation,
+		step.Metrics.Rows[1].Operation,
+		step.Metrics.Rows[2].Operation,
+		step.Metrics.Rows[3].Operation,
+	}
+	if strings.Join(gotOps, ",") != "READ,STAT,CREATE,DELETE" {
+		t.Fatalf("unexpected operation order: %v", gotOps)
+	}
+	if data.Params.ScenarioParams.GetDistrib != 45 ||
+		data.Params.ScenarioParams.StatDistrib != 30 ||
+		data.Params.ScenarioParams.PutDistrib != 15 ||
+		data.Params.ScenarioParams.DeleteDistrib != 10 {
+		t.Fatalf("unexpected mixed distribution: %+v", data.Params.ScenarioParams)
+	}
+	if got := step.Metrics.Rows[2].SizeBytes; got != 633339904 {
+		t.Fatalf("create size bytes = %d", got)
+	}
+	if got := step.Metrics.Rows[3].FailureCount; got != 4 {
+		t.Fatalf("delete failure count = %d", got)
+	}
+}
+
 func TestLoaderLoadMissingMetrics(t *testing.T) {
 	t.Parallel()
 
@@ -151,6 +231,65 @@ func TestLoaderLoadMissingMetrics(t *testing.T) {
 	}
 	if len(step.MissingRequired) == 0 || step.MissingRequired[0] != constants.ResultsArtifactSuffixMetricsTotal {
 		t.Fatalf("expected missing metrics total suffix, got %v", step.MissingRequired)
+	}
+}
+
+func TestLoaderLoadMetricsSuppressedStepDoesNotRequireMetricsTotal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	runDir := filepath.Join(tempDir, "mt-20260604.195722.505")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	stepID := "mt-001-20260604.195722.504-seed"
+	configName := stepID + "." + constants.ResultsArtifactSuffixConfig
+	configContent := []byte("output:\n  metrics:\n    summary:\n      persist: false\n")
+	if err := os.WriteFile(filepath.Join(runDir, configName), configContent, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	manifest := &results.Manifest{
+		BaseURL:     "http://example",
+		OutputDir:   runDir,
+		GeneratedAt: time.Now().UTC(),
+		Steps: []results.StepManifest{
+			{
+				StepID: stepID,
+				Files: []results.FileStatus{
+					{
+						Name:   stepID + "." + constants.ResultsArtifactSuffixMetricsTotal,
+						Status: "missing",
+						Error:  "not listed in index.json",
+					},
+					{
+						Name:   configName,
+						Status: fileStatusOK,
+					},
+				},
+			},
+		},
+	}
+	writeManifest(t, runDir, manifest)
+	writeParams(t, runDir, &RunParams{ExpectedStepIDs: []string{stepID}})
+
+	loader := NewLoader()
+	data, err := loader.Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	step := data.Steps[stepID]
+	if step == nil {
+		t.Fatalf("step not found")
+	}
+	if !step.MetricsSuppressed {
+		t.Fatalf("expected metrics to be marked suppressed")
+	}
+	if step.Status != StepStatusComplete {
+		t.Fatalf("expected complete status for metrics-suppressed step, got %s", step.Status)
+	}
+	if len(step.MissingRequired) != 0 {
+		t.Fatalf("metrics-suppressed step should not have missing required artifacts: %v", step.MissingRequired)
 	}
 }
 

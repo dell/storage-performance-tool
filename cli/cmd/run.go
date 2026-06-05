@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
@@ -25,7 +26,6 @@ import (
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
-	"sync"
 )
 
 const (
@@ -73,6 +73,7 @@ var (
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
 	generateRunSummaryFunc = generateRunSummary
+	requestShutdownAllFunc = requestShutdownAll
 )
 
 // shouldRunHeadless determines if the application should run in headless mode
@@ -160,7 +161,7 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		tracker := newRunTrackerFunc(baseURL)
 		// Wait for terminal run state; step IDs discovered later via metrics/json
 		if len(expectedStepIDs) > 0 {
-			fmt.Printf("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
+			writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
 		}
 		tracker.SetDebug(debug)
 		// While we wait, continuously discover step IDs so we have exact IDs on completion
@@ -307,14 +308,6 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			}
 		}
 		writeProgress("Auto-results: results saved to %s\n", root)
-		writer := summaryOut
-		if writer == nil {
-			writer = io.Discard
-		}
-		if err := generateRunSummaryFunc(context.Background(), root, writer); err != nil {
-			logging.LogError("auto-results", "generate summary", err)
-			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
-		}
 
 		// Optional: graceful shutdown of all nodes via /shutdown
 		if shutdownOn {
@@ -327,13 +320,22 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			if lingerSec <= 0 {
 				lingerSec = int(constants.APILingerDefault / time.Second)
 			}
-			reqErr := requestShutdownAll(shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, debug)
+			reqErr := requestShutdownAllFunc(shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, debug)
 			if reqErr != nil {
 				logging.LogError("auto-results", "shutdown encountered issues", reqErr)
 				writeProgress("Shutdown completed with warnings; see logs for details.\n")
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
 			}
+		}
+
+		writer := summaryOut
+		if writer == nil {
+			writer = io.Discard
+		}
+		if err := generateRunSummaryFunc(context.Background(), root, writer); err != nil {
+			logging.LogError("auto-results", "generate summary", err)
+			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
 	}()
 	return done

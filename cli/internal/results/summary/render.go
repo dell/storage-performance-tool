@@ -2,6 +2,7 @@ package summary
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,9 @@ type RenderOptions struct {
 const (
 	defaultMaxWidth       = 100
 	defaultSnippetLineCap = 40
+	headerIOPSAvg         = "IOPS Avg"
+	headerLatencyP50      = "Latency P50"
+	headerBandwidthAvg    = "Bandwidth Avg"
 )
 
 // NewRenderer builds a Renderer using the provided options.
@@ -52,6 +56,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderEnvironment(b, summary)
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
 
@@ -62,10 +67,14 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 func (r *Renderer) ConsoleSnippet(summary *RunSummary) string {
 	full := r.FullReport(summary)
 	lines := strings.Split(full, "\n")
-	if len(lines) <= r.SnippetLineCap {
+	lineCap := r.SnippetLineCap
+	if hasMixedSteps(summary) && lineCap < 60 {
+		lineCap = 60
+	}
+	if len(lines) <= lineCap {
 		return full
 	}
-	truncated := lines[:r.SnippetLineCap-1]
+	truncated := lines[:lineCap-1]
 	truncated = append(truncated, "… (report truncated; see file for full details)")
 	return strings.Join(truncated, "\n") + "\n"
 }
@@ -93,6 +102,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
+	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
 		sb.WriteString("Warnings:\n")
@@ -191,7 +201,7 @@ func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {
 }
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {
-	headers := []string{"Phase", "Object Size", "Success", "Data Moved", "IOPS Avg", "Latency P50", "Bandwidth Avg"}
+	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerBandwidthAvg}
 	isList := strings.EqualFold(summary.Workload.Type, workloadTypeList)
 	if isList {
 		headers[4] = "Ops/s Avg"
@@ -212,7 +222,7 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			formatInt(m.SuccessCount),
 			formatBytesHuman(m.DataBytes),
 			formatNumber(m.ThroughputAvgOps, "ops/s"),
-			formatNumber(m.LatencyHeadlineMs, "ms"),
+			mixedLatencyCell(step, m),
 			formatNumber(m.BandwidthAvgMBps, "MB/s"),
 		}
 		rows = append(rows, row)
@@ -221,6 +231,78 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—"})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
+	if !hasMixedSteps(summary) {
+		return
+	}
+	mixedStepCount := 0
+	for _, step := range summary.Steps {
+		if step.IsMixed && len(step.OperationBreakdown) > 0 {
+			mixedStepCount++
+		}
+	}
+	b.WriteString("Mixed Operation Breakdown\n")
+	first := true
+	for _, step := range summary.Steps {
+		if !step.IsMixed || len(step.OperationBreakdown) == 0 {
+			continue
+		}
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		if mixedStepCount > 1 && step.StepID != "" {
+			fmt.Fprintf(b, "Step: %s\n", step.StepID)
+		}
+		headers := []string{"Operation", "Configured", "Actual Ops", headerIOPSAvg, headerLatencyP50}
+		rows := make([][]string, 0, len(step.OperationBreakdown))
+		for _, op := range step.OperationBreakdown {
+			rows = append(rows, []string{
+				op.Operation,
+				formatConfiguredShare(op.ConfiguredShare),
+				formatActualOps(op.ActualShare, op.ActualOps),
+				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
+				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
+			})
+		}
+		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight}))
+		b.WriteByte('\n')
+	}
+}
+
+func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
+	if !hasMixedSteps(summary) {
+		return
+	}
+	b.WriteString("Mixed Operation Breakdown\n")
+	for _, step := range summary.Steps {
+		if !step.IsMixed || len(step.OperationBreakdown) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "Step: %s\n", step.StepID)
+		if configured := configuredDistributionText(summary.Workload.MixedDistribution); configured != "" {
+			fmt.Fprintf(b, "Configured distribution: %s\n", configured)
+		}
+		headers := []string{"Operation", "Configured", "Actual Ops", "Success", "Failure", "Data Moved", headerIOPSAvg, headerBandwidthAvg, headerLatencyP50}
+		rows := make([][]string, 0, len(step.OperationBreakdown))
+		for _, op := range step.OperationBreakdown {
+			rows = append(rows, []string{
+				op.Operation,
+				formatConfiguredShare(op.ConfiguredShare),
+				formatActualOps(op.ActualShare, op.ActualOps),
+				formatInt(op.Metrics.SuccessCount),
+				formatInt(op.Metrics.FailureCount),
+				formatBytesHuman(op.Metrics.DataBytes),
+				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
+				formatNumber(op.Metrics.BandwidthAvgMBps, "MB/s"),
+				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
+			})
+		}
+		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight}))
+		b.WriteString("\n\n")
+	}
 }
 
 func (r *Renderer) renderTotals(b *strings.Builder, summary *RunSummary) {
@@ -342,8 +424,73 @@ func formatNumber(value float64, suffix string) string {
 	}
 }
 
+func formatPercent(value float64) string {
+	if value == 0 {
+		return "0%"
+	}
+	if value == math.Trunc(value) {
+		return fmt.Sprintf("%.0f%%", value)
+	}
+	return fmt.Sprintf("%.1f%%", value)
+}
+
 func formatBytesHuman(bytes int64) string {
 	return formatBytes(bytes)
+}
+
+func hasMixedSteps(summary *RunSummary) bool {
+	if summary == nil {
+		return false
+	}
+	for _, step := range summary.Steps {
+		if step.IsMixed && len(step.OperationBreakdown) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mixedLatencyCell(step StepSummary, metrics *PhaseMetrics) string {
+	if step.IsMixed {
+		return "see ops"
+	}
+	return formatNumber(metrics.LatencyHeadlineMs, "ms")
+}
+
+func configuredDistributionText(dist MixedDistribution) string {
+	if !dist.Available {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	for _, item := range []struct {
+		label string
+		value int
+	}{
+		{label: "READ", value: dist.ReadPercent},
+		{label: "STAT", value: dist.StatPercent},
+		{label: "CREATE", value: dist.CreatePercent},
+		{label: "DELETE", value: dist.DeletePercent},
+	} {
+		if item.value <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d%%", item.label, item.value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatConfiguredShare(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return formatPercent(*value)
+}
+
+func formatActualOps(share *float64, count int64) string {
+	if share == nil {
+		return formatInt(count)
+	}
+	return fmt.Sprintf("%s (%s)", formatPercent(*share), formatInt(count))
 }
 
 func collectIncompleteSteps(summary *RunSummary) []string {

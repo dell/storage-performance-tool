@@ -18,6 +18,10 @@ import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 @AsynchronouslyFormattable
 public final class MetricsCsvLogMessage extends LogMessageBase {
 
+	private static final double LOW_QUARTILE = 0.25;
+	private static final double MEDIAN = 0.5;
+	private static final double HIGH_QUARTILE = 0.75;
+
 	private final AllMetricsSnapshot snapshot;
 	private final OpType opType;
 	private final int concurrencyLimit;
@@ -77,11 +81,23 @@ public final class MetricsCsvLogMessage extends LogMessageBase {
 						.append(',')
 						.append(durationSnapshot.min())
 						.append(',')
+						.append(durationSnapshot.percentile(LOW_QUARTILE))
+						.append(',')
+						.append(durationSnapshot.percentile(MEDIAN))
+						.append(',')
+						.append(durationSnapshot.percentile(HIGH_QUARTILE))
+						.append(',')
 						.append(durationSnapshot.max())
 						.append(',')
 						.append(latencySnapshot.mean())
 						.append(',')
 						.append(latencySnapshot.min())
+						.append(',')
+						.append(latencySnapshot.percentile(LOW_QUARTILE))
+						.append(',')
+						.append(latencySnapshot.percentile(MEDIAN))
+						.append(',')
+						.append(latencySnapshot.percentile(HIGH_QUARTILE))
 						.append(',')
 						.append(latencySnapshot.max());
 	}
