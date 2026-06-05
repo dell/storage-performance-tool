@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.10.4] - 2026-06-01
+
+### Changed
+
+- **Version-pinned default engine image** — the CLI now defaults to the matching versioned engine image instead of the moving `latest` tag, making CLI/engine behavior reproducible across runs. Use `--spt-image` to select a different engine image explicitly.
+
+### Fixed
+
+- **Headless completion detection** — fixed premature `--headless` completion when transient aggregate metrics briefly reported `Completed`, while preserving running state through temporary concurrency gaps. (PR #123)
+- **Headless auto-results shutdown** — fixed a shutdown race that could prevent headless runs from reliably collecting final auto-results artifacts. (PR #125)
+- **Headless multi-step read runs** — fixed multi-step completion detection so seeded read workflows wait for the actual read step instead of treating the seed step as the terminal workload. (PR #126)
+
+## [5.10.3] - 2026-05-23
+
 ### Fixed
 
 - **MPU completion race handling** — fixed race condition in multipart upload completion logic that could cause incorrect finalization timing. (PR #121)

@@ -428,12 +428,13 @@ func TestHeadlessRunner_SingleOpNoPerOpLines(t *testing.T) {
 func TestHeadlessOptions_AllFields(t *testing.T) {
 	// Test that all option fields can be set and retrieved
 	options := HeadlessOptions{
-		TraceFile:   "/tmp/test.log",
-		TraceAppend: true,
-		Verbose:     true,
-		JSONMode:    true,
-		MetricsOnly: true,
-		DryRun:      true,
+		TraceFile:              "/tmp/test.log",
+		TraceAppend:            true,
+		Verbose:                true,
+		JSONMode:               true,
+		MetricsOnly:            true,
+		DryRun:                 true,
+		DelegateNormalShutdown: true,
 	}
 
 	// Verify all fields are accessible
@@ -454,6 +455,9 @@ func TestHeadlessOptions_AllFields(t *testing.T) {
 	}
 	if !options.DryRun {
 		t.Errorf("DryRun not set correctly")
+	}
+	if !options.DelegateNormalShutdown {
+		t.Errorf("DelegateNormalShutdown not set correctly")
 	}
 	// KeepScenario removed from HeadlessOptions - now in ScenarioParams
 }

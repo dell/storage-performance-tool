@@ -7,6 +7,7 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -44,6 +45,34 @@ func TestPreflight_EnsureImage_PullsWhenMissing(t *testing.T) {
 	pf := &DefaultChecker{exec: mock}
 	if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
 		t.Fatalf("EnsureImage error: %v", err)
+	}
+}
+
+func TestPreflight_EnsureImage_DevImagePresent(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	image := constants.DefaultSptImage + ":" + constants.DevImageTag
+	// Image present
+	mock.SetCommandSuccess(fmt.Sprintf("%s %s -q %s", constants.DockerCommand, constants.DockerCmdImages, image), "sha256:abc1234")
+
+	pf := &DefaultChecker{exec: mock}
+	if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
+		t.Fatalf("EnsureImage error: %v", err)
+	}
+}
+
+func TestPreflight_EnsureImage_DevImageMissing(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	image := constants.DefaultSptImage + ":" + constants.DevImageTag
+	// Image missing
+	mock.SetCommandSuccess(fmt.Sprintf("%s %s -q %s", constants.DockerCommand, constants.DockerCmdImages, image), "")
+
+	pf := &DefaultChecker{exec: mock}
+	err := pf.EnsureImage(context.Background(), testHost(), image)
+	if err == nil {
+		t.Fatal("expected error when dev image is missing locally")
+	}
+	if !strings.Contains(err.Error(), "dev image") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

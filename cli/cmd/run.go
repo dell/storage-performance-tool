@@ -30,6 +30,7 @@ import (
 
 const (
 	flagSkipImagePull         = "skip-image-pull"
+	flagSptImage              = "spt-image"
 	flagAttachExistingWorkers = "attach-existing"
 )
 
@@ -366,6 +367,18 @@ type traceOptions struct {
 	Path   string
 	Append bool
 	Auto   bool
+}
+
+func buildHeadlessOptions(traceOpts traceOptions, verbose bool, apiPort string, autoTerminate int, delegateNormalShutdown bool, expectedStepIDs []string) headless.HeadlessOptions {
+	return headless.HeadlessOptions{
+		TraceFile:              traceOpts.Path,
+		TraceAppend:            traceOpts.Append,
+		Verbose:                verbose,
+		APIPort:                apiPort,
+		AutoTerminateSeconds:   autoTerminate,
+		DelegateNormalShutdown: delegateNormalShutdown,
+		ExpectedStepIDs:        append([]string(nil), expectedStepIDs...),
+	}
 }
 
 func prepareTraceOptions(explicitPath string, explicitAppend bool, autoResults bool, plannedResultsRoot string, runToken string, warnOut io.Writer) (traceOptions, error) {
@@ -750,6 +763,12 @@ Available workload types:
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
 
+		// --spt-image overrides the engine image (precedence: flag > SPT_IMAGE env >
+		// version-matched default). Set the env so constants.EffectiveSptImage picks it up.
+		if sptImageFlag, _ := cmd.Flags().GetString(flagSptImage); strings.TrimSpace(sptImageFlag) != "" {
+			_ = os.Setenv(constants.EnvSptImage, strings.TrimSpace(sptImageFlag))
+		}
+
 		switch params.S3Driver {
 		case scenario.S3DriverRdma:
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
@@ -886,13 +905,21 @@ Available workload types:
 		if resultsOpts.AutoResults {
 			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path)
 		}
-		waitForAutoResults := func() {
+		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
 				select {
 				case <-autoResultsDone:
-				case <-time.After(2 * time.Second):
+					return true
+				case <-time.After(func() time.Duration {
+					if required {
+						return 2 * time.Minute
+					}
+					return 2 * time.Second
+				}()):
+					return false
 				}
 			}
+			return true
 		}
 		finalizeTraceArtifact := func() {
 			if err := appendTraceToResultsManifest(plannedResultsRoot, traceOpts.Path); err != nil {
@@ -959,19 +986,22 @@ Available workload types:
 			if headlessMode {
 				verbose, _ := cmd.Flags().GetBool("verbose")
 
-				options := headless.HeadlessOptions{
-					TraceFile:            traceOpts.Path,
-					TraceAppend:          traceOpts.Append,
-					Verbose:              verbose,
-					AutoTerminateSeconds: autoTerminate,
-				}
+				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
+				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
 
 				if autoTerminate > 0 {
 					fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				}
 
 				err := headless.StartHeadlessModeWithOrchestrator(orchestrator, sptImage, scenarioPath, params, options)
-				waitForAutoResults()
+				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
+					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
+					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if stopErr := orchestrator.StopAllContainers(cleanupCtx); stopErr != nil {
+						logger.Error("Failed to clean up containers after auto-results timeout", "error", stopErr.Error())
+					}
+					cleanupCancel()
+				}
 				finalizeTraceArtifact()
 				return err
 			}
@@ -980,12 +1010,12 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				waitForAutoResults()
+				waitForAutoResults(false)
 				finalizeTraceArtifact()
 				return err
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
-			waitForAutoResults()
+			waitForAutoResults(false)
 			finalizeTraceArtifact()
 			return err
 		}
@@ -995,20 +1025,14 @@ Available workload types:
 		if headlessMode {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
-			options := headless.HeadlessOptions{
-				TraceFile:            traceOpts.Path,
-				TraceAppend:          traceOpts.Append,
-				Verbose:              verbose,
-				APIPort:              apiPort,
-				AutoTerminateSeconds: autoTerminate,
-				// KeepScenario is now passed via params, not options
-			}
+			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
+			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
 
 			err := headless.StartHeadlessModeWithParams(sptImage, scenarioPath, params, options)
-			waitForAutoResults()
+			waitForAutoResults(false)
 			finalizeTraceArtifact()
 			return err
 		}
@@ -1021,7 +1045,7 @@ Available workload types:
 		} else {
 			err = tui.StartTUIWithScenarioAndParamsWithTrace(sptImage, scenarioPath, params, apiPort, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
-		waitForAutoResults()
+		waitForAutoResults(false)
 		finalizeTraceArtifact()
 		return err
 	},
@@ -1077,6 +1101,7 @@ func init() {
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
 	// Results Retrieval Options (Phase 1: flags + parsing only)
 	runCmd.Flags().Bool("auto-results", true, "Automatically retrieve results artifacts at end of run")

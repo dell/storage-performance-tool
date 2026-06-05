@@ -243,3 +243,24 @@ For detailed engineering notes and planning documents, browse the `docs/` direct
 ## License
 
 SPT is released under the [MIT License](LICENSE). By submitting a pull request, you agree that your contribution will be licensed under MIT.
+
+## Engine image selection
+
+The CLI launches an engine container image whose tag is **derived from the CLI's
+own version**, so the engine you run always matches the CLI you invoked.
+
+Resolution order (highest precedence first):
+
+1. **`--spt-image <ref>`** flag, or the **`SPT_IMAGE`** environment variable — used
+   verbatim. This is how the comparison harness pins a specific version per run.
+2. **Release builds** → `ghcr.io/dell/storage-performance-tool:v<version>`
+   (e.g. a `5.10.3` CLI runs `...:v5.10.3`). Matches the published tag scheme.
+3. **Local/dev builds** → `ghcr.io/dell/storage-performance-tool:spt_dev`, the
+   local-only image produced by `make docker-local` and distributed to workers
+   with `engine/tools/push-worker-image.sh`. Dev images are never pulled from a
+   registry (the pull is auto-skipped).
+
+There is **no fallback to `:latest`**: if a release's matching image tag cannot be
+found it fails loudly rather than silently running a different engine version —
+this keeps benchmark comparisons honest. Use `--spt-image` / `SPT_IMAGE` if you
+explicitly want a floating tag such as `...:latest`.

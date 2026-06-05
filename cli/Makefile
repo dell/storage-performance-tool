@@ -12,7 +12,18 @@ GOVET=$(GOCMD) vet
 
 # Build metadata (override via env in CI).
 VERSION_FILE ?= ../VERSION
-VERSION ?= $(shell if [ -f $(VERSION_FILE) ]; then tr -d '\n' < $(VERSION_FILE); else echo "0.0.0-dev"; fi)
+# Base version from the VERSION file (0.0.0 fallback when absent).
+BASE_VERSION ?= $(shell if [ -f $(VERSION_FILE) ]; then tr -d '\n' < $(VERSION_FILE); else echo "0.0.0"; fi)
+# Release builds set VERSION explicitly (CI passes VERSION=<ver>) or are built from
+# an exact git tag, and report a clean semver. All other (local/dev) builds are
+# dev-marked so they are never mistaken for a release engine image and so the CLI
+# selects the local spt_dev image. See buildinfo.IsRelease().
+VERSION ?= $(shell \
+	if git describe --tags --exact-match >/dev/null 2>&1; then \
+		echo "$(BASE_VERSION)"; \
+	else \
+		echo "$(BASE_VERSION)-dev+$$(git rev-parse --short HEAD 2>/dev/null || echo local)"; \
+	fi)
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 BUILDINFO_PKG=github.com/dell/storage-performance-tool/cli/internal/buildinfo

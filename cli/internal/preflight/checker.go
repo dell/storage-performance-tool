@@ -75,6 +75,9 @@ func (c *DefaultChecker) EnsureImage(ctx context.Context, host *hostparse.HostIn
 	if available {
 		return nil
 	}
+	if constants.IsDevImage(image) {
+		return fmt.Errorf("dev image %s not present on %s; build it with `make docker-local` and distribute it with engine/tools/push-worker-image.sh", image, host.Original)
+	}
 	_, err = ops.PullImage(tctx, image)
 	return err
 }

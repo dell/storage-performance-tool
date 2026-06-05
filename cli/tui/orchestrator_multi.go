@@ -780,6 +780,8 @@ type MultiHostTestOrchestrator struct {
 	// Message sink for TUI (e.g., p.Send(sptMessageMsg(...)))
 	messageSink func(string)
 
+	expectedStepIDs []string
+
 	compatOnce sync.Once
 }
 
@@ -820,6 +822,13 @@ func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTe
 		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- jitter only
 		logJSONBodies: os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
+}
+
+// SetExpectedStepIDs constrains completion detection to the final step in the
+// generated scenario. This prevents a precondition/seed step from ending a
+// multi-step headless run.
+func (m *MultiHostTestOrchestrator) SetExpectedStepIDs(stepIDs []string) {
+	m.expectedStepIDs = append([]string(nil), stepIDs...)
 }
 
 // BuildBaselineUpdate constructs a status-only update for all configured hosts (no per-node samples).
@@ -983,13 +992,57 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
 			}
-			if update != nil && update.Aggregated != nil && update.Aggregated.TestState >= constants.TestStateCompleted {
+			if update != nil && shouldSignalCompletionForExpectedSteps(update.Aggregated, m.expectedStepIDs) {
 				m.signalCompletion()
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// shouldSignalCompletion reports whether an aggregated metrics sample indicates
+// the distributed test has truly finished and the headless coordinator should
+// stop.
+//
+// The engine reports test_state=Completed whenever operations have started but
+// the instantaneous concurrency is 0. The asynchronous Netty S3 driver hits that
+// transiently between operations at low thread counts, so a single Completed
+// sample is not a reliable end-of-test signal: in headless mode it caused
+// duration-bounded runs to abort within seconds of starting. For a time-bounded
+// run we therefore only honor completion once the configured duration has
+// actually elapsed (StepTime carries the engine-reported elapsed_time_seconds).
+// Op-count and unbounded runs are guarded by the engine-side fix and keep the
+// prior trust-the-state behavior here.
+func shouldSignalCompletion(agg *PerformanceMetric) bool {
+	if agg == nil || agg.TestState < constants.TestStateCompleted {
+		return false
+	}
+	if agg.HasLimit && agg.LimitType == constants.LimitTypeTime && agg.LimitTimeSec > 0 {
+		return agg.StepTime >= float64(agg.LimitTimeSec)
+	}
+	// For op-count-bounded runs, require the fleet to have reached 100% completion
+	// before trusting the Completed state. CompletionPercent is normalization-safe
+	// across N nodes (it is the slowest node's progress); comparing a summed
+	// SuccessCount against a per-node LimitOpCount would be wrong once aggregated.
+	if agg.HasLimit && agg.LimitType == constants.LimitTypeOpCount {
+		return agg.CompletionPercent >= 100
+	}
+	return true
+}
+
+func shouldSignalCompletionForExpectedSteps(agg *PerformanceMetric, expectedStepIDs []string) bool {
+	if len(expectedStepIDs) == 0 {
+		return shouldSignalCompletion(agg)
+	}
+	if agg == nil {
+		return false
+	}
+	finalStepID := expectedStepIDs[len(expectedStepIDs)-1]
+	if finalStepID == "" || agg.StepID != finalStepID {
+		return false
+	}
+	return shouldSignalCompletion(agg)
 }
 
 // collectAllMetrics polls all ready hosts and creates a MultiNodeMetricsUpdate

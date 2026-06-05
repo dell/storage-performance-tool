@@ -52,6 +52,10 @@ type HeadlessOptions struct {
 	DryRun      bool
 	// KeepScenario removed - this belongs in scenario.Params
 	AutoTerminateSeconds int // 0 = unlimited
+	// In multi-host runs, let auto-results fetch artifacts and request shutdown
+	// after normal completion instead of stopping containers immediately.
+	DelegateNormalShutdown bool
+	ExpectedStepIDs        []string
 }
 
 // NewHeadlessRunner creates a new headless runner
@@ -97,16 +101,20 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 
 // MultiHostHeadlessRunner manages headless execution across multiple hosts
 type MultiHostHeadlessRunner struct {
-	orchestrator *tui.MultiHostOrchestrator
-	traceFile    *os.File
-	verbose      bool
+	orchestrator           *tui.MultiHostOrchestrator
+	traceFile              *os.File
+	verbose                bool
+	delegateNormalShutdown bool
+	expectedStepIDs        []string
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
 func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options HeadlessOptions) (*MultiHostHeadlessRunner, error) {
 	runner := &MultiHostHeadlessRunner{
-		orchestrator: orchestrator,
-		verbose:      options.Verbose,
+		orchestrator:           orchestrator,
+		verbose:                options.Verbose,
+		delegateNormalShutdown: options.DelegateNormalShutdown,
+		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
 	}
 
 	// Set up trace file if specified
@@ -144,6 +152,7 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 
 	// Start the distributed test on all hosts via orchestrator wrapper
 	testOrchestrator := tui.NewMultiHostTestOrchestrator(r.orchestrator)
+	testOrchestrator.SetExpectedStepIDs(r.expectedStepIDs)
 	// Standardize progress output in headless mode as well
 	r.orchestrator.SetNotifier(func(msg string) {
 		r.output("spt", msg)
@@ -186,6 +195,9 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 	err = <-done
 	if err != nil {
 		r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
+	} else if r.delegateNormalShutdown {
+		r.output("SHUTDOWN", "Normal completion detected; auto-results will fetch artifacts and stop containers")
+		return nil
 	}
 
 	// Stop all containers
