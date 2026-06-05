@@ -1,3 +1,0 @@
-<result>
-<result id="mt-002-20260428.174126.587-read" StartDate="1969-12-31 23:59:59" StartTimestamp="-1" EndDate="1970-01-01 00:02:01" EndTimestamp="121004" operation="READ" threads="1" RequestThreads="1" clients="1" error="1" runtime="121.005" filesize="1KB" tps="488.58677685950414" tps_unit="Fileps" bw="0.4771355242768595" bw_unit="MBps" latency="1929.0262859655948" latency_unit="us" latency_min="1245" latency_max="45774" duration="1941.2851875031715" duration_unit="us" duration_min="1247" duration_max="48432" />
-</result>

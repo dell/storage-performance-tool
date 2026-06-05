@@ -14,17 +14,14 @@ storage:
       tags: {}
     versioning: false
   crt:
-    # Size thresholds for object classification
-    optimizeForSmallObjects: true
+    # Size threshold for small object classification
     smallObjectThresholdBytes: 65536      # 64KB
-    mediumObjectThresholdBytes: 8388608   # 8MB
-    largeObjectThresholdBytes: 104857600  # 100MB
 
-    # CRT performance parameters (factory defaults used when optimizeForSmallObjects: true)
-    targetThroughputGbps: 10.0           # High target for small object workloads
-    minimumPartSizeBytes: 8388608        # 8MB - optimal for small objects
-    maxConcurrency: 512                   # High concurrency for small objects
-    maxConcurrentRequestStreams: 16       # Optimal value tested: better connection utilization
+    # CRT performance parameters
+    targetThroughputGbps: 10.0           # High target throughput
+    minimumPartSizeBytes: 8388608        # 8MB - optimal part size
+    maxConcurrency: 512                   # High concurrency for better performance
+    maxConcurrentRequestStreams: 16       # Optimal connection utilization
 
     # Connection pool settings
     connectionTimeoutMs: 2000
@@ -34,12 +31,6 @@ storage:
 
     # Threading configuration
     useVirtualThreads: true
-    smallObjectThreadCount: 128
 
     # Buffer configuration
-    byteBufferThresholdBytes: 65536       # 64KB
     readBufferSizeBytes: 8192             # 8KB
-
-    # Adaptive tuning (enabled for performance optimization)
-    enableAdaptiveTuning: true
-    adaptiveTuningIntervalSeconds: 30

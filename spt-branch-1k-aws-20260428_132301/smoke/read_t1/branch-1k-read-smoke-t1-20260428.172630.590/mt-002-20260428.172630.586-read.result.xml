@@ -1,3 +1,0 @@
-<result>
-<result id="mt-002-20260428.172630.586-read" StartDate="2026-04-28 17:27:00" StartTimestamp="1777397220521" EndDate="2026-04-28 17:27:31" EndTimestamp="1777397251525" operation="READ" threads="1" RequestThreads="1" clients="1" error="0" runtime="31.004" filesize="1KB" tps="432.35483870967744" tps_unit="Fileps" bw="0.4222215221774194" bw_unit="MBps" latency="2076.7427441617547" latency_unit="us" latency_min="1412" latency_max="54338" duration="2093.9687383421624" duration_unit="us" duration_min="1414" duration_max="57061" />
-</result>

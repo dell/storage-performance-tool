@@ -21,10 +21,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
-    private static final String ENDPOINT = "http://10.246.190.64:8333";
-    private static final String ACCESS_KEY = "admin";
-    private static final String SECRET_KEY = "admin123";
-    private static final String BUCKET = "admin";
+    private static final String ENDPOINT = "http://your-s3-endpoint:9000";
+    private static final String ACCESS_KEY = "your-access-key";
+    private static final String SECRET_KEY = "your-secret-key";
+    private static final String BUCKET = "your-bucket";
     private static final String REGION = "us-east-1";
     private static final int WARMUP_ITERATIONS = 5;
     private static final int MEASURED_ITERATIONS = 30;

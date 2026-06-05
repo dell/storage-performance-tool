@@ -105,10 +105,10 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// ---------------------------
 		// CRT Configuration
 		// ---------------------------
-		// Use balanced configuration for all object sizes (AWS best practice: single client)
+		// Use high-performance configuration (AWS best practice: single client)
 		double targetThroughputInGbps = 10.0;
 		long minimumPartSizeInBytes = 8 * 1024 * 1024L;  // 8MB standard S3 part size
-		int maxConcurrency = 256;
+		int maxConcurrency = 512;
 
 		// Allow config override
 		try {
@@ -143,13 +143,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
 		}
 
-		long byteBufferThresholdBytes = 64 * 1024L;  // 64KB default
-		try {
-			byteBufferThresholdBytes = storageConfig.configVal("crt").longVal("byteBufferThresholdBytes");
-		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.byteBufferThresholdBytes from config, using default: {}", byteBufferThresholdBytes);
-		}
-
 		// ---------------------------
 		// Build AWS S3 Async Client with CRT
 		// ---------------------------
@@ -179,9 +172,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						batchSize,
 						s3AsyncClient,
 						smallObjectThresholdBytes,
-						partSizeBytes,
-						byteBufferThresholdBytes,
-						null);
+						partSizeBytes);
 	}
 
 	/**

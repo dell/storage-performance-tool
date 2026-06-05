@@ -6,10 +6,10 @@ ENGINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ELBENCHO_BIN="${ENGINE_ROOT}/../elbencho/bin/elbencho"
 
 # Configuration - matching SPT baseline
-S3_ENDPOINT="${S3_ENDPOINT:-http://10.246.190.64:8333}"
-S3_ACCESS_KEY="${S3_ACCESS_KEY:-admin}"
-S3_SECRET_KEY="${S3_SECRET_KEY:-admin123}"
-S3_BUCKET="${S3_BUCKET:-spttest}"
+S3_ENDPOINT="${S3_ENDPOINT:-http://your-s3-endpoint:9000}"
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-your-access-key}"
+S3_SECRET_KEY="${S3_SECRET_KEY:-your-secret-key}"
+S3_BUCKET="${S3_BUCKET:-your-bucket}"
 S3_REGION="${S3_REGION:-us-east-1}"
 
 # Output files

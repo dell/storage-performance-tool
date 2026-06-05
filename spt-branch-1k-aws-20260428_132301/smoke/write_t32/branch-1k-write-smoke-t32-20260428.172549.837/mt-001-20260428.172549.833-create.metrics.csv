@@ -1,3 +1,0 @@
-DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]
-"2026-04-28T17:25:52,874",CREATE,32,1,0,0.0,0,0,0,0.002,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0.0,0,0
-"2026-04-28T17:26:22,886",CREATE,32,1,31,30.533333333333335,26,0,26624,30.017,1.637597,0.8666666666666667,6.613530683180007E-12,8.463541666666667E-4,6.458526057792976E-15,62984.5,4285,480797,62983.269230769234,4284,480796

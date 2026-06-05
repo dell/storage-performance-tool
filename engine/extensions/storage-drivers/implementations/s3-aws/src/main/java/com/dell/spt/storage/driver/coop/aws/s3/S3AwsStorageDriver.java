@@ -18,7 +18,7 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
-import com.dell.spt.storage.driver.coop.aws.s3.metrics.WorkloadMetrics;
+
 import com.github.akurilov.confuse.Config;
 
 import org.slf4j.Logger;
@@ -70,8 +70,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Map<String, String> objectTags;
 	private final long smallObjectThresholdBytes;
 	private final long partSizeBytes;
-	private final long byteBufferThresholdBytes;
-	private final WorkloadMetrics metrics;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -81,9 +79,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final int batchSize,
 					final S3AsyncClient s3AsyncClient,
 					final long smallObjectThresholdBytes,
-					final long partSizeBytes,
-					final long byteBufferThresholdBytes,
-					final WorkloadMetrics metrics)
+					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
@@ -93,8 +89,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.s3AsyncClient = s3AsyncClient;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
-		this.byteBufferThresholdBytes = byteBufferThresholdBytes;
-		this.metrics = metrics != null ? metrics : new WorkloadMetrics();
 
 		LOG.info("S3-AWS driver initialized with single client");
 
@@ -623,17 +617,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			try {
 				final long size = dataItem.size();
 
-				if (size <= byteBufferThresholdBytes) {
+				if (size <= smallObjectThresholdBytes) {
 					// Use DataItemInputStream for small objects
-					LOG.trace(
-									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
-									size, smallObjectThresholdBytes, partSizeBytes);
-					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-									.thenApply(response -> null);
-				} else if (size <= smallObjectThresholdBytes) {
 					LOG.trace(
 									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
 									size, smallObjectThresholdBytes, partSizeBytes);
@@ -1230,9 +1215,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	protected void doClose()
 					throws IOException {
-		// Note: SmartS3ClientPool is shared across all driver instances and managed by the factory
-		// Do not close it here - it will be closed when the factory shuts down
-
 		try {
 			// Close the S3AsyncClient to release native CRT resources
 			// This closes the underlying event loops and connection pools

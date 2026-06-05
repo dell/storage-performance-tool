@@ -26,7 +26,7 @@ server:
     expose_fleet: true
 item:
   output:
-    path: "/admin"
+    path: "/your-bucket"
     delay: 0
     file: "/opt/spt/log/mt-001-create-1mb-single/items.csv"
     queue:
@@ -152,9 +152,9 @@ storage:
     type: "s3-aws"
     threads: 0
   auth:
-    uid: "admin"
+    uid: "your-access-key"
     file: null
-    secret: "admin123"
+    secret: "your-secret-key"
     version: 4
     token: null
   checksum:
@@ -188,7 +188,7 @@ storage:
       port: 8333
       slice: false
       addrs:
-      - "10.246.190.64"
+      - "your-s3-endpoint"
     timeoutMilliSec: 300000
     sndBuf: 0
     http:

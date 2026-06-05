@@ -1,9 +1,0 @@
-operation	threads	status	CountSucc	CountFail	TPAvg_ops	BWAvg_MBps	LatencyAvg_ms	StepDuration_s	metrics_file
-read	1	ok	13403	0	432.355	0.422222	2.077	31.004	/tmp/spt-branch-1k-aws-20260428_132301/smoke/read_t1/branch-1k-read-smoke-t1-20260428.172630.590/mt-002-20260428.172630.586-read.metrics.total.csv
-read	4	ok	53658	4	1730.903	1.690335	1.850	31.007	/tmp/spt-branch-1k-aws-20260428_132301/smoke/read_t4/branch-1k-read-smoke-t4-20260428.172748.921/mt-002-20260428.172748.917-read.metrics.total.csv
-read	8	ok	17	6	0.548	0.000536	8.100	31.010	/tmp/spt-branch-1k-aws-20260428_132301/smoke/read_t8/branch-1k-read-smoke-t8-20260428.172903.050/mt-002-20260428.172903.046-read.metrics.total.csv
-read	32	ok	32	6	1.032	0.001008	8.201	31.003	/tmp/spt-branch-1k-aws-20260428_132301/smoke/read_t32/branch-1k-read-smoke-t32-20260428.173015.286/mt-002-20260428.173015.283-read.metrics.total.csv
-write	1	ok	11960	1	385.806	0.376764	2.361	31.020	/tmp/spt-branch-1k-aws-20260428_132301/smoke/write_t1/branch-1k-write-smoke-t1-20260428.172348.990/mt-001-20260428.172348.985-create.metrics.total.csv
-write	4	ok	56317	11	1816.677	1.774099	2.028	31.018	/tmp/spt-branch-1k-aws-20260428_132301/smoke/write_t4/branch-1k-write-smoke-t4-20260428.172429.211/mt-001-20260428.172429.207-create.metrics.total.csv
-write	8	ok	28	0	0.903	0.000882	6391.025	31.030	/tmp/spt-branch-1k-aws-20260428_132301/smoke/write_t8/branch-1k-write-smoke-t8-20260428.172509.687/mt-001-20260428.172509.683-create.metrics.total.csv
-write	32	ok	32	0	1.032	0.001008	5593.979	31.021	/tmp/spt-branch-1k-aws-20260428_132301/smoke/write_t32/branch-1k-write-smoke-t32-20260428.172549.837/mt-001-20260428.172549.833-create.metrics.total.csv

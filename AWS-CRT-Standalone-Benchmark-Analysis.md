@@ -9,9 +9,9 @@ This document presents the analysis of a standalone benchmark using the plain AW
 ## Test Environment
 
 ### Benchmark Configuration
-- **Test Endpoint**: http://10.246.190.64:8333 (MinIO/SeaweedFS compatible S3)
-- **Bucket**: admin
-- **Credentials**: admin/admin123
+- **Test Endpoint**: http://your-s3-endpoint:9000 (MinIO/SeaweedFS compatible S3)
+- **Bucket**: your-bucket
+- **Credentials**: your-access-key/your-secret-key
 - **Test Mode**: Sequential (single-threaded) with configurable CRT maxConcurrency
 - **Warmup Iterations**: 5
 - **Measured Iterations**: 30

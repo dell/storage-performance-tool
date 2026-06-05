@@ -2167,10 +2167,7 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L,  // partSizeBytes
-							8 * 1024L,  // byteBufferThresholdBytes
-							null  // metrics
-			);
+							8 * 1024 * 1024L);  // partSizeBytes
 
 			// Verify the tagging fields were set correctly using reflection
 			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
@@ -2215,10 +2212,7 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L,  // partSizeBytes
-							8 * 1024L,  // byteBufferThresholdBytes
-							null  // metrics
-			);
+							8 * 1024 * 1024L);  // partSizeBytes
 
 			// Verify the tagging fields were set correctly using reflection
 			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
@@ -2291,10 +2285,7 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L,  // partSizeBytes
-							8 * 1024L,  // byteBufferThresholdBytes
-							null  // metrics
-			);
+							8 * 1024 * 1024L);  // partSizeBytes
 
 			// Verify the versioningEnabled field was set correctly using reflection
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2328,10 +2319,7 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L,  // partSizeBytes
-							8 * 1024L,  // byteBufferThresholdBytes
-							null  // metrics
-			);
+							8 * 1024 * 1024L);  // partSizeBytes
 
 			// Verify the versioningEnabled field was set correctly using reflection
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2363,10 +2351,7 @@ public class S3AwsStorageDriverTest {
 							1,
 							mockS3Client,
 							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L,  // partSizeBytes
-							8 * 1024L,  // byteBufferThresholdBytes
-							null  // metrics
-			);
+							8 * 1024 * 1024L);  // partSizeBytes
 
 			// Verify the versioningEnabled field was set to default (false)
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2420,7 +2405,7 @@ public class S3AwsStorageDriverTest {
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L, 8 * 1024L, null);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
 
 			// Act: Call the close method on the driver
 			driver.close();

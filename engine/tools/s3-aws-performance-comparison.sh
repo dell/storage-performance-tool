@@ -6,10 +6,10 @@ ENGINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_SCRIPT="$ENGINE_ROOT/bundle/build/dist/run.sh"
 
 # Configuration - can be overridden via environment variables
-S3_ENDPOINT="${S3_ENDPOINT:-http://10.246.190.64:8333}"
-S3_ACCESS_KEY="${S3_ACCESS_KEY:-admin}"
-S3_SECRET_KEY="${S3_SECRET_KEY:-admin123}"
-S3_BUCKET="${S3_BUCKET:-spttest}"
+S3_ENDPOINT="${S3_ENDPOINT:-http://your-s3-endpoint:9000}"
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-your-access-key}"
+S3_SECRET_KEY="${S3_SECRET_KEY:-your-secret-key}"
+S3_BUCKET="${S3_BUCKET:-your-bucket}"
 S3_AUTH_VERSION="${S3_AUTH_VERSION:-4}"
 TEST_DURATION_MINUTES="${TEST_DURATION_MINUTES:-1}"
 
