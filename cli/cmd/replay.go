@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -86,9 +87,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if len(hostInfos) > 1 {
 		return fmt.Errorf("multi-host replay execution is not implemented yet; set --test-hosts to a single host or use --generate-only")
 	}
-	if len(hostInfos) == 1 && !hostInfos[0].IsLocal {
-		return fmt.Errorf("single remote-host replay execution is not implemented yet; set --test-hosts to 127.0.0.1 or use --generate-only")
-	}
+	remoteSingleHost := len(hostInfos) == 1 && !hostInfos[0].IsLocal
 
 	resultsOpts := buildResultsOptions(cmd)
 	runToken := time.Now().UTC().Format("20060102.150405.000")
@@ -130,8 +129,28 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(out, "Using AWS SDK S3 driver (s3-aws).")
 	}
 
-	if err := checkPortConflicts(cmd); err != nil {
-		return err
+	if !remoteSingleHost {
+		if err := checkPortConflicts(cmd); err != nil {
+			return err
+		}
+	}
+
+	sptImage := constants.EffectiveSptImage()
+	apiPort := getAPIPort(cmd)
+	var remoteOrchestrator *tui.MultiHostOrchestrator
+	if remoteSingleHost {
+		_, _ = fmt.Fprintf(out, "Replay host: %s\n", hostInfos[0].Original)
+		remoteOrchestrator = tui.NewMultiHostOrchestrator(hostInfos, 1)
+		remoteOrchestrator.SetNotifier(func(msg string) {
+			_, _ = fmt.Fprintln(out, msg)
+		})
+		remoteOrchestrator.SetImage(sptImage)
+		remoteOrchestrator.SetAPIPort(apiPort)
+		forceMode, _ := cmd.Flags().GetBool("force")
+		remoteOrchestrator.SetForceCleanup(forceMode)
+		if err := remoteOrchestrator.ConnectHosts(context.Background()); err != nil {
+			return fmt.Errorf("failed to connect to replay host: %w", err)
+		}
 	}
 
 	headlessMode := shouldRunHeadless(cmd)
@@ -141,8 +160,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	sptImage := constants.EffectiveSptImage()
-	apiPort := getAPIPort(cmd)
 	autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds")
 	tracePath, _ := cmd.Flags().GetString("trace-file")
 	traceAppend, _ := cmd.Flags().GetBool("trace-append")
@@ -150,6 +167,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	baseURL := replayBaseURL(apiPort, hostInfos)
 	metadata := buildRunMetadata(runMetadataInput{
 		WorkloadType:         "replay",
 		Params:               params,
@@ -159,7 +177,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		TestHostsRaw:         testHosts,
 		MinHosts:             len(hostInfos),
 		APIPort:              apiPort,
-		BaseURL:              fmt.Sprintf("http://localhost:%s", apiPort),
+		BaseURL:              baseURL,
 		ExpectedStepIDs:      replayStepIDs(generated),
 		SptImage:             sptImage,
 		Command:              cmd,
@@ -175,17 +193,22 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
 	var autoResultsDone chan struct{}
-	if resultsOpts.AutoResults {
+	startReplayAutoResults := func() {
+		if autoResultsDone != nil || !resultsOpts.AutoResults {
+			return
+		}
 		autoResultsDone = startAutoResults(metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir, replayStepIDs(generated), resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario, metadata, out, out, traceOpts.Path)
 	}
-	waitForAutoResults := func() {
+	waitForAutoResults := func() bool {
 		if autoResultsDone == nil {
-			return
+			return true
 		}
 		select {
 		case <-autoResultsDone:
+			return true
 		case <-time.After(2 * time.Minute):
 			logging.GetLogger().Warn("Timed out waiting for replay auto-results")
+			return false
 		}
 	}
 	finalizeTraceArtifact := func() {
@@ -197,6 +220,48 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	if remoteSingleHost {
+		startReplayAutoResults()
+		if headlessMode {
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
+			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, delegateShutdownToAutoResults, replayStepIDs(generated))
+			if autoTerminate > 0 {
+				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
+			}
+			err := headless.StartHeadlessModeWithOrchestratorContent(remoteOrchestrator, sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				finalizeTraceArtifact()
+				return err
+			}
+			autoResultsOK := waitForAutoResults()
+			if delegateShutdownToAutoResults {
+				if !autoResultsOK {
+					logging.GetLogger().Warn("Timed out waiting for replay auto-results; forcing remote container cleanup")
+				}
+				if stopErr := cleanupReplayContainers(remoteOrchestrator, 30*time.Second); stopErr != nil {
+					logging.GetLogger().Error("Failed to clean up remote replay container", "error", stopErr.Error())
+				}
+			}
+			finalizeTraceArtifact()
+			return err
+		}
+
+		_, _ = fmt.Fprintln(out, "Starting remote-host TUI...")
+		if autoTerminate > 0 {
+			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
+			err := tui.StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(remoteOrchestrator, sptImage, paths.Scenario, params, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+			waitForAutoResults()
+			finalizeTraceArtifact()
+			return err
+		}
+		err = tui.StartTUIWithMultiHostOrchestratorContentWithTrace(remoteOrchestrator, sptImage, paths.Scenario, params, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+		waitForAutoResults()
+		finalizeTraceArtifact()
+		return err
+	}
+
+	startReplayAutoResults()
 	if headlessMode {
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
@@ -221,6 +286,29 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	waitForAutoResults()
 	finalizeTraceArtifact()
 	return err
+}
+
+type replayContainerCleaner interface {
+	StopAllContainers(context.Context) error
+}
+
+func cleanupReplayContainers(cleaner replayContainerCleaner, timeout time.Duration) error {
+	if cleaner == nil {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return cleaner.StopAllContainers(ctx)
+}
+
+func replayBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
+	if len(hosts) == 1 && hosts[0] != nil && !hosts[0].IsLocal {
+		return hosts[0].GetAPIURL(apiPort)
+	}
+	return fmt.Sprintf("http://localhost:%s", apiPort)
 }
 
 func printReplayArtifacts(out io.Writer, generated *replay.Generated, paths replay.OutputPaths) {

@@ -1094,6 +1094,16 @@ func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, imag
 
 // StartTUIWithMultiHostOrchestratorWithTrace starts the multi-host TUI with optional full-output trace capture.
 func StartTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
+	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, nil, nil)
+}
+
+// StartTUIWithMultiHostOrchestratorContentWithTrace starts the multi-host TUI
+// with caller-provided scenario/defaults content.
+func StartTUIWithMultiHostOrchestratorContentWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+}
+
+func startTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1187,7 +1197,13 @@ func StartTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestra
 		ctx := context.Background()
 
 		// Start the distributed test via the multi-host orchestrator
-		if err := multiOrchestrator.StartTest(ctx, image, params); err != nil {
+		var err error
+		if scenarioContent != nil {
+			err = multiOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		} else {
+			err = multiOrchestrator.StartTest(ctx, image, params)
+		}
+		if err != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting multi-host test monitoring: %v", err)))
 			logging.LogError("tui-multi", "failed to start test monitoring", err)
 			p.Send(containerStatusMsg("Failed"))
@@ -1363,8 +1379,18 @@ func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrato
 
 // StartTUIWithMultiHostOrchestratorTimeoutWithTrace starts the multi-host TUI with timeout and optional full-output trace capture.
 func StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
+	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
+}
+
+// StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace starts the multi-host
+// TUI with caller-provided content and optional auto-terminate timeout.
+func StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+}
+
+func startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	if autoTerminateSeconds <= 0 {
-		return StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend)
+		return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
 	}
 	model := InitialModel()
 	if params.MinimalTUI {
@@ -1428,7 +1454,13 @@ func StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOr
 		p.Send(sptMessageMsg("Starting distributed test across hosts..."))
 		p.Send(containerStatusMsg("Starting"))
 		ctx := context.Background()
-		if err := multiOrchestrator.StartTest(ctx, image, params); err != nil {
+		var err error
+		if scenarioContent != nil {
+			err = multiOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		} else {
+			err = multiOrchestrator.StartTest(ctx, image, params)
+		}
+		if err != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting multi-host test monitoring: %v", err)))
 			logging.LogError("tui-multi", "failed to start test monitoring", err)
 			p.Send(containerStatusMsg("Failed"))

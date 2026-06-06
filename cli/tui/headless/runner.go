@@ -140,8 +140,18 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 	return runner, nil
 }
 
-// RunWithParams executes the multi-host benchmark in headless mode
+// RunWithParams executes the multi-host benchmark in headless mode.
 func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
+	return r.runWithParams(ctx, image, scenarioPath, params, nil, nil)
+}
+
+// RunWithScenarioContentAndParams executes a multi-host orchestrated run with
+// caller-provided scenario/defaults content.
+func (r *MultiHostHeadlessRunner) RunWithScenarioContentAndParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	return r.runWithParams(ctx, image, scenarioPath, params, scenarioContent, defaultsContent)
+}
+
+func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
 	r.output("INIT", fmt.Sprintf("Starting multi-host headless benchmark on %d hosts", r.orchestrator.GetHostCount()))
 	r.output("INIT", fmt.Sprintf("Image: %s", image))
 	r.output("INIT", fmt.Sprintf("Scenario: %s", scenarioPath))
@@ -162,7 +172,12 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 	testOrchestrator.SetMessageSink(func(msg string) {
 		r.output("spt", msg)
 	})
-	err := testOrchestrator.StartTest(ctx, image, params)
+	var err error
+	if scenarioContent != nil {
+		err = testOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+	} else {
+		err = testOrchestrator.StartTest(ctx, image, params)
+	}
 	if err != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
 		if stopErr := r.orchestrator.StopAllContainers(ctx); stopErr != nil {
@@ -625,6 +640,16 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 
 // StartHeadlessModeWithOrchestrator is the entry point for multi-host headless mode
 func StartHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
+	return startHeadlessModeWithOrchestrator(orchestrator, image, scenarioPath, params, options, nil, nil)
+}
+
+// StartHeadlessModeWithOrchestratorContent is the entry point for multi-host
+// headless mode using caller-provided scenario/defaults content.
+func StartHeadlessModeWithOrchestratorContent(orchestrator *tui.MultiHostOrchestrator, image string, scenarioPath string, params scenario.Params, options HeadlessOptions, scenarioContent, defaultsContent []byte) error {
+	return startHeadlessModeWithOrchestrator(orchestrator, image, scenarioPath, params, options, scenarioContent, defaultsContent)
+}
+
+func startHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, image string, scenarioPath string, params scenario.Params, options HeadlessOptions, scenarioContent, defaultsContent []byte) error {
 	// Create a multi-host headless runner
 	runner, err := NewMultiHostHeadlessRunner(orchestrator, options)
 	if err != nil {
@@ -637,7 +662,13 @@ func StartHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, 
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()
+		if scenarioContent != nil {
+			return runner.RunWithScenarioContentAndParams(tctx, image, scenarioPath, params, scenarioContent, defaultsContent)
+		}
 		return runner.RunWithParams(tctx, image, scenarioPath, params)
+	}
+	if scenarioContent != nil {
+		return runner.RunWithScenarioContentAndParams(baseCtx, image, scenarioPath, params, scenarioContent, defaultsContent)
 	}
 	return runner.RunWithParams(baseCtx, image, scenarioPath, params)
 }

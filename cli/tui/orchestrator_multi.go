@@ -67,6 +67,9 @@ const (
 	HostStatusFailed HostStatus = "failed"
 	// HostStatusStopped indicates the test container has been stopped.
 	HostStatusStopped HostStatus = "stopped"
+
+	entryLogRelayModeStream = "stream"
+	entryLogRelayModePoll   = "poll"
 )
 
 // MultiHostOrchestrator manages tests across multiple Docker hosts
@@ -174,6 +177,17 @@ func (o *MultiHostOrchestrator) SetImage(image string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.image = image
+}
+
+// SetAPIPort overrides the Spt API port used for node startup and polling.
+func (o *MultiHostOrchestrator) SetAPIPort(apiPort string) {
+	apiPort = strings.TrimSpace(apiPort)
+	if apiPort == "" {
+		apiPort = constants.SptAPIPort
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.apiPort = apiPort
 }
 
 // SetForceCleanup enables stopping conflicting containers during preflight
@@ -320,7 +334,14 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					}
 				}
 				// 3) Check ports
-				apiPort := constants.DefaultSptAPIPort
+				apiPort, convErr := strconv.Atoi(o.apiPort)
+				if convErr != nil {
+					h.SetError(fmt.Errorf("invalid API port %q: %w", o.apiPort, convErr))
+					connectErrorsMu.Lock()
+					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Invalid API port %q", h.Info.Original, o.apiPort))
+					connectErrorsMu.Unlock()
+					return
+				}
 				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, apiPort, o.rmiPortStart, o.rmiPortCount); perr != nil {
 					h.SetError(fmt.Errorf("port check failed: %w", perr))
 					connectErrorsMu.Lock()
@@ -504,6 +525,7 @@ func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string,
 			h.ContainerID = containerID
 			h.Status = HostStatusRunning
 			h.mu.Unlock()
+			h.SetManaged(true)
 			h.SetPhase(NodePhaseContainerStarting)
 
 			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerID[:12])
@@ -1290,54 +1312,15 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 
 	// Determine if this is a single-host or multi-host test
 	if len(readyHosts) == 1 {
-		// Single host test - use regular container execution
-		if m.onStatusUpdate != nil {
-			m.onStatusUpdate(&TestStatus{
-				State:   constants.StateRunning,
-				Message: "Single-host test running",
-			})
-		}
-
-		if m.onOutput != nil {
-			m.onOutput(fmt.Sprintf("Starting single-host test on %s", readyHosts[0].Info.Original))
-		}
-
-		// For single host, we need to generate scenario file and start container
-		// Check if host has a Docker manager configured
-		if readyHosts[0].DockerManager == nil {
-			return fmt.Errorf("host %s has no Docker manager configured", readyHosts[0].Info.Original)
-		}
-
-		// Generate the scenario content first
 		scenarioContent, err := scenario.GenerateScenario(params)
 		if err != nil {
 			return fmt.Errorf("failed to generate scenario content: %w", err)
 		}
-
-		// Store scenario content for API submission - no file creation needed
-		m.multiHost.scenarioContent = scenarioContent
-
-		// Build endpoint arguments from params
-		additionalArgs, err := scenario.BuildEndpointArgs(params)
+		defaultsContent, err := scenario.GenerateDefaults(params)
 		if err != nil {
-			return fmt.Errorf("failed to build endpoint arguments: %w", err)
+			return fmt.Errorf("failed to generate defaults: %w", err)
 		}
-
-		// Start the container as entry node (single-host, no workers) - no file mounting needed
-		containerID, err := readyHosts[0].DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs)
-		if err != nil {
-			return err
-		}
-
-		// Store container ID for this host
-		readyHosts[0].mu.Lock()
-		readyHosts[0].ContainerID = containerID
-		readyHosts[0].mu.Unlock()
-
-		// Start metrics polling for single-host test
-		m.StartMetricsPolling(ctx)
-
-		return nil
+		return m.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
 
 	} else { //nolint:revive // keep else for clarity here
 		// Special-case: LIST workload is intentionally single-host for now.
@@ -1458,11 +1441,11 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 						if dm.client != nil {
 							fetcher := newSDKLogFetcher(dm, entry.ContainerID)
 							relay = NewEntryLogRelay(fetcher, true, 0)
-							mode = "stream"
+							mode = entryLogRelayModeStream
 						} else if dm.remote != nil {
 							fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
 							relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
-							mode = "poll"
+							mode = entryLogRelayModePoll
 						}
 					}
 					if relay != nil {
@@ -1563,12 +1546,12 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 						// Local SDK streaming
 						fetcher := newSDKLogFetcher(dm, entry.ContainerID)
 						relay = NewEntryLogRelay(fetcher, true, 0)
-						mode = "stream"
+						mode = entryLogRelayModeStream
 					} else if dm.remote != nil {
 						// Remote CLI polling with --since and --timestamps
 						fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
 						relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
-						mode = "poll"
+						mode = entryLogRelayModePoll
 					}
 				}
 				if relay != nil {
@@ -1599,6 +1582,115 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 
 		return nil
 	}
+}
+
+// StartTestWithContent starts a single-host test using caller-provided scenario
+// and defaults content. Multi-host replay content support is intentionally
+// deferred until the distributed RMI replay path is implemented.
+func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, image string, _ scenario.ScenarioParams, scenarioContent, defaultsContent []byte) error {
+	readyHosts := m.multiHost.GetReadyHosts()
+	if len(readyHosts) == 0 {
+		return fmt.Errorf("no ready hosts available to start tests")
+	}
+	if len(readyHosts) != 1 {
+		return fmt.Errorf("provided scenario content for multi-host replay is not implemented yet")
+	}
+	if len(scenarioContent) == 0 {
+		return fmt.Errorf("scenario content is empty")
+	}
+
+	host := readyHosts[0]
+	if host.DockerManager == nil {
+		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+	}
+
+	if m.onStatusUpdate != nil {
+		m.onStatusUpdate(&TestStatus{
+			State:   constants.StateRunning,
+			Message: "Single-host test running",
+		})
+	}
+	if m.onOutput != nil {
+		m.onOutput(fmt.Sprintf("Starting single-host test on %s", host.Info.Original))
+	}
+
+	m.multiHost.scenarioContent = string(scenarioContent)
+
+	if err := m.multiHost.StartContainers(ctx, image, ""); err != nil {
+		return err
+	}
+	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+		return fmt.Errorf("failed waiting for single-host API: %w", err)
+	}
+
+	if m.onMetrics != nil {
+		if baseline := m.BuildBaselineUpdate(); baseline != nil {
+			m.onMetrics(baseline)
+		}
+	}
+
+	if host.APIClient == nil {
+		return fmt.Errorf("host %s API client not initialized", host.Info.Original)
+	}
+	host.APIClient.LogReadySnapshot("pre-start")
+
+	if m.onOutput != nil {
+		m.onOutput("Starting test via host API...")
+	}
+	runID, err := host.APIClient.StartTest(scenarioContent, defaultsContent)
+	if err != nil {
+		return fmt.Errorf("failed to start test via host API: %w", err)
+	}
+	if m.onOutput != nil {
+		m.onOutput(fmt.Sprintf("Single-host test started with run ID: %s", runID))
+	}
+
+	m.StartMetricsPolling(ctx)
+	m.startEntryLogRelay(ctx)
+	return nil
+}
+
+func (m *MultiHostTestOrchestrator) startEntryLogRelay(ctx context.Context) {
+	if m.multiHost == nil || len(m.multiHost.hosts) == 0 {
+		return
+	}
+	entry := m.multiHost.hosts[0]
+	if entry == nil || entry.DockerManager == nil || entry.ContainerID == "" {
+		return
+	}
+	var relay *EntryLogRelay
+	mode := ""
+	if dm, ok := entry.DockerManager.(*DockerManager); ok {
+		if dm.client != nil {
+			fetcher := newSDKLogFetcher(dm, entry.ContainerID)
+			relay = NewEntryLogRelay(fetcher, true, 0)
+			mode = entryLogRelayModeStream
+		} else if dm.remote != nil {
+			fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
+			relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
+			mode = entryLogRelayModePoll
+		}
+	}
+	if relay == nil {
+		return
+	}
+	logging.LogInfo("entry-log-relay", "starting entry log relay",
+		"host", entry.Info.Original,
+		"mode", mode)
+	sink := m.messageSink
+	if sink == nil {
+		sink = func(s string) {
+			if m.multiHost != nil && m.multiHost.notifier != nil {
+				m.multiHost.notifier(s)
+				return
+			}
+			if m.onOutput != nil {
+				m.onOutput(s)
+			}
+		}
+	}
+	relay.Start(ctx, sink)
+	m.entryRelay = relay
 }
 
 // StopTest stops monitoring tests on all hosts

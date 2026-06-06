@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -494,11 +495,18 @@ func TestMultiHostTestOrchestrator_StartTest_NoReadyHosts(t *testing.T) {
 }
 
 func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
+	var postedScenario string
+	var postedDefaults string
+	srv := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+
 	hostInfos := []*hostparse.HostInfo{
-		{Host: "localhost", IsLocal: true, Original: "localhost"},
+		{Host: host, IsLocal: false, Original: "qa-client-01"},
 	}
 
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.SetAPIPort(port)
 	wrapper := NewMultiHostTestOrchestrator(orchestrator)
 
 	// Set up host as ready with mock Docker manager
@@ -508,22 +516,24 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 
 	// Set up callbacks to capture status updates
 	var statusUpdate *TestStatus
-	var outputMessage string
+	var outputMessages []string
 
 	wrapper.SetCallbacks(
 		func(status *TestStatus) { statusUpdate = status },
 		func(update *MultiNodeMetricsUpdate) {},
-		func(line string) { outputMessage = line },
+		func(line string) { outputMessages = append(outputMessages, line) },
 		func(err string) {},
 	)
 
-	ctx := context.Background()
-	params := scenario.ScenarioParams{WorkloadType: "write"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB"}
 
 	err := wrapper.StartTest(ctx, "test-image", params)
 	if err != nil {
 		t.Errorf("Expected StartTest to succeed for single host, got: %v", err)
 	}
+	defer func() { _ = wrapper.StopTest() }()
 
 	// Verify status update
 	if statusUpdate == nil {
@@ -538,14 +548,157 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	}
 
 	// Verify output message
-	if !strings.Contains(outputMessage, "Starting single-host test on localhost") {
-		t.Errorf("Expected single-host output message, got: %s", outputMessage)
+	if !containsStringSimple(strings.Join(outputMessages, "\n"), "Starting single-host test") {
+		t.Errorf("Expected single-host output message, got: %v", outputMessages)
 	}
 
-	// Verify Docker manager was called
-	if mockDocker.GetStartCallCount() == 0 {
-		t.Error("Expected StartContainerWithScenario to be called for single host")
+	containerCalls := mockDocker.GetContainerCalls()
+	if len(containerCalls) != 1 {
+		t.Fatalf("expected one node-mode container start, got %d", len(containerCalls))
 	}
+	if !containsStringSimple(strings.Join(containerCalls[0].Cmd, " "), "--run-port="+port) {
+		t.Fatalf("node-mode container did not use API port %s: %v", port, containerCalls[0].Cmd)
+	}
+	if !orchestrator.hosts[0].IsManaged() {
+		t.Fatal("expected single-host container to be marked managed")
+	}
+	if postedScenario == "" {
+		t.Fatal("expected generated scenario to be posted to /run")
+	}
+	if !strings.Contains(postedDefaults, "dummy-mock") {
+		t.Fatalf("expected generated defaults to include mock driver, got:\n%s", postedDefaults)
+	}
+}
+
+func TestMultiHostTestOrchestrator_StartTestWithContent_SingleHostPostsProvidedArtifacts(t *testing.T) {
+	var postedScenario string
+	var postedDefaults string
+	srv := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+
+	hostInfos := []*hostparse.HostInfo{
+		{Host: host, IsLocal: false, Original: "qa-client-01"},
+	}
+
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(
+		func(*TestStatus) {},
+		func(*MultiNodeMetricsUpdate) {},
+		func(string) {},
+		func(string) {},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	replayScenario := []byte(`var step = "replay-001-max-w10kb"; Load.config({}).run();`)
+	replayDefaults := []byte("storage:\n  driver:\n    type: dummy-mock\n")
+	params := scenario.ScenarioParams{WorkloadType: "replay", Threads: 1}
+	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
+		t.Fatalf("StartTestWithContent() error = %v", err)
+	}
+	defer func() { _ = wrapper.StopTest() }()
+
+	if postedScenario != string(replayScenario) {
+		t.Fatalf("posted scenario mismatch:\n%s", postedScenario)
+	}
+	if postedDefaults != string(replayDefaults) {
+		t.Fatalf("posted defaults mismatch:\n%s", postedDefaults)
+	}
+	containerCalls := mockDocker.GetContainerCalls()
+	if len(containerCalls) != 1 {
+		t.Fatalf("expected one node-mode container start, got %d", len(containerCalls))
+	}
+	if !containsStringSimple(strings.Join(containerCalls[0].Cmd, " "), "--run-port="+port) {
+		t.Fatalf("node-mode container did not use API port %s: %v", port, containerCalls[0].Cmd)
+	}
+	if orchestrator.hosts[0].APIClient == nil {
+		t.Fatal("expected API client to be attached after readiness")
+	}
+	if !orchestrator.hosts[0].IsManaged() {
+		t.Fatal("expected single-host replay container to be marked managed")
+	}
+}
+
+func newSingleHostReplayAPIServer(t *testing.T, postedScenario, postedDefaults *string) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"n0"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"n0"}`))
+		case "/run":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseMultipartForm(10 << 20); err != nil {
+				t.Errorf("ParseMultipartForm() error = %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			scenarioBody := readMultipartFile(t, r, "scenario")
+			defaultsBody := readMultipartFile(t, r, "defaults")
+			mu.Lock()
+			*postedScenario = scenarioBody
+			*postedDefaults = defaultsBody
+			mu.Unlock()
+			w.Header().Set("ETag", "run-single-remote")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"runId":"run-single-remote"}`))
+		case "/metrics/json":
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			payload := fmt.Sprintf(`[{"metrics_schema":2,"scope":"node","role":"entry","node_id":"n0","run_id":"run-single-remote","sample_ts":"%s","step_id":"replay-001","op_type":"CREATE","timestamp":%d,"elapsed_time_seconds":0.1,"test_state":1,"completion_percent":0,"overall_completion_percent":0,"unbounded":true,"overall_unbounded":true,"operations":{"success_count":0,"failed_count":0,"success_rate_last":0,"failed_rate_last":0},"bandwidth":{"bytes_total":0,"bytes_rate_last":0},"timing":{"latency_mean_us":0,"duration_mean_us":0},"concurrency":{"current":0,"mean":0}}]`, now, time.Now().UnixMilli())
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(payload))
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"RUNNING","message":"running","runId":"run-single-remote"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func readMultipartFile(t *testing.T, r *http.Request, name string) string {
+	t.Helper()
+	file, _, err := r.FormFile(name)
+	if err != nil {
+		t.Fatalf("FormFile(%q) error = %v", name, err)
+	}
+	defer func() { _ = file.Close() }()
+	body, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("ReadAll(%q) error = %v", name, err)
+	}
+	return string(body)
+}
+
+func splitServerHostPort(t *testing.T, rawURL string) (string, string) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split server host/port: %v", err)
+	}
+	return host, port
 }
 
 // Test verifies that multi-host logic is selected but we don't test the actual StartDistributedTest

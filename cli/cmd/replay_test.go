@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +53,7 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
-func TestReplayCommandRejectsSingleRemoteHostLaunchForNow(t *testing.T) {
+func TestReplayCommandAcceptsSingleRemoteHostBeforeLaunch(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
@@ -75,14 +79,92 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 		"--from", server.URL,
 		"--endpoints", "http://10.0.0.1:9020",
 		"--test-hosts", "qa-client-01",
+		"--s3-driver", "rdma",
+		"--results-dir", t.TempDir(),
 	})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("Execute() error = nil, want single remote-host not implemented")
+		t.Fatal("Execute() error = nil, want RDMA launch not implemented")
 	}
-	if !strings.Contains(err.Error(), "single remote-host replay execution is not implemented yet") {
+	if strings.Contains(err.Error(), "single remote-host replay execution is not implemented yet") {
+		t.Fatalf("single remote host should be accepted before launch, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "RDMA replay launch is not implemented yet") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func TestReplayBaseURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		port  string
+		hosts []*hostparse.HostInfo
+		want  string
+	}{
+		{
+			name: "remote single host",
+			port: "10080",
+			hosts: []*hostparse.HostInfo{
+				{Host: "qa-client-01", IsLocal: false, Original: "qa-client-01"},
+			},
+			want: "http://qa-client-01:10080",
+		},
+		{
+			name: "local single host",
+			port: "10080",
+			hosts: []*hostparse.HostInfo{
+				{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"},
+			},
+			want: "http://localhost:10080",
+		},
+		{
+			name:  "no hosts",
+			port:  "10080",
+			hosts: nil,
+			want:  "http://localhost:10080",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replayBaseURL(tt.port, tt.hosts); got != tt.want {
+				t.Fatalf("replayBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCleanupReplayContainers(t *testing.T) {
+	wantErr := errors.New("cleanup failed")
+	cleaner := &fakeReplayContainerCleaner{err: wantErr}
+
+	err := cleanupReplayContainers(cleaner, time.Second)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("cleanupReplayContainers() error = %v, want %v", err, wantErr)
+	}
+	if cleaner.calls != 1 {
+		t.Fatalf("StopAllContainers calls = %d, want 1", cleaner.calls)
+	}
+	if cleaner.deadline.IsZero() {
+		t.Fatal("expected cleanup context to have a deadline")
+	}
+
+	if err := cleanupReplayContainers(nil, time.Second); err != nil {
+		t.Fatalf("cleanupReplayContainers(nil) error = %v", err)
+	}
+}
+
+type fakeReplayContainerCleaner struct {
+	calls    int
+	deadline time.Time
+	err      error
+}
+
+func (f *fakeReplayContainerCleaner) StopAllContainers(ctx context.Context) error {
+	f.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		f.deadline = deadline
+	}
+	return f.err
 }
 
 func TestReplayCommandGenerateOnlyWritesArtifacts(t *testing.T) {
