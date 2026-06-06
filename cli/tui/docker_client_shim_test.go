@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -22,6 +27,10 @@ type fakeDockerClient struct {
 	stopped, removed int
 	ver              types.Version
 	inspectErr       error
+	logBody          []byte
+	logOptions       container.LogsOptions
+	stopErr          error
+	removeErr        error
 }
 
 func (f *fakeDockerClient) ImageInspect(ctx context.Context, imageID string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
@@ -32,7 +41,13 @@ func (f *fakeDockerClient) ImagePull(ctx context.Context, ref string, options im
 	return io.NopCloser(strings.NewReader("ok")), nil
 }
 func (f *fakeDockerClient) ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("log1\nlog2\n")), nil
+	f.logOptions = options
+	if f.logBody != nil {
+		return io.NopCloser(bytes.NewReader(f.logBody)), nil
+	}
+	var logs bytes.Buffer
+	_, _ = stdcopy.NewStdWriter(&logs, stdcopy.Stdout).Write([]byte("log1\nlog2\n"))
+	return io.NopCloser(bytes.NewReader(logs.Bytes())), nil
 }
 func (f *fakeDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 	return container.CreateResponse{ID: "abc"}, nil
@@ -42,11 +57,11 @@ func (f *fakeDockerClient) ContainerStart(ctx context.Context, containerID strin
 }
 func (f *fakeDockerClient) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
 	f.stopped++
-	return nil
+	return f.stopErr
 }
 func (f *fakeDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
 	f.removed++
-	return nil
+	return f.removeErr
 }
 func (f *fakeDockerClient) ServerVersion(ctx context.Context) (types.Version, error) {
 	return f.ver, nil
@@ -114,6 +129,17 @@ func TestCleanup_UsesClientToStopAndRemove(t *testing.T) {
 	}
 }
 
+func TestCleanupIgnoresAlreadyGoneContainer(t *testing.T) {
+	f := &fakeDockerClient{stopErr: fmt.Errorf("Error response from daemon: No such container: gone")}
+	dm := &DockerManager{client: f, containerID: "gone", ctx: context.Background()}
+	if err := dm.Cleanup(); err != nil {
+		t.Fatalf("cleanup error = %v, want nil for already-gone container", err)
+	}
+	if f.stopped != 1 || f.removed != 1 {
+		t.Fatalf("expected stop+remove once, got %d/%d", f.stopped, f.removed)
+	}
+}
+
 func TestGetDockerVersion_Delegates(t *testing.T) {
 	f := &fakeDockerClient{ver: types.Version{Version: "28.0.0"}}
 	dm := &DockerManager{client: f}
@@ -150,5 +176,43 @@ func TestStreamOutput_RawTextLines(t *testing.T) {
 		// ok
 	case <-time.After(200 * time.Millisecond):
 		t.Fatalf("expected stdout lines from stream")
+	}
+}
+
+func TestContainerDiagnosticTailIncludesDockerAndEngineErrors(t *testing.T) {
+	var dockerLogs bytes.Buffer
+	_, _ = stdcopy.NewStdWriter(&dockerLogs, stdcopy.Stdout).Write([]byte("console-start --access-key LOCALACCESS\n"))
+	_, _ = stdcopy.NewStdWriter(&dockerLogs, stdcopy.Stderr).Write([]byte("console-fatal\n"))
+
+	logDir := t.TempDir()
+	errorDir := filepath.Join(logDir, "log", "none-20260605.215723.824")
+	if err := os.MkdirAll(errorDir, 0o700); err != nil {
+		t.Fatalf("mkdir error log dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(errorDir, "errors.log"), []byte("Run node failure\nstorage.auth.secret=LOCALSECRET\njava.io.IOException: Permission denied\n"), 0o600); err != nil {
+		t.Fatalf("write errors.log: %v", err)
+	}
+
+	f := &fakeDockerClient{logBody: dockerLogs.Bytes()}
+	dm := &DockerManager{client: f, ctx: context.Background(), nodeLogDir: logDir}
+	got, err := dm.ContainerDiagnosticTail("cid", 7)
+	if err != nil {
+		t.Fatalf("ContainerDiagnosticTail() error = %v", err)
+	}
+	for _, want := range []string{"Docker logs:", "console-start", "console-fatal", "Engine errors.log:", "Permission denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("diagnostics missing %q:\n%s", want, got)
+		}
+	}
+	for _, leaked := range []string{"LOCALACCESS", "LOCALSECRET"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("diagnostics leaked %q:\n%s", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "--access-key ***") || !strings.Contains(got, "storage.auth.secret=***") {
+		t.Fatalf("diagnostics missing masked credentials:\n%s", got)
+	}
+	if f.logOptions.Tail != "7" {
+		t.Fatalf("docker log tail = %q, want 7", f.logOptions.Tail)
 	}
 }

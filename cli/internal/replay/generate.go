@@ -93,7 +93,15 @@ func replayWarnings(artifacts Artifacts, opts Options) []Diagnostic {
 
 // WriteGenerated writes generated replay artifacts to a private temp or explicit output directory.
 func WriteGenerated(g *Generated, outputDir string) (OutputPaths, error) {
-	dir := strings.TrimSpace(outputDir)
+	return WriteGeneratedWithOptions(g, WriteGeneratedOptions{
+		OutputDir:       outputDir,
+		IncludeDefaults: true,
+	})
+}
+
+// WriteGeneratedWithOptions writes generated replay artifacts with explicit persistence controls.
+func WriteGeneratedWithOptions(g *Generated, opts WriteGeneratedOptions) (OutputPaths, error) {
+	dir := strings.TrimSpace(opts.OutputDir)
 	var err error
 	if dir == "" {
 		dir, err = os.MkdirTemp("", "spt-replay-*")
@@ -115,8 +123,12 @@ func WriteGenerated(g *Generated, outputDir string) (OutputPaths, error) {
 	if err := os.WriteFile(paths.Scenario, g.ScenarioJS, 0o600); err != nil {
 		return OutputPaths{}, err
 	}
-	if err := os.WriteFile(paths.Defaults, g.DefaultsYAML, 0o600); err != nil {
-		return OutputPaths{}, err
+	if opts.IncludeDefaults {
+		if err := os.WriteFile(paths.Defaults, g.DefaultsYAML, 0o600); err != nil {
+			return OutputPaths{}, err
+		}
+	} else {
+		paths.Defaults = ""
 	}
 	if err := os.WriteFile(paths.Metadata, g.MetadataJSON, 0o600); err != nil {
 		return OutputPaths{}, err

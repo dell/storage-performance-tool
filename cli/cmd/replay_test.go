@@ -49,6 +49,42 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestReplayCommandRejectsSingleRemoteHostLaunchForNow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"item": {"data": {"size": "10KB"}}, "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cmd := newReplayCommandForTest(t)
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--endpoints", "http://10.0.0.1:9020",
+		"--test-hosts", "qa-client-01",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want single remote-host not implemented")
+	}
+	if !strings.Contains(err.Error(), "single remote-host replay execution is not implemented yet") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestReplayCommandGenerateOnlyWritesArtifacts(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -151,6 +187,24 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	if !strings.Contains(out.String(), "  Directory: "+filepath.Join(resultsDir, "replaycase-")) {
 		t.Fatalf("generated directory should be staged under results dir, output:\n%s", out.String())
+	}
+	matches, globErr := filepath.Glob(filepath.Join(resultsDir, "replaycase-*"))
+	if globErr != nil {
+		t.Fatalf("glob generated replay directory: %v", globErr)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("generated replay dirs = %v, want one", matches)
+	}
+	if _, statErr := os.Stat(filepath.Join(matches[0], "defaults.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("defaults.yaml stat error = %v, want not exist for default launch staging", statErr)
+	}
+	for _, name := range []string{"replay-scenario.js", "replay-metadata.json"} {
+		if _, statErr := os.Stat(filepath.Join(matches[0], name)); statErr != nil {
+			t.Fatalf("%s not staged: %v", name, statErr)
+		}
+	}
+	if !strings.Contains(out.String(), "  Defaults: in memory only") {
+		t.Fatalf("output should explain defaults were not persisted:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "/tmp/spt-replay-") {
 		t.Fatalf("launch path should not use transient replay temp dir when results-dir is available:\n%s", out.String())

@@ -5,12 +5,14 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,11 +20,13 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	units "github.com/docker/go-units"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -34,6 +38,8 @@ const (
 	dockerLabelTrue            = "true"
 	dockerMemlockUlimitName    = "memlock"
 	dockerNodeModeArg          = "--run-node=true"
+	dockerNodeLogMount         = "/spt-node-logs"
+	nodeLogDirPattern          = "spt-node-logs-*"
 )
 
 // DockerManager handles Docker operations for the TUI
@@ -60,6 +66,7 @@ type DockerManager struct {
 	cancel      context.CancelFunc
 	hostInfo    *hostparse.HostInfo  // New field to track host information
 	remote      *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
+	nodeLogDir  string               // Host-side temp dir mounted for node startup diagnostics
 }
 
 func skipImagePull(image string) bool {
@@ -159,6 +166,117 @@ func (dm *DockerManager) pullImage(imageName string) error {
 
 	logging.LogInfo("docker", "Docker image pulled successfully", "image", imageName)
 	return nil
+}
+
+func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
+	if dm.nodeLogDir != "" {
+		_ = os.RemoveAll(dm.nodeLogDir)
+		dm.nodeLogDir = ""
+	}
+	dir, err := os.MkdirTemp("", nodeLogDirPattern)
+	if err != nil {
+		logging.LogWarn("docker", "failed to create node log capture directory", "error", err.Error())
+		return nil, nil
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		logging.LogWarn("docker", "failed to secure node log capture directory", "error", err.Error())
+		return nil, nil
+	}
+	dm.nodeLogDir = dir
+	return []string{fmt.Sprintf("%s:%s", dir, dockerNodeLogMount)}, []string{"SPT_LOG_DIR=" + dockerNodeLogMount}
+}
+
+// ContainerDiagnosticTail returns recent container startup diagnostics from Docker logs
+// plus engine error logs captured through the private node log mount.
+func (dm *DockerManager) ContainerDiagnosticTail(containerID string, maxLines int) (string, error) {
+	var parts []string
+	if dockerLogs, err := dm.ContainerLogTail(containerID, maxLines); err == nil && strings.TrimSpace(dockerLogs) != "" {
+		parts = append(parts, "Docker logs:\n"+strings.TrimSpace(dockerLogs))
+	} else if err != nil {
+		parts = append(parts, fmt.Sprintf("Docker logs unavailable: %v", err))
+	}
+	if errorLogs := dm.nodeErrorLogTail(maxLines); strings.TrimSpace(errorLogs) != "" {
+		parts = append(parts, "Engine errors.log:\n"+strings.TrimSpace(errorLogs))
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return secretmask.Text(strings.Join(parts, "\n\n")), nil
+}
+
+// ContainerLogTail returns recent stdout/stderr lines from Docker logs.
+func (dm *DockerManager) ContainerLogTail(containerID string, maxLines int) (string, error) {
+	if containerID == "" {
+		return "", nil
+	}
+	if maxLines <= 0 {
+		maxLines = 80
+	}
+	out, err := dm.client.ContainerLogs(dm.ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       strconv.Itoa(maxLines),
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if closeErr := out.Close(); closeErr != nil {
+			slog.Warn("Failed to close container logs reader", "component", "docker", "error", closeErr)
+		}
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, out); err != nil {
+		return "", err
+	}
+	return tailLines(strings.Join([]string{stdout.String(), stderr.String()}, "\n"), maxLines), nil
+}
+
+func (dm *DockerManager) nodeErrorLogTail(maxLines int) string {
+	if dm.nodeLogDir == "" {
+		return ""
+	}
+	matches, err := filepath.Glob(filepath.Join(dm.nodeLogDir, "log", "*", "errors.log"))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+	var b strings.Builder
+	for _, path := range matches {
+		data, err := os.ReadFile(path) // #nosec G304 -- path is under the private temp log dir we created.
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(tailLines(string(data), maxLines))
+		if content == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(filepath.Base(filepath.Dir(path)))
+		b.WriteString("/errors.log\n")
+		b.WriteString(content)
+	}
+	return b.String()
+}
+
+func tailLines(content string, maxLines int) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if maxLines <= 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
 }
 
 // StartContainer creates and starts a new container
@@ -300,11 +418,14 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
 		envVars = append(envVars, "SPT_JAVA_OPTS="+v)
 	}
+	logBinds, logEnv := dm.prepareNodeLogCapture()
+	envVars = append(envVars, logEnv...)
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
 
 	hostConfig := &container.HostConfig{
 		PortBindings: portBinding,
+		Binds:        logBinds,
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -337,6 +458,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)
+		dm.cleanupNodeLogDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -354,6 +476,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
 		}
 		dm.containerID = ""
+		dm.cleanupNodeLogDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
@@ -720,6 +843,7 @@ func (dm *DockerManager) Cleanup() error {
 	if dm.remote != nil {
 		return dm.remote.Cleanup()
 	}
+	defer dm.cleanupNodeLogDir()
 	if dm.containerID == "" {
 		return nil
 	}
@@ -731,7 +855,7 @@ func (dm *DockerManager) Cleanup() error {
 	err := dm.client.ContainerStop(dm.ctx, dm.containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
-	if err != nil && !strings.Contains(err.Error(), "already stopped") {
+	if err != nil && !isContainerAlreadyStoppedOrGone(err) {
 		logging.LogError("docker", "failed to stop container", err, "container_id", dm.containerID)
 		return fmt.Errorf("failed to stop container: %w", err)
 	}
@@ -742,13 +866,38 @@ func (dm *DockerManager) Cleanup() error {
 	err = dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{
 		Force: true,
 	})
-	if err != nil {
+	if err != nil && !isNoSuchContainer(err) {
 		logging.LogError("docker", "failed to remove container", err, "container_id", dm.containerID)
 		return fmt.Errorf("failed to remove container: %w", err)
 	}
 
 	logging.LogContainerEvent("removed", dm.containerID)
 	return nil
+}
+
+func (dm *DockerManager) cleanupNodeLogDir() {
+	if dm.nodeLogDir == "" {
+		return
+	}
+	if err := os.RemoveAll(dm.nodeLogDir); err != nil {
+		logging.LogWarn("docker", "failed to remove node log capture directory", "path", dm.nodeLogDir, "error", err.Error())
+	}
+	dm.nodeLogDir = ""
+}
+
+func isContainerAlreadyStoppedOrGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "already stopped") || isNoSuchContainer(err)
+}
+
+func isNoSuchContainer(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "No such container")
 }
 
 // Close cleans up resources

@@ -93,3 +93,9 @@ type OutputPaths struct {
 	Defaults string
 	Metadata string
 }
+
+// WriteGeneratedOptions controls which replay artifacts are persisted.
+type WriteGeneratedOptions struct {
+	OutputDir       string
+	IncludeDefaults bool
+}

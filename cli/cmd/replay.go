@@ -86,16 +86,23 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if len(hostInfos) > 1 {
 		return fmt.Errorf("multi-host replay execution is not implemented yet; set --test-hosts to a single host or use --generate-only")
 	}
+	if len(hostInfos) == 1 && !hostInfos[0].IsLocal {
+		return fmt.Errorf("single remote-host replay execution is not implemented yet; set --test-hosts to 127.0.0.1 or use --generate-only")
+	}
 
 	resultsOpts := buildResultsOptions(cmd)
 	runToken := time.Now().UTC().Format("20060102.150405.000")
 	plannedResultsRoot := filepath.Join(resultsOpts.ResultsDir, fmt.Sprintf("%s-%s", resultsOpts.Label, runToken))
 	outputDir, _ := cmd.Flags().GetString("output-dir")
 	generatedOutputDir := strings.TrimSpace(outputDir)
+	includeDefaults := generatedOutputDir != ""
 	if generatedOutputDir == "" {
 		generatedOutputDir = plannedResultsRoot
 	}
-	paths, err := replay.WriteGenerated(generated, generatedOutputDir)
+	paths, err := replay.WriteGeneratedWithOptions(generated, replay.WriteGeneratedOptions{
+		OutputDir:       generatedOutputDir,
+		IncludeDefaults: includeDefaults,
+	})
 	if err != nil {
 		return fmt.Errorf("write generated replay artifacts: %w", err)
 	}
@@ -221,7 +228,11 @@ func printReplayArtifacts(out io.Writer, generated *replay.Generated, paths repl
 	_, _ = fmt.Fprintln(out, "Generated files")
 	_, _ = fmt.Fprintf(out, "  Directory: %s\n", paths.Dir)
 	_, _ = fmt.Fprintf(out, "  Scenario: %s\n", paths.Scenario)
-	_, _ = fmt.Fprintf(out, "  Defaults: %s\n", paths.Defaults)
+	if paths.Defaults == "" {
+		_, _ = fmt.Fprintln(out, "  Defaults: in memory only")
+	} else {
+		_, _ = fmt.Fprintf(out, "  Defaults: %s\n", paths.Defaults)
+	}
 	_, _ = fmt.Fprintf(out, "  Metadata: %s\n", paths.Metadata)
 }
 

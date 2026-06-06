@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +20,8 @@ import (
 )
 
 const (
-	apiReadyTimeout = 60 * time.Second
+	apiReadyTimeout     = 60 * time.Second
+	startupLogTailLines = 120
 
 	// Optimized polling intervals
 	defaultMetricsInterval = constants.DefaultMetricsInterval
@@ -58,6 +60,10 @@ type TestOrchestrator struct {
 	logJSONBodies     bool
 }
 
+type containerDiagnosticTailer interface {
+	ContainerDiagnosticTail(containerID string, maxLines int) (string, error)
+}
+
 // NewTestOrchestrator creates a new test orchestrator
 func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 	if apiPort == "" {
@@ -88,6 +94,22 @@ func (o *TestOrchestrator) SetCallbacks(
 	o.onMetrics = onMetrics
 	o.onOutput = onOutput
 	o.onError = onError
+}
+
+func (o *TestOrchestrator) containerStartupDiagnostics() string {
+	if o.dockerManager == nil || o.containerID == "" {
+		return ""
+	}
+	tailer, ok := o.dockerManager.(containerDiagnosticTailer)
+	if !ok {
+		return ""
+	}
+	diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
+	if err != nil {
+		logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
+		return ""
+	}
+	return strings.TrimSpace(diagnostics)
 }
 
 // StartTest starts a Spt test using the API approach
@@ -149,8 +171,20 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 	if err := o.apiClient.WaitForAPIReady(apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
+		diagnostics := o.containerStartupDiagnostics()
+		reportedDiagnostics := false
+		if diagnostics != "" && o.onError != nil {
+			o.onError("Container startup diagnostics:\n" + diagnostics)
+			reportedDiagnostics = true
+		}
 		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API failure", cleanupErr)
+		}
+		if diagnostics != "" {
+			if reportedDiagnostics {
+				return fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+			}
+			return fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 		}
 		return fmt.Errorf("spt API failed to become ready: %w", err)
 	}

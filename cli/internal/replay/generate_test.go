@@ -79,3 +79,31 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 		t.Fatalf("output dir mode = %o, want 700", gotMode)
 	}
 }
+
+func TestWriteGeneratedWithOptionsCanOmitDefaults(t *testing.T) {
+	generated := &Generated{
+		ScenarioJS:   []byte("// scenario\n"),
+		DefaultsYAML: []byte("storage:\n  auth:\n    secret: local-secret\n"),
+		MetadataJSON: []byte("{}\n"),
+	}
+	outDir := filepath.Join(t.TempDir(), "runtime")
+
+	paths, err := WriteGeneratedWithOptions(generated, WriteGeneratedOptions{
+		OutputDir:       outDir,
+		IncludeDefaults: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteGeneratedWithOptions() error = %v", err)
+	}
+	if paths.Defaults != "" {
+		t.Fatalf("Defaults path = %q, want empty when defaults are not persisted", paths.Defaults)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "defaults.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("defaults.yaml stat error = %v, want not exist", err)
+	}
+	for _, path := range []string{paths.Scenario, paths.Metadata} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to be written: %v", path, err)
+		}
+	}
+}
