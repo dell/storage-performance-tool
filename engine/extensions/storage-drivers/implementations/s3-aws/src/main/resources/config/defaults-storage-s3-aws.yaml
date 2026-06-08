@@ -14,23 +14,10 @@ storage:
       tags: {}
     versioning: false
   crt:
-    # Size threshold for small object classification
-    smallObjectThresholdBytes: 65536      # 64KB
-
     # CRT performance parameters
-    targetThroughputGbps: 10.0           # High target throughput
-    minimumPartSizeBytes: 8388608        # 8MB - optimal part size
-    maxConcurrency: 512                   # High concurrency for better performance
-    maxConcurrentRequestStreams: 16       # Optimal connection utilization
+    targetThroughputGbps: 10.0
+    minimumPartSizeBytes: 8388608        # 8MB
+    maxConcurrency: 512
 
-    # Connection pool settings
-    connectionTimeoutMs: 2000
-    connectionAcquisitionTimeoutMs: 1000
-    connectionMaxIdleTimeMs: 60000        # 60 seconds
-    connectionTimeToLiveMs: 300000        # 5 minutes
-
-    # Threading configuration
-    useVirtualThreads: true
-
-    # Buffer configuration
-    readBufferSizeBytes: 8192             # 8KB
+    # Upload thresholds (reserved for future per-size upload strategies)
+    smallObjectThresholdBytes: 65536     # 64KB

@@ -8,8 +8,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -297,173 +295,122 @@ class S3AwsStorageDriverFactoryTest {
 	}
 
 	// -----------------------------------------------------------------------
-	// CRT Configuration Tests
+	// CRT Configuration Tests — exercise create() to verify config is read
 	// -----------------------------------------------------------------------
-	
-	@Test
-	void shippedDefaults_setCorrectCRTParameters() throws Exception {
-		// Given: Config with shipped defaults
-		Config config = mock(Config.class);
-		when(config.stringVal("storage.driver")).thenReturn("s3-aws");
-		when(config.stringVal("storage.auth.uid")).thenReturn("test-key");
-		when(config.stringVal("storage.auth.secret")).thenReturn("test-secret");
-		when(config.stringVal("storage.auth.version")).thenReturn("4");
-		when(config.boolVal("storage.object.versioning")).thenReturn(false);
-		
-		// Mock network config
-		Config netConfig = mock(Config.class);
-		when(config.configVal("net")).thenReturn(netConfig);
-		when(netConfig.listVal("node.addrs")).thenReturn(List.of("localhost"));
-		when(netConfig.intVal("node.port")).thenReturn(9000);
-		when(netConfig.boolVal("ssl.enabled")).thenReturn(false);
-		
-		// Mock CRT config with shipped defaults
-		Config crtConfig = mock(Config.class);
-		when(config.configVal("crt")).thenReturn(crtConfig);
-		when(crtConfig.doubleVal("targetThroughputGbps")).thenReturn(10.0);
-		when(crtConfig.longVal("minimumPartSizeBytes")).thenReturn(8L * 1024 * 1024L);
-		when(crtConfig.intVal("maxConcurrency")).thenReturn(512);
-		when(crtConfig.intVal("maxConcurrentRequestStreams")).thenReturn(16);
-		when(crtConfig.longVal("smallObjectThresholdBytes")).thenReturn(64L * 1024L);
-		
-		// Mock object config
-		Config objectConfig = mock(Config.class);
-		when(config.configVal("object")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
-		when(objectConfig.configVal("tagging")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("tagging.enabled")).thenReturn(false);
-		when(objectConfig.mapVal("tagging.tags")).thenReturn(Map.of());
-		
-		// When: Create driver factory
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
-		
-		// Then: Verify factory was created successfully
-		assertNotNull(factory);
-		
-		// Note: Full CRT parameter verification requires actual S3AsyncClient creation
-		// which is tested in integration tests. This test ensures config parsing works.
-	}
-	
-	@Test
-	void configOverrides_honorCustomCRTParameters() throws Exception {
-		// Given: Config with custom CRT overrides
-		Config config = mock(Config.class);
-		when(config.stringVal("storage.driver")).thenReturn("s3-aws");
-		when(config.stringVal("storage.auth.uid")).thenReturn("test-key");
-		when(config.stringVal("storage.auth.secret")).thenReturn("test-secret");
-		when(config.stringVal("storage.auth.version")).thenReturn("4");
-		when(config.boolVal("storage.object.versioning")).thenReturn(false);
-		
-		// Mock network config
-		Config netConfig = mock(Config.class);
-		when(config.configVal("net")).thenReturn(netConfig);
-		when(netConfig.listVal("node.addrs")).thenReturn(List.of("localhost"));
-		when(netConfig.intVal("node.port")).thenReturn(9000);
-		when(netConfig.boolVal("ssl.enabled")).thenReturn(false);
-		
-		// Mock CRT config with custom values
-		Config crtConfig = mock(Config.class);
-		when(config.configVal("crt")).thenReturn(crtConfig);
-		when(crtConfig.doubleVal("targetThroughputGbps")).thenReturn(20.0);  // Custom: 20 Gbps
-		when(crtConfig.longVal("minimumPartSizeBytes")).thenReturn(16L * 1024 * 1024L);  // Custom: 16MB
-		when(crtConfig.intVal("maxConcurrency")).thenReturn(1024);  // Custom: 1024
-		when(crtConfig.intVal("maxConcurrentRequestStreams")).thenReturn(32);  // Custom: 32
-		when(crtConfig.longVal("smallObjectThresholdBytes")).thenReturn(128L * 1024L);  // Custom: 128KB
-		
-		// Mock object config
-		Config objectConfig = mock(Config.class);
-		when(config.configVal("object")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
-		when(objectConfig.configVal("tagging")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("tagging.enabled")).thenReturn(false);
-		when(objectConfig.mapVal("tagging.tags")).thenReturn(Map.of());
-		
-		// When: Create driver factory
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
-		
-		// Then: Verify factory was created successfully
-		assertNotNull(factory);
-		
-		// Note: Full parameter verification requires actual S3AsyncClient creation
-		// This test ensures custom config values are parsed correctly.
-	}
-	
-	@Test
-	void fallbackBehavior_usesDefaultsWhenConfigMissing() throws Exception {
-		// Given: Config without CRT config section
-		Config config = mock(Config.class);
-		when(config.stringVal("storage.driver")).thenReturn("s3-aws");
-		when(config.stringVal("storage.auth.uid")).thenReturn("test-key");
-		when(config.stringVal("storage.auth.secret")).thenReturn("test-secret");
-		when(config.stringVal("storage.auth.version")).thenReturn("4");
-		when(config.boolVal("storage.object.versioning")).thenReturn(false);
-		
-		// Mock network config
-		Config netConfig = mock(Config.class);
-		when(config.configVal("net")).thenReturn(netConfig);
-		when(netConfig.listVal("node.addrs")).thenReturn(List.of("localhost"));
-		when(netConfig.intVal("node.port")).thenReturn(9000);
-		when(netConfig.boolVal("ssl.enabled")).thenReturn(false);
-		
-		// Mock missing CRT config
-		when(config.configVal("crt")).thenThrow(new RuntimeException("no crt config"));
-		
-		// Mock object config
-		Config objectConfig = mock(Config.class);
-		when(config.configVal("object")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
-		when(objectConfig.configVal("tagging")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("tagging.enabled")).thenReturn(false);
-		when(objectConfig.mapVal("tagging.tags")).thenReturn(Map.of());
-		
-		// When: Create driver factory
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
-		
-		// Then: Verify factory was created successfully (fallback to defaults)
-		assertNotNull(factory);
-	}
-	
-	@Test
-	void smallObjectThreshold_affectsUploadPath() throws Exception {
-		// Given: Config with custom small object threshold
-		Config config = mock(Config.class);
-		when(config.stringVal("storage.driver")).thenReturn("s3-aws");
-		when(config.stringVal("storage.auth.uid")).thenReturn("test-key");
-		when(config.stringVal("storage.auth.secret")).thenReturn("test-secret");
-		when(config.stringVal("storage.auth.version")).thenReturn("4");
-		when(config.boolVal("storage.object.versioning")).thenReturn(false);
-		
-		// Mock network config
-		Config netConfig = mock(Config.class);
-		when(config.configVal("net")).thenReturn(netConfig);
-		when(netConfig.listVal("node.addrs")).thenReturn(List.of("localhost"));
-		when(netConfig.intVal("node.port")).thenReturn(9000);
-		when(netConfig.boolVal("ssl.enabled")).thenReturn(false);
-		
-		// Mock CRT config with custom small object threshold
-		Config crtConfig = mock(Config.class);
-		when(config.configVal("crt")).thenReturn(crtConfig);
-		when(crtConfig.doubleVal("targetThroughputGbps")).thenReturn(10.0);
-		when(crtConfig.longVal("minimumPartSizeBytes")).thenReturn(8L * 1024 * 1024L);
-		when(crtConfig.intVal("maxConcurrency")).thenReturn(512);
-		when(crtConfig.intVal("maxConcurrentRequestStreams")).thenReturn(16);
-		when(crtConfig.longVal("smallObjectThresholdBytes")).thenReturn(128L * 1024L);  // 128KB threshold
-		
-		// Mock object config
-		Config objectConfig = mock(Config.class);
-		when(config.configVal("object")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("versioning")).thenReturn(false);
-		when(objectConfig.configVal("tagging")).thenReturn(objectConfig);
-		when(objectConfig.boolVal("tagging.enabled")).thenReturn(false);
-		when(objectConfig.mapVal("tagging.tags")).thenReturn(Map.of());
-		
-		// When: Create driver factory
-		S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
-		
-		// Then: Verify factory was created successfully
-		assertNotNull(factory);
-		
-		// Note: Actual upload path verification requires driver instantiation with S3AsyncClient
-		// This test ensures the threshold parameter is parsed and passed correctly.
+
+	@Nested
+	class CrtConfigReadTest {
+
+		/**
+		 * Helper: build a storageConfig mock that satisfies auth + endpoint
+		 * requirements so create() progresses into CRT config reading.
+		 * The CRT config sub-object is returned so callers can stub values.
+		 */
+		private Config[] baseConfigWithCrt() {
+			Config crtConfig = mock(Config.class);
+
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1"), 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+			when(storageConfig.stringVal("auth-uid")).thenReturn("access");
+			when(storageConfig.stringVal("auth-secret")).thenReturn("secret");
+			when(storageConfig.stringVal("region")).thenReturn("us-east-1");
+			when(storageConfig.configVal("crt")).thenReturn(crtConfig);
+
+			return new Config[]{storageConfig, crtConfig};
+		}
+
+		@Test
+		void crtConfigMissing_fallsBackToDefaults_andCreatesDriver() throws Exception {
+			// Given: storageConfig with no CRT section at all
+			Config nodeConfig = mockNodeConfig(List.of("10.0.0.1"), 8333);
+			Config netConfig = mockNetConfig(nodeConfig, null);
+			Config storageConfig = mockStorageConfig(netConfig);
+			when(storageConfig.stringVal("auth-uid")).thenReturn("access");
+			when(storageConfig.stringVal("auth-secret")).thenReturn("secret");
+			when(storageConfig.stringVal("region")).thenReturn("us-east-1");
+			when(storageConfig.configVal("crt"))
+							.thenThrow(new RuntimeException("no crt config"));
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			// create() should succeed past CRT config parsing using hardcoded
+			// fallback defaults. It may fail later (CRT native lib, driver
+			// constructor needing parent-class config) — that is acceptable.
+			try {
+				factory.create("step-1", null, storageConfig, false, 1);
+			} catch (IllegalConfigurationException e) {
+				// IllegalConfigurationException from our code means config parsing
+				// itself failed — that must not happen for missing CRT keys.
+				assertFalse(e.getMessage().contains("crt"),
+								"Should not fail on CRT config parsing: " + e.getMessage());
+			} catch (Exception e) {
+				// Other exceptions (NPE from driver constructor, CRT native lib
+				// missing, etc.) are acceptable — not a CRT config problem.
+			}
+		}
+
+		@Test
+		void customCrtValues_areReadFromConfig() throws Exception {
+			Config[] configs = baseConfigWithCrt();
+			Config storageConfig = configs[0];
+			Config crtConfig = configs[1];
+
+			when(crtConfig.doubleVal("targetThroughputGbps")).thenReturn(20.0);
+			when(crtConfig.longVal("minimumPartSizeBytes")).thenReturn(16L * 1024 * 1024);
+			when(crtConfig.intVal("maxConcurrency")).thenReturn(1024);
+			when(crtConfig.longVal("partSizeBytes")).thenReturn(16L * 1024 * 1024);
+			when(crtConfig.longVal("smallObjectThresholdBytes")).thenReturn(128L * 1024);
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			// Verify each config path is actually read by the factory
+			try {
+				factory.create("step-1", null, storageConfig, false, 1);
+			} catch (Exception ignored) {
+				// CRT native lib may not be available
+			}
+
+			// If these paths were not read, the mock would not have been invoked.
+			verify(crtConfig).doubleVal("targetThroughputGbps");
+			verify(crtConfig).longVal("minimumPartSizeBytes");
+			verify(crtConfig).intVal("maxConcurrency");
+			verify(crtConfig).longVal("partSizeBytes");
+			verify(crtConfig).longVal("smallObjectThresholdBytes");
+		}
+
+		@Test
+		void partialCrtConfig_usesDefaultsForMissingKeys() throws Exception {
+			Config[] configs = baseConfigWithCrt();
+			Config storageConfig = configs[0];
+			Config crtConfig = configs[1];
+
+			// Only provide maxConcurrency; others throw (simulating missing keys)
+			when(crtConfig.intVal("maxConcurrency")).thenReturn(256);
+			when(crtConfig.doubleVal("targetThroughputGbps"))
+							.thenThrow(new RuntimeException("missing"));
+			when(crtConfig.longVal("minimumPartSizeBytes"))
+							.thenThrow(new RuntimeException("missing"));
+			when(crtConfig.longVal("partSizeBytes"))
+							.thenThrow(new RuntimeException("missing"));
+			when(crtConfig.longVal("smallObjectThresholdBytes"))
+							.thenThrow(new RuntimeException("missing"));
+
+			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
+
+			// Should not throw a CRT config-related error; missing keys fall back.
+			// It may fail later (CRT native lib, driver constructor) — acceptable.
+			try {
+				factory.create("step-1", null, storageConfig, false, 1);
+			} catch (IllegalConfigurationException e) {
+				assertFalse(e.getMessage().contains("crt"),
+								"Should not fail on CRT config parsing: " + e.getMessage());
+			} catch (Exception e) {
+				// Other exceptions are acceptable — not a CRT config problem.
+			}
+
+			// maxConcurrency was provided and should have been read
+			verify(crtConfig).intVal("maxConcurrency");
+		}
 	}
 }

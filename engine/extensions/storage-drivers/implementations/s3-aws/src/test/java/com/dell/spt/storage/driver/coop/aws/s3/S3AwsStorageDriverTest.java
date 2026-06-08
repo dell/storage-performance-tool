@@ -18,6 +18,7 @@ import com.dell.spt.base.storage.driver.ListOptions;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Nested;
@@ -40,18 +41,16 @@ import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 import software.amazon.awssdk.core.ResponseInputStream;
 
 import java.io.ByteArrayInputStream;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -114,6 +113,29 @@ public class S3AwsStorageDriverTest {
 		setS3Client(drv, mockS3Client);
 		setBucketName(drv, "test-bucket");
 		setExecutors(drv);
+	}
+
+	@AfterEach
+	void tearDown() throws Exception {
+		if (drv != null) {
+			shutdownExecutors(drv);
+		}
+	}
+
+	private void shutdownExecutors(S3AwsStorageDriver<Item, Operation<Item>> driver) throws Exception {
+		Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
+		executorField.setAccessible(true);
+		ExecutorService exec = (ExecutorService) executorField.get(driver);
+		if (exec != null) {
+			exec.shutdownNow();
+		}
+
+		Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
+		uploadExecutorField.setAccessible(true);
+		ExecutorService uploadExec = (ExecutorService) uploadExecutorField.get(driver);
+		if (uploadExec != null) {
+			uploadExec.shutdownNow();
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -2405,7 +2427,7 @@ public class S3AwsStorageDriverTest {
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 64 * 1024L, 8 * 1024 * 1024L);
 
 			// Act: Call the close method on the driver
 			driver.close();

@@ -616,27 +616,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			dataItem.position(0);
 			try {
 				final long size = dataItem.size();
-
-				if (size <= smallObjectThresholdBytes) {
-					// Use DataItemInputStream for small objects
-					LOG.trace(
-									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
-									size, smallObjectThresholdBytes, partSizeBytes);
-					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-									.thenApply(response -> null);
-				} else {
-					LOG.trace(
-									"Streaming large object upload, size={}B, threshold={}B, partSize={}B",
-									size, smallObjectThresholdBytes, partSizeBytes);
-					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-									.thenApply(response -> null);
-				}
+				// TODO: use smallObjectThresholdBytes / partSizeBytes to select different
+				//  upload strategies (e.g. byte-buffer for small objects, multipart for large).
+				LOG.trace(
+								"Streaming object upload, size={}B, threshold={}B, partSize={}B",
+								size, smallObjectThresholdBytes, partSizeBytes);
+				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+				return s3AsyncClient.putObject(
+								reqBuilder.build(),
+								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
+								.thenApply(response -> null);
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}

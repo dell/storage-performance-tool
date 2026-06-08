@@ -136,7 +136,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			LOG.debug("Could not read storage.crt.partSizeBytes from config, using default: {}", partSizeBytes);
 		}
 
-		long smallObjectThresholdBytes = 100 * 1024L;
+		long smallObjectThresholdBytes = 64 * 1024L;  // must match defaults-storage-s3-aws.yaml
 		try {
 			smallObjectThresholdBytes = storageConfig.configVal("crt").longVal("smallObjectThresholdBytes");
 		} catch (Exception e) {
@@ -159,8 +159,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 
 		// Note: partSizeBytes is used for driver-level multipart decisions
 		// The CRT manages part size internally based on minimumPartSizeInBytes
-		// Note: Connection pool settings (maxConcurrentRequestStreams, timeouts) are 
-		// configured at the CRT native level and not exposed in the Java builder API
 
 		S3AsyncClient s3AsyncClient = crtBuilder.build();
 

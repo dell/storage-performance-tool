@@ -20,36 +20,11 @@ storage:
       tags: map
     versioning: boolean
   crt:
-    # Size thresholds for object classification
-    optimizeForSmallObjects: boolean
-    smallObjectThresholdBytes: long
-    mediumObjectThresholdBytes: long
-    largeObjectThresholdBytes: long
-
     # CRT performance parameters
     targetThroughputGbps: double
     minimumPartSizeBytes: long
     maxConcurrency: int
-    maxConcurrentRequestStreams: int
 
-    # Connection pool settings
-    connectionTimeoutMs: int
-    connectionAcquisitionTimeoutMs: int
-    connectionMaxIdleTimeMs: int
-    connectionTimeToLiveMs: int
-    socketTimeoutMs: int
-
-    # Threading configuration
-    useVirtualThreads: boolean
-    smallObjectThreadCount: int
-
-    # Buffer configuration
-    byteBufferThresholdBytes: long
-    readBufferSizeBytes: int
-
-    # Adaptive tuning
-    enableAdaptiveTuning: boolean
-    adaptiveTuningIntervalSeconds: long
-
-    # Legacy parameters (kept for backward compatibility)
+    # Upload thresholds (reserved for future per-size upload strategies)
+    smallObjectThresholdBytes: long
     partSizeBytes: long
