@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/spf13/cobra"
 )
 
-func TestReplayCommandRejectsMultiHostLaunchForNow(t *testing.T) {
+func TestReplayCommandWiresMultiHostOrchestratorFlags(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
@@ -38,18 +39,73 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
+	connectErr := errors.New("stop after replay orchestrator wiring")
+	var capturedHosts []*hostparse.HostInfo
+	var capturedMinHosts int
+	var capturedRMIConfig tui.RMIConfig
+	var capturedAttachExisting bool
+	var factoryCalled bool
+	var connectCalled bool
+	origMultiHostFactory := newReplayMultiHostOrchestrator
+	origConnect := connectReplayOrchestrator
+	t.Cleanup(func() {
+		newReplayMultiHostOrchestrator = origMultiHostFactory
+		connectReplayOrchestrator = origConnect
+	})
+	newReplayMultiHostOrchestrator = func(hostInfos []*hostparse.HostInfo, minHosts int, rmiConfig tui.RMIConfig) *tui.MultiHostOrchestrator {
+		factoryCalled = true
+		capturedHosts = append([]*hostparse.HostInfo(nil), hostInfos...)
+		capturedMinHosts = minHosts
+		capturedRMIConfig = rmiConfig
+		return origMultiHostFactory(hostInfos, minHosts, rmiConfig)
+	}
+	connectReplayOrchestrator = func(_ context.Context, orchestrator *tui.MultiHostOrchestrator) error {
+		connectCalled = true
+		capturedAttachExisting = orchestrator.AttachExistingWorkersEnabled()
+		return connectErr
+	}
+
+	var out bytes.Buffer
 	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(&out)
 	cmd.SetArgs([]string{
 		"--from", server.URL,
 		"--endpoints", "http://10.0.0.1:9020",
-		"--test-hosts", "127.0.0.1,127.0.0.2",
+		"--test-hosts", "qa-entry-01,qa-worker-01",
+		"--min-hosts", "1",
+		"--attach-existing",
+		"--network-mode", "bridge",
+		"--rmi-port-start", "40123",
+		"--rmi-port-count", "7",
+		"--results-dir", t.TempDir(),
 	})
 	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("Execute() error = nil, want multi-host not implemented")
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("Execute() error = %v, want wrapped connect sentinel", err)
 	}
-	if !strings.Contains(err.Error(), "multi-host replay execution is not implemented yet") {
-		t.Fatalf("error = %v", err)
+	if strings.Contains(err.Error(), "multi-host replay execution is not implemented yet") {
+		t.Fatalf("multi-host replay should be accepted before launch, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "RDMA replay launch is not implemented yet") {
+		t.Fatalf("test should not depend on RDMA replay guard, got: %v", err)
+	}
+	if !factoryCalled || !connectCalled {
+		t.Fatalf("factoryCalled=%t connectCalled=%t, want both true", factoryCalled, connectCalled)
+	}
+	if len(capturedHosts) != 2 || capturedHosts[0].Original != "qa-entry-01" || capturedHosts[1].Original != "qa-worker-01" {
+		t.Fatalf("capturedHosts = %+v", capturedHosts)
+	}
+	if capturedMinHosts != 1 {
+		t.Fatalf("minHosts = %d, want 1", capturedMinHosts)
+	}
+	if capturedRMIConfig.NetworkMode != "bridge" || capturedRMIConfig.PortStart != 40123 || capturedRMIConfig.PortCount != 7 {
+		t.Fatalf("RMI config = %+v, want bridge/40123/7", capturedRMIConfig)
+	}
+	if !capturedAttachExisting {
+		t.Fatal("attach-existing was not applied to replay orchestrator")
+	}
+	if !strings.Contains(out.String(), "Multi-host replay: 2 hosts, minimum required: 1") {
+		t.Fatalf("output missing multi-host summary:\n%s", out.String())
 	}
 }
 
@@ -116,6 +172,15 @@ func TestReplayBaseURL(t *testing.T) {
 				{Host: "127.0.0.1", IsLocal: true, Original: "127.0.0.1"},
 			},
 			want: "http://localhost:10080",
+		},
+		{
+			name: "multi host uses entry host",
+			port: "10080",
+			hosts: []*hostparse.HostInfo{
+				{Host: "qa-entry-01", IsLocal: false, Original: "qa-entry-01"},
+				{Host: "qa-worker-01", IsLocal: false, Original: "qa-worker-01"},
+			},
+			want: "http://qa-entry-01:10080",
 		},
 		{
 			name:  "no hosts",
@@ -369,6 +434,11 @@ func newReplayCommandForTest(t *testing.T) *cobra.Command {
 	cmd.Flags().Int("auto-terminate-seconds", 0, "")
 	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().String("api-port", "", "")
+	cmd.Flags().Int("min-hosts", 0, "")
+	cmd.Flags().Bool(flagAttachExistingWorkers, false, "")
+	cmd.Flags().String("network-mode", "host", "")
+	cmd.Flags().Int("rmi-port-start", 40000, "")
+	cmd.Flags().Int("rmi-port-count", 10, "")
 	cmd.Flags().Bool(flagSkipImagePull, false, "")
 	cmd.Flags().String(flagSptImage, "", "")
 	cmd.Flags().String("trace-file", "", "")

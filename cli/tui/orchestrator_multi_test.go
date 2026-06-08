@@ -626,6 +626,86 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_SingleHostPostsProvidedA
 	}
 }
 
+func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistributedAndPostsProvidedArtifacts(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:"+constants.RMIRegistryPort)
+	if err != nil {
+		t.Skipf("unable to bind local RMI port for test: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	var postedScenario string
+	var postedDefaults string
+	srv := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+
+	hostInfos := []*hostparse.HostInfo{
+		{Host: host, IsLocal: true, Original: "entry"},
+		{Host: host, IsLocal: true, Original: "worker1"},
+	}
+
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetAPIPort(port)
+	orchestrator.detectAdvIP = func(_ context.Context, _ *hostparse.HostInfo) (string, error) {
+		return "127.0.0.1", nil
+	}
+
+	entryDM := NewMockDockerManager()
+	workerDM := NewMockDockerManager()
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].SetStatus(HostStatusReady)
+	orchestrator.hosts[1].DockerManager = workerDM
+
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(
+		func(*TestStatus) {},
+		func(*MultiNodeMetricsUpdate) {},
+		func(string) {},
+		func(string) {},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	replayScenario := []byte(`var step = "replay-001-max-w10kb"; Load.config({}).run();`)
+	replayDefaults := []byte("storage:\n  driver:\n    type: s3\n")
+	params := scenario.ScenarioParams{WorkloadType: "write", Threads: 1}
+	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
+		t.Fatalf("StartTestWithContent() error = %v", err)
+	}
+	defer func() { _ = wrapper.StopTest() }()
+
+	if postedScenario != string(replayScenario) {
+		t.Fatalf("posted scenario mismatch:\n%s", postedScenario)
+	}
+	if postedDefaults != string(replayDefaults) {
+		t.Fatalf("posted defaults mismatch:\n%s", postedDefaults)
+	}
+
+	workerCalls := workerDM.GetWorkerNodeCalls()
+	if len(workerCalls) != 1 {
+		t.Fatalf("expected one worker node start, got %d", len(workerCalls))
+	}
+	if workerCalls[0].RMIHostname != "127.0.0.1" {
+		t.Fatalf("worker RMI hostname = %q, want 127.0.0.1", workerCalls[0].RMIHostname)
+	}
+
+	entryCalls := entryDM.GetEntryNodeCalls()
+	if len(entryCalls) != 1 {
+		t.Fatalf("expected one entry node start, got %d", len(entryCalls))
+	}
+	wantWorkerAddr := "127.0.0.1:" + constants.RMIRegistryPort
+	if len(entryCalls[0].WorkerAddresses) != 1 || entryCalls[0].WorkerAddresses[0] != wantWorkerAddr {
+		t.Fatalf("entry worker addresses = %v, want [%s]", entryCalls[0].WorkerAddresses, wantWorkerAddr)
+	}
+	if orchestrator.hosts[0].APIClient == nil {
+		t.Fatal("expected entry API client to be attached after readiness")
+	}
+	if !orchestrator.hosts[0].IsManaged() || !orchestrator.hosts[1].IsManaged() {
+		t.Fatal("expected entry and worker containers to be marked managed")
+	}
+}
+
 func newSingleHostReplayAPIServer(t *testing.T, postedScenario, postedDefaults *string) *httptest.Server {
 	t.Helper()
 	var mu sync.Mutex

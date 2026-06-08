@@ -1494,109 +1494,43 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		if err != nil {
 			return err
 		}
-
-		// Wait for APIs to be ready on all running hosts (ensures API clients set)
-		if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
-			return fmt.Errorf("failed waiting for APIs after distributed start: %w", err)
-		}
-
-		if m.onMetrics != nil {
-			if baseline := m.BuildBaselineUpdate(); baseline != nil {
-				m.onMetrics(baseline)
-			}
-		}
-
-		if len(m.multiHost.hosts) > 0 {
-			if entry := m.multiHost.hosts[0]; entry != nil && entry.APIClient != nil {
-				entry.APIClient.LogReadySnapshot("pre-start")
-			}
-		}
-
-		// Start the distributed test via the entry node API (first host is entry)
-		if len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0].APIClient == nil {
-			return fmt.Errorf("entry node API client not initialized")
-		}
 		defaultsContent, derr := scenario.GenerateDefaults(params)
 		if derr != nil {
 			return fmt.Errorf("failed to generate defaults: %w", derr)
 		}
-		if m.onOutput != nil {
-			m.onOutput("Starting test via entry node API...")
-		}
-		runID, serr := m.multiHost.hosts[0].APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
-		if serr != nil {
-			return fmt.Errorf("failed to start test via entry node API: %w", serr)
-		}
-		if m.onOutput != nil {
-			m.onOutput(fmt.Sprintf("Distributed test started with run ID: %s", runID))
-		}
-
-		// Start metrics polling for multi-host test
-		m.StartMetricsPolling(ctx)
-
-		// Start entry-node log relay
-		if len(m.multiHost.hosts) > 0 {
-			entry := m.multiHost.hosts[0]
-			if entry != nil && entry.DockerManager != nil && entry.ContainerID != "" {
-				var relay *EntryLogRelay
-				mode := ""
-				// Determine fetcher based on underlying DockerManager flavor
-				if dm, ok := entry.DockerManager.(*DockerManager); ok {
-					if dm.client != nil {
-						// Local SDK streaming
-						fetcher := newSDKLogFetcher(dm, entry.ContainerID)
-						relay = NewEntryLogRelay(fetcher, true, 0)
-						mode = entryLogRelayModeStream
-					} else if dm.remote != nil {
-						// Remote CLI polling with --since and --timestamps
-						fetcher := newRemoteLogFetcher(dm.remote.ops, entry.ContainerID)
-						relay = NewEntryLogRelay(fetcher, false, constants.APIPollingTimeout)
-						mode = entryLogRelayModePoll
-					}
-				}
-				if relay != nil {
-					// Log relay start for troubleshooting
-					if m.multiHost != nil && len(m.multiHost.hosts) > 0 {
-						logging.LogInfo("entry-log-relay", "starting entry log relay",
-							"host", m.multiHost.hosts[0].Info.Original,
-							"mode", mode)
-					}
-					sink := m.messageSink
-					if sink == nil {
-						// fallback: use notifier if set; otherwise, onOutput
-						sink = func(s string) {
-							if m.multiHost != nil && m.multiHost.notifier != nil {
-								m.multiHost.notifier(s)
-								return
-							}
-							if m.onOutput != nil {
-								m.onOutput(s)
-							}
-						}
-					}
-					relay.Start(ctx, sink)
-					m.entryRelay = relay
-				}
-			}
-		}
-
-		return nil
+		return m.startEntryAPIRun(ctx, []byte(m.multiHost.scenarioContent), defaultsContent, "Distributed test")
 	}
 }
 
-// StartTestWithContent starts a single-host test using caller-provided scenario
-// and defaults content. Multi-host replay content support is intentionally
-// deferred until the distributed RMI replay path is implemented.
-func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, image string, _ scenario.ScenarioParams, scenarioContent, defaultsContent []byte) error {
+// StartTestWithContent starts a test using caller-provided scenario and
+// defaults content.
+func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent, defaultsContent []byte) error {
 	readyHosts := m.multiHost.GetReadyHosts()
 	if len(readyHosts) == 0 {
 		return fmt.Errorf("no ready hosts available to start tests")
 	}
-	if len(readyHosts) != 1 {
-		return fmt.Errorf("provided scenario content for multi-host replay is not implemented yet")
-	}
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
+	}
+	if len(readyHosts) != 1 {
+		if m.onStatusUpdate != nil {
+			m.onStatusUpdate(&TestStatus{
+				State:   constants.StateRunning,
+				Message: fmt.Sprintf("Multi-host distributed replay running on %d hosts", len(readyHosts)),
+			})
+		}
+		if m.onOutput != nil {
+			hostList := make([]string, len(readyHosts))
+			for i, host := range readyHosts {
+				hostList[i] = host.Info.Original
+			}
+			m.onOutput(fmt.Sprintf("Starting distributed replay on hosts: %s", strings.Join(hostList, ", ")))
+		}
+
+		if err := m.multiHost.StartDistributedTestWithContent(ctx, image, params, scenarioContent); err != nil {
+			return err
+		}
+		return m.startEntryAPIRun(ctx, scenarioContent, defaultsContent, "Distributed replay")
 	}
 
 	host := readyHosts[0]
@@ -1643,6 +1577,44 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	}
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("Single-host test started with run ID: %s", runID))
+	}
+
+	m.StartMetricsPolling(ctx)
+	m.startEntryLogRelay(ctx)
+	return nil
+}
+
+func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, scenarioContent, defaultsContent []byte, runLabel string) error {
+	// Wait for APIs to be ready on all running hosts (ensures API clients set)
+	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+		return fmt.Errorf("failed waiting for APIs after distributed start: %w", err)
+	}
+
+	if m.onMetrics != nil {
+		if baseline := m.BuildBaselineUpdate(); baseline != nil {
+			m.onMetrics(baseline)
+		}
+	}
+
+	if len(m.multiHost.hosts) > 0 {
+		if entry := m.multiHost.hosts[0]; entry != nil && entry.APIClient != nil {
+			entry.APIClient.LogReadySnapshot("pre-start")
+		}
+	}
+
+	// Start the distributed test via the entry node API (first host is entry)
+	if len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0].APIClient == nil {
+		return fmt.Errorf("entry node API client not initialized")
+	}
+	if m.onOutput != nil {
+		m.onOutput("Starting test via entry node API...")
+	}
+	runID, err := m.multiHost.hosts[0].APIClient.StartTest(scenarioContent, defaultsContent)
+	if err != nil {
+		return fmt.Errorf("failed to start test via entry node API: %w", err)
+	}
+	if m.onOutput != nil {
+		m.onOutput(fmt.Sprintf("%s started with run ID: %s", runLabel, runID))
 	}
 
 	m.StartMetricsPolling(ctx)
@@ -1866,7 +1838,21 @@ func (o *MultiHostOrchestrator) startEntryNode(
 }
 
 // StartDistributedTest starts a distributed test using RMI coordination
-func (o *MultiHostOrchestrator) StartDistributedTest(_ context.Context, image string, params scenario.ScenarioParams) error {
+func (o *MultiHostOrchestrator) StartDistributedTest(ctx context.Context, image string, params scenario.ScenarioParams) error {
+	scenarioContent, err := scenario.GenerateScenario(params)
+	if err != nil {
+		return fmt.Errorf("failed to generate scenario: %w", err)
+	}
+	return o.StartDistributedTestWithContent(ctx, image, params, []byte(scenarioContent))
+}
+
+// StartDistributedTestWithContent starts the RMI entry/worker topology with
+// caller-provided scenario content for later API submission.
+func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Context, image string, params scenario.ScenarioParams, scenarioContent []byte) error {
+	if len(scenarioContent) == 0 {
+		return fmt.Errorf("scenario content is empty")
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -1885,14 +1871,8 @@ func (o *MultiHostOrchestrator) StartDistributedTest(_ context.Context, image st
 		"entry_node", entryNode.Info.Host,
 		"worker_count", len(workerNodes))
 
-	// 2. Generate scenario content (will be sent via API, not mounted as file)
-	scenarioContent, err := scenario.GenerateScenario(params)
-	if err != nil {
-		return fmt.Errorf("failed to generate scenario: %w", err)
-	}
-
-	// Store scenario content for API submission - no file creation needed
-	o.scenarioContent = scenarioContent
+	// 2. Store scenario content for API submission - no file creation needed
+	o.scenarioContent = string(scenarioContent)
 
 	// 3. Start worker nodes first (they need to be ready for entry node)
 	if len(workerNodes) > 0 {

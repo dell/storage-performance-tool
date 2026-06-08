@@ -36,6 +36,14 @@ var replayCmd = &cobra.Command{
 	RunE: runReplay,
 }
 
+var (
+	newReplaySingleHostOrchestrator = tui.NewMultiHostOrchestrator
+	newReplayMultiHostOrchestrator  = tui.NewMultiHostOrchestratorWithRMI
+	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
+		return orchestrator.ConnectHosts(ctx)
+	}
+)
+
 func runReplay(cmd *cobra.Command, _ []string) error {
 	generateOnly, _ := cmd.Flags().GetBool("generate-only")
 	sourceURL, _ := cmd.Flags().GetString("from")
@@ -84,10 +92,23 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid test hosts: %w", err)
 	}
-	if len(hostInfos) > 1 {
-		return fmt.Errorf("multi-host replay execution is not implemented yet; set --test-hosts to a single host or use --generate-only")
+	minHosts, _ := cmd.Flags().GetInt("min-hosts")
+	if minHosts == 0 {
+		minHosts = len(hostInfos)
+	}
+	if minHosts < 1 {
+		return fmt.Errorf("min-hosts must be at least 1")
+	}
+	if minHosts > len(hostInfos) {
+		return fmt.Errorf("min-hosts (%d) cannot exceed total hosts (%d)", minHosts, len(hostInfos))
+	}
+	attachExisting, _ := cmd.Flags().GetBool(flagAttachExistingWorkers)
+	if attachExisting && len(hostInfos) < 2 {
+		return fmt.Errorf("--%s requires at least two hosts (entry + worker)", flagAttachExistingWorkers)
 	}
 	remoteSingleHost := len(hostInfos) == 1 && !hostInfos[0].IsLocal
+	multiHostReplay := len(hostInfos) > 1
+	orchestratedReplay := remoteSingleHost || multiHostReplay
 
 	resultsOpts := buildResultsOptions(cmd)
 	runToken := time.Now().UTC().Format("20060102.150405.000")
@@ -129,7 +150,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(out, "Using AWS SDK S3 driver (s3-aws).")
 	}
 
-	if !remoteSingleHost {
+	if !orchestratedReplay {
 		if err := checkPortConflicts(cmd); err != nil {
 			return err
 		}
@@ -137,19 +158,38 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 	sptImage := constants.EffectiveSptImage()
 	apiPort := getAPIPort(cmd)
-	var remoteOrchestrator *tui.MultiHostOrchestrator
-	if remoteSingleHost {
-		_, _ = fmt.Fprintf(out, "Replay host: %s\n", hostInfos[0].Original)
-		remoteOrchestrator = tui.NewMultiHostOrchestrator(hostInfos, 1)
-		remoteOrchestrator.SetNotifier(func(msg string) {
+	networkMode, _ := cmd.Flags().GetString("network-mode")
+	rmiPortStart, _ := cmd.Flags().GetInt("rmi-port-start")
+	rmiPortCount, _ := cmd.Flags().GetInt("rmi-port-count")
+	var replayOrchestrator *tui.MultiHostOrchestrator
+	if orchestratedReplay {
+		if multiHostReplay {
+			if networkMode == constants.BridgeNetworkMode {
+				_, _ = fmt.Fprintln(out, "WARNING: Bridge networking may not work for distributed replay; Java RMI requires host networking for inter-node communication.")
+			}
+			_, _ = fmt.Fprintf(out, "Multi-host replay: %d hosts, minimum required: %d\n", len(hostInfos), minHosts)
+			if attachExisting {
+				_, _ = fmt.Fprintln(out, "Attach mode enabled: expecting worker nodes prestarted with --run-node; replay will launch the entry node.")
+			}
+			replayOrchestrator = newReplayMultiHostOrchestrator(hostInfos, minHosts, tui.RMIConfig{
+				NetworkMode: networkMode,
+				PortStart:   rmiPortStart,
+				PortCount:   rmiPortCount,
+			})
+			replayOrchestrator.SetAttachExistingWorkers(attachExisting)
+		} else {
+			_, _ = fmt.Fprintf(out, "Replay host: %s\n", hostInfos[0].Original)
+			replayOrchestrator = newReplaySingleHostOrchestrator(hostInfos, 1)
+		}
+		replayOrchestrator.SetNotifier(func(msg string) {
 			_, _ = fmt.Fprintln(out, msg)
 		})
-		remoteOrchestrator.SetImage(sptImage)
-		remoteOrchestrator.SetAPIPort(apiPort)
+		replayOrchestrator.SetImage(sptImage)
+		replayOrchestrator.SetAPIPort(apiPort)
 		forceMode, _ := cmd.Flags().GetBool("force")
-		remoteOrchestrator.SetForceCleanup(forceMode)
-		if err := remoteOrchestrator.ConnectHosts(context.Background()); err != nil {
-			return fmt.Errorf("failed to connect to replay host: %w", err)
+		replayOrchestrator.SetForceCleanup(forceMode)
+		if err := connectReplayOrchestrator(context.Background(), replayOrchestrator); err != nil {
+			return fmt.Errorf("failed to connect to replay host(s): %w", err)
 		}
 	}
 
@@ -175,7 +215,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		ResultsOptions:       resultsOpts,
 		HostInfos:            hostInfos,
 		TestHostsRaw:         testHosts,
-		MinHosts:             len(hostInfos),
+		MinHosts:             minHosts,
+		AttachExisting:       attachExisting,
+		NetworkMode:          networkMode,
+		RMIPortStart:         rmiPortStart,
+		RMIPortCount:         rmiPortCount,
 		APIPort:              apiPort,
 		BaseURL:              baseURL,
 		ExpectedStepIDs:      replayStepIDs(generated),
@@ -220,7 +264,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if remoteSingleHost {
+	if orchestratedReplay {
 		startReplayAutoResults()
 		if headlessMode {
 			verbose, _ := cmd.Flags().GetBool("verbose")
@@ -229,7 +273,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			if autoTerminate > 0 {
 				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
-			err := headless.StartHeadlessModeWithOrchestratorContent(remoteOrchestrator, sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
+			err := headless.StartHeadlessModeWithOrchestratorContent(replayOrchestrator, sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				finalizeTraceArtifact()
 				return err
@@ -239,23 +283,27 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				if !autoResultsOK {
 					logging.GetLogger().Warn("Timed out waiting for replay auto-results; forcing remote container cleanup")
 				}
-				if stopErr := cleanupReplayContainers(remoteOrchestrator, 30*time.Second); stopErr != nil {
-					logging.GetLogger().Error("Failed to clean up remote replay container", "error", stopErr.Error())
+				if stopErr := cleanupReplayContainers(replayOrchestrator, 30*time.Second); stopErr != nil {
+					logging.GetLogger().Error("Failed to clean up replay containers", "error", stopErr.Error())
 				}
 			}
 			finalizeTraceArtifact()
 			return err
 		}
 
-		_, _ = fmt.Fprintln(out, "Starting remote-host TUI...")
+		if multiHostReplay {
+			_, _ = fmt.Fprintln(out, "Starting multi-host replay TUI...")
+		} else {
+			_, _ = fmt.Fprintln(out, "Starting remote-host TUI...")
+		}
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err := tui.StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(remoteOrchestrator, sptImage, paths.Scenario, params, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+			err := tui.StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(replayOrchestrator, sptImage, paths.Scenario, params, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 			waitForAutoResults()
 			finalizeTraceArtifact()
 			return err
 		}
-		err = tui.StartTUIWithMultiHostOrchestratorContentWithTrace(remoteOrchestrator, sptImage, paths.Scenario, params, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+		err = tui.StartTUIWithMultiHostOrchestratorContentWithTrace(replayOrchestrator, sptImage, paths.Scenario, params, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 		waitForAutoResults()
 		finalizeTraceArtifact()
 		return err
@@ -305,6 +353,9 @@ func cleanupReplayContainers(cleaner replayContainerCleaner, timeout time.Durati
 }
 
 func replayBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
+	if len(hosts) > 1 && hosts[0] != nil {
+		return hosts[0].GetAPIURL(apiPort)
+	}
 	if len(hosts) == 1 && hosts[0] != nil && !hosts[0].IsLocal {
 		return hosts[0].GetAPIURL(apiPort)
 	}
@@ -380,6 +431,11 @@ func init() {
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
 	replayCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
 	replayCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999)")
+	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
+	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")
+	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
+	replayCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
+	replayCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")
 	replayCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
