@@ -191,13 +191,47 @@ func TestConvertJSONRejectsUnresolvedLimitVariable(t *testing.T) {
 	}
 }
 
-func TestConvertJSONRejectsUnsupportedCommand(t *testing.T) {
+func TestConvertJSONConvertsSafeFileCommand(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
   "config": {"storage": {"driver": {"type": "s3"}}},
   "steps": [
     {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}}},
     {"type": "command", "value": "cd ${MONGOOSE_DIR}/log/MAX-W10KB ; split -l 5 items.csv; mv items.csv items.csv.1; mv xaa items.csv", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`runReplayProcess("split", ["-l", "5", "items.csv"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create");`,
+		`runReplayProcess("mv", ["items.csv", "items.csv.1"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create");`,
+		`runReplayProcess("mv", ["xaa", "items.csv"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create");`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, "/log/MAX-W10KB") {
+		t.Fatalf("scenario retained legacy command path:\n%s", js)
+	}
+	if len(got.PathRewrites) != 1 {
+		t.Fatalf("len(PathRewrites) = %d, want 1", len(got.PathRewrites))
+	}
+}
+
+func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}}},
+    {"type": "command", "value": "rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB", "blocking": true}
   ]
 }`)
 	_, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{

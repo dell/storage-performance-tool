@@ -45,6 +45,8 @@ const (
 	legacyStepTypeParallel     = "parallel"
 	legacyStepTypePrecondition = "precondition"
 
+	legacyMongooseDirVar = "MONGOOSE_DIR"
+
 	legacyKeyConcurrency = "concurrency"
 	legacyKeyCount       = "count"
 	legacyKeyDriver      = "driver"
@@ -58,10 +60,12 @@ const (
 )
 
 var itemFileRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/log/([^/]+)/([^"'\s]+)`)
+var itemDirRe = regexp.MustCompile(`^\$\{MONGOOSE_DIR\}/log/([^/"'\s]+)$`)
 var mongoosePathRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/([^"'\s]+)`)
 var (
 	expandVarRe          = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
 	exprPlaceholderRe    = regexp.MustCompile(`"__SPT_EXPR_([A-Za-z0-9_]+)__"`)
+	safeCommandArgRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 	unsafeExprSentinelRe = regexp.MustCompile(`__SPT_EXPR_[A-Za-z0-9_]+__`)
 )
 
@@ -128,6 +132,20 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	body.WriteString("  if (message) { print(\"[\" + new Date().toISOString() + \"] \" + message); }\n")
 	body.WriteString("  java.lang.Thread.sleep(Number(seconds) * 1000);\n")
 	body.WriteString("}\n\n")
+	body.WriteString("function runReplayProcess(command, args, cwd) {\n")
+	body.WriteString("  var commandLine = new java.util.ArrayList();\n")
+	body.WriteString("  commandLine.add(String(command));\n")
+	body.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
+	body.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
+	body.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
+	body.WriteString("  processBuilder.redirectErrorStream(true);\n")
+	body.WriteString("  var process = processBuilder.start();\n")
+	body.WriteString("  var reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream()));\n")
+	body.WriteString("  var line;\n")
+	body.WriteString("  while ((line = reader.readLine()) !== null) { if (line.length() > 0) { print(line); } }\n")
+	body.WriteString("  var exitCode = process.waitFor();\n")
+	body.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
+	body.WriteString("}\n\n")
 
 	loadStepNumber := 0
 	waitNumber := 0
@@ -147,13 +165,24 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			body.WriteString("\n")
 		case "command":
 			seconds, ok := parseSleepCommand(step.Value, effectiveVars)
-			if !ok {
-				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported command step: %s", step.Value)})
-				fmt.Fprintf(&body, "// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value))
+			if ok {
+				waitNumber++
+				fmt.Fprintf(&body, "pauseSeconds(%d, %s);\n\n", seconds, jsQuote(fmt.Sprintf("Archived wait %d", waitNumber)))
 				continue
 			}
-			waitNumber++
-			fmt.Fprintf(&body, "pauseSeconds(%d, %s);\n\n", seconds, jsQuote(fmt.Sprintf("Archived wait %d", waitNumber)))
+			converted, supported, err := convertCommandStep(step.Value, effectiveVars, archiveToStepID)
+			if err != nil {
+				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
+				continue
+			}
+			if supported {
+				pathRewrites = append(pathRewrites, converted.rewrites...)
+				body.WriteString(converted.js)
+				body.WriteString("\n")
+				continue
+			}
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported command step: %s", step.Value)})
+			fmt.Fprintf(&body, "// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value))
 		case legacyStepTypeParallel:
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: errParallelReplayUnimplemented})
 		default:
@@ -198,6 +227,11 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 type convertedStep struct {
 	js       string
 	summary  StepSummary
+	rewrites []PathRewrite
+}
+
+type convertedCommand struct {
+	js       string
 	rewrites []PathRewrite
 }
 
@@ -441,7 +475,7 @@ func splitCSV(value string) []string {
 func writePreludeVars(b *strings.Builder, vars map[string]string) {
 	keys := make([]string, 0, len(vars))
 	for k := range vars {
-		if isSensitiveName(k) || k == "MONGOOSE_DIR" {
+		if isSensitiveName(k) || k == legacyMongooseDirVar {
 			continue
 		}
 		keys = append(keys, k)
@@ -549,6 +583,135 @@ func parseSleepCommand(value string, vars map[string]string) (int, bool) {
 		return 0, false
 	}
 	return seconds, true
+}
+
+func convertCommandStep(value string, vars map[string]string, archiveToStepID map[string]string) (convertedCommand, bool, error) {
+	expanded := strings.TrimSpace(osExpandPreservingMongooseDir(value, vars))
+	if expanded == "" {
+		return convertedCommand{}, false, nil
+	}
+	if missing := unresolvedCommandVars(expanded); len(missing) > 0 {
+		return convertedCommand{}, true, fmt.Errorf("command step has unresolved variable %s", missing[0])
+	}
+	segments := splitCommandSegments(expanded)
+	if len(segments) == 0 {
+		return convertedCommand{}, false, nil
+	}
+
+	cwdExpr := "sptHomeDir"
+	var rewrites []PathRewrite
+	firstFields := strings.Fields(segments[0])
+	if len(firstFields) > 0 && firstFields[0] == "cd" {
+		if len(firstFields) != 2 {
+			return convertedCommand{}, true, fmt.Errorf("unsupported command working directory: %s", segments[0])
+		}
+		expr, rewrite, hasRewrite, err := commandWorkDirExpr(firstFields[1], archiveToStepID)
+		if err != nil {
+			return convertedCommand{}, true, err
+		}
+		cwdExpr = expr
+		if hasRewrite {
+			rewrites = append(rewrites, rewrite)
+		}
+		segments = segments[1:]
+	}
+	if len(segments) == 0 {
+		return convertedCommand{}, false, nil
+	}
+
+	var b strings.Builder
+	for _, segment := range segments {
+		fields := strings.Fields(segment)
+		if len(fields) == 0 {
+			continue
+		}
+		if !isAllowedReplayCommand(fields[0]) {
+			return convertedCommand{}, false, nil
+		}
+		args := fields[1:]
+		for _, arg := range args {
+			if !isSafeReplayCommandArg(arg) {
+				return convertedCommand{}, true, fmt.Errorf("unsupported command argument %q in step: %s", arg, value)
+			}
+		}
+		fmt.Fprintf(&b, "runReplayProcess(%s, [%s], %s);\n", jsQuote(fields[0]), jsArray(args), cwdExpr)
+	}
+	if b.Len() == 0 {
+		return convertedCommand{}, false, nil
+	}
+	return convertedCommand{js: b.String(), rewrites: rewrites}, true, nil
+}
+
+func splitCommandSegments(value string) []string {
+	raw := strings.Split(value, ";")
+	segments := make([]string, 0, len(raw))
+	for _, segment := range raw {
+		segment = strings.TrimSpace(segment)
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+	}
+	return segments
+}
+
+func unresolvedCommandVars(value string) []string {
+	var missing []string
+	matches := expandVarRe.FindAllStringSubmatch(value, -1)
+	for _, match := range matches {
+		if len(match) != 2 || match[1] == legacyMongooseDirVar {
+			continue
+		}
+		missing = append(missing, match[1])
+	}
+	return missing
+}
+
+func commandWorkDirExpr(raw string, archiveToStepID map[string]string) (string, PathRewrite, bool, error) {
+	pathValue := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if pathValue == "" {
+		return "", PathRewrite{}, false, fmt.Errorf("unsupported empty command working directory")
+	}
+	if m := itemDirRe.FindStringSubmatch(pathValue); len(m) == 2 {
+		archiveID := m[1]
+		stepID := archiveToStepID[archiveID]
+		if stepID == "" {
+			return "", PathRewrite{}, false, fmt.Errorf("command step references unknown path label %s", archiveID)
+		}
+		return `sptHomeDir + "/log/" + ` + jsQuote(stepID), PathRewrite{
+			ArchiveID: archiveID,
+			StepID:    stepID,
+			From:      pathValue,
+			To:        "${MONGOOSE_DIR}/log/" + stepID,
+		}, true, nil
+	}
+	if homeRelative, ok := parseMongoosePath(pathValue); ok {
+		return `sptHomeDir + "/` + jsEscape(homeRelative) + `"`, PathRewrite{}, false, nil
+	}
+	return "", PathRewrite{}, false, fmt.Errorf("unsupported command working directory: %s", raw)
+}
+
+func isAllowedReplayCommand(command string) bool {
+	switch command {
+	case "cat", "cp", "mv", "split":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeReplayCommandArg(arg string) bool {
+	if arg == "" || strings.HasPrefix(arg, "/") || strings.Contains(arg, "..") {
+		return false
+	}
+	return safeCommandArgRe.MatchString(arg)
+}
+
+func jsArray(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, jsQuote(value))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
@@ -724,7 +887,7 @@ func itemPathString(v any, vars map[string]string) string {
 
 func osExpandPreservingMongooseDir(s string, vars map[string]string) string {
 	return osExpand(s, func(key string) string {
-		if key == "MONGOOSE_DIR" {
+		if key == legacyMongooseDirVar {
 			return "${MONGOOSE_DIR}"
 		}
 		if vars != nil {
