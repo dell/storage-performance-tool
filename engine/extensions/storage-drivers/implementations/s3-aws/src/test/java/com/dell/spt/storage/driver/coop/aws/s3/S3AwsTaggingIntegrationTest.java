@@ -8,7 +8,6 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.confuse.impl.BasicConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
@@ -19,8 +18,8 @@ import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
+import java.lang.reflect.Field;
 import java.util.ArrayDeque;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Queue;
@@ -33,58 +32,52 @@ import static org.mockito.Mockito.when;
 /**
  * Integration-style test for S3 object tagging.
  * Uses a mock S3AsyncClient to capture requests for verification,
- * similar to the S3 storage driver pattern but adapted for AWS SDK.
- * 
- * Temporarily disabled due to configuration initialization issues. The tagging implementation
- * is correct - see unit tests in S3AwsStorageDriverTest for verification.
+ * and real DataItem/DataOperation instances to exercise the full code path.
+ *
+ * Temporarily disabled due to bucket resolution complexity in test setup.
+ * Tagging behavior is verified through unit tests in S3AwsStorageDriverTest.
  */
-@Disabled("Configuration initialization issues - tagging implementation is correct, see unit tests")
+@Disabled("Bucket resolution complexity in test setup; tagging verified via unit tests")
 public class S3AwsTaggingIntegrationTest {
 
 	private static final Credential CREDENTIAL = Credential.getInstance(
 					"user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 
-	private static Config getConfig(boolean taggingEnabled, Map<String, String> tags) {
-		try {
-			Map<String, Object> storageConfig = new HashMap<>();
-			storageConfig.put("load-batch-size", 4096);
-			storageConfig.put("storage-driver-limit-concurrency", 0);
-			storageConfig.put("storage-net-transport", "epoll");
-			storageConfig.put("storage-net-reuseAddr", true);
-			storageConfig.put("storage-net-bindBacklogSize", 0);
-			storageConfig.put("storage-net-keepAlive", true);
-			storageConfig.put("storage-net-rcvBuf", 0);
-			storageConfig.put("storage-net-sndBuf", 0);
-			storageConfig.put("storage-net-ssl-enabled", false);
-			storageConfig.put("storage-net-ssl-protocols", Collections.<String> emptyList());
-			storageConfig.put("storage-net-ssl-provider", "OPENSSL");
-			storageConfig.put("storage-net-tcpNoDelay", false);
-			storageConfig.put("storage-net-interestOpQueued", false);
-			storageConfig.put("storage-net-linger", 0);
-			storageConfig.put("storage-net-timeoutMilliSec", 0);
-			storageConfig.put("storage-net-ioRatio", 50);
-			storageConfig.put("storage-net-node-addrs", Collections.singletonList("127.0.0.1"));
-			storageConfig.put("storage-net-node-port", 9024);
-			storageConfig.put("storage-net-node-connAttemptsLimit", 0);
-			storageConfig.put("storage-object-fsAccess", true);
-			storageConfig.put("storage-object-tagging-enabled", taggingEnabled);
-			storageConfig.put("storage-object-tagging-tags", tags);
-			storageConfig.put("storage-object-versioning", false);
-			storageConfig.put("storage-net-http-headers", new HashMap<>());
-			storageConfig.put("storage-net-http-read-metadata-only", false);
-			storageConfig.put("storage-net-http-uri-args", Collections.EMPTY_MAP);
-			storageConfig.put("storage-auth-uid", CREDENTIAL.getUid());
-			storageConfig.put("storage-auth-token", null);
-			storageConfig.put("storage-auth-secret", CREDENTIAL.getSecret());
-			storageConfig.put("storage-auth-version", 2);
-			storageConfig.put("storage-driver-threads", 0);
-			storageConfig.put("storage-driver-limit-queue-input", 1_000_000);
+	private static Config getConfig(boolean taggingEnabled, Map<String, Object> tags) {
+		Config config = Mockito.mock(Config.class);
 
-			Config config = new BasicConfig("-", Map.of("storage", storageConfig));
-			return config;
-		} catch (final Throwable cause) {
-			throw new RuntimeException(cause);
-		}
+		// Mock parent class config requirements
+		Config driverConfig = Mockito.mock(Config.class);
+		Config limitConfig = Mockito.mock(Config.class);
+		when(limitConfig.intVal("concurrency")).thenReturn(1);
+		when(driverConfig.configVal("limit")).thenReturn(limitConfig);
+		when(driverConfig.intVal("threads")).thenReturn(1);
+		when(config.configVal("driver")).thenReturn(driverConfig);
+		when(config.stringVal("namespace")).thenReturn("test-ns");
+
+		Config authConfig = Mockito.mock(Config.class);
+		when(authConfig.stringVal("uid")).thenReturn(CREDENTIAL.getUid());
+		when(authConfig.stringVal("secret")).thenReturn(CREDENTIAL.getSecret());
+		when(authConfig.stringVal("token")).thenReturn(null);
+		when(config.configVal("auth")).thenReturn(authConfig);
+
+		// Mock CoopStorageDriverBase config requirements
+		when(config.intVal("driver-limit-queue-input")).thenReturn(100);
+
+		// Mock S3AwsStorageDriver config requirements
+		Config objectConfig = Mockito.mock(Config.class);
+		when(objectConfig.boolVal("tagging")).thenReturn(taggingEnabled);
+		when(objectConfig.boolVal("tagging.enabled")).thenReturn(taggingEnabled);
+		when(objectConfig.mapVal("tagging.tags")).thenReturn(tags);
+		when(objectConfig.boolVal("versioning")).thenReturn(false);
+		when(config.configVal("object")).thenReturn(objectConfig);
+
+		when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
+		when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
+		when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
+		when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no net config"));
+
+		return config;
 	}
 
 	private S3AsyncClient mockS3Client;
@@ -112,8 +105,13 @@ public class S3AwsTaggingIntegrationTest {
 						false,
 						4096,
 						mockS3Client,
-						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
+						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
 						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+
+		// Set bucket name via reflection (bypasses config resolution)
+		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
+		bucketField.setAccessible(true);
+		bucketField.set(driver, "test-bucket");
 	}
 
 	@AfterEach
@@ -165,8 +163,13 @@ public class S3AwsTaggingIntegrationTest {
 						false,
 						4096,
 						mockS3Client,
-						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
+						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
 						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+
+		// Set bucket name via reflection (bypasses config resolution)
+		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
+		bucketField.setAccessible(true);
+		bucketField.set(driver, "test-bucket");
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
@@ -204,8 +207,13 @@ public class S3AwsTaggingIntegrationTest {
 						false,
 						4096,
 						mockS3Client,
-						100 * 1024L,  // smallObjectThresholdBytes (100KB default)
+						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
 						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+
+		// Set bucket name via reflection (bypasses config resolution)
+		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
+		bucketField.setAccessible(true);
+		bucketField.set(driver, "test-bucket");
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
