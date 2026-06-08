@@ -30,10 +30,12 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 		generated = &Generated{}
 	}
 	generated.Artifacts = artifacts
+	generated.Diagnostics = append(generated.Diagnostics, replayWarnings(artifacts, opts)...)
 	if err != nil {
+		generated.MetadataJSON = buildMetadata(generated)
+		generated.Preflight = BuildPreflight(generated, opts)
 		return generated, err
 	}
-	generated.Diagnostics = append(generated.Diagnostics, replayWarnings(artifacts, opts)...)
 
 	localAccess := strings.TrimSpace(opts.AccessKey)
 	localSecret := strings.TrimSpace(opts.SecretKey)
@@ -76,7 +78,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 func replayWarnings(artifacts Artifacts, opts Options) []Diagnostic {
 	warnings := []Diagnostic{{Severity: severityWarning, Message: "converted legacy JSON scenario to JS"}}
 	if strings.HasPrefix(strings.ToLower(artifacts.FolderURL), "http://") {
-		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "source uses unauthenticated HTTP; command operations are limited to recognized replay operations"})
+		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "source uses unauthenticated HTTP"})
 	}
 	if archivedNodes := splitCSV(artifacts.RunScript.StorageNodeAddrs); len(archivedNodes) > 0 && len(opts.Endpoints) > 0 && len(archivedNodes) != len(opts.Endpoints) {
 		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("local endpoint count (%d) differs from archived storage node count (%d); concurrency was not rescaled", len(opts.Endpoints), len(archivedNodes))})
@@ -184,7 +186,27 @@ func BuildPreflight(g *Generated, opts Options) string {
 			fmt.Fprintf(&b, "  %s -> %s\n", rewrite.ArchiveID, rewrite.StepID)
 		}
 	}
-	if len(g.Diagnostics) > 0 {
+	if len(g.CommandOps) > 0 {
+		b.WriteString("\nCommand operations\n")
+		for _, op := range g.CommandOps {
+			fmt.Fprintf(&b, "  - %s: %s", op.Action, safeCommandSummary(op.Command))
+			if strings.TrimSpace(op.Detail) != "" {
+				fmt.Fprintf(&b, " (%s)", op.Detail)
+			}
+			b.WriteByte('\n')
+		}
+	}
+	if hasDiagnosticSeverity(g.Diagnostics, severityError) {
+		b.WriteString("\nErrors\n")
+		for _, d := range g.Diagnostics {
+			if d.Severity == severityError {
+				b.WriteString("  - ")
+				b.WriteString(d.Message)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	if hasDiagnosticSeverity(g.Diagnostics, severityWarning) {
 		b.WriteString("\nWarnings\n")
 		for _, d := range g.Diagnostics {
 			if d.Severity == severityWarning {
@@ -195,6 +217,23 @@ func BuildPreflight(g *Generated, opts Options) string {
 		}
 	}
 	return b.String()
+}
+
+func hasDiagnosticSeverity(diagnostics []Diagnostic, severity string) bool {
+	for _, d := range diagnostics {
+		if d.Severity == severity {
+			return true
+		}
+	}
+	return false
+}
+
+func safeCommandSummary(command string) string {
+	command = strings.TrimSpace(jsLineComment(command))
+	if command == "" {
+		return "<empty>"
+	}
+	return command
 }
 
 func maxConcurrency(steps []StepSummary) int {
@@ -209,15 +248,16 @@ func maxConcurrency(steps []StepSummary) int {
 
 func buildMetadata(g *Generated) []byte {
 	type metadata struct {
-		GeneratedAt     string        `json:"generatedAt"`
-		SourceURL       string        `json:"sourceUrl"`
-		RunScript       string        `json:"runScript"`
-		Scenario        string        `json:"scenario"`
-		ScenarioFormat  string        `json:"scenarioFormat"`
-		EffectiveBucket string        `json:"effectiveBucket"`
-		Steps           []StepSummary `json:"steps"`
-		PathRewrites    []PathRewrite `json:"pathRewrites,omitempty"`
-		Diagnostics     []Diagnostic  `json:"diagnostics,omitempty"`
+		GeneratedAt     string             `json:"generatedAt"`
+		SourceURL       string             `json:"sourceUrl"`
+		RunScript       string             `json:"runScript"`
+		Scenario        string             `json:"scenario"`
+		ScenarioFormat  string             `json:"scenarioFormat"`
+		EffectiveBucket string             `json:"effectiveBucket"`
+		Steps           []StepSummary      `json:"steps"`
+		PathRewrites    []PathRewrite      `json:"pathRewrites,omitempty"`
+		CommandOps      []CommandOperation `json:"commandOperations,omitempty"`
+		Diagnostics     []Diagnostic       `json:"diagnostics,omitempty"`
 	}
 	data, _ := json.MarshalIndent(metadata{
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -228,6 +268,7 @@ func buildMetadata(g *Generated) []byte {
 		EffectiveBucket: g.EffectiveBucket,
 		Steps:           g.Steps,
 		PathRewrites:    g.PathRewrites,
+		CommandOps:      g.CommandOps,
 		Diagnostics:     g.Diagnostics,
 	}, "", "  ")
 	return data

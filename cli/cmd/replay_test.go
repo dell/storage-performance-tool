@@ -295,6 +295,56 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestReplayCommandPrintsPreflightForRejectedCommand(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}},
+    {"type": "command", "value": "rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB", "blocking": true}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	var out bytes.Buffer
+	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--generate-only",
+		"--endpoints", "http://10.0.0.1:9020",
+		"--bucket", "local-bucket",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want rejected command error")
+	}
+	if !strings.Contains(err.Error(), "unsupported command step") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{
+		"Replay preflight",
+		"\nCommand operations\n",
+		"  - rejected: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB (not recognized by replay command whitelist)\n",
+		"\nErrors\n  - unsupported command step: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q\n%s", want, out.String())
+		}
+	}
+}
+
 func TestReplayCommandLaunchStagesArtifactsInResultsDirWhenAutoResultsDisabled(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

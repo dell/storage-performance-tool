@@ -101,6 +101,12 @@ func TestConvertJSONRewritesItemPathsToCanonicalStepIDs(t *testing.T) {
 	if len(got.PathRewrites) != 1 {
 		t.Fatalf("len(PathRewrites) = %d, want 1", len(got.PathRewrites))
 	}
+	if len(got.CommandOps) != 1 {
+		t.Fatalf("len(CommandOps) = %d, want 1", len(got.CommandOps))
+	}
+	if got.CommandOps[0].Action != "converted" || !strings.Contains(got.CommandOps[0].Detail, "pauseSeconds") {
+		t.Fatalf("CommandOps[0] = %+v, want converted sleep command", got.CommandOps[0])
+	}
 }
 
 func TestConvertJSONRejectsFSDriver(t *testing.T) {
@@ -223,6 +229,12 @@ func TestConvertJSONConvertsSafeFileCommand(t *testing.T) {
 	if len(got.PathRewrites) != 1 {
 		t.Fatalf("len(PathRewrites) = %d, want 1", len(got.PathRewrites))
 	}
+	if len(got.CommandOps) != 1 {
+		t.Fatalf("len(CommandOps) = %d, want 1", len(got.CommandOps))
+	}
+	if got.CommandOps[0].Action != "converted" || !strings.Contains(got.CommandOps[0].Detail, "safe file command") {
+		t.Fatalf("CommandOps[0] = %+v, want converted safe file command", got.CommandOps[0])
+	}
 }
 
 func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
@@ -234,7 +246,7 @@ func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
     {"type": "command", "value": "rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB", "blocking": true}
   ]
 }`)
-	_, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
 		Endpoints:     []string{"http://10.0.0.1:9020"},
 		BaseTimestamp: "20260605.121400.000",
 	})
@@ -243,6 +255,12 @@ func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported command step") {
 		t.Fatalf("error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("ConvertJSON() generated result = nil, want rejected command diagnostics")
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "rejected" {
+		t.Fatalf("CommandOps = %+v, want rejected command", got.CommandOps)
 	}
 }
 

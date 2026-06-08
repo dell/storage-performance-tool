@@ -75,6 +75,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		S3Driver:    s3Driver,
 	})
 	if err != nil {
+		if generated != nil && strings.TrimSpace(generated.Preflight) != "" {
+			_, _ = fmt.Fprintln(out, generated.Preflight)
+		}
 		return err
 	}
 

@@ -72,6 +72,13 @@ type PathRewrite struct {
 	To        string `json:"to"`
 }
 
+// CommandOperation records how an archived command step was handled.
+type CommandOperation struct {
+	Action  string `json:"action"`
+	Command string `json:"command"`
+	Detail  string `json:"detail,omitempty"`
+}
+
 // Generated is the complete generate-only replay output.
 type Generated struct {
 	Artifacts       Artifacts
@@ -83,6 +90,7 @@ type Generated struct {
 	Diagnostics     []Diagnostic
 	Steps           []StepSummary
 	PathRewrites    []PathRewrite
+	CommandOps      []CommandOperation
 	EffectiveBucket string
 }
 

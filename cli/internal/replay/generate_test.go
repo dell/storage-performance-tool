@@ -47,6 +47,18 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	if strings.Contains(got.Preflight, "local_secret_key") {
 		t.Fatalf("preflight leaked placeholder secret\n%s", got.Preflight)
 	}
+	if !strings.Contains(got.Preflight, "\nCommand operations\n  - converted: sleep ${WAIT_TIME} (sleep converted to pauseSeconds)\n") {
+		t.Fatalf("preflight missing command-operation section\n%s", got.Preflight)
+	}
+	if !strings.Contains(got.Preflight, "\nWarnings\n  - converted legacy JSON scenario to JS\n  - source uses unauthenticated HTTP\n") {
+		t.Fatalf("preflight missing separate HTTP source warning\n%s", got.Preflight)
+	}
+	if strings.Contains(got.Preflight, "source uses unauthenticated HTTP; command operations") {
+		t.Fatalf("preflight should not combine HTTP and command warnings\n%s", got.Preflight)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" || got.CommandOps[0].Command != "sleep ${WAIT_TIME}" {
+		t.Fatalf("CommandOps = %+v, want converted sleep command", got.CommandOps)
+	}
 	if !strings.Contains(string(got.DefaultsYAML), "local_access_key") {
 		t.Fatalf("defaults should contain placeholder auth for generate-only without local credentials")
 	}
@@ -77,6 +89,116 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	if gotMode := info.Mode().Perm(); gotMode != 0o700 {
 		t.Fatalf("output dir mode = %o, want 700", gotMode)
+	}
+}
+
+func TestGenerateBuildsPreflightForRejectedCommands(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}},
+    {"type": "command", "value": "rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB", "blocking": true}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	got, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		TestHosts:     "127.0.0.1",
+		Label:         "replay",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want rejected command error")
+	}
+	if !strings.Contains(err.Error(), "unsupported command step") {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Generate() result = nil, want partial preflight")
+	}
+	for _, want := range []string{
+		"\nCommand operations\n",
+		"  - rejected: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB (not recognized by replay command whitelist)\n",
+		"\nErrors\n  - unsupported command step: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB\n",
+		"\nWarnings\n  - converted legacy JSON scenario to JS\n  - source uses unauthenticated HTTP\n",
+	} {
+		if !strings.Contains(got.Preflight, want) {
+			t.Fatalf("preflight missing %q\n%s", want, got.Preflight)
+		}
+	}
+	metadata := string(got.MetadataJSON)
+	for _, want := range []string{
+		`"commandOperations"`,
+		`"action": "rejected"`,
+		`"unsupported command step: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB"`,
+	} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("metadata missing %q\n%s", want, metadata)
+		}
+	}
+}
+
+func TestGenerateOmitsCommandNoiseWhenNoArchivedCommands(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}, "load": {"limit": {"concurrency": 1}}}}
+  ]
+}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	got, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		TestHosts:     "127.0.0.1",
+		Label:         "replay",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if strings.Contains(got.Preflight, "Command operations") {
+		t.Fatalf("preflight should omit command-operation section when no commands exist\n%s", got.Preflight)
+	}
+	if strings.Contains(got.Preflight, "no archived command operations found") {
+		t.Fatalf("preflight should not report no-op command details\n%s", got.Preflight)
+	}
+	if !strings.Contains(got.Preflight, "\nWarnings\n  - converted legacy JSON scenario to JS\n  - source uses unauthenticated HTTP\n") {
+		t.Fatalf("preflight missing plain HTTP warning\n%s", got.Preflight)
+	}
+	metadata := string(got.MetadataJSON)
+	if strings.Contains(metadata, "commandOperations") || strings.Contains(metadata, "no archived command operations found") {
+		t.Fatalf("metadata should omit empty command-operation details\n%s", metadata)
 	}
 }
 

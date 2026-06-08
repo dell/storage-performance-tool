@@ -81,6 +81,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	var diagnostics []Diagnostic
 	var pathRewrites []PathRewrite
 	var stepsOut []StepSummary
+	var commandOps []CommandOperation
 	effectiveVars := effectiveVariables(runScript.Exports, opts)
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
@@ -106,7 +107,10 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	}
 
 	if hasErrors(diagnostics) {
-		return &Generated{Diagnostics: diagnostics}, diagnosticsError(diagnostics)
+		return &Generated{
+			Diagnostics:     diagnostics,
+			EffectiveBucket: bucket,
+		}, diagnosticsError(diagnostics)
 	}
 
 	label := sanitizeLabel(opts.Label)
@@ -166,21 +170,41 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		case "command":
 			seconds, ok := parseSleepCommand(step.Value, effectiveVars)
 			if ok {
+				commandOps = append(commandOps, CommandOperation{
+					Action:  "converted",
+					Command: step.Value,
+					Detail:  "sleep converted to pauseSeconds",
+				})
 				waitNumber++
 				fmt.Fprintf(&body, "pauseSeconds(%d, %s);\n\n", seconds, jsQuote(fmt.Sprintf("Archived wait %d", waitNumber)))
 				continue
 			}
 			converted, supported, err := convertCommandStep(step.Value, effectiveVars, archiveToStepID)
 			if err != nil {
+				commandOps = append(commandOps, CommandOperation{
+					Action:  "rejected",
+					Command: step.Value,
+					Detail:  err.Error(),
+				})
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
 				continue
 			}
 			if supported {
+				commandOps = append(commandOps, CommandOperation{
+					Action:  "converted",
+					Command: step.Value,
+					Detail:  "safe file command(s) run without a shell",
+				})
 				pathRewrites = append(pathRewrites, converted.rewrites...)
 				body.WriteString(converted.js)
 				body.WriteString("\n")
 				continue
 			}
+			commandOps = append(commandOps, CommandOperation{
+				Action:  "rejected",
+				Command: step.Value,
+				Detail:  "not recognized by replay command whitelist",
+			})
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported command step: %s", step.Value)})
 			fmt.Fprintf(&body, "// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value))
 		case legacyStepTypeParallel:
@@ -189,10 +213,16 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("unsupported step type %q skipped", step.Type)})
 		}
 	}
-	if hasErrors(diagnostics) {
-		return &Generated{Diagnostics: diagnostics}, diagnosticsError(diagnostics)
-	}
 	pathRewrites = uniquePathRewrites(pathRewrites)
+	if hasErrors(diagnostics) {
+		return &Generated{
+			Diagnostics:     diagnostics,
+			Steps:           stepsOut,
+			PathRewrites:    pathRewrites,
+			CommandOps:      commandOps,
+			EffectiveBucket: bucket,
+		}, diagnosticsError(diagnostics)
+	}
 
 	var prelude strings.Builder
 	prelude.WriteString(body.String())
@@ -220,6 +250,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		Diagnostics:     diagnostics,
 		Steps:           stepsOut,
 		PathRewrites:    pathRewrites,
+		CommandOps:      commandOps,
 		EffectiveBucket: bucket,
 	}, nil
 }
