@@ -163,8 +163,7 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	r.writeBullet(b, "Workload", titleize(work.Type))
 	isList := strings.EqualFold(work.Type, workloadTypeList)
 	if work.ObjectSizeHuman != "" && !isList {
-		obj := fmt.Sprintf("%s (%d objects)", work.ObjectSizeHuman, work.ObjectCount)
-		r.writeBullet(b, "Object size", obj)
+		r.writeBullet(b, "Object size", formatObjectSizeBullet(work))
 	} else if isList {
 		r.writeBullet(b, "Object size", "not applicable")
 	}
@@ -185,13 +184,20 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 		r.writeBullet(b, "Prefix", prefixValue)
 	}
 	if work.DurationRequest != "" {
-		r.writeBullet(b, "Duration", work.DurationRequest)
+		r.writeBullet(b, "Requested duration", work.DurationRequest)
 	}
 	toggles := formatWorkloadToggles(work)
 	if toggles != "" {
 		r.writeBullet(b, "Options", toggles)
 	}
 	b.WriteString("\n")
+}
+
+func formatObjectSizeBullet(work WorkloadSummary) string {
+	if work.ObjectCount > 0 {
+		return fmt.Sprintf("%s (%d objects)", work.ObjectSizeHuman, work.ObjectCount)
+	}
+	return work.ObjectSizeHuman
 }
 
 func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {

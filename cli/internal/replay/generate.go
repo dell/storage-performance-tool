@@ -58,6 +58,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 		// replay should not opt into SPT's anti-dedupe stamping unless explicitly designed.
 		ObjectDataDedupable: true,
 	}
+	applyReplayShapeToParams(&params, generated.Steps)
 	if len(opts.Endpoints) == 1 {
 		params.Endpoint = opts.Endpoints[0]
 	}
@@ -258,6 +259,78 @@ func maxConcurrency(steps []StepSummary) int {
 		}
 	}
 	return maxValue
+}
+
+func applyReplayShapeToParams(params *scenario.Params, steps []StepSummary) {
+	if params == nil || len(steps) == 0 {
+		return
+	}
+	if size, ok := commonReplaySize(steps); ok {
+		params.ObjectSize = size
+	}
+	if duration, ok := commonReplayDuration(steps); ok {
+		params.Duration = duration
+	}
+	if count, ok := commonReplayCount(steps); ok {
+		params.ObjectCount = count
+	}
+}
+
+func commonReplaySize(steps []StepSummary) (string, bool) {
+	var common string
+	for _, step := range steps {
+		size := strings.TrimSpace(step.Size)
+		if size == "" {
+			return "", false
+		}
+		if common == "" {
+			common = size
+			continue
+		}
+		if size != common {
+			return "", false
+		}
+	}
+	return common, common != ""
+}
+
+func commonReplayDuration(steps []StepSummary) (string, bool) {
+	var common string
+	for _, step := range steps {
+		duration := strings.TrimSpace(step.Duration)
+		if duration == "" || step.Count > 0 {
+			return "", false
+		}
+		if common == "" {
+			common = duration
+			continue
+		}
+		if duration != common {
+			return "", false
+		}
+	}
+	return common, common != ""
+}
+
+func commonReplayCount(steps []StepSummary) (int, bool) {
+	var common int64
+	maxInt := int64(^uint(0) >> 1)
+	for _, step := range steps {
+		if step.Count <= 0 || strings.TrimSpace(step.Duration) != "" || step.Count > maxInt {
+			return 0, false
+		}
+		if common == 0 {
+			common = step.Count
+			continue
+		}
+		if step.Count != common {
+			return 0, false
+		}
+	}
+	if common == 0 {
+		return 0, false
+	}
+	return int(common), true
 }
 
 func buildMetadata(g *Generated) []byte {

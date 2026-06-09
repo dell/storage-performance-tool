@@ -27,6 +27,7 @@ var (
 	jsMongoosePathRe   = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/([^"]+)"`)
 	jsOutputKeyRe      = regexp.MustCompile(`"output"\s*:\s*\{`)
 	jsPathKeyRe        = regexp.MustCompile(`"path"\s*:`)
+	jsIdentifierRe     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 // ConvertJS adapts a generated legacy JavaScript scenario for replay against local S3 defaults.
@@ -248,10 +249,25 @@ func extractJSSteps(source string, vars map[string]string, label, baseTS string)
 		}
 		archiveToStepID[archiveID] = stepID
 
-		duration := durationValue(jsFieldValue(configText, "time", vars), nil)
+		limitTimeRaw, missingTimeVars := jsLimitFieldValue(configText, "time", vars)
+		if len(missingTimeVars) > 0 {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("step %s has unresolved variable %s in time limit", archiveID, missingTimeVars[0])})
+		}
+		limitCountRaw, missingCountVars := jsLimitFieldValue(configText, "count", vars)
+		if len(missingCountVars) > 0 {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("step %s has unresolved variable %s in count limit", archiveID, missingCountVars[0])})
+		}
+		duration := durationValue(limitTimeRaw, nil)
 		var count int64
 		if duration == "" {
-			count = int64Value(jsFieldValue(configText, "count", vars), nil)
+			count = int64Value(limitCountRaw, nil)
+		}
+		limitOp := opSuffix
+		if limitOp == opTypeSeed {
+			limitOp = opTypeCreate
+		}
+		if requiresExplicitLimit(limitOp) && duration == "" && count == 0 {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("step %s has no time or count limit", archiveID)})
 		}
 		steps = append(steps, StepSummary{
 			ArchiveID:   archiveID,
@@ -547,12 +563,10 @@ func jsStringField(configText, name string, vars map[string]string) string {
 }
 
 func jsFieldValue(configText, name string, vars map[string]string) any {
-	re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:\s*("(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*|-?[0-9]+(?:\.[0-9]+)?|true|false)`)
-	match := re.FindStringSubmatch(configText)
-	if len(match) != 2 {
+	raw, ok := jsFieldToken(configText, name)
+	if !ok {
 		return nil
 	}
-	raw := strings.TrimSpace(match[1])
 	if strings.HasPrefix(raw, `"`) {
 		return expandWithExports(unquoteJSString(strings.Trim(raw, `"`)), vars)
 	}
@@ -563,6 +577,43 @@ func jsFieldValue(configText, name string, vars map[string]string) any {
 		return raw
 	}
 	return raw
+}
+
+func jsLimitFieldValue(configText, name string, vars map[string]string) (any, []string) {
+	raw, ok := jsFieldToken(configText, name)
+	if !ok {
+		return nil, nil
+	}
+	if strings.HasPrefix(raw, `"`) {
+		unquoted := unquoteJSString(strings.Trim(raw, `"`))
+		if missing := unresolvedVars(unquoted, vars); len(missing) > 0 {
+			return "", missing
+		}
+		return expandWithExports(unquoted, vars), nil
+	}
+	if raw == "true" || raw == "false" {
+		return raw, nil
+	}
+	if _, err := strconv.ParseFloat(raw, 64); err == nil {
+		return raw, nil
+	}
+	if jsIdentifierRe.MatchString(raw) {
+		value, ok := vars[raw]
+		if !ok || strings.TrimSpace(value) == "" {
+			return "", []string{raw}
+		}
+		return value, nil
+	}
+	return raw, nil
+}
+
+func jsFieldToken(configText, name string) (string, bool) {
+	re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:\s*("(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*|-?[0-9]+(?:\.[0-9]+)?|true|false)`)
+	match := re.FindStringSubmatch(configText)
+	if len(match) != 2 {
+		return "", false
+	}
+	return strings.TrimSpace(match[1]), true
 }
 
 func unquoteJSString(raw string) string {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 func TestGenerateAndWriteGeneratedUsePrivateArtifacts(t *testing.T) {
@@ -64,6 +66,9 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	if !got.Params.ObjectDataDedupable {
 		t.Fatalf("replay params should keep dedupe-friendly data by default")
+	}
+	if got.Params.ObjectSize != "10KB" {
+		t.Fatalf("replay params object size = %q, want 10KB", got.Params.ObjectSize)
 	}
 	if strings.Contains(string(got.DefaultsYAML), "dedupable: false") {
 		t.Fatalf("defaults should not enable anti-dedupe stamping for replay:\n%s", string(got.DefaultsYAML))
@@ -243,6 +248,56 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	metadata := string(got.MetadataJSON)
 	if strings.Contains(metadata, "commandOperations") || strings.Contains(metadata, "no archived command operations found") {
 		t.Fatalf("metadata should omit empty command-operation details\n%s", metadata)
+	}
+}
+
+func TestApplyReplayShapeToParamsCapturesUniformShape(t *testing.T) {
+	params := scenario.Params{}
+	applyReplayShapeToParams(&params, []StepSummary{
+		{Size: "10KB", Duration: "30s", Concurrency: 50},
+	})
+
+	if params.ObjectSize != "10KB" {
+		t.Fatalf("ObjectSize = %q, want 10KB", params.ObjectSize)
+	}
+	if params.Duration != "30s" {
+		t.Fatalf("Duration = %q, want 30s", params.Duration)
+	}
+	if params.ObjectCount != 0 {
+		t.Fatalf("ObjectCount = %d, want 0 for duration-limited replay", params.ObjectCount)
+	}
+}
+
+func TestApplyReplayShapeToParamsLeavesMixedShapeBlank(t *testing.T) {
+	params := scenario.Params{}
+	applyReplayShapeToParams(&params, []StepSummary{
+		{Size: "10KB", Duration: "30s"},
+		{Size: "1MB", Duration: "30s"},
+	})
+
+	if params.ObjectSize != "" {
+		t.Fatalf("ObjectSize = %q, want blank for mixed-size replay", params.ObjectSize)
+	}
+	if params.Duration != "30s" {
+		t.Fatalf("Duration = %q, want common duration preserved", params.Duration)
+	}
+}
+
+func TestApplyReplayShapeToParamsCapturesUniformCount(t *testing.T) {
+	params := scenario.Params{}
+	applyReplayShapeToParams(&params, []StepSummary{
+		{Size: "4KB", Count: 100},
+		{Size: "4KB", Count: 100},
+	})
+
+	if params.ObjectSize != "4KB" {
+		t.Fatalf("ObjectSize = %q, want 4KB", params.ObjectSize)
+	}
+	if params.ObjectCount != 100 {
+		t.Fatalf("ObjectCount = %d, want 100", params.ObjectCount)
+	}
+	if params.Duration != "" {
+		t.Fatalf("Duration = %q, want blank for count-limited replay", params.Duration)
 	}
 }
 

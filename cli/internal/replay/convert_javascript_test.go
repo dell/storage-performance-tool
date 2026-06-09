@@ -99,11 +99,15 @@ func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
 			"DATA_NODE_2":            "192.0.2.11",
 			"BUCKET":                 "archive-bucket",
 			"KEY":                    "archived-sensitive-value",
+			"CLIENT":                 "archived-client",
+			"CLIENT_2":               "archived-client-2",
+			"CLIENTS":                "archived-client,archived-client-2",
 		},
 		ItemOutputPath: "archive-bucket",
 	}, Options{
 		Endpoints:     []string{"http://10.0.0.1:8333", "http://10.0.0.2:8334"},
 		Bucket:        "local-bucket",
+		TestHosts:     "root@wrk1,root@wrk2",
 		Label:         "replay",
 		S3Driver:      "aws",
 		BaseTimestamp: "20260605.121400.000",
@@ -117,6 +121,9 @@ func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
 		"var MONGOOSE_DIR = sptHomeDir;",
 		"var DATA_NODE = \"10.0.0.1\";",
 		"var DATA_NODE_2 = \"10.0.0.2\";",
+		"var CLIENT = \"wrk1\";",
+		"var CLIENT_2 = \"wrk2\";",
+		"var CLIENTS = \"wrk1,wrk2\";",
 		"var BUCKET = \"local-bucket\";",
 		`"type" : "s3-aws"`,
 		`"path" : "/local-bucket"`,
@@ -136,6 +143,8 @@ func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
 		"archived-sensitive-value",
 		"192.0.2.11",
 		"archive-bucket",
+		"archived-client",
+		"root@",
 	} {
 		if strings.Contains(js, forbidden) {
 			t.Fatalf("scenario retained forbidden text %q\n%s", forbidden, js)
@@ -155,6 +164,49 @@ func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
 	}
 	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
 		t.Fatalf("CommandOps = %+v, want converted sleep command", got.CommandOps)
+	}
+}
+
+func TestConvertJSRejectsEmptyLimitVariable(t *testing.T) {
+	got, err := ConvertJS([]byte(maxS3SanityJS), RunScript{
+		Exports: map[string]string{
+			"RUN_TIME":               "",
+			"RUN_TIME_FOR_SMALL_OBJ": "1800",
+			"WAIT_TIME":              "60",
+		},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want empty limit variable rejection")
+	}
+	if !strings.Contains(err.Error(), "unresolved variable RUN_TIME") {
+		t.Fatalf("error = %v", err)
+	}
+	if got == nil || !hasDiagnosticContaining(got.Diagnostics, severityError, "unresolved variable RUN_TIME") {
+		t.Fatalf("Diagnostics = %+v, want RUN_TIME error", got)
+	}
+}
+
+func TestConvertJSRejectsUnboundedReadStep(t *testing.T) {
+	raw := strings.Replace(maxS3SanityJS, `"time" : RUN_TIME
+`, `"time" : ""
+`, 1)
+
+	_, err := ConvertJS([]byte(raw), RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unbounded step rejection")
+	}
+	if !strings.Contains(err.Error(), "has no time or count limit") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

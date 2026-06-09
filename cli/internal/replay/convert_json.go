@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
 type legacyScenario struct {
@@ -456,12 +458,40 @@ func effectiveVariables(exports map[string]string, opts Options) map[string]stri
 		vars["DATA_NODES"] = strings.Join(hosts, ",")
 		vars["ALL_NODES"] = strings.Join(hosts, ",")
 	}
-	clients := splitCSV(opts.TestHosts)
+	clients := testHostnames(opts.TestHosts)
 	if len(clients) > 0 {
 		rebindIndexedVars(vars, "CLIENT", clients)
 		vars["CLIENTS"] = strings.Join(clients, ",")
 	}
 	return vars
+}
+
+func testHostnames(testHosts string) []string {
+	hostInfos, err := hostparse.ParseTestHosts(testHosts)
+	if err == nil && len(hostInfos) > 0 {
+		hosts := make([]string, 0, len(hostInfos))
+		for _, info := range hostInfos {
+			if info != nil && strings.TrimSpace(info.Host) != "" {
+				hosts = append(hosts, info.Host)
+			}
+		}
+		if len(hosts) > 0 {
+			return hosts
+		}
+	}
+
+	rawHosts := splitCSV(testHosts)
+	hosts := make([]string, 0, len(rawHosts))
+	for _, raw := range rawHosts {
+		host := raw
+		if _, after, ok := strings.Cut(raw, "@"); ok {
+			host = after
+		}
+		if strings.TrimSpace(host) != "" {
+			hosts = append(hosts, strings.TrimSpace(host))
+		}
+	}
+	return hosts
 }
 
 func rebindIndexedVars(vars map[string]string, base string, localValues []string) {
