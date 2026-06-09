@@ -71,6 +71,31 @@ func TestMultiHostOrchestrator_StartContainers_NoDockerManager(t *testing.T) {
 	}
 }
 
+func TestMultiHostOrchestrator_StartContainers_PassesNetworkMode(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "host1", IsLocal: false, Original: "host1"},
+	}
+	orchestrator := NewMultiHostOrchestratorWithRMI(hostInfos, 1, RMIConfig{
+		NetworkMode: constants.HostNetworkMode,
+		PortStart:   constants.DefaultRMIPortStart,
+		PortCount:   constants.DefaultRMIPortCount,
+	})
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+
+	if err := orchestrator.StartContainers(context.Background(), "test-image", ""); err != nil {
+		t.Fatalf("StartContainers() error = %v", err)
+	}
+	calls := mockDocker.GetContainerCalls()
+	if len(calls) != 1 {
+		t.Fatalf("container calls = %d, want 1", len(calls))
+	}
+	if got := strings.Join(calls[0].Cmd, " "); !strings.Contains(got, "--network-mode=host") {
+		t.Fatalf("node mode call did not receive host network mode: %s", got)
+	}
+}
+
 func TestMultiHostOrchestrator_WaitForAPIs_NoRunningContainers_Simple(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},

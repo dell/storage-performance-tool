@@ -506,7 +506,7 @@ func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string,
 				return
 			}
 
-			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort)
+			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode)
 			if err != nil {
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
@@ -1350,7 +1350,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 					continue
 				}
 				w.SetPhase(NodePhaseContainerStarting)
-				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort)
+				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort, m.multiHost.networkMode)
 				if err != nil {
 					// Record but continue; non-critical for primary execution
 					w.SetError(err)

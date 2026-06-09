@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
@@ -378,10 +379,10 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	return resp.ID, nil
 }
 
-// StartContainerInNodeMode starts a Spt container in API server mode
-func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) (string, error) {
+// StartContainerInNodeMode starts a Spt container in API server mode.
+func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
 	if dm.remote != nil {
-		return dm.remote.StartContainerInNodeMode(image, apiPort)
+		return dm.remote.StartContainerInNodeMode(image, apiPort, networkMode)
 	}
 
 	if err := dm.ensureImageAvailable(image); err != nil {
@@ -423,9 +424,14 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
 
+	useHostNetwork := selectedNodeNetworkMode(networkMode) == command.NetworkModeHost
 	hostConfig := &container.HostConfig{
-		PortBindings: portBinding,
-		Binds:        logBinds,
+		Binds: logBinds,
+	}
+	if useHostNetwork {
+		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
+	} else {
+		hostConfig.PortBindings = portBinding
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -445,16 +451,20 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string) 
 			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
 	}
 
-	// Create container with port mapping
-	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
+	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
-		ExposedPorts: nat.PortSet{hostPort: struct{}{}},
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          envVars,
 		Labels:       labels,
-	}, hostConfig, nil, nil, "")
+	}
+	if !useHostNetwork {
+		containerConfig.ExposedPorts = nat.PortSet{hostPort: struct{}{}}
+	}
+
+	// Create container with the selected network mode.
+	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)

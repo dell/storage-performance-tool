@@ -953,15 +953,20 @@ func StartTUIWithScenarioAndParams(image string, scenarioPath string, params sce
 
 // StartTUIWithScenarioAndParamsWithTrace starts the TUI with optional full-output trace capture.
 func StartTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
-	return startTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, nil, nil)
+	return StartTUIWithScenarioAndParamsNetworkModeWithTrace(image, scenarioPath, params, apiPort, constants.DefaultNetworkMode, setSummarySink, tracePath, traceAppend)
+}
+
+// StartTUIWithScenarioAndParamsNetworkModeWithTrace starts the TUI with a selected Docker network mode.
+func StartTUIWithScenarioAndParamsNetworkModeWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
+	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, setSummarySink, tracePath, traceAppend, nil, nil)
 }
 
 // StartTUIWithScenarioContentAndParamsWithTrace starts the TUI with caller-provided scenario/defaults content.
-func StartTUIWithScenarioContentAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
-	return startTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+func StartTUIWithScenarioContentAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
 }
 
-func startTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func startTUIWithScenarioAndParamsWithNetworkModeTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -984,6 +989,7 @@ func startTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, p
 
 	// Create the orchestrator for API-based control
 	orchestrator := NewTestOrchestrator(dm, apiPort)
+	orchestrator.SetNetworkMode(networkMode)
 	model.orchestrator = orchestrator
 
 	model.dockerManager = dm
@@ -1252,21 +1258,26 @@ func StartTUIWithScenarioAndParamsTimeout(image string, scenarioPath string, par
 
 // StartTUIWithScenarioAndParamsTimeoutWithTrace starts the TUI (single host), exits after timeout, and can capture full output.
 func StartTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
+	return StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(image, scenarioPath, params, apiPort, constants.DefaultNetworkMode, autoTerminateSeconds, setSummarySink, tracePath, traceAppend)
+}
+
+// StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace starts the TUI with a selected Docker network mode and optional timeout.
+func StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
 	if autoTerminateSeconds <= 0 {
-		return StartTUIWithScenarioAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend)
+		return StartTUIWithScenarioAndParamsNetworkModeWithTrace(image, scenarioPath, params, apiPort, networkMode, setSummarySink, tracePath, traceAppend)
 	}
-	return startTUIWithScenarioAndParamsTimeoutWithTrace(image, scenarioPath, params, apiPort, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
+	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
 }
 
 // StartTUIWithScenarioContentAndParamsTimeoutWithTrace starts the TUI with caller-provided content and optional timeout.
-func StartTUIWithScenarioContentAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func StartTUIWithScenarioContentAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	if autoTerminateSeconds <= 0 {
-		return StartTUIWithScenarioContentAndParamsWithTrace(image, scenarioPath, params, apiPort, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+		return StartTUIWithScenarioContentAndParamsWithTrace(image, scenarioPath, params, apiPort, networkMode, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
 	}
-	return startTUIWithScenarioAndParamsTimeoutWithTrace(image, scenarioPath, params, apiPort, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
 }
 
-func startTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1285,6 +1296,7 @@ func startTUIWithScenarioAndParamsTimeoutWithTrace(image string, scenarioPath st
 	defer dm.Close()
 
 	orchestrator := NewTestOrchestrator(dm, apiPort)
+	orchestrator.SetNetworkMode(networkMode)
 	model.orchestrator = orchestrator
 	model.dockerManager = dm
 

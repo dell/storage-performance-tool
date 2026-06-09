@@ -139,7 +139,7 @@ func TestOrchestratorStartTest(t *testing.T) {
 	// For now, let's test the components separately
 
 	// Start container
-	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999")
+	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999", constants.DefaultNetworkMode)
 	if err != nil {
 		t.Fatalf("Failed to start container: %v", err)
 	}
@@ -323,6 +323,86 @@ func TestOrchestratorStartTestWithContentPostsProvidedArtifacts(t *testing.T) {
 	}
 	if strings.Contains(string(postedScenario), "64MB") || strings.Contains(string(postedScenario), "99") {
 		t.Fatalf("posted scenario appears to have been regenerated from params: %q", postedScenario)
+	}
+}
+
+func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/run":
+			switch r.Method {
+			case http.MethodHead:
+				w.WriteHeader(http.StatusOK)
+			case http.MethodPost:
+				w.Header().Set("ETag", `"run-network-mode"`)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"runId":"run-network-mode"}`))
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"RUNNING","message":"running"}`))
+		case "/metrics/json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name          string
+		configureMode func(*TestOrchestrator)
+		wantMode      string
+	}{
+		{
+			name:     "default host network",
+			wantMode: constants.DefaultNetworkMode,
+		},
+		{
+			name: "explicit bridge network",
+			configureMode: func(orchestrator *TestOrchestrator) {
+				orchestrator.SetNetworkMode(constants.BridgeNetworkMode)
+			},
+			wantMode: constants.BridgeNetworkMode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDM := NewMockDockerManager()
+			orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+			orchestrator.apiClient = NewSptAPIClient(server.URL)
+			if tt.configureMode != nil {
+				tt.configureMode(orchestrator)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			err := orchestrator.StartTestWithContent(ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil)
+			if err != nil {
+				t.Fatalf("StartTestWithContent() error = %v", err)
+			}
+			cancel()
+
+			calls := mockDM.GetContainerCalls()
+			if len(calls) != 1 {
+				t.Fatalf("container calls = %d, want 1", len(calls))
+			}
+			wantArg := "--network-mode=" + tt.wantMode
+			if !containsString(calls[0].Cmd, wantArg) {
+				t.Fatalf("container command = %v, want %s", calls[0].Cmd, wantArg)
+			}
+		})
 	}
 }
 
@@ -937,4 +1017,13 @@ func TestOrchestratorCleanupOnError(t *testing.T) {
 	if mockDM.GetCleanupCallCount() != 1 {
 		t.Errorf("Expected 1 cleanup call, got %d", mockDM.GetCleanupCallCount())
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

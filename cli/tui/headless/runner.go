@@ -37,6 +37,7 @@ type HeadlessRunner struct {
 	keepScenario  bool
 	scenarioPath  string
 	apiPort       string
+	networkMode   string
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -47,6 +48,7 @@ type HeadlessOptions struct {
 	TraceAppend bool
 	Verbose     bool
 	APIPort     string
+	NetworkMode string
 	JSONMode    bool
 	MetricsOnly bool
 	DryRun      bool
@@ -65,6 +67,10 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 	if apiPort == "" {
 		apiPort = constants.SptAPIPort
 	}
+	networkMode := strings.TrimSpace(options.NetworkMode)
+	if networkMode == "" {
+		networkMode = constants.DefaultNetworkMode
+	}
 
 	runner := &HeadlessRunner{
 		dockerManager: dockerManager,
@@ -73,6 +79,7 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		metricsOnly:   options.MetricsOnly,
 		dryRun:        options.DryRun,
 		apiPort:       apiPort,
+		networkMode:   networkMode,
 		// keepScenario will be set when RunWithScenario is called
 	}
 
@@ -414,6 +421,7 @@ func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image stri
 func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, startTest func(*tui.TestOrchestrator) error) error {
 	// Create the orchestrator for API-based control
 	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort)
+	r.orchestrator.SetNetworkMode(r.networkMode)
 
 	// Set up callbacks to handle orchestrator events
 	r.orchestrator.SetCallbacks(

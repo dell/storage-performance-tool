@@ -16,8 +16,8 @@ type DockerInterface interface {
 	// StartContainerWithScenario creates and starts a container with a scenario file
 	StartContainerWithScenario(image string, scenarioPath string, additionalArgs []string) (string, error)
 
-	// StartContainerInNodeMode starts a container in API server mode with port mapping
-	StartContainerInNodeMode(image string, apiPort string) (string, error)
+	// StartContainerInNodeMode starts a container in API server mode.
+	StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error)
 
 	// StartWorkerNodeContainer starts a container in RMI worker node mode
 	StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error)

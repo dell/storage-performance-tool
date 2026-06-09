@@ -37,7 +37,7 @@ var replayCmd = &cobra.Command{
 }
 
 var (
-	newReplaySingleHostOrchestrator = tui.NewMultiHostOrchestrator
+	newReplaySingleHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI
 	newReplayMultiHostOrchestrator  = tui.NewMultiHostOrchestratorWithRMI
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		return orchestrator.ConnectHosts(ctx)
@@ -182,7 +182,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			replayOrchestrator.SetAttachExistingWorkers(attachExisting)
 		} else {
 			_, _ = fmt.Fprintf(out, "Replay host: %s\n", hostInfos[0].Original)
-			replayOrchestrator = newReplaySingleHostOrchestrator(hostInfos, 1)
+			replayOrchestrator = newReplaySingleHostOrchestrator(hostInfos, 1, tui.RMIConfig{
+				NetworkMode: networkMode,
+				PortStart:   rmiPortStart,
+				PortCount:   rmiPortCount,
+			})
 		}
 		replayOrchestrator.SetNotifier(func(msg string) {
 			_, _ = fmt.Fprintln(out, msg)
@@ -316,6 +320,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if headlessMode {
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
+		options.NetworkMode = networkMode
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
@@ -328,12 +333,12 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Starting TUI...")
 	if autoTerminate > 0 {
 		_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
-		err := tui.StartTUIWithScenarioContentAndParamsTimeoutWithTrace(sptImage, paths.Scenario, params, apiPort, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+		err := tui.StartTUIWithScenarioContentAndParamsTimeoutWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 		waitForAutoResults()
 		finalizeTraceArtifact()
 		return err
 	}
-	err = tui.StartTUIWithScenarioContentAndParamsWithTrace(sptImage, paths.Scenario, params, apiPort, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+	err = tui.StartTUIWithScenarioContentAndParamsWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 	waitForAutoResults()
 	finalizeTraceArtifact()
 	return err

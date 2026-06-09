@@ -121,8 +121,8 @@ func (m *MockDockerManager) StartContainerWithScenario(image string, scenarioPat
 	return m.containerID, nil
 }
 
-// StartContainerInNodeMode simulates starting a container in API server mode
-func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string) (string, error) {
+// StartContainerInNodeMode simulates starting a container in API server mode.
+func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -132,13 +132,18 @@ func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort strin
 		return "", fmt.Errorf("mock start container in node mode failed")
 	}
 
+	cmd := []string{dockerNodeModeArg, "--run-port=" + apiPort}
+	if networkMode != "" {
+		cmd = append(cmd, "--network-mode="+networkMode)
+	}
+
 	// Record the call for testing
 	m.containerCalls = append(m.containerCalls, struct {
 		Image string
 		Cmd   []string
 	}{
 		Image: image,
-		Cmd:   []string{dockerNodeModeArg, "--run-port=" + apiPort},
+		Cmd:   cmd,
 	})
 
 	return m.containerID, nil

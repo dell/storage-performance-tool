@@ -36,6 +36,7 @@ type TestOrchestrator struct {
 	scenarioPath  string
 	keepScenario  bool
 	apiPort       string // Configurable API port
+	networkMode   string
 	mu            sync.Mutex
 	compatOnce    sync.Once
 
@@ -72,6 +73,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 	return &TestOrchestrator{
 		dockerManager:         dm,
 		apiPort:               apiPort,
+		networkMode:           constants.DefaultNetworkMode,
 		stopCh:                make(chan struct{}),
 		stoppedCh:             make(chan struct{}),
 		completionCh:          make(chan struct{}),
@@ -81,6 +83,15 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- non-crypto jitter source
 		logJSONBodies:         os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
+}
+
+// SetNetworkMode selects the Docker network mode used for API node startup.
+func (o *TestOrchestrator) SetNetworkMode(networkMode string) {
+	networkMode = strings.TrimSpace(networkMode)
+	if networkMode == "" {
+		networkMode = constants.DefaultNetworkMode
+	}
+	o.networkMode = networkMode
 }
 
 // SetCallbacks sets the callback functions for status updates
@@ -150,8 +161,8 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 	}
 
 	// Start container in node mode
-	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort)
-	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort)
+	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
+	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode)
 	if err != nil {
 		return fmt.Errorf("failed to start container in node mode: %w", err)
 	}

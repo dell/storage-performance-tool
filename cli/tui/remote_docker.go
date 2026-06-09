@@ -110,21 +110,24 @@ func (m *RemoteDockerManager) StartContainerWithScenario(_ string, _ string, _ [
 }
 
 // StartContainerInNodeMode starts a single Spt node exposing the provided API port.
-func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string) (string, error) {
+func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
 	port := command.ParsePortFromString(apiPort)
 	if port <= 0 {
 		return "", fmt.Errorf("invalid api port: %q", apiPort)
 	}
 
 	name := generateRemoteContainerName("node", m.host.Host)
+	mode := selectedNodeNetworkMode(networkMode)
 	cfg := command.ContainerConfig{
-		Image:        image,
-		Name:         name,
-		NetworkMode:  command.NetworkModeBridge,
-		Detached:     true,
-		PortMappings: []command.PortMapping{{HostPort: port, ContainerPort: port}},
-		Labels:       m.baseLabels(constants.DockerRoleNode),
-		Command:      []string{dockerNodeModeArg, "--run-port=" + apiPort},
+		Image:       image,
+		Name:        name,
+		NetworkMode: mode,
+		Detached:    true,
+		Labels:      m.baseLabels(constants.DockerRoleNode),
+		Command:     []string{dockerNodeModeArg, "--run-port=" + apiPort},
+	}
+	if mode != command.NetworkModeHost {
+		cfg.PortMappings = []command.PortMapping{{HostPort: port, ContainerPort: port}}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
@@ -136,6 +139,13 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 	}
 	m.containerID = strings.TrimSpace(id)
 	return m.containerID, nil
+}
+
+func selectedNodeNetworkMode(networkMode string) command.NetworkMode {
+	if strings.EqualFold(strings.TrimSpace(networkMode), string(command.NetworkModeHost)) {
+		return command.NetworkModeHost
+	}
+	return command.NetworkModeBridge
 }
 
 // StartWorkerNodeContainer starts a worker in RMI mode on the remote host.

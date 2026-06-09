@@ -130,23 +130,66 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
+	connectErr := errors.New("stop after single replay orchestrator wiring")
+	var capturedHosts []*hostparse.HostInfo
+	var capturedMinHosts int
+	var capturedRMIConfig tui.RMIConfig
+	var factoryCalled bool
+	var connectCalled bool
+	origSingleHostFactory := newReplaySingleHostOrchestrator
+	origConnect := connectReplayOrchestrator
+	t.Cleanup(func() {
+		newReplaySingleHostOrchestrator = origSingleHostFactory
+		connectReplayOrchestrator = origConnect
+	})
+	newReplaySingleHostOrchestrator = func(hostInfos []*hostparse.HostInfo, minHosts int, rmiConfig tui.RMIConfig) *tui.MultiHostOrchestrator {
+		factoryCalled = true
+		capturedHosts = append([]*hostparse.HostInfo(nil), hostInfos...)
+		capturedMinHosts = minHosts
+		capturedRMIConfig = rmiConfig
+		return origSingleHostFactory(hostInfos, minHosts, rmiConfig)
+	}
+	connectReplayOrchestrator = func(_ context.Context, _ *tui.MultiHostOrchestrator) error {
+		connectCalled = true
+		return connectErr
+	}
+
+	var out bytes.Buffer
 	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(&out)
 	cmd.SetArgs([]string{
 		"--from", server.URL,
 		"--endpoints", "http://10.0.0.1:9020",
 		"--test-hosts", "qa-client-01",
-		"--s3-driver", "rdma",
+		"--network-mode", "bridge",
+		"--rmi-port-start", "40123",
+		"--rmi-port-count", "7",
 		"--results-dir", t.TempDir(),
 	})
 	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("Execute() error = nil, want RDMA launch not implemented")
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("Execute() error = %v, want wrapped connect sentinel", err)
 	}
 	if strings.Contains(err.Error(), "single remote-host replay execution is not implemented yet") {
 		t.Fatalf("single remote host should be accepted before launch, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "RDMA replay launch is not implemented yet") {
-		t.Fatalf("error = %v", err)
+	if strings.Contains(err.Error(), "RDMA replay launch is not implemented yet") {
+		t.Fatalf("test should not depend on RDMA replay guard, got: %v", err)
+	}
+	if !factoryCalled || !connectCalled {
+		t.Fatalf("factoryCalled=%t connectCalled=%t, want both true", factoryCalled, connectCalled)
+	}
+	if len(capturedHosts) != 1 || capturedHosts[0].Original != "qa-client-01" {
+		t.Fatalf("capturedHosts = %+v", capturedHosts)
+	}
+	if capturedMinHosts != 1 {
+		t.Fatalf("minHosts = %d, want 1", capturedMinHosts)
+	}
+	if capturedRMIConfig.NetworkMode != "bridge" || capturedRMIConfig.PortStart != 40123 || capturedRMIConfig.PortCount != 7 {
+		t.Fatalf("RMI config = %+v, want bridge/40123/7", capturedRMIConfig)
+	}
+	if !strings.Contains(out.String(), "Replay host: qa-client-01") {
+		t.Fatalf("output missing single-host summary:\n%s", out.String())
 	}
 }
 
