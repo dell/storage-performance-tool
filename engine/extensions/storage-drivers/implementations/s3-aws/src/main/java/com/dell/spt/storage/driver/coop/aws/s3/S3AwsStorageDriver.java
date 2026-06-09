@@ -68,8 +68,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final boolean versioningEnabled;
 	private final boolean taggingEnabled;
 	private final Map<String, String> objectTags;
-	private final long smallObjectThresholdBytes;
-	private final long partSizeBytes;
+
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -77,9 +76,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final Config config,
 					final boolean verifyFlag,
 					final int batchSize,
-					final S3AsyncClient s3AsyncClient,
-					final long smallObjectThresholdBytes,
-					final long partSizeBytes)
+					final S3AsyncClient s3AsyncClient)
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
@@ -87,8 +84,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							"S3-AWS driver does not support --item-data-verify; reads will report SUCC without integrity checks");
 		}
 		this.s3AsyncClient = s3AsyncClient;
-		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
-		this.partSizeBytes = partSizeBytes;
 
 		LOG.info("S3-AWS driver initialized with single client");
 
@@ -616,16 +611,28 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			dataItem.position(0);
 			try {
 				final long size = dataItem.size();
-				// TODO: use smallObjectThresholdBytes / partSizeBytes to select different
-				//  upload strategies (e.g. byte-buffer for small objects, multipart for large).
-				LOG.trace(
-								"Streaming object upload, size={}B, threshold={}B, partSize={}B",
-								size, smallObjectThresholdBytes, partSizeBytes);
-				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-				return s3AsyncClient.putObject(
-								reqBuilder.build(),
-								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-								.thenApply(response -> null);
+
+				if (size <= 8 * 1024) {
+					// Small objects: use byte-buffer for efficiency
+					java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate((int) size);
+					int bytesRead = dataItem.read(buffer);
+					if (bytesRead != size) {
+						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
+					}
+					buffer.flip();
+					return s3AsyncClient.putObject(
+									reqBuilder.build(),
+									AsyncRequestBody.fromByteBuffer(buffer))
+									.thenApply(response -> null);
+				} else {
+					// Larger objects: use streaming upload
+					LOG.trace("Streaming object upload, size={}B", size);
+					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+					return s3AsyncClient.putObject(
+									reqBuilder.build(),
+									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
+									.thenApply(response -> null);
+				}
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}

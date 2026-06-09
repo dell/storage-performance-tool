@@ -129,20 +129,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			LOG.debug("Could not read storage.crt.maxConcurrency from config, using default: {}", maxConcurrency);
 		}
 
-		long partSizeBytes = 8 * 1024 * 1024L;  // 8MB default part size
-		try {
-			partSizeBytes = storageConfig.configVal("crt").longVal("partSizeBytes");
-		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.partSizeBytes from config, using default: {}", partSizeBytes);
-		}
-
-		long smallObjectThresholdBytes = 64 * 1024L;  // must match defaults-storage-s3-aws.yaml
-		try {
-			smallObjectThresholdBytes = storageConfig.configVal("crt").longVal("smallObjectThresholdBytes");
-		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
-		}
-
 		// ---------------------------
 		// Build AWS S3 Async Client with CRT
 		// ---------------------------
@@ -157,7 +143,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						.minimumPartSizeInBytes(minimumPartSizeInBytes)
 						.maxConcurrency(maxConcurrency);
 
-		// Note: partSizeBytes is used for driver-level multipart decisions
 		// The CRT manages part size internally based on minimumPartSizeInBytes
 
 		S3AsyncClient s3AsyncClient = crtBuilder.build();
@@ -168,9 +153,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						storageConfig,
 						verifyFlag,
 						batchSize,
-						s3AsyncClient,
-						smallObjectThresholdBytes,
-						partSizeBytes);
+						s3AsyncClient);
 	}
 
 	/**

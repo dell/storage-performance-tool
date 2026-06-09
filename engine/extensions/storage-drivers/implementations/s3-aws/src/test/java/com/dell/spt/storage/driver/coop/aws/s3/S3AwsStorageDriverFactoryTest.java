@@ -359,8 +359,6 @@ class S3AwsStorageDriverFactoryTest {
 			when(crtConfig.doubleVal("targetThroughputGbps")).thenReturn(20.0);
 			when(crtConfig.longVal("minimumPartSizeBytes")).thenReturn(16L * 1024 * 1024);
 			when(crtConfig.intVal("maxConcurrency")).thenReturn(1024);
-			when(crtConfig.longVal("partSizeBytes")).thenReturn(16L * 1024 * 1024);
-			when(crtConfig.longVal("smallObjectThresholdBytes")).thenReturn(128L * 1024);
 
 			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
 
@@ -375,8 +373,6 @@ class S3AwsStorageDriverFactoryTest {
 			verify(crtConfig).doubleVal("targetThroughputGbps");
 			verify(crtConfig).longVal("minimumPartSizeBytes");
 			verify(crtConfig).intVal("maxConcurrency");
-			verify(crtConfig).longVal("partSizeBytes");
-			verify(crtConfig).longVal("smallObjectThresholdBytes");
 		}
 
 		@Test
@@ -390,10 +386,6 @@ class S3AwsStorageDriverFactoryTest {
 			when(crtConfig.doubleVal("targetThroughputGbps"))
 							.thenThrow(new RuntimeException("missing"));
 			when(crtConfig.longVal("minimumPartSizeBytes"))
-							.thenThrow(new RuntimeException("missing"));
-			when(crtConfig.longVal("partSizeBytes"))
-							.thenThrow(new RuntimeException("missing"));
-			when(crtConfig.longVal("smallObjectThresholdBytes"))
 							.thenThrow(new RuntimeException("missing"));
 
 			S3AwsStorageDriverFactory<?, ?> factory = new S3AwsStorageDriverFactory<>();
@@ -411,28 +403,6 @@ class S3AwsStorageDriverFactoryTest {
 
 			// maxConcurrency was provided and should have been read
 			verify(crtConfig).intVal("maxConcurrency");
-		}
-
-		@Test
-		void shippedDefaults_runtimeFallbacksAlign_withDefaultsFile() throws Exception {
-			// This test documents the contract: runtime fallback values must match
-			// the values in defaults-storage-s3-aws.yaml. The factory code comments
-			// explicitly reference this alignment requirement.
-			//
-			// Full verification that the CRT client is built with these values
-			// requires integration tests with a real S3 endpoint or very
-			// sophisticated mocking of the CRT native builder API.
-			//
-			// Current contract (from factory code):
-			//   targetThroughputGbps: 10.0
-			//   minimumPartSizeBytes: 8 * 1024 * 1024L (8MB)
-			//   maxConcurrency: 512
-			//   partSizeBytes: 8 * 1024 * 1024L (8MB)
-			//   smallObjectThresholdBytes: 64 * 1024L (64KB) - aligned with defaults
-			//
-			// This test serves as documentation of the contract. If defaults change,
-			// this test should be updated to reflect the new contract.
-			assertTrue(true, "Contract documented; full CRT verification requires integration tests");
 		}
 	}
 }

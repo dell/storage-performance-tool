@@ -109,9 +109,7 @@ public class S3AwsTaggingIntegrationTest {
 						config,
 						false,
 						4096,
-						mockS3Client,
-						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
+						mockS3Client);
 
 		// Set bucket name and tagging fields via reflection (bypasses config resolution)
 		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");

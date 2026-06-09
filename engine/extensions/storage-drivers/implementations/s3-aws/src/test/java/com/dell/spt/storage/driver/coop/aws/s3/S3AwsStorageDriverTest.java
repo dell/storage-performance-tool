@@ -2187,9 +2187,7 @@ public class S3AwsStorageDriverTest {
 							config,
 							false,
 							1,
-							mockS3Client,
-							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L);  // partSizeBytes
+							mockS3Client);
 
 			// Verify the tagging fields were set correctly using reflection
 			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
@@ -2232,9 +2230,7 @@ public class S3AwsStorageDriverTest {
 							config,
 							false,
 							1,
-							mockS3Client,
-							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L);  // partSizeBytes
+							mockS3Client);
 
 			// Verify the tagging fields were set correctly using reflection
 			Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
@@ -2305,9 +2301,7 @@ public class S3AwsStorageDriverTest {
 							config,
 							false,
 							1,
-							mockS3Client,
-							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L);  // partSizeBytes
+							mockS3Client);
 
 			// Verify the versioningEnabled field was set correctly using reflection
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2339,9 +2333,7 @@ public class S3AwsStorageDriverTest {
 							config,
 							false,
 							1,
-							mockS3Client,
-							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L);  // partSizeBytes
+							mockS3Client);
 
 			// Verify the versioningEnabled field was set correctly using reflection
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2371,9 +2363,7 @@ public class S3AwsStorageDriverTest {
 							config,
 							false,
 							1,
-							mockS3Client,
-							100 * 1024L,  // smallObjectThresholdBytes
-							8 * 1024 * 1024L);  // partSizeBytes
+							mockS3Client);
 
 			// Verify the versioningEnabled field was set to default (false)
 			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
@@ -2427,7 +2417,7 @@ public class S3AwsStorageDriverTest {
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 64 * 1024L, 8 * 1024 * 1024L);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient);
 
 			// Act: Call the close method on the driver
 			driver.close();

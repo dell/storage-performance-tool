@@ -18,6 +18,3 @@ storage:
     targetThroughputGbps: 10.0
     minimumPartSizeBytes: 8388608        # 8MB
     maxConcurrency: 512
-
-    # Upload thresholds (reserved for future per-size upload strategies)
-    smallObjectThresholdBytes: 65536     # 64KB

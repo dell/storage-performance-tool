@@ -24,7 +24,3 @@ storage:
     targetThroughputGbps: double
     minimumPartSizeBytes: long
     maxConcurrency: int
-
-    # Upload thresholds (reserved for future per-size upload strategies)
-    smallObjectThresholdBytes: long
-    partSizeBytes: long
