@@ -18,14 +18,11 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if err != nil {
 		return nil, err
 	}
-	if artifacts.ScenarioFormat != "json" {
-		return nil, fmt.Errorf("scenario format %q is not implemented for replay", artifacts.ScenarioFormat)
-	}
 	if strings.TrimSpace(opts.BaseTimestamp) == "" {
 		opts.BaseTimestamp = scenario.BaseTimestamp()
 	}
 
-	generated, err := ConvertJSON(artifacts.ScenarioBody, artifacts.RunScript, opts)
+	generated, err := convertScenario(artifacts, opts)
 	if generated == nil {
 		generated = &Generated{}
 	}
@@ -75,8 +72,25 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	return generated, nil
 }
 
+func convertScenario(artifacts Artifacts, opts Options) (*Generated, error) {
+	switch artifacts.ScenarioFormat {
+	case "json":
+		return ConvertJSON(artifacts.ScenarioBody, artifacts.RunScript, opts)
+	case "js":
+		return ConvertJS(artifacts.ScenarioBody, artifacts.RunScript, opts)
+	default:
+		return nil, fmt.Errorf("scenario format %q is not implemented for replay", artifacts.ScenarioFormat)
+	}
+}
+
 func replayWarnings(artifacts Artifacts, opts Options) []Diagnostic {
-	warnings := []Diagnostic{{Severity: severityWarning, Message: "converted legacy JSON scenario to JS"}}
+	var warnings []Diagnostic
+	switch artifacts.ScenarioFormat {
+	case "json":
+		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "converted legacy JSON scenario to JS"})
+	case "js":
+		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "adapted legacy JS scenario for replay"})
+	}
 	if strings.HasPrefix(strings.ToLower(artifacts.FolderURL), "http://") {
 		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "source uses unauthenticated HTTP"})
 	}

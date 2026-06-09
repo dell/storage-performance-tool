@@ -55,6 +55,22 @@ const (
 	legacyKeyType        = "type"
 
 	opTypeCreate = "create"
+	opTypeDelete = "delete"
+	opTypeRead   = "read"
+	opTypeSeed   = "seed"
+
+	commandActionConverted = "converted"
+	commandActionRejected  = "rejected"
+
+	storageDriverTypeS3     = "s3"
+	storageDriverTypeEMCS3  = "emcs3"
+	storageDriverTypeS3AWS  = "s3-aws"
+	storageDriverTypeS3RDMA = "s3-rdma"
+
+	loadFactoryLoad         = "Load"
+	loadFactoryPrecondition = "PreconditionLoad"
+	loadFactoryRead         = "ReadLoad"
+	loadFactoryDelete       = "DeleteLoad"
 
 	errParallelReplayUnimplemented = "parallel scenarios are not implemented for replay"
 )
@@ -171,7 +187,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			seconds, ok := parseSleepCommand(step.Value, effectiveVars)
 			if ok {
 				commandOps = append(commandOps, CommandOperation{
-					Action:  "converted",
+					Action:  commandActionConverted,
 					Command: step.Value,
 					Detail:  "sleep converted to pauseSeconds",
 				})
@@ -182,7 +198,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			converted, supported, err := convertCommandStep(step.Value, effectiveVars, archiveToStepID)
 			if err != nil {
 				commandOps = append(commandOps, CommandOperation{
-					Action:  "rejected",
+					Action:  commandActionRejected,
 					Command: step.Value,
 					Detail:  err.Error(),
 				})
@@ -191,7 +207,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			}
 			if supported {
 				commandOps = append(commandOps, CommandOperation{
-					Action:  "converted",
+					Action:  commandActionConverted,
 					Command: step.Value,
 					Detail:  "safe file command(s) run without a shell",
 				})
@@ -201,7 +217,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 				continue
 			}
 			commandOps = append(commandOps, CommandOperation{
-				Action:  "rejected",
+				Action:  commandActionRejected,
 				Command: step.Value,
 				Detail:  "not recognized by replay command whitelist",
 			})
@@ -212,6 +228,9 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		default:
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("unsupported step type %q skipped", step.Type)})
 		}
+	}
+	if len(stepsOut) == 0 {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "scenario contains no load steps"})
 	}
 	pathRewrites = uniquePathRewrites(pathRewrites)
 	if hasErrors(diagnostics) {
@@ -279,18 +298,18 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	var loadFactory string
 	if strings.EqualFold(step.Type, legacyStepTypePrecondition) {
 		opType = opTypeCreate
-		opSuffix = "seed"
-		loadFactory = "PreconditionLoad"
+		opSuffix = opTypeSeed
+		loadFactory = loadFactoryPrecondition
 	} else {
 		switch opType {
 		case "", opTypeCreate, "write":
 			opType = opTypeCreate
 			opSuffix = opTypeCreate
-			loadFactory = "Load"
-		case "read":
-			loadFactory = "ReadLoad"
-		case "delete":
-			loadFactory = "DeleteLoad"
+			loadFactory = loadFactoryLoad
+		case opTypeRead:
+			loadFactory = loadFactoryRead
+		case opTypeDelete:
+			loadFactory = loadFactoryDelete
 		default:
 			return convertedStep{}, fmt.Errorf("unsupported load operation %q in step %s", opType, archiveID)
 		}
@@ -609,7 +628,8 @@ func parseSleepCommand(value string, vars map[string]string) (int, bool) {
 	if len(fields) != 2 || fields[0] != "sleep" {
 		return 0, false
 	}
-	seconds, err := strconv.Atoi(fields[1])
+	duration := strings.TrimSuffix(fields[1], "s")
+	seconds, err := strconv.Atoi(duration)
 	if err != nil || seconds < 0 {
 		return 0, false
 	}
@@ -750,7 +770,7 @@ func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
 	check := func(v any) {
 		driver := strings.ToLower(resolveString(v, nil))
 		switch driver {
-		case "", "s3", "emcs3", "s3-aws", "s3-rdma":
+		case "", storageDriverTypeS3, storageDriverTypeEMCS3, storageDriverTypeS3AWS, storageDriverTypeS3RDMA:
 		case "fs":
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "NFS/FS replay is not implemented for storage.driver.type fs"})
 		case "atmos", "cas", "swift":
@@ -901,7 +921,7 @@ func unresolvedVars(v any, vars map[string]string) []string {
 
 func requiresExplicitLimit(opType string) bool {
 	switch opType {
-	case opTypeCreate, "read":
+	case opTypeCreate, opTypeRead:
 		return true
 	default:
 		return false
@@ -973,11 +993,11 @@ func jsLineComment(s string) string {
 func s3DriverType(userValue string) string {
 	switch strings.ToLower(strings.TrimSpace(userValue)) {
 	case "aws":
-		return "s3-aws"
+		return storageDriverTypeS3AWS
 	case "rdma":
-		return "s3-rdma"
+		return storageDriverTypeS3RDMA
 	default:
-		return "s3"
+		return storageDriverTypeS3
 	}
 }
 

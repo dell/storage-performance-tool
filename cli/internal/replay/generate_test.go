@@ -154,6 +154,50 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestGenerateSupportsJavaScriptScenarioArtifacts(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.2026-06-05.sh">run</a><a href="max.s3.sanity.js">scenario</a>`)
+	})
+	mux.HandleFunc("/run.2026-06-05.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export RUN_TIME=900
+export RUN_TIME_FOR_SMALL_OBJ=1800
+export WAIT_TIME=60
+export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --run-scenario=/tmp/perf/max.s3.sanity.js`)
+	})
+	mux.HandleFunc("/max.s3.sanity.js", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, maxS3SanityJS)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	got, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		TestHosts:     "127.0.0.1",
+		Label:         "replay",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if !strings.Contains(got.Preflight, "  Format: JS\n") {
+		t.Fatalf("preflight missing JS format\n%s", got.Preflight)
+	}
+	if !strings.Contains(got.Preflight, "\nWarnings\n  - adapted legacy JS scenario for replay\n  - source uses unauthenticated HTTP\n") {
+		t.Fatalf("preflight missing JS conversion warning\n%s", got.Preflight)
+	}
+	if !strings.Contains(string(got.ScenarioJS), "replay-001-20260605.121400.000-create") {
+		t.Fatalf("generated scenario missing canonical step ID\n%s", string(got.ScenarioJS))
+	}
+	if !strings.Contains(string(got.MetadataJSON), `"scenarioFormat": "js"`) {
+		t.Fatalf("metadata missing JS scenario format\n%s", string(got.MetadataJSON))
+	}
+}
+
 func TestGenerateOmitsCommandNoiseWhenNoArchivedCommands(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

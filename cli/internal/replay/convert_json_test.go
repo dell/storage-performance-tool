@@ -50,7 +50,7 @@ func TestConvertJSONRewritesItemPathsToCanonicalStepIDs(t *testing.T) {
 		Exports: map[string]string{
 			"RUN_TIME":               "900",
 			"RUN_TIME_FOR_SMALL_OBJ": "1800",
-			"WAIT_TIME":              "60",
+			"WAIT_TIME":              "60s",
 			"MONGOOSE_DIR":           "/opt/mongoose/current",
 			"KEY":                    "archived-sensitive-value",
 			"USER_ID":                "archived_user",
@@ -173,6 +173,64 @@ func TestConvertJSONRejectsUnboundedCreateStep(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "has no time or count limit") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConvertJSONRejectsScenarioWithOnlyUnsupportedStepTypes(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "jobs": [{
+    "type": "for",
+    "value": "threads",
+    "in": [1, 2],
+    "jobs": [{
+      "type": "load",
+      "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}}
+    }]
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want no-load error")
+	}
+	if !strings.Contains(err.Error(), "scenario contains no load steps") {
+		t.Fatalf("error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("ConvertJSON() generated result = nil, want diagnostics")
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, `unsupported step type "for" skipped`) {
+		t.Fatalf("Diagnostics = %+v, want skipped for-loop warning", got.Diagnostics)
+	}
+}
+
+func TestParseSleepCommandAcceptsIntegerSecondsWithOptionalSuffix(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		vars    map[string]string
+		want    int
+		wantOK  bool
+	}{
+		{name: "bare integer", command: "sleep 180", want: 180, wantOK: true},
+		{name: "integer seconds suffix", command: "sleep 180s", want: 180, wantOK: true},
+		{name: "expanded seconds suffix", command: "sleep ${WAIT_TIME}", vars: map[string]string{"WAIT_TIME": "180s"}, want: 180, wantOK: true},
+		{name: "unsupported milliseconds suffix", command: "sleep 180ms", wantOK: false},
+		{name: "unsupported minutes suffix", command: "sleep 3m", wantOK: false},
+		{name: "negative duration", command: "sleep -1s", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSleepCommand(tt.command, tt.vars)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("parseSleepCommand(%q) = %d, %v; want %d, %v", tt.command, got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
 

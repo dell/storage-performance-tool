@@ -1,0 +1,380 @@
+package replay
+
+import (
+	"strings"
+	"testing"
+)
+
+const maxS3SanityJS = `var parentConfig_1 = {
+  "storage" : {
+    "net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },
+    "driver" : {
+      "type" : "s3"
+    }
+  }
+};
+
+var cmd_1 = new java.lang.ProcessBuilder()
+    .command("/bin/sh", "-c", "sleep ${WAIT_TIME}")
+    .inheritIO()
+    .start();
+cmd_1.waitFor();
+
+Load
+    .config(parentConfig_1)
+    .config({
+      "item" : {
+        "data" : {
+          "size" : "10KB"
+        },
+        "output" : {
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }
+      },
+      "storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70
+          }
+        }
+      },
+      "load" : {
+        "step" : {
+          "limit" : {
+            "time" : RUN_TIME_FOR_SMALL_OBJ
+          },
+          "id" : "MAX-W10KB"
+        }
+      }
+    })
+    .run();
+
+ReadLoad
+    .config(parentConfig_1)
+    .config({
+      "item" : {
+        "data" : {
+          "size" : "10KB",
+          "verify" : true
+        },
+        "input" : {
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }
+      },
+      "storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 160
+          }
+        }
+      },
+      "load" : {
+        "op" : {
+          "shuffle" : true,
+          "recycle" : { "mode" : false }
+        },
+        "step" : {
+          "limit" : {
+            "time" : RUN_TIME
+          },
+          "id" : "MAX-R10KB"
+        }
+      }
+    })
+    .run();
+`
+
+func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
+	got, err := ConvertJS([]byte(maxS3SanityJS), RunScript{
+		Exports: map[string]string{
+			"RUN_TIME":               "900",
+			"RUN_TIME_FOR_SMALL_OBJ": "1800",
+			"WAIT_TIME":              "60s",
+			"MONGOOSE_DIR":           "/opt/mongoose/current",
+			"DATA_NODE":              "192.0.2.10",
+			"DATA_NODE_2":            "192.0.2.11",
+			"BUCKET":                 "archive-bucket",
+			"KEY":                    "archived-sensitive-value",
+		},
+		ItemOutputPath: "archive-bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:8333", "http://10.0.0.2:8334"},
+		Bucket:        "local-bucket",
+		Label:         "replay",
+		S3Driver:      "aws",
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		"var sptHomeDir = org.apache.logging.log4j.ThreadContext.get(\"home_dir\");",
+		"var MONGOOSE_DIR = sptHomeDir;",
+		"var DATA_NODE = \"10.0.0.1\";",
+		"var DATA_NODE_2 = \"10.0.0.2\";",
+		"var BUCKET = \"local-bucket\";",
+		`"type" : "s3-aws"`,
+		`"path" : "/local-bucket"`,
+		`pauseSeconds(60, "Archived wait 1");`,
+		`"id" : "replay-001-20260605.121400.000-create"`,
+		`"id" : "replay-002-20260605.121400.000-read"`,
+		`sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	for _, forbidden := range []string{
+		"new java.lang.ProcessBuilder",
+		`"port" : 9020`,
+		"/log/MAX-W10KB",
+		"archived-sensitive-value",
+		"192.0.2.11",
+		"archive-bucket",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("scenario retained forbidden text %q\n%s", forbidden, js)
+		}
+	}
+	if len(got.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(got.Steps))
+	}
+	if got.Steps[0].ArchiveID != "MAX-W10KB" || got.Steps[0].Operation != "create" || got.Steps[0].Duration != "1800s" || got.Steps[0].Concurrency != 70 {
+		t.Fatalf("Steps[0] = %+v", got.Steps[0])
+	}
+	if got.Steps[1].ArchiveID != "MAX-R10KB" || got.Steps[1].Operation != "read" || got.Steps[1].Duration != "900s" || got.Steps[1].Concurrency != 160 {
+		t.Fatalf("Steps[1] = %+v", got.Steps[1])
+	}
+	if len(got.PathRewrites) != 1 {
+		t.Fatalf("len(PathRewrites) = %d, want 1", len(got.PathRewrites))
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted sleep command", got.CommandOps)
+	}
+}
+
+func TestConvertJSRewritesInlineOutputPathToLocalBucket(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"output" : {
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }`, `"output" : {
+          "path" : "/archive-bucket",
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "archive-bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	if strings.Contains(js, "/archive-bucket") {
+		t.Fatalf("scenario retained archived output path:\n%s", js)
+	}
+	if !strings.Contains(js, `"path" : "/local-bucket"`) {
+		t.Fatalf("scenario missing local output path:\n%s", js)
+	}
+}
+
+func TestConvertJSRejectsUnsafeProcessBuilderCommand(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `shuf /opt/mongoose/current/log/MAX-W10KB/items.csv > /opt/mongoose/current/log/MAX-W10KB/items.csv.1;`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unsafe command rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported JavaScript command") {
+		t.Fatalf("error = %v", err)
+	}
+	if got == nil || len(got.CommandOps) != 1 || got.CommandOps[0].Action != "rejected" {
+		t.Fatalf("CommandOps = %+v, want rejected command", got)
+	}
+}
+
+func TestConvertJSRewritesBareParentConfigAssignment(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, "var parentConfig_1", "parentConfig_1", 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	if strings.Contains(js, `"port" : 9020`) {
+		t.Fatalf("scenario retained archived parent port:\n%s", js)
+	}
+	if !strings.Contains(js, `var parentConfig_1 = {`) {
+		t.Fatalf("scenario missing sanitized parent declaration:\n%s", js)
+	}
+}
+
+func TestConvertJSWarnsWhenParentConfigDropsExtraSettings(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"driver" : {
+      "type" : "s3"
+    }`, `"driver" : {
+      "type" : "s3"
+    },
+    "ssl" : {
+      "enabled" : true
+    }`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"https://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "archived parent settings") {
+		t.Fatalf("Diagnostics = %+v, want parentConfig stripping warning", got.Diagnostics)
+	}
+	if strings.Contains(string(got.ScenarioJS), `"ssl"`) {
+		t.Fatalf("scenario retained archived ssl parent setting:\n%s", string(got.ScenarioJS))
+	}
+}
+
+func TestConvertJSRejectsUnsupportedLoadFactory(t *testing.T) {
+	raw := []byte(maxS3SanityJS + `
+MixedLoad
+    .config({
+      "load" : {
+        "step" : {
+          "id" : "MIXED"
+        }
+      }
+    })
+    .run();
+`)
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unsupported load factory rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported JavaScript load factory MixedLoad") {
+		t.Fatalf("error = %v", err)
+	}
+	if got == nil || !hasDiagnosticContaining(got.Diagnostics, severityError, "MixedLoad") {
+		t.Fatalf("Diagnostics = %+v, want MixedLoad error", got)
+	}
+}
+
+func TestConvertJSRejectsInlineArchivedAuth(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70
+          }
+        }
+      }`, `"storage" : {
+        "auth" : {
+          "uid" : "archived-user",
+          "secret" : "archived-secret"
+        },
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70
+          }
+        }
+      }`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want inline auth rejection")
+	}
+	if strings.Contains(err.Error(), "archived-secret") || strings.Contains(err.Error(), "archived-user") {
+		t.Fatalf("error leaked inline auth value: %v", err)
+	}
+	if got == nil || len(got.ScenarioJS) != 0 {
+		t.Fatalf("generated = %+v, want no scenario emitted on inline auth rejection", got)
+	}
+}
+
+func TestConvertJSInfersLoadReadOperationFromOpType(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `ReadLoad
+    .config(parentConfig_1)`, `Load
+    .config(parentConfig_1)`, 1))
+	raw = []byte(strings.Replace(string(raw), `"op" : {
+          "shuffle" : true,`, `"op" : {
+          "type" : "read",
+          "shuffle" : true,`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if got.Steps[1].Operation != opTypeRead {
+		t.Fatalf("Steps[1].Operation = %q, want read", got.Steps[1].Operation)
+	}
+	if !strings.Contains(string(got.ScenarioJS), `"id" : "replay-002-20260605.121400.000-read"`) {
+		t.Fatalf("scenario missing read-suffixed canonical step ID:\n%s", string(got.ScenarioJS))
+	}
+}
+
+func TestConvertJSRejectsUnsupportedDriver(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"type" : "s3"`, `"type" : "swift"`, 1))
+
+	_, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unsupported driver error")
+	}
+	if !strings.Contains(err.Error(), "SWIFT replay is not implemented") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func hasDiagnosticContaining(diagnostics []Diagnostic, severity, text string) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == severity && strings.Contains(diagnostic.Message, text) {
+			return true
+		}
+	}
+	return false
+}
