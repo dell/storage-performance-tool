@@ -1726,7 +1726,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Requires complex setup with real CompositeDataOperation/PartialDataOperation instances - tested through integration")
+		@Disabled("Requires integration test with local S3-compatible service (MinIO) for proper CompositeDataOperation setup")
 		@Test
 		void uploadPart_storesEtagInParent() throws Exception {
 			UploadPartResponse mockResponse = UploadPartResponse.builder()
@@ -1758,7 +1758,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Requires complex setup with real CompositeDataOperation instances - tested through integration")
+		@Disabled("Requires integration test with local S3-compatible service (MinIO) for proper CompositeDataOperation setup")
 		@Test
 		void completeMultipartUpload_assemblesParts() throws Exception {
 			CompleteMultipartUploadResponse mockResponse = CompleteMultipartUploadResponse.builder()
@@ -1853,7 +1853,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Mocking complexity - requires ResponseInputStream and AsyncResponseTransformer mocking")
+		@Disabled("Requires integration test with local S3-compatible service (MinIO) for proper ResponseInputStream/AsyncResponseTransformer setup")
 		@Test
 		void readRange_calculatesCorrectRange() throws Exception {
 			GetObjectResponse mockResponse = GetObjectResponse.builder()
@@ -1882,7 +1882,7 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		@Disabled("Mocking complexity with execute() path - exception handling works in production")
+		@Disabled("Requires integration test with local S3-compatible service (MinIO) for proper exception handling verification")
 		@Test
 		void readRange_handlesIOException() throws Exception {
 			DataItem item = mock(DataItem.class);

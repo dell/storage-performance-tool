@@ -10,7 +10,6 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
@@ -33,11 +32,7 @@ import static org.mockito.Mockito.when;
  * Integration-style test for S3 object tagging.
  * Uses a mock S3AsyncClient to capture requests for verification,
  * and real DataItem/DataOperation instances to exercise the full code path.
- *
- * Temporarily disabled due to bucket resolution complexity in test setup.
- * Tagging behavior is verified through unit tests in S3AwsStorageDriverTest.
  */
-@Disabled("Bucket resolution complexity in test setup; tagging verified via unit tests")
 public class S3AwsTaggingIntegrationTest {
 
 	private static final Credential CREDENTIAL = Credential.getInstance(
@@ -80,6 +75,16 @@ public class S3AwsTaggingIntegrationTest {
 		return config;
 	}
 
+	private void setTaggingFields(S3AwsStorageDriver<?, ?> driver, boolean enabled, Map<String, String> tags) throws Exception {
+		Field taggingEnabledField = S3AwsStorageDriver.class.getDeclaredField("taggingEnabled");
+		taggingEnabledField.setAccessible(true);
+		taggingEnabledField.set(driver, enabled);
+
+		Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+		objectTagsField.setAccessible(true);
+		objectTagsField.set(driver, tags != null ? tags : Map.of());
+	}
+
 	private S3AsyncClient mockS3Client;
 	private S3AwsStorageDriver<DataItem, DataOperation<DataItem>> driver;
 	private final Queue<PutObjectRequest> putObjectRequests = new ArrayDeque<>();
@@ -108,10 +113,12 @@ public class S3AwsTaggingIntegrationTest {
 						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
 						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
 
-		// Set bucket name via reflection (bypasses config resolution)
+		// Set bucket name and tagging fields via reflection (bypasses config resolution)
 		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
 		bucketField.setAccessible(true);
 		bucketField.set(driver, "test-bucket");
+
+		setTaggingFields(driver, true, Map.of("tag1", "value1", "tag2", "value2"));
 	}
 
 	@AfterEach
@@ -143,33 +150,8 @@ public class S3AwsTaggingIntegrationTest {
 
 	@Test
 	public void testPutObjectNoTagsWhenDisabled() throws Exception {
-		// Re-create driver with tagging disabled
-		tearDown();
-		putObjectRequests.clear();
-
-		Config config = getConfig(false, Map.of());
-		mockS3Client = Mockito.mock(S3AsyncClient.class);
-		when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
-						.thenAnswer(invocation -> {
-							PutObjectRequest request = invocation.getArgument(0);
-							putObjectRequests.add(request);
-							return CompletableFuture.completedFuture(PutObjectResponse.builder().build());
-						});
-
-		driver = new S3AwsStorageDriver<>(
-						"test-storage-driver-s3-aws",
-						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false),
-						config,
-						false,
-						4096,
-						mockS3Client,
-						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
-
-		// Set bucket name via reflection (bypasses config resolution)
-		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
-		bucketField.setAccessible(true);
-		bucketField.set(driver, "test-bucket");
+		// Disable tagging via reflection
+		setTaggingFields(driver, false, Map.of());
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
@@ -187,33 +169,8 @@ public class S3AwsTaggingIntegrationTest {
 
 	@Test
 	public void testPutObjectNoTagsWhenEmpty() throws Exception {
-		// Re-create driver with tagging enabled but empty tags
-		tearDown();
-		putObjectRequests.clear();
-
-		Config config = getConfig(true, Map.of());
-		mockS3Client = Mockito.mock(S3AsyncClient.class);
-		when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
-						.thenAnswer(invocation -> {
-							PutObjectRequest request = invocation.getArgument(0);
-							putObjectRequests.add(request);
-							return CompletableFuture.completedFuture(PutObjectResponse.builder().build());
-						});
-
-		driver = new S3AwsStorageDriver<>(
-						"test-storage-driver-s3-aws",
-						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false),
-						config,
-						false,
-						4096,
-						mockS3Client,
-						64 * 1024L,  // smallObjectThresholdBytes (64KB default)
-						8 * 1024 * 1024L);  // partSizeBytes (8MB default)
-
-		// Set bucket name via reflection (bypasses config resolution)
-		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
-		bucketField.setAccessible(true);
-		bucketField.set(driver, "test-bucket");
+		// Enable tagging but with empty tags via reflection
+		setTaggingFields(driver, true, Map.of());
 
 		DataItem item = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 1024);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
