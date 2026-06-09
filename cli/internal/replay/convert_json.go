@@ -176,11 +176,13 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		switch stepType {
 		case legacyStepTypeLoad, legacyStepTypePrecondition:
 			loadStepNumber++
+			step.Config = mergeConfig(legacy.Config, step.Config)
 			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
 				continue
 			}
+			diagnostics = append(diagnostics, converted.diagnostics...)
 			stepsOut = append(stepsOut, converted.summary)
 			pathRewrites = append(pathRewrites, converted.rewrites...)
 			body.WriteString(converted.js)
@@ -277,9 +279,10 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 }
 
 type convertedStep struct {
-	js       string
-	summary  StepSummary
-	rewrites []PathRewrite
+	js          string
+	summary     StepSummary
+	rewrites    []PathRewrite
+	diagnostics []Diagnostic
 }
 
 type convertedCommand struct {
@@ -319,6 +322,7 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 
 	stepID := formatStepID(label, stepNumber, baseTS, opSuffix)
 	archiveToStepID[archiveID] = stepID
+	diagnostics := ignoredJSONConfigDiagnostics(archiveID, step.Config)
 
 	concurrency := intValue(firstPath(step.Config,
 		[]string{legacyStepTypeLoad, legacyKeyLimit, legacyKeyConcurrency},
@@ -443,8 +447,144 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 			Duration:    duration,
 			Count:       count,
 		},
-		rewrites: rewrites,
+		rewrites:    rewrites,
+		diagnostics: diagnostics,
 	}, nil
+}
+
+func mergeConfig(base, override map[string]any) map[string]any {
+	out := cloneConfigMap(base)
+	for k, v := range override {
+		if baseMap, ok := out[k].(map[string]any); ok {
+			if overrideMap, ok := v.(map[string]any); ok {
+				out[k] = mergeConfig(baseMap, overrideMap)
+				continue
+			}
+		}
+		out[k] = cloneConfigValue(v)
+	}
+	return out
+}
+
+func cloneConfigMap(src map[string]any) map[string]any {
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = cloneConfigValue(v)
+	}
+	return out
+}
+
+func cloneConfigValue(value any) any {
+	switch t := value.(type) {
+	case map[string]any:
+		return cloneConfigMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, v := range t {
+			out[i] = cloneConfigValue(v)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func ignoredJSONConfigDiagnostics(archiveID string, config map[string]any) []Diagnostic {
+	paths := ignoredJSONConfigPaths(config)
+	if len(paths) == 0 {
+		return nil
+	}
+	diagnostics := make([]Diagnostic, 0, len(paths))
+	for _, path := range paths {
+		diagnostics = append(diagnostics, Diagnostic{
+			Severity: severityWarning,
+			Message:  fmt.Sprintf("step %s ignores unmodeled JSON config path %s", archiveID, path),
+		})
+	}
+	return diagnostics
+}
+
+func ignoredJSONConfigPaths(config map[string]any) []string {
+	var leaves []string
+	collectConfigLeafPaths(config, nil, &leaves)
+	ignored := map[string]struct{}{}
+	for _, path := range leaves {
+		switch {
+		case isModeledJSONConfigPath(path):
+			continue
+		case hasJSONConfigPathPrefix(path, "item.naming"):
+			ignored["item.naming"] = struct{}{}
+		case hasJSONConfigPathPrefix(path, "storage.net.http"):
+			ignored["storage.net.http"] = struct{}{}
+		default:
+			ignored[path] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(ignored))
+	for path := range ignored {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func collectConfigLeafPaths(value any, path []string, out *[]string) {
+	switch t := value.(type) {
+	case map[string]any:
+		if len(t) == 0 && len(path) > 0 {
+			*out = append(*out, strings.Join(path, "."))
+			return
+		}
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			collectConfigLeafPaths(t[k], append(path, k), out)
+		}
+	case []any:
+		if len(path) > 0 {
+			*out = append(*out, strings.Join(path, "."))
+		}
+	default:
+		if len(path) > 0 {
+			*out = append(*out, strings.Join(path, "."))
+		}
+	}
+}
+
+func isModeledJSONConfigPath(path string) bool {
+	switch path {
+	case "item.data.size",
+		"item.data.verify",
+		"item.input.file",
+		"item.input.path",
+		"item.output.file",
+		"item.output.path",
+		"load.generator.recycle.enabled",
+		"load.generator.shuffle",
+		"load.limit.concurrency",
+		"load.op.limit.count",
+		"load.op.type",
+		"load.type",
+		"storage.driver.concurrency",
+		"storage.driver.limit.concurrency",
+		"storage.driver.queue.input",
+		"storage.driver.type",
+		"storage.net.node.addrs",
+		"storage.net.node.port",
+		"test.step.id",
+		"test.step.limit.count",
+		"test.step.limit.time":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasJSONConfigPathPrefix(path, prefix string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+".")
 }
 
 func effectiveVariables(exports map[string]string, opts Options) map[string]string {

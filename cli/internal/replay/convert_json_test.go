@@ -155,6 +155,58 @@ func TestConvertJSONReadsTestStepLimitCount(t *testing.T) {
 	}
 }
 
+func TestConvertJSONWarnsOnUnmodeledConfigAndUsesInheritedDefaults(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {
+    "item": {
+      "data": {"size": "10KB"},
+      "naming": {"prefix": "obj_", "length": 11}
+    },
+    "storage": {
+      "driver": {"type": "emcs3"},
+      "net": {
+        "node": {"port": 9020},
+        "http": {
+          "headers": {
+            "x-amz-meta-name": "JohnDoe-%d[1-10]",
+            "x-amz-meta-score": "%f{##.##}[2-10]"
+          }
+        }
+      }
+    }
+  },
+  "jobs": [{
+    "type": "load",
+    "config": {
+      "item": {"naming": {"offset": 12}},
+      "test": {"step": {"id": "MAX", "limit": {"count": 10}}},
+      "load": {"limit": {"concurrency": 4}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	if !strings.Contains(js, `"size": "10KB"`) {
+		t.Fatalf("scenario did not inherit top-level item.data.size:\n%s", js)
+	}
+	if strings.Contains(js, "JohnDoe-%d[1-10]") || strings.Contains(js, `"naming"`) {
+		t.Fatalf("scenario retained unmodeled config instead of warning:\n%s", js)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "step MAX ignores unmodeled JSON config path item.naming") {
+		t.Fatalf("Diagnostics = %+v, want item.naming warning", got.Diagnostics)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "step MAX ignores unmodeled JSON config path storage.net.http") {
+		t.Fatalf("Diagnostics = %+v, want storage.net.http warning", got.Diagnostics)
+	}
+}
+
 func TestConvertJSONRejectsUnboundedCreateStep(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
