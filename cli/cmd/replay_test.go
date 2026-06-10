@@ -15,6 +15,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/tui"
+	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
 )
 
@@ -258,6 +259,76 @@ func TestCleanupReplayContainers(t *testing.T) {
 
 	if err := cleanupReplayContainers(nil, time.Second); err != nil {
 		t.Fatalf("cleanupReplayContainers(nil) error = %v", err)
+	}
+}
+
+func TestNormalizeHeadlessAutoTerminate(t *testing.T) {
+	firstStopErr := errors.New("first cleanup failed")
+	secondStopErr := errors.New("second cleanup failed")
+
+	tests := []struct {
+		name         string
+		inputErr     error
+		cleanerErr   error
+		wantAuto     bool
+		wantErr      error
+		wantCleanup  int
+		wantCleanup2 error
+	}{
+		{
+			name:     "nil error",
+			wantAuto: false,
+		},
+		{
+			name:     "clean auto terminate",
+			inputErr: &headless.AutoTerminateError{CleanupComplete: true},
+			wantAuto: true,
+		},
+		{
+			name:        "auto terminate with first cleanup failure retries",
+			inputErr:    errors.Join(&headless.AutoTerminateError{CleanupComplete: false}, firstStopErr),
+			wantAuto:    true,
+			wantCleanup: 1,
+		},
+		{
+			name:         "auto terminate retry failure is returned",
+			inputErr:     errors.Join(&headless.AutoTerminateError{CleanupComplete: false}, firstStopErr),
+			cleanerErr:   secondStopErr,
+			wantAuto:     true,
+			wantErr:      secondStopErr,
+			wantCleanup:  1,
+			wantCleanup2: firstStopErr,
+		},
+		{
+			name:     "ordinary error passes through",
+			inputErr: firstStopErr,
+			wantErr:  firstStopErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleaner := &fakeReplayContainerCleaner{err: tt.cleanerErr}
+			gotAuto, gotErr := normalizeHeadlessAutoTerminate(tt.inputErr, cleaner, time.Second)
+			if gotAuto != tt.wantAuto {
+				t.Fatalf("autoTerminated = %t, want %t", gotAuto, tt.wantAuto)
+			}
+			if cleaner.calls != tt.wantCleanup {
+				t.Fatalf("cleanup calls = %d, want %d", cleaner.calls, tt.wantCleanup)
+			}
+			if tt.wantErr == nil {
+				if gotErr != nil {
+					t.Fatalf("error = %v, want nil", gotErr)
+				}
+				return
+			}
+			if !errors.Is(gotErr, tt.wantErr) {
+				t.Fatalf("error = %v, want errors.Is(..., %v)", gotErr, tt.wantErr)
+			}
+			if tt.wantCleanup2 != nil && !errors.Is(gotErr, tt.wantCleanup2) {
+				t.Fatalf("error = %v, want joined first cleanup error %v", gotErr, tt.wantCleanup2)
+			}
+		})
 	}
 }
 

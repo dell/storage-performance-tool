@@ -8,6 +8,7 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -58,6 +59,27 @@ type HeadlessOptions struct {
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
 	ExpectedStepIDs        []string
+}
+
+// AutoTerminateError indicates a headless multi-host run reached the configured
+// auto-terminate deadline. CleanupComplete reports whether the runner already
+// stopped managed containers before returning.
+type AutoTerminateError struct {
+	CleanupComplete bool
+}
+
+func (e *AutoTerminateError) Error() string {
+	return "auto-terminate deadline reached"
+}
+
+// AutoTerminateState reports whether err represents a configured auto-terminate
+// deadline and whether the runner completed container cleanup before returning.
+func AutoTerminateState(err error) (bool, bool) {
+	var autoErr *AutoTerminateError
+	if !errors.As(err, &autoErr) {
+		return false, false
+	}
+	return true, autoErr.CleanupComplete
 }
 
 // NewHeadlessRunner creates a new headless runner
@@ -216,7 +238,11 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	// Wait for completion or interruption
 	err = <-done
 	if err != nil {
-		r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
+		if errors.Is(err, context.DeadlineExceeded) {
+			r.output("SHUTDOWN", "Auto-terminate deadline reached")
+		} else {
+			r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
+		}
 	} else if r.delegateNormalShutdown {
 		r.output("SHUTDOWN", "Normal completion detected; auto-results will fetch artifacts and stop containers")
 		return nil
@@ -224,7 +250,8 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 
 	// Stop all containers
 	r.output("SHUTDOWN", "Stopping all containers...")
-	if stopErr := r.orchestrator.StopAllContainers(ctx); stopErr != nil {
+	stopErr := r.orchestrator.StopAllContainers(ctx)
+	if stopErr != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 		if err == nil {
 			err = stopErr
@@ -233,7 +260,23 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		r.output("SHUTDOWN", "All containers stopped successfully")
 	}
 
-	return err
+	return multiHostShutdownResult(err, stopErr)
+}
+
+func multiHostShutdownResult(runErr, stopErr error) error {
+	if stopErr != nil {
+		if runErr != nil && !errors.Is(runErr, context.DeadlineExceeded) {
+			return errors.Join(runErr, stopErr)
+		}
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			return errors.Join(&AutoTerminateError{CleanupComplete: false}, stopErr)
+		}
+		return stopErr
+	}
+	if errors.Is(runErr, context.DeadlineExceeded) {
+		return &AutoTerminateError{CleanupComplete: true}
+	}
+	return runErr
 }
 
 // Close cleans up resources

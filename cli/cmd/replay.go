@@ -281,6 +281,16 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
 			err := headless.StartHeadlessModeWithOrchestratorContent(replayOrchestrator, sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
+			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, replayOrchestrator, 30*time.Second)
+			if autoTerminated {
+				if normalizedErr != nil {
+					finalizeTraceArtifact()
+					return normalizedErr
+				}
+				finalizeTraceArtifact()
+				return nil
+			}
+			err = normalizedErr
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				finalizeTraceArtifact()
 				return err
@@ -346,6 +356,23 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 type replayContainerCleaner interface {
 	StopAllContainers(context.Context) error
+}
+
+func normalizeHeadlessAutoTerminate(err error, cleaner replayContainerCleaner, timeout time.Duration) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	autoTerminated, cleanupComplete := headless.AutoTerminateState(err)
+	if !autoTerminated {
+		return false, err
+	}
+	if cleanupComplete {
+		return true, nil
+	}
+	if stopErr := cleanupReplayContainers(cleaner, timeout); stopErr != nil {
+		return true, errors.Join(err, stopErr)
+	}
+	return true, nil
 }
 
 func cleanupReplayContainers(cleaner replayContainerCleaner, timeout time.Duration) error {

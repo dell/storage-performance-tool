@@ -996,6 +996,11 @@ Available workload types:
 				}
 
 				err := headless.StartHeadlessModeWithOrchestrator(orchestrator, sptImage, scenarioPath, params, options)
+				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
+				if autoTerminated {
+					finalizeTraceArtifact()
+					return normalizedErr
+				}
 				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
 					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
 					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1005,7 +1010,7 @@ Available workload types:
 					cleanupCancel()
 				}
 				finalizeTraceArtifact()
-				return err
+				return normalizedErr
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
