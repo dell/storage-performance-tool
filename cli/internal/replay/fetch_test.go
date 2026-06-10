@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFetchArtifactsDiscoversTimestampedScenario(t *testing.T) {
@@ -66,5 +67,141 @@ func TestSelectScenarioAllowsTimestampedResultMatch(t *testing.T) {
 	}
 	if got != "max.s3.sanity.result.2025-10-21.16:29:50.json" {
 		t.Fatalf("scenario = %q", got)
+	}
+}
+
+func TestFetchArtifactsFollowsArtifactRedirects(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/run.real.sh", http.StatusFound)
+	})
+	mux.HandleFunc("/run.real.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/max.s3.sanity.real.json", http.StatusFound)
+	})
+	mux.HandleFunc("/max.s3.sanity.real.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"type":"sequential","steps":[]}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	got, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err != nil {
+		t.Fatalf("FetchArtifacts() error = %v", err)
+	}
+	if got.RunScriptName != "run.sh" {
+		t.Fatalf("RunScriptName = %q", got.RunScriptName)
+	}
+	if got.ScenarioName != "max.s3.sanity.json" {
+		t.Fatalf("ScenarioName = %q", got.ScenarioName)
+	}
+}
+
+func TestFetchArtifactsReportsHTTPStatusForFolderListing(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "not_found", statusCode: http.StatusNotFound},
+		{name: "internal_error", statusCode: http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, http.StatusText(tc.statusCode), tc.statusCode)
+			}))
+			defer server.Close()
+
+			_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+			if err == nil {
+				t.Fatal("FetchArtifacts() error = nil, want HTTP status error")
+			}
+			want := fmt.Sprintf("HTTP %d", tc.statusCode)
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want contains %q", err, want)
+			}
+		})
+	}
+}
+
+func TestFetchArtifactsPropagatesTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a>`)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := FetchArtifacts(ctx, server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestFetchArtifactsRejectsOversizedScenarioArtifact(t *testing.T) {
+	oversized := strings.Repeat("x", int(maxArtifactBytes+1))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, oversized)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want size-limit error")
+	}
+	if !strings.Contains(err.Error(), "artifact exceeds max size") {
+		t.Fatalf("error = %v, want size-limit error", err)
+	}
+}
+
+func TestFetchArtifactsRejectsEscapingRunScriptHref(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/folder/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="../run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL+"/folder/", server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want escaping-link error")
+	}
+	if !strings.Contains(err.Error(), "escapes replay folder") {
+		t.Fatalf("error = %v, want escape error", err)
+	}
+}
+
+func TestFetchArtifactsFailsOnMalformedFolderListing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<html><body><a href=>broken<a data="x">still broken</a></body></html>`)
+	}))
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want missing run script error")
+	}
+	if !strings.Contains(err.Error(), "no .sh run script found in replay folder") {
+		t.Fatalf("error = %v, want missing-run-script error", err)
 	}
 }
