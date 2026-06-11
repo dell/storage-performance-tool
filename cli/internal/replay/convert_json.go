@@ -124,6 +124,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "scenario contains no steps or jobs"})
 	}
 
+	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
 			Diagnostics:     diagnostics,
@@ -237,6 +238,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "scenario contains no load steps"})
 	}
 	pathRewrites = uniquePathRewrites(pathRewrites)
+	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
 			Diagnostics:     diagnostics,
@@ -1205,6 +1207,7 @@ func hasErrors(diagnostics []Diagnostic) bool {
 }
 
 func diagnosticsError(diagnostics []Diagnostic) error {
+	diagnostics = normalizeDiagnostics(diagnostics)
 	var messages []string
 	for _, d := range diagnostics {
 		if d.Severity == severityError {
@@ -1214,7 +1217,7 @@ func diagnosticsError(diagnostics []Diagnostic) error {
 	if len(messages) == 0 {
 		return nil
 	}
-	return errors.New(strings.Join(messages, "; "))
+	return newClassifiedError(firstErrorClass(diagnostics), strings.Join(messages, "; "), errors.New(strings.Join(messages, "; ")))
 }
 
 func uniquePathRewrites(rewrites []PathRewrite) []PathRewrite {

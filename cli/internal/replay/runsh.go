@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"fmt"
 	"os"
 	"regexp"
 	"strconv"
@@ -43,7 +42,7 @@ func ParseRunScript(script string) (RunScript, error) {
 	}
 
 	if rs.ScenarioPath == "" {
-		return rs, fmt.Errorf("run script does not reference a scenario file")
+		return rs, classifiedErrorf(failureRunScriptMissingScenario, "run script does not reference a scenario file")
 	}
 	return rs, nil
 }

@@ -10,6 +10,78 @@ import (
 	"time"
 )
 
+func TestFetchArtifactsClassifiesMissingRunScript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="max.s3.sanity.json">scenario</a>`)
+	}))
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want missing run script")
+	}
+	if got := ErrorClass(err); got != failureMissingRunScript {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureMissingRunScript, err)
+	}
+}
+
+func TestFetchArtifactsClassifiesAmbiguousRunScript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run-a.sh">run-a</a><a href="run-b.sh">run-b</a><a href="max.s3.sanity.json">scenario</a>`)
+	}))
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want ambiguous run script")
+	}
+	if got := ErrorClass(err); got != failureAmbiguousRunScript {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureAmbiguousRunScript, err)
+	}
+}
+
+func TestFetchArtifactsClassifiesScenarioNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="different.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want scenario_not_found")
+	}
+	if got := ErrorClass(err); got != failureScenarioNotFound {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureScenarioNotFound, err)
+	}
+}
+
+func TestFetchArtifactsClassifiesScenarioMissing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want scenario_missing")
+	}
+	if got := ErrorClass(err); got != failureScenarioMissing {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureScenarioMissing, err)
+	}
+}
+
 func TestFetchArtifactsDiscoversTimestampedScenario(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

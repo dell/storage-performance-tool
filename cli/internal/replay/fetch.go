@@ -22,7 +22,7 @@ var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["']?([^"'>\s]+)`)
 func FetchArtifacts(ctx context.Context, sourceURL string, client *http.Client) (Artifacts, error) {
 	folderURL, err := normalizeFolderURL(sourceURL)
 	if err != nil {
-		return Artifacts{}, err
+		return Artifacts{}, ensureClassifiedError(err)
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -30,38 +30,38 @@ func FetchArtifacts(ctx context.Context, sourceURL string, client *http.Client) 
 
 	listing, err := fetchBytes(ctx, client, folderURL)
 	if err != nil {
-		return Artifacts{}, fmt.Errorf("fetch folder listing: %w", err)
+		return Artifacts{}, ensureClassifiedError(fmt.Errorf("fetch folder listing: %w", err))
 	}
 	links := parseLinks(string(listing))
 
 	runHref, err := selectRunScript(links)
 	if err != nil {
-		return Artifacts{}, err
+		return Artifacts{}, ensureClassifiedError(err)
 	}
 	runURL, runName, err := resolveFolderLink(folderURL, runHref)
 	if err != nil {
-		return Artifacts{}, fmt.Errorf("resolve run script URL: %w", err)
+		return Artifacts{}, ensureClassifiedError(fmt.Errorf("resolve run script URL: %w", err))
 	}
 	runBody, err := fetchBytes(ctx, client, runURL)
 	if err != nil {
-		return Artifacts{}, fmt.Errorf("fetch run script %s: %w", runName, err)
+		return Artifacts{}, ensureClassifiedError(fmt.Errorf("fetch run script %s: %w", runName, err))
 	}
 	runScript, err := ParseRunScript(string(runBody))
 	if err != nil {
-		return Artifacts{}, err
+		return Artifacts{}, ensureClassifiedError(err)
 	}
 
 	scenarioHref, err := selectScenario(links, runScript.ScenarioPath)
 	if err != nil {
-		return Artifacts{}, err
+		return Artifacts{}, ensureClassifiedError(err)
 	}
 	scenarioURL, scenarioName, err := resolveFolderLink(folderURL, scenarioHref)
 	if err != nil {
-		return Artifacts{}, fmt.Errorf("resolve scenario URL: %w", err)
+		return Artifacts{}, ensureClassifiedError(fmt.Errorf("resolve scenario URL: %w", err))
 	}
 	scenarioBody, err := fetchBytes(ctx, client, scenarioURL)
 	if err != nil {
-		return Artifacts{}, fmt.Errorf("fetch scenario %s: %w", scenarioName, err)
+		return Artifacts{}, ensureClassifiedError(fmt.Errorf("fetch scenario %s: %w", scenarioName, err))
 	}
 
 	return Artifacts{
@@ -76,14 +76,14 @@ func FetchArtifacts(ctx context.Context, sourceURL string, client *http.Client) 
 
 func normalizeFolderURL(raw string) (*url.URL, error) {
 	if strings.TrimSpace(raw) == "" {
-		return nil, fmt.Errorf("--from URL is required")
+		return nil, classifiedErrorf(failureInvalidSourceURL, "--from URL is required")
 	}
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return nil, fmt.Errorf("invalid --from URL: %w", err)
+		return nil, newClassifiedError(failureInvalidSourceURL, fmt.Sprintf("invalid --from URL: %v", err), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported replay URL scheme %q; use http or https", u.Scheme)
+		return nil, classifiedErrorf(failureInvalidSourceURL, "unsupported replay URL scheme %q; use http or https", u.Scheme)
 	}
 	if !strings.HasSuffix(u.Path, "/") {
 		u.Path += "/"
@@ -152,13 +152,13 @@ func selectRunScript(links []string) (string, error) {
 	case len(namedRun) == 1:
 		return namedRun[0], nil
 	case len(namedRun) > 1:
-		return "", fmt.Errorf("multiple run script candidates found: %s", strings.Join(baseNames(namedRun), ", "))
+		return "", classifiedErrorf(failureAmbiguousRunScript, "multiple run script candidates found: %s", strings.Join(baseNames(namedRun), ", "))
 	case len(all) == 1:
 		return all[0], nil
 	case len(all) > 1:
-		return "", fmt.Errorf("multiple shell script candidates found: %s", strings.Join(baseNames(all), ", "))
+		return "", classifiedErrorf(failureAmbiguousRunScript, "multiple shell script candidates found: %s", strings.Join(baseNames(all), ", "))
 	default:
-		return "", fmt.Errorf("no .sh run script found in replay folder")
+		return "", classifiedErrorf(failureMissingRunScript, "no .sh run script found in replay folder")
 	}
 }
 
@@ -179,7 +179,7 @@ func selectScenario(links []string, scenarioPath string) (string, error) {
 		}
 	}
 	if len(scenarioLinks) == 0 {
-		return "", fmt.Errorf("no %s scenario artifact found in replay folder", strings.TrimPrefix(wantExt, "."))
+		return "", classifiedErrorf(failureScenarioMissing, "no %s scenario artifact found in replay folder", strings.TrimPrefix(wantExt, "."))
 	}
 	for _, link := range scenarioLinks {
 		if path.Base(link) == want {
@@ -199,10 +199,10 @@ func selectScenario(links []string, scenarioPath string) (string, error) {
 			return prefixMatches[0], nil
 		}
 		if len(prefixMatches) > 1 {
-			return "", fmt.Errorf("multiple scenario candidates match %s: %s", want, strings.Join(baseNames(prefixMatches), ", "))
+			return "", classifiedErrorf(failureScenarioNotFound, "multiple scenario candidates match %s: %s", want, strings.Join(baseNames(prefixMatches), ", "))
 		}
 	}
-	return "", fmt.Errorf("scenario %s was not found in replay folder", want)
+	return "", classifiedErrorf(failureScenarioNotFound, "scenario %s was not found in replay folder", want)
 }
 
 func resolveFolderLink(folderURL *url.URL, href string) (*url.URL, string, error) {
@@ -218,7 +218,7 @@ func resolveFolderLink(folderURL *url.URL, href string) (*url.URL, string, error
 	}
 	resolved := folderURL.ResolveReference(rel)
 	if resolved.Scheme != folderURL.Scheme || resolved.Host != folderURL.Host || !strings.HasPrefix(resolved.Path, folderURL.Path) {
-		return nil, "", fmt.Errorf("artifact link %q escapes replay folder", href)
+		return nil, "", classifiedErrorf(failureEscapedArtifactLink, "artifact link %q escapes replay folder", href)
 	}
 	name := path.Base(resolved.Path)
 	if name == "." || name == "/" || name == "" {

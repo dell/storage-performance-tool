@@ -203,6 +203,36 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --run-scenar
 	}
 }
 
+func TestGenerateClassifiesUnsupportedScenarioFormat(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.10kb100kbjson">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.10kb100kbjson`)
+	})
+	mux.HandleFunc("/max.s3.sanity.10kb100kbjson", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `placeholder`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want unsupported scenario format")
+	}
+	if got := ErrorClass(err); got != failureScenarioFormatUnsupported {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureScenarioFormatUnsupported, err)
+	}
+}
+
 func TestGenerateOmitsCommandNoiseWhenNoArchivedCommands(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

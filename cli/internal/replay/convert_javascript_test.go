@@ -259,6 +259,23 @@ func TestConvertJSRejectsUnsafeProcessBuilderCommand(t *testing.T) {
 	}
 }
 
+func TestConvertJSClassifiesUnsupportedProcessBuilder(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `python /tmp/s3query.py ${BUCKET}`, 1))
+	_, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unsupported JS ProcessBuilder")
+	}
+	if got := ErrorClass(err); got != failureUnsupportedJSProcess {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureUnsupportedJSProcess, err)
+	}
+}
+
 func TestConvertJSRewritesBareParentConfigAssignment(t *testing.T) {
 	raw := []byte(strings.Replace(maxS3SanityJS, "var parentConfig_1", "parentConfig_1", 1))
 
@@ -334,6 +351,9 @@ MixedLoad
 	}
 	if !strings.Contains(err.Error(), "unsupported JavaScript load factory MixedLoad") {
 		t.Fatalf("error = %v", err)
+	}
+	if got := ErrorClass(err); got != failureUnsupportedJSLoadFactory {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureUnsupportedJSLoadFactory, err)
 	}
 	if got == nil || !hasDiagnosticContaining(got.Diagnostics, severityError, "MixedLoad") {
 		t.Fatalf("Diagnostics = %+v, want MixedLoad error", got)

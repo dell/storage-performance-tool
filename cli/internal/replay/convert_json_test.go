@@ -127,6 +127,42 @@ func TestConvertJSONRejectsFSDriver(t *testing.T) {
 	}
 }
 
+func TestConvertJSONClassifiesParallelUnimplemented(t *testing.T) {
+	raw := []byte(`{
+  "type": "parallel",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}}]
+}`)
+	_, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want parallel unimplemented")
+	}
+	if got := ErrorClass(err); got != failureParallelUnimplemented {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureParallelUnimplemented, err)
+	}
+}
+
+func TestConvertJSONClassifiesScenarioNoStepsOrJobs(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": []
+}`)
+	_, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want no steps/jobs")
+	}
+	if got := ErrorClass(err); got != failureScenarioNoStepsOrJobs {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureScenarioNoStepsOrJobs, err)
+	}
+}
+
 func TestConvertJSONReadsTestStepLimitCount(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",

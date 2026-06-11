@@ -452,6 +452,7 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 		"\nCommand operations\n",
 		"  - rejected: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB (not recognized by replay command whitelist)\n",
 		"\nErrors\n  - unsupported command step: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB\n",
+		"Replay failure class: unsupported_command_step\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output missing %q\n%s", want, out.String())

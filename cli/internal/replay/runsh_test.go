@@ -28,3 +28,15 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --storage-net-node-addrs=${DATA_NODES} --
 		t.Fatalf("KEY export was not parsed")
 	}
 }
+
+func TestParseRunScriptClassifiesMissingScenarioReference(t *testing.T) {
+	_, err := ParseRunScript(`#!/bin/bash
+export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET}`)
+	if err == nil {
+		t.Fatal("ParseRunScript() error = nil, want missing scenario")
+	}
+	if got := ErrorClass(err); got != failureRunScriptMissingScenario {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureRunScriptMissingScenario, err)
+	}
+}

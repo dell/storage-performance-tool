@@ -78,6 +78,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		if generated != nil && strings.TrimSpace(generated.Preflight) != "" {
 			_, _ = fmt.Fprintln(out, generated.Preflight)
 		}
+		_, _ = fmt.Fprintf(out, "Replay failure class: %s\n", replay.ErrorClass(err))
 		return err
 	}
 

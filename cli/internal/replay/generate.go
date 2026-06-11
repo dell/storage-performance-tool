@@ -16,7 +16,7 @@ import (
 func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	artifacts, err := FetchArtifacts(ctx, opts.SourceURL, opts.HTTPClient)
 	if err != nil {
-		return nil, err
+		return nil, ensureClassifiedError(err)
 	}
 	if strings.TrimSpace(opts.BaseTimestamp) == "" {
 		opts.BaseTimestamp = scenario.BaseTimestamp()
@@ -31,7 +31,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if err != nil {
 		generated.MetadataJSON = buildMetadata(generated)
 		generated.Preflight = BuildPreflight(generated, opts)
-		return generated, err
+		return generated, ensureClassifiedError(err)
 	}
 
 	localAccess := strings.TrimSpace(opts.AccessKey)
@@ -80,7 +80,7 @@ func convertScenario(artifacts Artifacts, opts Options) (*Generated, error) {
 	case "js":
 		return ConvertJS(artifacts.ScenarioBody, artifacts.RunScript, opts)
 	default:
-		return nil, fmt.Errorf("scenario format %q is not implemented for replay", artifacts.ScenarioFormat)
+		return nil, classifiedErrorf(failureScenarioFormatUnsupported, "scenario format %q is not implemented for replay", artifacts.ScenarioFormat)
 	}
 }
 

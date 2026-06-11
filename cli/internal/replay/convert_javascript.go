@@ -48,6 +48,7 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 
 	body := string(raw)
 	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body)...)
+	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
 			Diagnostics:     diagnostics,
@@ -85,6 +86,7 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	diagnostics = append(diagnostics, detectSensitiveJSConfig(body)...)
 
 	pathRewrites = uniquePathRewrites(pathRewrites)
+	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
 			Diagnostics:     diagnostics,

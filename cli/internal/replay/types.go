@@ -31,6 +31,7 @@ type Options struct {
 // Diagnostic describes a conversion/import issue surfaced during replay planning.
 type Diagnostic struct {
 	Severity string `json:"severity"`
+	Code     string `json:"code,omitempty"`
 	Message  string `json:"message"`
 }
 
