@@ -143,7 +143,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		baseTS = baseTimestamp()
 	}
 
-	archiveToStepID := map[string]string{}
+	archiveToStepID := precomputeArchiveStepIDs(legacySteps, legacy.Config, label, baseTS, effectiveVars)
 	itemVars := map[string]itemFileExpr{}
 	var itemVarOrder []string
 	var body strings.Builder
@@ -169,6 +169,21 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	body.WriteString("  var line;\n")
 	body.WriteString("  while ((line = reader.readLine()) !== null) { if (line.length() > 0) { print(line); } }\n")
 	body.WriteString("  var exitCode = process.waitFor();\n")
+	body.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
+	body.WriteString("}\n\n")
+	body.WriteString("function runReplayProcessToFile(command, args, cwd, outputPath, append) {\n")
+	body.WriteString("  var commandLine = new java.util.ArrayList();\n")
+	body.WriteString("  commandLine.add(String(command));\n")
+	body.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
+	body.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
+	body.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
+	body.WriteString("  var outputFile = new java.io.File(String(outputPath));\n")
+	body.WriteString("  var parentDir = outputFile.getParentFile();\n")
+	body.WriteString("  if (parentDir) { parentDir.mkdirs(); }\n")
+	body.WriteString("  var redirect = append ? java.lang.ProcessBuilder.Redirect.appendTo(outputFile) : java.lang.ProcessBuilder.Redirect.to(outputFile);\n")
+	body.WriteString("  processBuilder.redirectOutput(redirect);\n")
+	body.WriteString("  processBuilder.redirectError(java.lang.ProcessBuilder.Redirect.INHERIT);\n")
+	body.WriteString("  var exitCode = processBuilder.start().waitFor();\n")
 	body.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
 	body.WriteString("}\n\n")
 
@@ -295,38 +310,14 @@ type convertedCommand struct {
 }
 
 func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, bucket string, opts Options, vars map[string]string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, itemVarOrder *[]string) (convertedStep, error) {
-	archiveID := resolveString(getPath(step.Config, "test", "step", "id"), vars)
-	if archiveID == "" {
-		archiveID = fmt.Sprintf("archive-step-%03d", index+1)
+	archiveID, opType, opSuffix, loadFactory, err := loadStepIdentity(step, index, vars)
+	if err != nil {
+		return convertedStep{}, err
 	}
-	opType := strings.ToLower(resolveString(firstPath(step.Config,
-		[]string{legacyStepTypeLoad, "op", legacyKeyType},
-		[]string{legacyStepTypeLoad, legacyKeyType},
-	), vars))
-	opSuffix := opType
-	var loadFactory string
-	if strings.EqualFold(step.Type, legacyStepTypePrecondition) {
-		opType = opTypeCreate
-		opSuffix = opTypeSeed
-		loadFactory = loadFactoryPrecondition
-	} else {
-		switch opType {
-		case "", opTypeCreate, "write":
-			opType = opTypeCreate
-			opSuffix = opTypeCreate
-			loadFactory = loadFactoryLoad
-		case opTypeRead:
-			loadFactory = loadFactoryRead
-		case opTypeUpdate:
-			loadFactory = loadFactoryUpdate
-		case opTypeDelete:
-			loadFactory = loadFactoryDelete
-		default:
-			return convertedStep{}, fmt.Errorf("unsupported load operation %q in step %s", opType, archiveID)
-		}
+	stepID := archiveToStepID[archiveID]
+	if stepID == "" {
+		stepID = formatStepID(label, stepNumber, baseTS, opSuffix)
 	}
-
-	stepID := formatStepID(label, stepNumber, baseTS, opSuffix)
 	archiveToStepID[archiveID] = stepID
 	diagnostics := ignoredJSONConfigDiagnostics(archiveID, step.Config)
 
@@ -386,6 +377,12 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if queueInput := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyDriver, "queue", "input"), vars); queueInput > 0 {
 		setPath(config, queueInput, legacyKeyStorage, legacyKeyDriver, "queue", "input")
 	}
+	if failCount := int64Value(firstPath(step.Config,
+		[]string{legacyStepTypeLoad, "op", legacyKeyLimit, "fail", legacyKeyCount},
+		[]string{"test", "step", legacyKeyLimit, "fail", legacyKeyCount},
+	), vars); failCount > 0 {
+		setPath(config, failCount, legacyStepTypeLoad, "op", legacyKeyLimit, "fail", legacyKeyCount)
+	}
 	if duration != "" {
 		setPath(config, duration, legacyStepTypeLoad, "step", legacyKeyLimit, "time")
 	}
@@ -397,6 +394,33 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	}
 	if shuffle, ok := boolValue(getPath(step.Config, legacyStepTypeLoad, "generator", "shuffle"), vars); ok {
 		setPath(config, shuffle, legacyStepTypeLoad, "op", "shuffle")
+	}
+	if threshold, ok := floatValue(firstPath(step.Config,
+		[]string{"output", "metrics", "threshold"},
+		[]string{"test", "step", "metrics", "threshold"},
+	), vars); ok {
+		setPath(config, threshold, "output", "metrics", "threshold")
+	}
+	if enabled, ok := boolValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "enabled"), vars); ok {
+		setPath(config, enabled, legacyKeyStorage, "net", "ssl", "enabled")
+	}
+	if ciphers, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "ciphers"), vars); ok {
+		setPath(config, ciphers, legacyKeyStorage, "net", "ssl", "ciphers")
+	}
+	if protocols, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "protocols"), vars); ok {
+		setPath(config, protocols, legacyKeyStorage, "net", "ssl", "protocols")
+	}
+	if namedGroups, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "namedGroups"), vars); ok {
+		setPath(config, namedGroups, legacyKeyStorage, "net", "ssl", "namedGroups")
+	}
+	if provider := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "provider"), vars); provider != "" {
+		setPath(config, provider, legacyKeyStorage, "net", "ssl", "provider")
+	}
+	if jsseProvider := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "jsseProvider"), vars); jsseProvider != "" {
+		setPath(config, jsseProvider, legacyKeyStorage, "net", "ssl", "jsseProvider")
+	}
+	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "pqcMode"), vars); pqcMode != "" {
+		setPath(config, pqcMode, legacyKeyStorage, "net", "ssl", "pqcMode")
 	}
 
 	var rewrites []PathRewrite
@@ -456,6 +480,51 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		rewrites:    rewrites,
 		diagnostics: diagnostics,
 	}, nil
+}
+
+func precomputeArchiveStepIDs(steps []legacyStep, baseConfig map[string]any, label, baseTS string, vars map[string]string) map[string]string {
+	archiveToStepID := map[string]string{}
+	loadStepNumber := 0
+	for i, step := range steps {
+		stepType := strings.ToLower(strings.TrimSpace(step.Type))
+		if stepType != legacyStepTypeLoad && stepType != legacyStepTypePrecondition {
+			continue
+		}
+		loadStepNumber++
+		step.Config = mergeConfig(baseConfig, step.Config)
+		archiveID, _, opSuffix, _, err := loadStepIdentity(step, i, vars)
+		if err != nil {
+			continue
+		}
+		archiveToStepID[archiveID] = formatStepID(label, loadStepNumber, baseTS, opSuffix)
+	}
+	return archiveToStepID
+}
+
+func loadStepIdentity(step legacyStep, index int, vars map[string]string) (string, string, string, string, error) {
+	archiveID := resolveString(getPath(step.Config, "test", "step", "id"), vars)
+	if archiveID == "" {
+		archiveID = fmt.Sprintf("archive-step-%03d", index+1)
+	}
+	opType := strings.ToLower(resolveString(firstPath(step.Config,
+		[]string{legacyStepTypeLoad, "op", legacyKeyType},
+		[]string{legacyStepTypeLoad, legacyKeyType},
+	), vars))
+	if strings.EqualFold(step.Type, legacyStepTypePrecondition) {
+		return archiveID, opTypeCreate, opTypeSeed, loadFactoryPrecondition, nil
+	}
+	switch opType {
+	case "", opTypeCreate, "write":
+		return archiveID, opTypeCreate, opTypeCreate, loadFactoryLoad, nil
+	case opTypeRead:
+		return archiveID, opTypeRead, opTypeRead, loadFactoryRead, nil
+	case opTypeUpdate:
+		return archiveID, opTypeUpdate, opTypeUpdate, loadFactoryUpdate, nil
+	case opTypeDelete:
+		return archiveID, opTypeDelete, opTypeDelete, loadFactoryDelete, nil
+	default:
+		return archiveID, "", "", "", fmt.Errorf("unsupported load operation %q in step %s", opType, archiveID)
+	}
 }
 
 func mergeConfig(base, override map[string]any) map[string]any {
@@ -571,17 +640,28 @@ func isModeledJSONConfigPath(path string) bool {
 		"load.generator.recycle.enabled",
 		"load.generator.shuffle",
 		"load.limit.concurrency",
+		"load.op.limit.fail.count",
 		"load.op.limit.count",
 		"load.op.type",
 		"load.type",
+		"output.metrics.threshold",
 		"storage.driver.concurrency",
 		"storage.driver.limit.concurrency",
 		"storage.driver.queue.input",
 		"storage.driver.type",
+		"storage.net.ssl.ciphers",
+		"storage.net.ssl.enabled",
+		"storage.net.ssl.jsseProvider",
+		"storage.net.ssl.namedGroups",
+		"storage.net.ssl.pqcMode",
+		"storage.net.ssl.protocols",
+		"storage.net.ssl.provider",
 		"storage.net.node.addrs",
 		"storage.net.node.port",
 		"test.step.id",
+		"test.step.limit.fail.count",
 		"test.step.limit.count",
+		"test.step.metrics.threshold",
 		"test.step.limit.time":
 		return true
 	default:
@@ -848,25 +928,129 @@ func convertCommandStep(value string, vars map[string]string, archiveToStepID ma
 
 	var b strings.Builder
 	for _, segment := range segments {
-		fields := strings.Fields(segment)
-		if len(fields) == 0 {
-			continue
+		js, segmentRewrites, supported, err := convertCommandSegment(segment, value, cwdExpr, archiveToStepID)
+		if err != nil {
+			return convertedCommand{}, true, err
 		}
-		if !isAllowedReplayCommand(fields[0]) {
+		if !supported {
 			return convertedCommand{}, false, nil
 		}
-		args := fields[1:]
-		for _, arg := range args {
-			if !isSafeReplayCommandArg(arg) {
-				return convertedCommand{}, true, fmt.Errorf("unsupported command argument %q in step: %s", arg, value)
-			}
-		}
-		fmt.Fprintf(&b, "runReplayProcess(%s, [%s], %s);\n", jsQuote(fields[0]), jsArray(args), cwdExpr)
+		rewrites = append(rewrites, segmentRewrites...)
+		b.WriteString(js)
 	}
 	if b.Len() == 0 {
 		return convertedCommand{}, false, nil
 	}
 	return convertedCommand{js: b.String(), rewrites: rewrites}, true, nil
+}
+
+func convertCommandSegment(segment, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
+	fields := strings.Fields(segment)
+	if len(fields) == 0 {
+		return "", nil, false, nil
+	}
+	if js, rewrites, ok, err := maybeConvertSedRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
+		return js, rewrites, true, err
+	}
+	if js, rewrites, ok, err := maybeConvertCatRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
+		return js, rewrites, true, err
+	}
+	if js, ok, err := maybeConvertRMCommand(fields, stepValue, cwdExpr); ok || err != nil {
+		return js, nil, true, err
+	}
+	if !isAllowedReplayCommand(fields[0]) {
+		return "", nil, false, nil
+	}
+	argExprs, rewrites, err := commandArgExprs(fields[1:], stepValue, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	return fmt.Sprintf("runReplayProcess(%s, [%s], %s);\n", jsQuote(fields[0]), strings.Join(argExprs, ", "), cwdExpr), rewrites, true, nil
+}
+
+func maybeConvertSedRedirectCommand(fields []string, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
+	if len(fields) == 0 || fields[0] != "sed" {
+		return "", nil, false, nil
+	}
+	if len(fields) != 5 || fields[3] != ">" {
+		return "", nil, false, nil
+	}
+	script := unquoteCommandToken(fields[1])
+	if script == "" {
+		return "", nil, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[1], stepValue)
+	}
+	inputExprs, rewrites, err := commandArgExprs([]string{fields[2]}, stepValue, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	outputExpr, rewrite, hasRewrite, supported, err := commandArgExpr(fields[4], archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	if !supported {
+		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[4], stepValue)
+	}
+	if hasRewrite {
+		rewrites = append(rewrites, rewrite)
+	}
+	args := append([]string{jsQuote(script)}, inputExprs...)
+	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, false);\n", jsQuote("sed"), strings.Join(args, ", "), cwdExpr, outputExpr), rewrites, true, nil
+}
+
+func maybeConvertCatRedirectCommand(fields []string, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
+	if len(fields) == 0 || fields[0] != "cat" {
+		return "", nil, false, nil
+	}
+	redirectIndex := -1
+	appendMode := false
+	for i := 1; i < len(fields)-1; i++ {
+		switch fields[i] {
+		case ">":
+			redirectIndex = i
+		case ">>":
+			redirectIndex = i
+			appendMode = true
+		}
+		if redirectIndex >= 0 {
+			break
+		}
+	}
+	if redirectIndex < 0 || redirectIndex == 1 || redirectIndex != len(fields)-2 {
+		return "", nil, false, nil
+	}
+	inputExprs, rewrites, err := commandArgExprs(fields[1:redirectIndex], stepValue, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	outputExpr, rewrite, hasRewrite, supported, err := commandArgExpr(fields[len(fields)-1], archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	if !supported {
+		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[len(fields)-1], stepValue)
+	}
+	if hasRewrite {
+		rewrites = append(rewrites, rewrite)
+	}
+	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, %t);\n", jsQuote("cat"), strings.Join(inputExprs, ", "), cwdExpr, outputExpr, appendMode), rewrites, true, nil
+}
+
+func maybeConvertRMCommand(fields []string, stepValue, cwdExpr string) (string, bool, error) {
+	if len(fields) == 0 || fields[0] != "rm" {
+		return "", false, nil
+	}
+	if len(fields) < 2 {
+		return "", false, nil
+	}
+	args := make([]string, 0, len(fields)-1)
+	for _, raw := range fields[1:] {
+		arg := unquoteCommandToken(raw)
+		if arg == "" || strings.HasPrefix(arg, "-") || strings.Contains(arg, "/") || strings.Contains(arg, "..") || !safeCommandArgRe.MatchString(arg) {
+			return "", false, nil
+		}
+		args = append(args, jsQuote(arg))
+	}
+	return fmt.Sprintf("runReplayProcess(%s, [%s], %s);\n", jsQuote("rm"), strings.Join(args, ", "), cwdExpr), true, nil
 }
 
 func splitCommandSegments(value string) []string {
@@ -891,6 +1075,61 @@ func unresolvedCommandVars(value string) []string {
 		missing = append(missing, match[1])
 	}
 	return missing
+}
+
+func commandArgExprs(args []string, stepValue string, archiveToStepID map[string]string) ([]string, []PathRewrite, error) {
+	exprs := make([]string, 0, len(args))
+	var rewrites []PathRewrite
+	for _, raw := range args {
+		expr, rewrite, hasRewrite, supported, err := commandArgExpr(raw, archiveToStepID)
+		if err != nil {
+			return nil, rewrites, err
+		}
+		if !supported {
+			return nil, rewrites, fmt.Errorf("unsupported command argument %q in step: %s", raw, stepValue)
+		}
+		exprs = append(exprs, expr)
+		if hasRewrite {
+			rewrites = append(rewrites, rewrite)
+		}
+	}
+	return exprs, rewrites, nil
+}
+
+func commandArgExpr(raw string, archiveToStepID map[string]string) (string, PathRewrite, bool, bool, error) {
+	value := unquoteCommandToken(raw)
+	if value == "" {
+		return "", PathRewrite{}, false, false, nil
+	}
+	if archiveID, fileName, ok := parseItemFile(value); ok {
+		stepID := archiveToStepID[archiveID]
+		if stepID == "" {
+			return "", PathRewrite{}, false, false, fmt.Errorf("command step references unknown path label %s", archiveID)
+		}
+		return `sptHomeDir + "/log/" + ` + jsQuote(stepID) + ` + "/` + jsEscape(fileName) + `"`, PathRewrite{
+			ArchiveID: archiveID,
+			StepID:    stepID,
+			From:      value,
+			To:        "${MONGOOSE_DIR}/log/" + stepID + "/" + fileName,
+		}, true, true, nil
+	}
+	if homeRelative, ok := parseMongoosePath(value); ok {
+		return `sptHomeDir + "/` + jsEscape(homeRelative) + `"`, PathRewrite{}, false, true, nil
+	}
+	if !isSafeReplayCommandArg(value) {
+		return "", PathRewrite{}, false, false, nil
+	}
+	return jsQuote(value), PathRewrite{}, false, true, nil
+}
+
+func unquoteCommandToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) >= 2 {
+		if (raw[0] == '\'' && raw[len(raw)-1] == '\'') || (raw[0] == '"' && raw[len(raw)-1] == '"') {
+			return raw[1 : len(raw)-1]
+		}
+	}
+	return raw
 }
 
 func commandWorkDirExpr(raw string, archiveToStepID map[string]string) (string, PathRewrite, bool, error) {
@@ -1062,6 +1301,57 @@ func boolValue(v any, vars map[string]string) (bool, bool) {
 		return b, err == nil
 	default:
 		return false, false
+	}
+}
+
+func floatValue(v any, vars map[string]string) (float64, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		n, err := t.Float64()
+		return n, err == nil
+	case float64:
+		return t, true
+	case float32:
+		return float64(t), true
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(expandWithExports(t, vars)), 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func stringListValue(v any, vars map[string]string) ([]string, bool) {
+	switch t := v.(type) {
+	case []any:
+		values := make([]string, 0, len(t))
+		for _, raw := range t {
+			value := strings.TrimSpace(resolveString(raw, vars))
+			if value == "" {
+				continue
+			}
+			values = append(values, value)
+		}
+		return values, len(values) > 0
+	case []string:
+		values := make([]string, 0, len(t))
+		for _, raw := range t {
+			value := strings.TrimSpace(expandWithExports(raw, vars))
+			if value == "" {
+				continue
+			}
+			values = append(values, value)
+		}
+		return values, len(values) > 0
+	case string:
+		values := splitCSV(expandWithExports(t, vars))
+		return values, len(values) > 0
+	default:
+		return nil, false
 	}
 }
 

@@ -290,6 +290,75 @@ func TestConvertJSONWarnsOnUnmodeledConfigAndUsesInheritedDefaults(t *testing.T)
 	}
 }
 
+func TestConvertJSONPreservesSSLConfigAndLegacyAliases(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {
+    "storage": {
+      "driver": {"type": "s3"},
+      "net": {
+        "ssl": {
+          "enabled": true,
+          "ciphers": ["TLS_AES_128_GCM_SHA256"],
+          "protocols": ["TLSv1.2", "TLSv1.3"],
+          "provider": "OPENSSL",
+          "jsseProvider": "SunJSSE",
+          "namedGroups": ["x25519"],
+          "pqcMode": "hybrid"
+        }
+      }
+    }
+  },
+  "steps": [{
+    "type": "load",
+    "config": {
+      "test": {
+        "step": {
+          "id": "MAX-W10KB",
+          "limit": {
+            "count": 1,
+            "fail": {"count": 7}
+          },
+          "metrics": {"threshold": 0.95}
+        }
+      }
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"https://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`"threshold": 0.95`,
+		`"count": 7`,
+		`"provider": "OPENSSL"`,
+		`"jsseProvider": "SunJSSE"`,
+		`"pqcMode": "hybrid"`,
+		`"TLS_AES_128_GCM_SHA256"`,
+		`"TLSv1.2"`,
+		`"TLSv1.3"`,
+		`"x25519"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	for _, unwanted := range []string{
+		"step MAX-W10KB ignores unmodeled JSON config path storage.net.ssl",
+		"step MAX-W10KB ignores unmodeled JSON config path test.step.limit.fail.count",
+		"step MAX-W10KB ignores unmodeled JSON config path test.step.metrics.threshold",
+	} {
+		if hasDiagnosticContaining(got.Diagnostics, severityWarning, unwanted) {
+			t.Fatalf("Diagnostics = %+v, unexpected warning %q", got.Diagnostics, unwanted)
+		}
+	}
+}
+
 func TestConvertJSONRejectsUnboundedCreateStep(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
@@ -430,6 +499,72 @@ func TestConvertJSONConvertsSafeFileCommand(t *testing.T) {
 	}
 }
 
+func TestConvertJSONConvertsSedFilePrepCommand(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}}},
+    {"type": "command", "value": "sed '/^.\\{6\\}./d' ${MONGOOSE_DIR}/log/items.w.10KB.csv > ${MONGOOSE_DIR}/log/items.w.10KB.csv.1", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	want := `runReplayProcessToFile("sed", ["/^.\\{6\\}./d", sptHomeDir + "/log/items.w.10KB.csv"], sptHomeDir, sptHomeDir + "/log/items.w.10KB.csv.1", false);`
+	if !strings.Contains(js, want) {
+		t.Fatalf("scenario missing sed file-prep conversion %q\n%s", want, js)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted sed command", got.CommandOps)
+	}
+}
+
+func TestConvertJSONConvertsCpCatRmFilePrepCommand(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/MAX-W10MB/items.csv"}},
+      "test": {"step": {"id": "MAX-W10MB", "limit": {"count": 10}}}
+    }},
+    {"type": "command", "value": "cp ${MONGOOSE_DIR}/log/MAX-W10MB/items.csv a; cat a a a a a >> ${MONGOOSE_DIR}/log/MAX-W10MB/items.csv; rm a", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`runReplayProcess("cp", [sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv", "a"], sptHomeDir);`,
+		`runReplayProcessToFile("cat", ["a", "a", "a", "a", "a"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv", true);`,
+		`runReplayProcess("rm", ["a"], sptHomeDir);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, "/log/MAX-W10MB") {
+		t.Fatalf("scenario retained legacy cp/cat/rm path:\n%s", js)
+	}
+	if len(got.PathRewrites) != 1 {
+		t.Fatalf("len(PathRewrites) = %d, want 1", len(got.PathRewrites))
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted cp/cat/rm command", got.CommandOps)
+	}
+}
+
 func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
@@ -500,6 +635,45 @@ func TestConvertJSONRejectsUnknownItemFileLabel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown item-file path label UNKNOWN") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConvertJSONRewritesForwardReferencedItemFileLabel(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{
+    "type": "load",
+    "config": {
+      "load": {"type": "read"},
+      "item": {"input": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}},
+      "test": {"step": {"id": "MAX-R10KB", "limit": {"count": 10}}}
+    }
+  }, {
+    "type": "load",
+    "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}},
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	want := `var itemsFile001 = sptHomeDir + "/log/" + "replay-002-20260605.121400.000-create" + "/items.csv";`
+	if !strings.Contains(js, want) {
+		t.Fatalf("scenario missing forward-reference rewrite %q\n%s", want, js)
+	}
+	if got.Steps[0].Operation != opTypeRead {
+		t.Fatalf("Steps[0].Operation = %q, want read", got.Steps[0].Operation)
+	}
+	if len(got.PathRewrites) != 1 || got.PathRewrites[0].StepID != "replay-002-20260605.121400.000-create" {
+		t.Fatalf("PathRewrites = %+v, want rewrite to future create step", got.PathRewrites)
 	}
 }
 
