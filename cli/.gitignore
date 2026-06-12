@@ -27,6 +27,7 @@ coverage.*
 *.log
 cmd_coverage.html
 *.js
+!internal/replay/testdata/backlog/*.js
 *.zst
 tools/work/
 _tmp/
