@@ -64,7 +64,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	}
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
-		return generated, fmt.Errorf("generate replay defaults: %w", err)
+		return generated, newClassifiedError(failureReplayDefaultsGeneration, fmt.Sprintf("generate replay defaults: %v", err), err)
 	}
 	generated.Params = params
 	generated.DefaultsYAML = defaults

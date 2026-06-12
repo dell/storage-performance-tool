@@ -233,6 +233,41 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestGenerateClassifiesReplayDefaultsGenerationError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export RUN_TIME=900
+export RUN_TIME_FOR_SMALL_OBJ=1800
+export WAIT_TIME=60
+export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, maxS3SanityJSON)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		Endpoints:     []string{"10.0.0.1:9020"}, // invalid URL scheme for defaults generation
+		Bucket:        "local-bucket",
+		TestHosts:     "127.0.0.1",
+		Label:         "replay",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want defaults generation error")
+	}
+	if got := ErrorClass(err); got != failureReplayDefaultsGeneration {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureReplayDefaultsGeneration, err)
+	}
+}
+
 func TestGenerateOmitsCommandNoiseWhenNoArchivedCommands(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

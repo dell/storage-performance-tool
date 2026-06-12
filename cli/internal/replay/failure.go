@@ -14,6 +14,7 @@ const (
 	failureScenarioMissing           = "scenario_missing"
 	failureScenarioNotFound          = "scenario_not_found"
 	failureScenarioNoStepsOrJobs     = "scenario_no_steps_or_jobs"
+	failureScenarioNoLoadSteps       = "scenario_no_load_steps"
 	failureUnsupportedCommandStep    = "unsupported_command_step"
 	failureUnsupportedJSProcess      = "unsupported_js_processbuilder"
 	failureUnsupportedJSLoadFactory  = "unsupported_js_load_factory"
@@ -23,9 +24,19 @@ const (
 	failureAmbiguousRunScript        = "ambiguous_run_script"
 	failureInvalidSourceURL          = "invalid_source_url"
 	failureEscapedArtifactLink       = "escaped_artifact_link"
+	failureHTTPFetchError            = "http_fetch_error"
+	failureArtifactTooLarge          = "artifact_too_large"
+	failureUnknownItemPathLabel      = "unknown_item_path_label"
+	failureUnsupportedLoadOperation  = "unsupported_load_operation"
+	failureMissingStepLimit          = "missing_step_limit"
+	failureUnresolvedVariable        = "unresolved_variable"
+	failureMissingLocalEndpoints     = "missing_local_endpoints"
+	failureMissingBucket             = "missing_bucket"
+	failureTimeout                   = "timeout"
+	failureInvalidArtifactLink       = "invalid_artifact_link"
+	failureReplayDefaultsGeneration  = "replay_defaults_generation_error"
 )
 
-// ClassifiedError carries a deterministic replay failure class.
 type ClassifiedError struct {
 	Class string
 	Msg   string
@@ -52,15 +63,15 @@ func classifyMessage(msg string) string {
 	text := strings.ToLower(strings.TrimSpace(msg))
 	switch {
 	case strings.Contains(text, "scenario contains no load steps"):
-		return "scenario_no_load_steps"
+		return failureScenarioNoLoadSteps
 	case strings.Contains(text, "scenario contains no steps or jobs"):
 		return failureScenarioNoStepsOrJobs
 	case strings.Contains(text, "references unknown item-file path label") || strings.Contains(text, "unknown item-file path label"):
-		return "unknown_item_path_label"
+		return failureUnknownItemPathLabel
 	case strings.Contains(text, "unsupported load operation"):
-		return "unsupported_load_operation"
+		return failureUnsupportedLoadOperation
 	case strings.Contains(text, "has no time or count limit"):
-		return "missing_step_limit"
+		return failureMissingStepLimit
 	case strings.Contains(text, "parallel scenarios are not implemented for replay"):
 		return failureParallelUnimplemented
 	case strings.Contains(text, "unsupported storage.driver.type"):
@@ -77,32 +88,52 @@ func classifyMessage(msg string) string {
 		return failureUnsupportedJSLoadFactory
 	case strings.Contains(text, "unsupported command step"):
 		return failureUnsupportedCommandStep
+	case strings.Contains(text, "unsupported command argument"):
+		return failureUnsupportedCommandStep
+	case strings.Contains(text, "unsupported command working directory"):
+		return failureUnsupportedCommandStep
+	case strings.Contains(text, "command step references unknown path label"):
+		return failureUnsupportedCommandStep
 	case strings.Contains(text, "multiple run script candidates found") || strings.Contains(text, "multiple shell script candidates found"):
 		return failureAmbiguousRunScript
 	case strings.Contains(text, "no .sh run script found in replay folder"):
 		return failureMissingRunScript
 	case strings.Contains(text, "scenario") && strings.Contains(text, "was not found in replay folder"):
 		return failureScenarioNotFound
+	case strings.Contains(text, "multiple scenario candidates match"):
+		return failureScenarioNotFound
 	case strings.Contains(text, "no json scenario artifact found") || strings.Contains(text, "no js scenario artifact found"):
 		return failureScenarioMissing
 	case strings.Contains(text, "run script does not reference a scenario file"):
 		return failureRunScriptMissingScenario
 	case strings.Contains(text, "unresolved variable"):
-		return "unresolved_variable"
+		return failureUnresolvedVariable
+	case strings.Contains(text, "unresolved item output file path"):
+		return failureUnresolvedVariable
+	case strings.Contains(text, "unresolved item input file path"):
+		return failureUnresolvedVariable
 	case strings.Contains(text, "local endpoints are required for replay"):
-		return "missing_local_endpoints"
+		return failureMissingLocalEndpoints
 	case strings.Contains(text, "bucket is required; set --bucket"):
-		return "missing_bucket"
+		return failureMissingBucket
 	case strings.Contains(text, "unsupported replay url scheme") || strings.Contains(text, "invalid --from url"):
 		return failureInvalidSourceURL
 	case strings.Contains(text, "artifact link") && strings.Contains(text, "escapes replay folder"):
 		return failureEscapedArtifactLink
+	case strings.Contains(text, "artifact link") && strings.Contains(text, "does not name a file"):
+		return failureInvalidArtifactLink
+	case strings.Contains(text, "http ") && strings.Contains(text, "fetch"):
+		return failureHTTPFetchError
+	case strings.Contains(text, "artifact exceeds max size"):
+		return failureArtifactTooLarge
 	case strings.Contains(text, "timed out") || strings.Contains(text, "deadline exceeded"):
-		return "timeout"
+		return failureTimeout
 	case strings.Contains(text, "parse legacy json scenario"):
 		return failureLegacyJSONParse
 	case strings.Contains(text, "scenario format") && strings.Contains(text, "is not implemented for replay"):
 		return failureScenarioFormatUnsupported
+	case strings.Contains(text, "generate replay defaults"):
+		return failureReplayDefaultsGeneration
 	default:
 		return failureUnknownError
 	}
@@ -152,7 +183,6 @@ func classifiedErrorf(class, format string, args ...any) error {
 	return newClassifiedError(class, fmt.Sprintf(format, args...), nil)
 }
 
-// ErrorClass returns the deterministic replay failure class for an error.
 func ErrorClass(err error) string {
 	if err == nil {
 		return ""

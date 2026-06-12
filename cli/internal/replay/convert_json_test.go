@@ -402,6 +402,9 @@ func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
 	if !strings.Contains(err.Error(), "unsupported command step") {
 		t.Fatalf("error = %v", err)
 	}
+	if got := ErrorClass(err); got != failureUnsupportedCommandStep {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureUnsupportedCommandStep, err)
+	}
 	if got == nil {
 		t.Fatal("ConvertJSON() generated result = nil, want rejected command diagnostics")
 	}

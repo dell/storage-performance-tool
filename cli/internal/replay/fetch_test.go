@@ -244,6 +244,9 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	if !strings.Contains(err.Error(), "artifact exceeds max size") {
 		t.Fatalf("error = %v, want size-limit error", err)
 	}
+	if got := ErrorClass(err); got != failureArtifactTooLarge {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureArtifactTooLarge, err)
+	}
 }
 
 func TestFetchArtifactsRejectsEscapingRunScriptHref(t *testing.T) {
@@ -260,6 +263,24 @@ func TestFetchArtifactsRejectsEscapingRunScriptHref(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "escapes replay folder") {
 		t.Fatalf("error = %v, want escape error", err)
+	}
+	if got := ErrorClass(err); got != failureEscapedArtifactLink {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureEscapedArtifactLink, err)
+	}
+}
+
+func TestFetchArtifactsClassifiesHTTPFetchError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	_, err := FetchArtifacts(context.Background(), server.URL, server.Client())
+	if err == nil {
+		t.Fatal("FetchArtifacts() error = nil, want HTTP fetch error")
+	}
+	if got := ErrorClass(err); got != failureHTTPFetchError {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureHTTPFetchError, err)
 	}
 }
 

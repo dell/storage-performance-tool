@@ -102,14 +102,14 @@ func fetchBytes(ctx context.Context, client *http.Client, u *url.URL) ([]byte, e
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
+		return nil, classifiedErrorf(failureHTTPFetchError, "HTTP %s", resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxArtifactBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(data)) > maxArtifactBytes {
-		return nil, fmt.Errorf("artifact exceeds max size %d bytes", maxArtifactBytes)
+		return nil, classifiedErrorf(failureArtifactTooLarge, "artifact exceeds max size %d bytes", maxArtifactBytes)
 	}
 	return data, nil
 }
@@ -222,7 +222,7 @@ func resolveFolderLink(folderURL *url.URL, href string) (*url.URL, string, error
 	}
 	name := path.Base(resolved.Path)
 	if name == "." || name == "/" || name == "" {
-		return nil, "", fmt.Errorf("artifact link %q does not name a file", href)
+		return nil, "", classifiedErrorf(failureInvalidArtifactLink, "artifact link %q does not name a file", href)
 	}
 	return resolved, name, nil
 }
