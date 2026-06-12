@@ -1,0 +1,90 @@
+{
+  "_comment": "Backlog proxy-gate fixtures derived from the full-catalog stress run (2026-06-12). Each fixture is one representative case for a backlog class. converterClass is the coarse class spt's converter emits TODAY (asserted by TestBacklogProxyGate). refinedClass is what replayqual.py re-buckets it into for reporting. disposition=lock => by-design unsupported, converterClass must never change. disposition=fix => P1 target; when implemented, set converterClass to \"\" (expect success) and add positive assertions. harnessExcerptSubstrings are the lowercased tokens the private replayqual.py classifier keys on to produce refinedClass; the test asserts the converter error still contains them so a converter message change that would silently break the out-of-repo harness fails here instead. See cli/mike/planning/REPLAY_BACKLOG_WORK_CONTRACT.md.",
+  "fixtures": [
+    {
+      "file": "update_op.json",
+      "format": "json",
+      "converterClass": "unsupported_load_operation",
+      "refinedClass": "unsupported_load_operation",
+      "disposition": "fix",
+      "lever": "convert_json.go:convertLoadStep (op switch ~L311) and convert_javascript.go (UpdateLoad factory)",
+      "note": "Implement update op. SPIKE: confirm engine exposes an UpdateLoad/update load factory before coding the converter side."
+    },
+    {
+      "file": "sed_fileprep.json",
+      "format": "json",
+      "converterClass": "unsupported_command_step",
+      "refinedClass": "local_file_prep_command_unimplemented",
+      "disposition": "fix",
+      "lever": "convert_json.go:convertCommandStep + isAllowedReplayCommand",
+      "note": "Recognize sed items.csv line-filter idiom as a native op. Dominant local file-prep idiom in corpus.",
+      "harnessExcerptSubstrings": ["sed ", "items", ">", "/d"]
+    },
+    {
+      "file": "cpcatrm_fileprep.json",
+      "format": "json",
+      "converterClass": "unsupported_command_step",
+      "refinedClass": "local_file_prep_command_unimplemented",
+      "disposition": "fix",
+      "lever": "convert_json.go:convertCommandStep + isSafeReplayCommandArg (rejects ${MONGOOSE_DIR}/... path args)",
+      "note": "Recognize cp/cat/rm items.csv multiply idiom; allow MONGOOSE_DIR-rooted path args under the log dir.",
+      "harnessExcerptSubstrings": ["cp ${mongoose_dir}/log/", ">> ${mongoose_dir}/log/", "rm a"]
+    },
+    {
+      "file": "unknown_path_label.json",
+      "format": "json",
+      "converterClass": "unknown_item_path_label",
+      "refinedClass": "unknown_item_path_label",
+      "disposition": "fix",
+      "lever": "convert_json.go:convertLoadStep item.input.file rewrite (~L419)",
+      "note": "Read step references a producer label with no matching create step in this scenario. Improve label-rewrite reliability / ordering."
+    },
+    {
+      "file": "sleep_unresolved.json",
+      "format": "json",
+      "converterClass": "unsupported_command_step",
+      "refinedClass": "unsupported_command_step",
+      "disposition": "fix",
+      "lever": "convert_json.go:parseSleepCommand / convertCommandStep",
+      "note": "NOT a JSON/JS parity bug: both paths call parseSleepCommand. Failure is an UNRESOLVED sleep duration (WAIT_TIME undefined in exports). Decide: default+warn, or fidelity warning."
+    },
+    {
+      "file": "external_tool.json",
+      "format": "json",
+      "converterClass": "unsupported_command_step",
+      "refinedClass": "external_remote_tool_command_unsupported",
+      "disposition": "lock",
+      "lever": "n/a (by design under command-safety model)",
+      "note": "ssh/remote external-tool command. Must stay rejected (unsupported_intended). Lock against accidental shell passthrough.",
+      "harnessExcerptSubstrings": ["ssh ", "bucket-sizer.jar"]
+    },
+    {
+      "file": "parallel.json",
+      "format": "json",
+      "converterClass": "parallel_unimplemented",
+      "refinedClass": "parallel_unimplemented",
+      "disposition": "lock",
+      "lever": "n/a (P2 feature expansion)",
+      "note": "Parallel groups rejected in MVP by design."
+    },
+    {
+      "file": "fs_protocol.json",
+      "format": "json",
+      "converterClass": "unsupported_protocol",
+      "refinedClass": "unsupported_protocol",
+      "disposition": "lock",
+      "lever": "n/a (P2 protocol expansion)",
+      "note": "Non-S3 (fs/NFS) rejected in MVP by design."
+    },
+    {
+      "file": "js_processbuilder_noload.js",
+      "format": "js",
+      "converterClass": "unsupported_js_processbuilder",
+      "refinedClass": "js_processbuilder_no_load_workload_unsupported",
+      "disposition": "lock",
+      "lever": "n/a (by design under command-safety model)",
+      "note": "JS scenario whose only work is a ProcessBuilder external tool with no load step. Must stay unsupported_intended.",
+      "harnessExcerptSubstrings": ["scenario contains no load steps"]
+    }
+  ]
+}

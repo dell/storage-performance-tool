@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "type": "load",
+      "config": {
+        "test": { "step": { "id": "MAX-W10MB", "limit": { "time": "60" } } },
+        "load": { "op": { "type": "create" } },
+        "item": { "data": { "size": "10MB" } },
+        "storage": { "driver": { "limit": { "concurrency": 20 } } }
+      }
+    },
+    {
+      "type": "command",
+      "value": "cp ${MONGOOSE_DIR}/log/MAX-W10MB/items.csv a; cat a a a a a >> ${MONGOOSE_DIR}/log/MAX-W10MB/items.csv; rm a",
+      "blocking": true
+    }
+  ]
+}
