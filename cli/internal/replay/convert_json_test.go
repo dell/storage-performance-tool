@@ -191,6 +191,53 @@ func TestConvertJSONReadsTestStepLimitCount(t *testing.T) {
 	}
 }
 
+func TestConvertJSONSupportsUpdateOperation(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{
+    "type": "load",
+    "config": {
+      "item": {
+        "data": {"size": "10KB"},
+        "output": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}
+      },
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}
+    }
+  }, {
+    "type": "load",
+    "config": {
+      "item": {
+        "data": {"size": "10KB"},
+        "input": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}
+      },
+      "test": {"step": {"id": "MAX-U10KB"}},
+      "load": {"op": {"type": "update"}, "limit": {"concurrency": 64}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`UpdateLoad`,
+		`"type": "update"`,
+		`"id": "replay-002-20260605.121400.000-update"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if got.Steps[1].Operation != opTypeUpdate {
+		t.Fatalf("Steps[1].Operation = %q, want update", got.Steps[1].Operation)
+	}
+}
+
 func TestConvertJSONWarnsOnUnmodeledConfigAndUsesInheritedDefaults(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",

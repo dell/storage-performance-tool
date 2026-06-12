@@ -4,7 +4,7 @@
     {
       "file": "update_op.json",
       "format": "json",
-      "converterClass": "unsupported_load_operation",
+      "converterClass": "",
       "refinedClass": "unsupported_load_operation",
       "disposition": "fix",
       "lever": "convert_json.go:convertLoadStep (op switch ~L311) and convert_javascript.go (UpdateLoad factory)",

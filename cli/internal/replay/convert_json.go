@@ -60,6 +60,7 @@ const (
 	opTypeDelete = "delete"
 	opTypeRead   = "read"
 	opTypeSeed   = "seed"
+	opTypeUpdate = "update"
 
 	commandActionConverted = "converted"
 	commandActionRejected  = "rejected"
@@ -73,6 +74,7 @@ const (
 	loadFactoryPrecondition = "PreconditionLoad"
 	loadFactoryRead         = "ReadLoad"
 	loadFactoryDelete       = "DeleteLoad"
+	loadFactoryUpdate       = "UpdateLoad"
 
 	errParallelReplayUnimplemented = "parallel scenarios are not implemented for replay"
 )
@@ -315,6 +317,8 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 			loadFactory = loadFactoryLoad
 		case opTypeRead:
 			loadFactory = loadFactoryRead
+		case opTypeUpdate:
+			loadFactory = loadFactoryUpdate
 		case opTypeDelete:
 			loadFactory = loadFactoryDelete
 		default:

@@ -424,6 +424,88 @@ func TestConvertJSInfersLoadReadOperationFromOpType(t *testing.T) {
 	}
 }
 
+func TestConvertJSSupportsUpdateLoadFactory(t *testing.T) {
+	raw := []byte(`var parentConfig_1 = {
+  "storage" : {
+    "driver" : {
+      "type" : "s3"
+    }
+  }
+};
+
+Load
+    .config(parentConfig_1)
+    .config({
+      "item" : {
+        "data" : {
+          "size" : "10KB"
+        },
+        "output" : {
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }
+      },
+      "load" : {
+        "step" : {
+          "id" : "MAX-W10KB",
+          "limit" : {
+            "count" : 10
+          }
+        }
+      }
+    })
+    .run();
+
+UpdateLoad
+    .config(parentConfig_1)
+    .config({
+      "item" : {
+        "data" : {
+          "size" : "10KB"
+        },
+        "input" : {
+          "file" : "" + MONGOOSE_DIR + "/log/MAX-W10KB/items.csv"
+        }
+      },
+      "storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 64
+          }
+        }
+      },
+      "load" : {
+        "step" : {
+          "id" : "MAX-U10KB"
+        }
+      }
+    })
+    .run();
+
+`)
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if got.Steps[1].Operation != opTypeUpdate {
+		t.Fatalf("Steps[1].Operation = %q, want update", got.Steps[1].Operation)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`"id" : "replay-002-20260605.121400.000-update"`,
+		`sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+}
+
 func TestConvertJSRejectsUnsupportedDriver(t *testing.T) {
 	raw := []byte(strings.Replace(maxS3SanityJS, `"type" : "s3"`, `"type" : "swift"`, 1))
 

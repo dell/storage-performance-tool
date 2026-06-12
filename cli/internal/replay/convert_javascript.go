@@ -17,7 +17,7 @@ type jsReplacement struct {
 var (
 	jsProcessBuilderRe = regexp.MustCompile(`(?s)var\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+java\.lang\.ProcessBuilder\(\)\s*\.command\(\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*\)\s*\.inheritIO\(\)\s*\.start\(\)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.waitFor\(\)\s*;`)
 	jsDriverTypeRe     = regexp.MustCompile(`(?s)"driver"\s*:\s*\{\s*"type"\s*:\s*"([^"]+)"`)
-	jsFactoryRe        = regexp.MustCompile(`\b(PreconditionLoad|ReadLoad|DeleteLoad|Load)\b`)
+	jsFactoryRe        = regexp.MustCompile(`\b(PreconditionLoad|ReadLoad|UpdateLoad|DeleteLoad|Load)\b`)
 	jsAnyLoadFactoryRe = regexp.MustCompile(`\b([A-Z][A-Za-z]*Load)\b`)
 	jsIDFieldRe        = regexp.MustCompile(`"id"\s*:\s*"([^"]+)"`)
 	jsObjectKeyRe      = regexp.MustCompile(`"([^"]+)"\s*:`)
@@ -295,6 +295,9 @@ func jsStepOperationForConfig(factory, configText string, vars map[string]string
 	if factory == loadFactoryRead {
 		return opTypeRead
 	}
+	if factory == loadFactoryUpdate {
+		return opTypeUpdate
+	}
 	if factory == loadFactoryDelete {
 		return opTypeDelete
 	}
@@ -318,7 +321,7 @@ func detectUnsupportedJSLoadFactories(source string) []Diagnostic {
 		}
 		factory := source[match[2]:match[3]]
 		switch factory {
-		case loadFactoryPrecondition, loadFactoryRead, loadFactoryDelete, loadFactoryLoad:
+		case loadFactoryPrecondition, loadFactoryRead, loadFactoryUpdate, loadFactoryDelete, loadFactoryLoad:
 			continue
 		}
 		if _, ok := seen[factory]; ok {
