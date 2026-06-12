@@ -15,19 +15,44 @@ type jsReplacement struct {
 }
 
 var (
-	jsProcessBuilderRe = regexp.MustCompile(`(?s)var\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+java\.lang\.ProcessBuilder\(\)\s*\.command\(\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*\)\s*\.inheritIO\(\)\s*\.start\(\)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.waitFor\(\)\s*;`)
-	jsDriverTypeRe     = regexp.MustCompile(`(?s)"driver"\s*:\s*\{\s*"type"\s*:\s*"([^"]+)"`)
-	jsFactoryRe        = regexp.MustCompile(`\b(PreconditionLoad|ReadLoad|UpdateLoad|DeleteLoad|Load)\b`)
-	jsAnyLoadFactoryRe = regexp.MustCompile(`\b([A-Z][A-Za-z]*Load)\b`)
-	jsIDFieldRe        = regexp.MustCompile(`"id"\s*:\s*"([^"]+)"`)
-	jsObjectKeyRe      = regexp.MustCompile(`"([^"]+)"\s*:`)
-	jsParentConfigRe   = regexp.MustCompile(`(?:var\s+)?(parentConfig_[A-Za-z0-9_]+)\s*=\s*\{`)
-	jsBraceVarRe       = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-	jsLogPathRe        = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/log\/([^/"]+)\/([^"]+)"`)
-	jsMongoosePathRe   = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/([^"]+)"`)
-	jsOutputKeyRe      = regexp.MustCompile(`"output"\s*:\s*\{`)
-	jsPathKeyRe        = regexp.MustCompile(`"path"\s*:`)
-	jsIdentifierRe     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	jsProcessBuilderRe        = regexp.MustCompile(`(?s)var\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+java\.lang\.ProcessBuilder\(\)\s*\.command\(\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*,\s*"((?:\\.|[^"\\])*)"\s*\)\s*\.inheritIO\(\)\s*\.start\(\)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.waitFor\(\)\s*;`)
+	jsDriverTypeRe            = regexp.MustCompile(`(?s)"driver"\s*:\s*\{\s*"type"\s*:\s*"([^"]+)"`)
+	jsFactoryRe               = regexp.MustCompile(`\b(PreconditionLoad|ReadLoad|UpdateLoad|DeleteLoad|Load)\b`)
+	jsAnyLoadFactoryRe        = regexp.MustCompile(`\b([A-Z][A-Za-z]*Load)\b`)
+	jsIDFieldRe               = regexp.MustCompile(`"id"\s*:\s*"([^"]+)"`)
+	jsObjectKeyRe             = regexp.MustCompile(`"([^"]+)"\s*:`)
+	jsParentConfigRe          = regexp.MustCompile(`(?:var\s+)?(parentConfig_[A-Za-z0-9_]+)\s*=\s*\{`)
+	jsBraceVarRe              = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	jsLogPathRe               = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/log\/([^/"]+)\/([^"]+)"`)
+	jsMongoosePathRe          = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/([^"]+)"`)
+	jsOutputKeyRe             = regexp.MustCompile(`"output"\s*:\s*\{`)
+	jsPathKeyRe               = regexp.MustCompile(`"path"\s*:`)
+	jsIdentifierRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	jsParentConfigAllowedKeys = map[string]struct{}{
+		"storage":      {},
+		"net":          {},
+		"node":         {},
+		"port":         {},
+		"driver":       {},
+		"type":         {},
+		"ssl":          {},
+		"enabled":      {},
+		"ciphers":      {},
+		"protocols":    {},
+		"provider":     {},
+		"jsseProvider": {},
+		"namedGroups":  {},
+		"pqcMode":      {},
+	}
+	jsParentSSLAllowedKeys = map[string]struct{}{
+		"enabled":      {},
+		"ciphers":      {},
+		"protocols":    {},
+		"provider":     {},
+		"jsseProvider": {},
+		"namedGroups":  {},
+		"pqcMode":      {},
+	}
 )
 
 // ConvertJS adapts a generated legacy JavaScript scenario for replay against local S3 defaults.
@@ -78,7 +103,7 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	diagnostics = append(diagnostics, pathDiagnostics...)
 
 	var parentDiagnostics []Diagnostic
-	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket)
+	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket, effectiveVars)
 	diagnostics = append(diagnostics, parentDiagnostics...)
 	if bucket != "" {
 		body = rewriteJSOutputPaths(body, bucket)
@@ -399,7 +424,7 @@ func rewriteJSMongoosePaths(source string, archiveToStepID map[string]string) (s
 	return out, rewrites, diagnostics
 }
 
-func rewriteJSParentConfigs(source string, opts Options, bucket string) (string, []Diagnostic) {
+func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map[string]string) (string, []Diagnostic) {
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
 	matches := jsParentConfigRe.FindAllStringSubmatchIndex(source, -1)
@@ -414,8 +439,19 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string) (string,
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("%s has an unterminated config object", name)})
 			continue
 		}
-		if parentConfigHasExtraKeys(source[open : closeIdx+1]) {
-			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("%s contained archived parent settings beyond storage.driver.type/storage.net.node.port; replay stripped them and uses local defaults", name)})
+		configText := source[open : closeIdx+1]
+		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
+		if len(unsupportedSSLKeys) > 0 {
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: severityWarning,
+				Message:  fmt.Sprintf("%s contained unsupported archived ssl setting(s) %s; replay stripped them and uses local defaults for those fields", name, strings.Join(unsupportedSSLKeys, ", ")),
+			})
+		}
+		if parentConfigHasExtraKeys(configText) {
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: severityWarning,
+				Message:  fmt.Sprintf("%s contained archived parent settings outside replay's modeled parent-config subset; replay preserved representable storage.net.ssl* settings, stripped unsupported settings, and uses local defaults where needed", name),
+			})
 		}
 		end := closeIdx + 1
 		for end < len(source) && isJSWhitespace(source[end]) {
@@ -427,34 +463,43 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string) (string,
 		replacements = append(replacements, jsReplacement{
 			start: match[0],
 			end:   end,
-			text:  sanitizedJSParentConfig(name, opts, bucket),
+			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig),
 		})
 	}
 	return applyJSReplacements(source, replacements), diagnostics
 }
 
 func parentConfigHasExtraKeys(configText string) bool {
-	allowed := map[string]struct{}{
-		"storage": {},
-		"net":     {},
-		"node":    {},
-		"port":    {},
-		"driver":  {},
-		"type":    {},
-	}
 	for _, match := range jsObjectKeyRe.FindAllStringSubmatch(configText, -1) {
 		if len(match) != 2 {
 			continue
 		}
-		if _, ok := allowed[match[1]]; !ok {
+		if _, ok := jsParentConfigAllowedKeys[match[1]]; !ok {
 			return true
 		}
 	}
 	return false
 }
 
-func sanitizedJSParentConfig(name string, opts Options, bucket string) string {
-	return fmt.Sprintf(`var %s = {
+func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any) string {
+	config := map[string]any{
+		"item": map[string]any{
+			"output": map[string]any{
+				"path": jsBucketPath(bucket),
+			},
+		},
+		"storage": map[string]any{
+			"driver": map[string]any{
+				"type": s3DriverType(opts.S3Driver),
+			},
+		},
+	}
+	if len(sslConfig) > 0 {
+		setPath(config, sslConfig, "storage", "net", "ssl")
+	}
+	configJS, err := marshalJSConfig(config)
+	if err != nil {
+		return fmt.Sprintf(`var %s = {
   "item" : {
     "output" : {
       "path" : %s
@@ -466,6 +511,71 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string) string {
     }
   }
 };`, name, jsQuote(jsBucketPath(bucket)), jsQuote(s3DriverType(opts.S3Driver)))
+	}
+	return fmt.Sprintf("var %s = %s;", name, configJS)
+}
+
+func extractJSParentSSLConfig(configText string, vars map[string]string) (map[string]any, []string) {
+	storageText := jsObjectForKey(configText, "storage")
+	if storageText == "" {
+		return nil, nil
+	}
+	netText := jsObjectForKey(storageText, "net")
+	if netText == "" {
+		return nil, nil
+	}
+	sslText := jsObjectForKey(netText, "ssl")
+	if sslText == "" {
+		return nil, nil
+	}
+
+	sslConfig := map[string]any{}
+	if enabled, ok := boolValue(jsFieldValue(sslText, "enabled", vars), vars); ok {
+		sslConfig["enabled"] = enabled
+	}
+	if ciphers, ok := jsStringListField(sslText, "ciphers", vars); ok {
+		sslConfig["ciphers"] = ciphers
+	}
+	if protocols, ok := jsStringListField(sslText, "protocols", vars); ok {
+		sslConfig["protocols"] = protocols
+	}
+	if namedGroups, ok := jsStringListField(sslText, "namedGroups", vars); ok {
+		sslConfig["namedGroups"] = namedGroups
+	}
+	if provider := jsStringField(sslText, "provider", vars); provider != "" {
+		sslConfig["provider"] = provider
+	}
+	if jsseProvider := jsStringField(sslText, "jsseProvider", vars); jsseProvider != "" {
+		sslConfig["jsseProvider"] = jsseProvider
+	}
+	if pqcMode := jsStringField(sslText, "pqcMode", vars); pqcMode != "" {
+		sslConfig["pqcMode"] = pqcMode
+	}
+	if len(sslConfig) == 0 {
+		sslConfig = nil
+	}
+	return sslConfig, jsUnsupportedObjectKeys(sslText, jsParentSSLAllowedKeys)
+}
+
+func jsUnsupportedObjectKeys(objectText string, allowed map[string]struct{}) []string {
+	seen := map[string]struct{}{}
+	var unsupported []string
+	for _, match := range jsObjectKeyRe.FindAllStringSubmatch(objectText, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		key := match[1]
+		if _, ok := allowed[key]; ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unsupported = append(unsupported, key)
+	}
+	sort.Strings(unsupported)
+	return unsupported
 }
 
 func rewriteJSOutputPaths(source, bucket string) string {
@@ -584,6 +694,29 @@ func jsFieldValue(configText, name string, vars map[string]string) any {
 	return raw
 }
 
+func jsStringListField(configText, name string, vars map[string]string) ([]string, bool) {
+	raw, ok := jsFieldRawValue(configText, name)
+	if !ok {
+		return nil, false
+	}
+	raw = strings.TrimSpace(raw)
+	switch {
+	case strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]"):
+		parts := splitJSArrayValues(raw[1 : len(raw)-1])
+		values := make([]string, 0, len(parts))
+		for _, part := range parts {
+			value, ok := resolveJSStringListValue(part, vars)
+			if ok {
+				values = append(values, value...)
+			}
+		}
+		return values, len(values) > 0
+	default:
+		values, ok := resolveJSStringListValue(raw, vars)
+		return values, ok
+	}
+}
+
 func jsLimitFieldValue(configText, name string, vars map[string]string) (any, []string) {
 	raw, ok := jsFieldToken(configText, name)
 	if !ok {
@@ -619,6 +752,81 @@ func jsFieldToken(configText, name string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(match[1]), true
+}
+
+func jsFieldRawValue(configText, name string) (string, bool) {
+	re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:`)
+	match := re.FindStringIndex(configText)
+	if len(match) != 2 {
+		return "", false
+	}
+	valueStart := skipJSWhitespace(configText, match[1])
+	valueEnd := findJSValueEnd(configText, valueStart, len(configText)-1)
+	if valueEnd <= valueStart {
+		return "", false
+	}
+	return strings.TrimSpace(configText[valueStart:valueEnd]), true
+}
+
+func splitJSArrayValues(raw string) []string {
+	var parts []string
+	start := 0
+	depth := 0
+	var quote byte
+	escaped := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '[', '{', '(':
+			depth++
+		case ']', '}', ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(raw[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(raw[start:]); tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts
+}
+
+func resolveJSStringListValue(raw string, vars map[string]string) ([]string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) {
+		return splitCSV(expandWithExports(unquoteJSString(strings.Trim(raw, `"`)), vars)), true
+	}
+	if strings.HasPrefix(raw, `'`) && strings.HasSuffix(raw, `'`) {
+		return splitCSV(strings.Trim(raw, `'`)), true
+	}
+	if value, ok := vars[raw]; ok && strings.TrimSpace(value) != "" {
+		return splitCSV(value), true
+	}
+	return splitCSV(raw), true
 }
 
 func unquoteJSString(raw string) string {

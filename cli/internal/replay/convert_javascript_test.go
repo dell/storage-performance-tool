@@ -125,7 +125,7 @@ func TestConvertJSAdaptsGeneratedS3Scenario(t *testing.T) {
 		"var CLIENT_2 = \"wrk2\";",
 		"var CLIENTS = \"wrk1,wrk2\";",
 		"var BUCKET = \"local-bucket\";",
-		`"type" : "s3-aws"`,
+		`"type": "s3-aws"`,
 		`"path" : "/local-bucket"`,
 		`pauseSeconds(60, "Archived wait 1");`,
 		`"id" : "replay-001-20260605.121400.000-create"`,
@@ -298,15 +298,25 @@ func TestConvertJSRewritesBareParentConfigAssignment(t *testing.T) {
 	}
 }
 
-func TestConvertJSWarnsWhenParentConfigDropsExtraSettings(t *testing.T) {
-	raw := []byte(strings.Replace(maxS3SanityJS, `"driver" : {
-      "type" : "s3"
-    }`, `"driver" : {
-      "type" : "s3"
-    },
-    "ssl" : {
-      "enabled" : true
-    }`, 1))
+func TestConvertJSPreservesRepresentableParentSSLSettings(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },`, `"net" : {
+      "node" : {
+        "port" : 9020
+      },
+      "ssl" : {
+        "enabled" : true,
+        "ciphers" : ["TLS_AES_128_GCM_SHA256"],
+        "protocols" : ["TLSv1.2", "TLSv1.3"],
+        "provider" : "OPENSSL",
+        "jsseProvider" : "SunJSSE",
+        "namedGroups" : ["x25519"],
+        "pqcMode" : "hybrid"
+      }
+    },`, 1))
 
 	got, err := ConvertJS(raw, RunScript{
 		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
@@ -318,11 +328,64 @@ func TestConvertJSWarnsWhenParentConfigDropsExtraSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConvertJS() error = %v", err)
 	}
-	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "archived parent settings") {
-		t.Fatalf("Diagnostics = %+v, want parentConfig stripping warning", got.Diagnostics)
+	if hasDiagnosticContaining(got.Diagnostics, severityWarning, "archived parent settings") {
+		t.Fatalf("Diagnostics = %+v, want no generic parentConfig stripping warning for representable SSL", got.Diagnostics)
 	}
-	if strings.Contains(string(got.ScenarioJS), `"ssl"`) {
-		t.Fatalf("scenario retained archived ssl parent setting:\n%s", string(got.ScenarioJS))
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`"ssl": {`,
+		`"enabled": true`,
+		`"provider": "OPENSSL"`,
+		`"jsseProvider": "SunJSSE"`,
+		`"pqcMode": "hybrid"`,
+		`"TLS_AES_128_GCM_SHA256"`,
+		`"TLSv1.2"`,
+		`"TLSv1.3"`,
+		`"x25519"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, `"port": 9020`) || strings.Contains(js, `"port" : 9020`) {
+		t.Fatalf("scenario retained archived parent port:\n%s", js)
+	}
+}
+
+func TestConvertJSWarnsWhenParentConfigDropsUnsupportedSSLSettings(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },`, `"net" : {
+      "node" : {
+        "port" : 9020
+      },
+      "ssl" : {
+        "enabled" : true,
+        "trustAll" : true
+      }
+    },`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"https://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "unsupported archived ssl setting") {
+		t.Fatalf("Diagnostics = %+v, want unsupported SSL warning", got.Diagnostics)
+	}
+	js := string(got.ScenarioJS)
+	if !strings.Contains(js, `"enabled": true`) {
+		t.Fatalf("scenario missing preserved ssl.enabled:\n%s", js)
+	}
+	if strings.Contains(js, `"trustAll"`) {
+		t.Fatalf("scenario retained unsupported archived ssl setting:\n%s", js)
 	}
 }
 
