@@ -343,6 +343,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if verify, ok := boolValue(getPath(step.Config, "item", "data", "verify"), vars); ok {
 		setPath(config, verify, "item", "data", "verify")
 	}
+	if randomRanges := int64Value(getPath(step.Config, "item", "data", "ranges", "random"), vars); randomRanges > 0 {
+		setPath(config, randomRanges, "item", "data", "ranges", "random")
+	}
 	if queueInput := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyDriver, "queue", "input"), vars); queueInput > 0 {
 		setPath(config, queueInput, legacyKeyStorage, legacyKeyDriver, "queue", "input")
 	}
@@ -604,6 +607,7 @@ func collectConfigLeafPaths(value any, path []string, out *[]string) {
 func isModeledJSONConfigPath(path string) bool {
 	switch path {
 	case "item.data.size",
+		"item.data.ranges.random",
 		"item.data.verify",
 		"item.input.file",
 		"item.input.path",

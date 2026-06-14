@@ -238,6 +238,56 @@ func TestConvertJSONSupportsUpdateOperation(t *testing.T) {
 	}
 }
 
+func TestConvertJSONPreservesUpdateRandomRanges(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{
+    "type": "load",
+    "config": {
+      "item": {
+        "data": {"size": "10KB"},
+        "output": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}
+      },
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}
+    }
+  }, {
+    "type": "load",
+    "config": {
+      "item": {
+        "data": {
+          "size": "10KB",
+          "ranges": {"random": 4}
+        },
+        "input": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}
+      },
+      "test": {"step": {"id": "MAX-U10KB"}},
+      "load": {"op": {"type": "update"}, "limit": {"concurrency": 64}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`UpdateLoad`,
+		`"random": 4`,
+		`"id": "replay-002-20260605.121400.000-update"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if hasDiagnosticContaining(got.Diagnostics, severityWarning, "step MAX-U10KB ignores unmodeled JSON config path item.data.ranges.random") {
+		t.Fatalf("Diagnostics = %+v, unexpected update-ranges warning", got.Diagnostics)
+	}
+}
+
 func TestConvertJSONWarnsOnUnmodeledConfigAndUsesInheritedDefaults(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
