@@ -359,6 +359,40 @@ func TestConvertJSONPreservesSSLConfigAndLegacyAliases(t *testing.T) {
 	}
 }
 
+func TestConvertJSONMapsScalarSSLToEnabled(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {
+    "storage": {
+      "driver": {"type": "s3"},
+      "net": {
+        "ssl": true
+      }
+    }
+  },
+  "steps": [{
+    "type": "load",
+    "config": {
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"https://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	if !strings.Contains(js, `"enabled": true`) {
+		t.Fatalf("scenario missing scalar SSL mapping:\n%s", js)
+	}
+	if hasDiagnosticContaining(got.Diagnostics, severityWarning, "step MAX-W10KB ignores unmodeled JSON config path storage.net.ssl") {
+		t.Fatalf("Diagnostics = %+v, unexpected scalar SSL warning", got.Diagnostics)
+	}
+}
+
 func TestConvertJSONRejectsUnboundedCreateStep(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",

@@ -448,6 +448,37 @@ func TestConvertJSWarnsWhenParentConfigDropsUnsupportedSSLSettings(t *testing.T)
 	}
 }
 
+func TestConvertJSMapsScalarParentSSLToEnabled(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },`, `"net" : {
+      "node" : {
+        "port" : 9020
+      },
+      "ssl" : true
+    },`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"https://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if hasDiagnosticContaining(got.Diagnostics, severityWarning, "unsupported archived ssl setting") {
+		t.Fatalf("Diagnostics = %+v, want no unsupported SSL warning", got.Diagnostics)
+	}
+	js := string(got.ScenarioJS)
+	if !strings.Contains(js, `"enabled": true`) {
+		t.Fatalf("scenario missing scalar ssl.enabled mapping:\n%s", js)
+	}
+}
+
 func TestConvertJSRejectsUnsupportedLoadFactory(t *testing.T) {
 	raw := []byte(maxS3SanityJS + `
 MixedLoad

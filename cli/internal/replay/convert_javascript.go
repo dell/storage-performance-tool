@@ -569,6 +569,9 @@ func extractJSParentSSLConfig(configText string, vars map[string]string) (map[st
 	}
 	sslText := jsObjectForKey(netText, "ssl")
 	if sslText == "" {
+		if enabled, ok := boolValue(jsFieldValue(netText, "ssl", vars), vars); ok {
+			return map[string]any{"enabled": enabled}, nil
+		}
 		return nil, nil
 	}
 

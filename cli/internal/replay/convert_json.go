@@ -370,7 +370,10 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	), vars); ok {
 		setPath(config, threshold, "output", "metrics", "threshold")
 	}
-	if enabled, ok := boolValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "enabled"), vars); ok {
+	if enabled, ok := boolValue(firstPath(step.Config,
+		[]string{legacyKeyStorage, "net", "ssl", "enabled"},
+		[]string{legacyKeyStorage, "net", "ssl"},
+	), vars); ok {
 		setPath(config, enabled, legacyKeyStorage, "net", "ssl", "enabled")
 	}
 	if ciphers, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "ciphers"), vars); ok {
@@ -618,6 +621,7 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.driver.limit.concurrency",
 		"storage.driver.queue.input",
 		"storage.driver.type",
+		"storage.net.ssl",
 		"storage.net.ssl.ciphers",
 		"storage.net.ssl.enabled",
 		"storage.net.ssl.jsseProvider",
