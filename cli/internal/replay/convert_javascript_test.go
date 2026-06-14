@@ -259,6 +259,65 @@ func TestConvertJSRejectsUnsafeProcessBuilderCommand(t *testing.T) {
 	}
 }
 
+func TestConvertJSConvertsFilePrepProcessBuilderWithArchivedAbsoluteWorkDir(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `cd /opt/mongoose/current/log/MAX-W10KB;sed '/^.\{49\}./d' items.csv > items.csv.1; sed -r '/^.{,45}$/d' items.csv.1 > items.csv;`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" || !strings.Contains(got.CommandOps[0].Detail, "safe file command") {
+		t.Fatalf("CommandOps = %+v, want converted file-prep command", got.CommandOps)
+	}
+	if hasDiagnosticContaining(got.Diagnostics, severityError, "unsupported JavaScript command") {
+		t.Fatalf("Diagnostics = %+v, want no unsupported command error", got.Diagnostics)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`function runReplayProcess(command, args, cwd) {`,
+		`function runReplayProcessToFile(command, args, cwd, outputPath, append) {`,
+		`runReplayProcessToFile("sed", ["/^.\\{49\\}./d", "items.csv"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create", sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv.1", false);`,
+		`runReplayProcessToFile("sed", ["-r", "/^.{,45}$/d", "items.csv.1"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create", sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv", false);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+}
+
+func TestConvertJSConvertsFilePrepProcessBuilderWithArchivedAbsoluteFileArgs(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `sed '/^.\{49\}./d' /opt/mongoose/current/log/MAX-W10KB/items.csv > /opt/mongoose/current/log/MAX-W10KB/items.csv.1; sed -r '/^.{,45}$/d' /opt/mongoose/current/log/MAX-W10KB/items.csv.1 > /opt/mongoose/current/log/MAX-W10KB/items.csv;`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted file-prep command", got.CommandOps)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`runReplayProcessToFile("sed", ["/^.\\{49\\}./d", sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv.1", false);`,
+		`runReplayProcessToFile("sed", ["-r", "/^.{,45}$/d", sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv.1"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv", false);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+}
+
 func TestConvertJSClassifiesUnsupportedProcessBuilder(t *testing.T) {
 	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `python /tmp/s3query.py ${BUCKET}`, 1))
 	_, err := ConvertJS(raw, RunScript{

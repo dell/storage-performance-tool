@@ -79,9 +79,6 @@ const (
 	errParallelReplayUnimplemented = "parallel scenarios are not implemented for replay"
 )
 
-var itemFileRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/log/([^/]+)/([^"'\s]+)`)
-var itemDirRe = regexp.MustCompile(`^\$\{MONGOOSE_DIR\}/log/([^/"'\s]+)$`)
-var mongoosePathRe = regexp.MustCompile(`\$\{MONGOOSE_DIR\}/([^"'\s]+)`)
 var (
 	expandVarRe          = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
 	exprPlaceholderRe    = regexp.MustCompile(`"__SPT_EXPR_([A-Za-z0-9_]+)__"`)
@@ -157,35 +154,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	body.WriteString("  if (message) { print(\"[\" + new Date().toISOString() + \"] \" + message); }\n")
 	body.WriteString("  java.lang.Thread.sleep(Number(seconds) * 1000);\n")
 	body.WriteString("}\n\n")
-	body.WriteString("function runReplayProcess(command, args, cwd) {\n")
-	body.WriteString("  var commandLine = new java.util.ArrayList();\n")
-	body.WriteString("  commandLine.add(String(command));\n")
-	body.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
-	body.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
-	body.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
-	body.WriteString("  processBuilder.redirectErrorStream(true);\n")
-	body.WriteString("  var process = processBuilder.start();\n")
-	body.WriteString("  var reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream()));\n")
-	body.WriteString("  var line;\n")
-	body.WriteString("  while ((line = reader.readLine()) !== null) { if (line.length() > 0) { print(line); } }\n")
-	body.WriteString("  var exitCode = process.waitFor();\n")
-	body.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
-	body.WriteString("}\n\n")
-	body.WriteString("function runReplayProcessToFile(command, args, cwd, outputPath, append) {\n")
-	body.WriteString("  var commandLine = new java.util.ArrayList();\n")
-	body.WriteString("  commandLine.add(String(command));\n")
-	body.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
-	body.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
-	body.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
-	body.WriteString("  var outputFile = new java.io.File(String(outputPath));\n")
-	body.WriteString("  var parentDir = outputFile.getParentFile();\n")
-	body.WriteString("  if (parentDir) { parentDir.mkdirs(); }\n")
-	body.WriteString("  var redirect = append ? java.lang.ProcessBuilder.Redirect.appendTo(outputFile) : java.lang.ProcessBuilder.Redirect.to(outputFile);\n")
-	body.WriteString("  processBuilder.redirectOutput(redirect);\n")
-	body.WriteString("  processBuilder.redirectError(java.lang.ProcessBuilder.Redirect.INHERIT);\n")
-	body.WriteString("  var exitCode = processBuilder.start().waitFor();\n")
-	body.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
-	body.WriteString("}\n\n")
+	writeReplayProcessHelpers(&body)
 
 	loadStepNumber := 0
 	waitNumber := 0
@@ -796,6 +765,38 @@ func writePreludeVars(b *strings.Builder, vars map[string]string) {
 	}
 }
 
+func writeReplayProcessHelpers(b *strings.Builder) {
+	b.WriteString("function runReplayProcess(command, args, cwd) {\n")
+	b.WriteString("  var commandLine = new java.util.ArrayList();\n")
+	b.WriteString("  commandLine.add(String(command));\n")
+	b.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
+	b.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
+	b.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
+	b.WriteString("  processBuilder.redirectErrorStream(true);\n")
+	b.WriteString("  var process = processBuilder.start();\n")
+	b.WriteString("  var reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream()));\n")
+	b.WriteString("  var line;\n")
+	b.WriteString("  while ((line = reader.readLine()) !== null) { if (line.length() > 0) { print(line); } }\n")
+	b.WriteString("  var exitCode = process.waitFor();\n")
+	b.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
+	b.WriteString("}\n\n")
+	b.WriteString("function runReplayProcessToFile(command, args, cwd, outputPath, append) {\n")
+	b.WriteString("  var commandLine = new java.util.ArrayList();\n")
+	b.WriteString("  commandLine.add(String(command));\n")
+	b.WriteString("  for (var i = 0; i < args.length; i++) { commandLine.add(String(args[i])); }\n")
+	b.WriteString("  var processBuilder = new java.lang.ProcessBuilder(commandLine);\n")
+	b.WriteString("  if (cwd) { processBuilder.directory(new java.io.File(String(cwd))); }\n")
+	b.WriteString("  var outputFile = new java.io.File(String(outputPath));\n")
+	b.WriteString("  var parentDir = outputFile.getParentFile();\n")
+	b.WriteString("  if (parentDir) { parentDir.mkdirs(); }\n")
+	b.WriteString("  var redirect = append ? java.lang.ProcessBuilder.Redirect.appendTo(outputFile) : java.lang.ProcessBuilder.Redirect.to(outputFile);\n")
+	b.WriteString("  processBuilder.redirectOutput(redirect);\n")
+	b.WriteString("  processBuilder.redirectError(java.lang.ProcessBuilder.Redirect.INHERIT);\n")
+	b.WriteString("  var exitCode = processBuilder.start().waitFor();\n")
+	b.WriteString("  if (exitCode !== 0) { throw \"Replay command failed (\" + exitCode + \"): \" + command + \" \" + args.join(\" \"); }\n")
+	b.WriteString("}\n\n")
+}
+
 func isSensitiveName(name string) bool {
 	lower := strings.ToLower(name)
 	if lower == "key" || lower == "user_id" {
@@ -859,23 +860,54 @@ func mongoosePathVariable(raw string, itemVars map[string]itemFileExpr, order *[
 }
 
 func parseItemFile(raw string) (string, string, bool) {
-	m := itemFileRe.FindStringSubmatch(raw)
-	if len(m) != 3 {
+	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	if !ok || !strings.HasPrefix(homeRelative, "log/") {
 		return "", "", false
 	}
-	return m[1], strings.Trim(m[2], `"'`), true
+	archiveID, fileName, ok := strings.Cut(strings.TrimPrefix(homeRelative, "log/"), "/")
+	if !ok || archiveID == "" || fileName == "" || strings.Contains(archiveID, "/") || strings.Contains(fileName, "/") {
+		return "", "", false
+	}
+	return archiveID, fileName, true
+}
+
+func parseItemDir(raw string) (string, bool) {
+	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	if !ok || !strings.HasPrefix(homeRelative, "log/") {
+		return "", false
+	}
+	archiveID := strings.TrimPrefix(homeRelative, "log/")
+	if archiveID == "" || strings.Contains(archiveID, "/") {
+		return "", false
+	}
+	return archiveID, true
 }
 
 func parseMongoosePath(raw string) (string, bool) {
-	m := mongoosePathRe.FindStringSubmatch(raw)
-	if len(m) != 2 {
-		return "", false
+	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	return homeRelative, ok
+}
+
+func normalizeArchivedMongoosePath(raw string) (string, string, bool) {
+	pathValue := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if pathValue == "" {
+		return "", "", false
 	}
-	homeRelative := strings.Trim(m[1], `"'`)
-	if homeRelative == "" || strings.Contains(homeRelative, "${") {
-		return "", false
+	var homeRelative string
+	switch {
+	case strings.HasPrefix(pathValue, "${"+legacyMongooseDirVar+"}/"):
+		homeRelative = strings.TrimPrefix(pathValue, "${"+legacyMongooseDirVar+"}/")
+	case strings.HasPrefix(pathValue, "/opt/mongoose/current/"):
+		homeRelative = strings.TrimPrefix(pathValue, "/opt/mongoose/current/")
+	case strings.HasPrefix(pathValue, "/opt/mongoose/"):
+		homeRelative = strings.TrimPrefix(pathValue, "/opt/mongoose/")
+	default:
+		return "", "", false
 	}
-	return homeRelative, true
+	if homeRelative == "" || strings.Contains(homeRelative, "${") || strings.Contains(homeRelative, "..") {
+		return "", "", false
+	}
+	return pathValue, homeRelative, true
 }
 
 func parseSleepCommand(value string, vars map[string]string) (int, bool) {
@@ -972,28 +1004,36 @@ func maybeConvertSedRedirectCommand(fields []string, stepValue, cwdExpr string, 
 	if len(fields) == 0 || fields[0] != "sed" {
 		return "", nil, false, nil
 	}
-	if len(fields) != 5 || fields[3] != ">" {
+	if len(fields) < 5 || fields[len(fields)-2] != ">" {
 		return "", nil, false, nil
 	}
-	script := unquoteCommandToken(fields[1])
-	if script == "" {
-		return "", nil, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[1], stepValue)
+	sedArgs := fields[1 : len(fields)-3]
+	if len(sedArgs) == 0 {
+		return "", nil, false, nil
 	}
-	inputExprs, rewrites, err := commandArgExprs([]string{fields[2]}, stepValue, archiveToStepID)
+	argExprs := make([]string, 0, len(sedArgs)+1)
+	for _, raw := range sedArgs {
+		arg := unquoteCommandToken(raw)
+		if arg == "" {
+			return "", nil, true, fmt.Errorf("unsupported command argument %q in step: %s", raw, stepValue)
+		}
+		argExprs = append(argExprs, jsQuote(arg))
+	}
+	inputExprs, rewrites, err := commandArgExprs([]string{fields[len(fields)-3]}, stepValue, archiveToStepID)
 	if err != nil {
 		return "", rewrites, true, err
 	}
-	outputExpr, rewrite, hasRewrite, supported, err := commandArgExpr(fields[4], archiveToStepID)
+	outputExpr, rewrite, hasRewrite, supported, err := commandOutputExpr(fields[len(fields)-1], cwdExpr, archiveToStepID)
 	if err != nil {
 		return "", rewrites, true, err
 	}
 	if !supported {
-		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[4], stepValue)
+		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[len(fields)-1], stepValue)
 	}
 	if hasRewrite {
 		rewrites = append(rewrites, rewrite)
 	}
-	args := append([]string{jsQuote(script)}, inputExprs...)
+	args := append(argExprs, inputExprs...)
 	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, false);\n", jsQuote("sed"), strings.Join(args, ", "), cwdExpr, outputExpr), rewrites, true, nil
 }
 
@@ -1022,7 +1062,7 @@ func maybeConvertCatRedirectCommand(fields []string, stepValue, cwdExpr string, 
 	if err != nil {
 		return "", rewrites, true, err
 	}
-	outputExpr, rewrite, hasRewrite, supported, err := commandArgExpr(fields[len(fields)-1], archiveToStepID)
+	outputExpr, rewrite, hasRewrite, supported, err := commandOutputExpr(fields[len(fields)-1], cwdExpr, archiveToStepID)
 	if err != nil {
 		return "", rewrites, true, err
 	}
@@ -1122,6 +1162,18 @@ func commandArgExpr(raw string, archiveToStepID map[string]string) (string, Path
 	return jsQuote(value), PathRewrite{}, false, true, nil
 }
 
+func commandOutputExpr(raw, cwdExpr string, archiveToStepID map[string]string) (string, PathRewrite, bool, bool, error) {
+	expr, rewrite, hasRewrite, supported, err := commandArgExpr(raw, archiveToStepID)
+	if err != nil || !supported {
+		return expr, rewrite, hasRewrite, supported, err
+	}
+	value := unquoteCommandToken(raw)
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "..") || !safeCommandArgRe.MatchString(value) {
+		return expr, rewrite, hasRewrite, supported, nil
+	}
+	return cwdExpr + ` + "/` + jsEscape(value) + `"`, rewrite, hasRewrite, true, nil
+}
+
 func unquoteCommandToken(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if len(raw) >= 2 {
@@ -1137,8 +1189,7 @@ func commandWorkDirExpr(raw string, archiveToStepID map[string]string) (string, 
 	if pathValue == "" {
 		return "", PathRewrite{}, false, fmt.Errorf("unsupported empty command working directory")
 	}
-	if m := itemDirRe.FindStringSubmatch(pathValue); len(m) == 2 {
-		archiveID := m[1]
+	if archiveID, ok := parseItemDir(pathValue); ok {
 		stepID := archiveToStepID[archiveID]
 		if stepID == "" {
 			return "", PathRewrite{}, false, fmt.Errorf("command step references unknown path label %s", archiveID)
