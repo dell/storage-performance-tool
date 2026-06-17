@@ -609,6 +609,35 @@ func TestConvertJSONConvertsSedFilePrepCommand(t *testing.T) {
 	}
 }
 
+func TestConvertJSONConvertsShufFilePrepCommand(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}},
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}
+    }},
+    {"type": "command", "value": "shuf ${MONGOOSE_DIR}/log/MAX-W10KB/items.csv > ${MONGOOSE_DIR}/log/MAX-W10KB/items.csv.1", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	want := `runReplayProcessToFile("shuf", [sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv.1", false);`
+	if !strings.Contains(js, want) {
+		t.Fatalf("scenario missing shuf file-prep conversion %q\n%s", want, js)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted shuf command", got.CommandOps)
+	}
+}
+
 func TestConvertJSONConvertsCpCatRmFilePrepCommand(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
@@ -685,6 +714,72 @@ func TestConvertJSONConvertsCatLoopFilePrepCommand(t *testing.T) {
 	}
 	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
 		t.Fatalf("CommandOps = %+v, want converted cat loop command", got.CommandOps)
+	}
+}
+
+func TestConvertJSONConvertsCatLoopFilePrepCommandWithWorkDir(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/MAX-W100KB/items.csv"}},
+      "test": {"step": {"id": "MAX-W100KB", "limit": {"count": 10}}}
+    }},
+    {"type": "command", "value": "cd ${MONGOOSE_DIR}/log/MAX-W100KB; for i in {1..5000};do cat items.1.csv >> items.csv; done", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`for (var replayCatLoop = 0; replayCatLoop < 5000; replayCatLoop++) {`,
+		`runReplayProcessToFile("cat", ["items.1.csv"], sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create", sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv", true);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, "/log/MAX-W100KB") {
+		t.Fatalf("scenario retained legacy cat-loop path:\n%s", js)
+	}
+	if len(got.PathRewrites) != 2 {
+		t.Fatalf("len(PathRewrites) = %d, want 2", len(got.PathRewrites))
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted cat loop command", got.CommandOps)
+	}
+}
+
+func TestConvertJSONRejectsUnresolvedFilePrepCommandVariable(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/MAX-W10KB/items.csv"}},
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": 10}}}
+    }},
+    {"type": "command", "value": "shuf ${MISSING_INPUT} > ${MONGOOSE_DIR}/log/MAX-W10KB/items.csv.1", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want unresolved command variable rejection")
+	}
+	if !strings.Contains(err.Error(), "unresolved variable MISSING_INPUT") {
+		t.Fatalf("error = %v, want unresolved variable MISSING_INPUT", err)
+	}
+	if got == nil || len(got.CommandOps) != 1 || got.CommandOps[0].Action != "rejected" {
+		t.Fatalf("CommandOps = %+v, want rejected command", got)
 	}
 }
 

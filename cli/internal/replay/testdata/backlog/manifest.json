@@ -51,11 +51,11 @@
     {
       "file": "sleep_unresolved.json",
       "format": "json",
-      "converterClass": "unsupported_command_step",
-      "refinedClass": "unsupported_command_step",
+      "converterClass": "unresolved_variable",
+      "refinedClass": "unresolved_variable",
       "disposition": "fix",
       "lever": "convert_json.go:parseSleepCommand / convertCommandStep",
-      "note": "NOT a JSON/JS parity bug: both paths call parseSleepCommand. Failure is an UNRESOLVED sleep duration (WAIT_TIME undefined in exports). Decide: default+warn, or fidelity warning."
+      "note": "NOT a JSON/JS parity bug: both paths call parseSleepCommand. Failure is an UNRESOLVED sleep duration (WAIT_TIME undefined in exports), which must remain an explicit unresolved_variable failure rather than silently defaulting."
     },
     {
       "file": "sleep_resolved.json",

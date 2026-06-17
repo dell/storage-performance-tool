@@ -934,11 +934,14 @@ func parseSleepCommand(value string, vars map[string]string) (int, bool) {
 }
 
 func convertCommandStep(value string, vars map[string]string, archiveToStepID map[string]string) (convertedCommand, bool, error) {
+	if missing := unresolvedCommandVars(value, vars); len(missing) > 0 {
+		return convertedCommand{}, true, fmt.Errorf("command step has unresolved variable %s", missing[0])
+	}
 	expanded := strings.TrimSpace(osExpandPreservingMongooseDir(value, vars))
 	if expanded == "" {
 		return convertedCommand{}, false, nil
 	}
-	if missing := unresolvedCommandVars(expanded); len(missing) > 0 {
+	if missing := unresolvedCommandVars(expanded, vars); len(missing) > 0 {
 		return convertedCommand{}, true, fmt.Errorf("command step has unresolved variable %s", missing[0])
 	}
 	segments := splitCommandSegments(expanded)
@@ -1171,14 +1174,23 @@ func splitCommandSegments(value string) []string {
 	return segments
 }
 
-func unresolvedCommandVars(value string) []string {
+func unresolvedCommandVars(value string, vars map[string]string) []string {
 	var missing []string
+	seen := map[string]struct{}{}
 	matches := expandVarRe.FindAllStringSubmatch(value, -1)
 	for _, match := range matches {
 		if len(match) != 2 || match[1] == legacyMongooseDirVar {
 			continue
 		}
-		missing = append(missing, match[1])
+		name := match[1]
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		value, ok := vars[name]
+		if !ok || strings.TrimSpace(value) == "" {
+			missing = append(missing, name)
+		}
 	}
 	return missing
 }

@@ -78,6 +78,12 @@ func classifyMessage(msg string) string {
 		return failureUnsupportedProtocol
 	case strings.Contains(text, " replay is not implemented") && (strings.Contains(text, "nfs") || strings.Contains(text, "fs") || strings.Contains(text, "atmos") || strings.Contains(text, "swift") || strings.Contains(text, "cas")):
 		return failureUnsupportedProtocol
+	case strings.Contains(text, "unresolved variable"):
+		return failureUnresolvedVariable
+	case strings.Contains(text, "unresolved item output file path"):
+		return failureUnresolvedVariable
+	case strings.Contains(text, "unresolved item input file path"):
+		return failureUnresolvedVariable
 	case strings.Contains(text, "unsupported javascript command"):
 		return failureUnsupportedJSProcess
 	case strings.Contains(text, "unsupported javascript processbuilder form"):
@@ -106,12 +112,6 @@ func classifyMessage(msg string) string {
 		return failureScenarioMissing
 	case strings.Contains(text, "run script does not reference a scenario file"):
 		return failureRunScriptMissingScenario
-	case strings.Contains(text, "unresolved variable"):
-		return failureUnresolvedVariable
-	case strings.Contains(text, "unresolved item output file path"):
-		return failureUnresolvedVariable
-	case strings.Contains(text, "unresolved item input file path"):
-		return failureUnresolvedVariable
 	case strings.Contains(text, "local endpoints are required for replay"):
 		return failureMissingLocalEndpoints
 	case strings.Contains(text, "bucket is required; set --bucket"):

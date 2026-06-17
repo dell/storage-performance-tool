@@ -285,6 +285,30 @@ func TestConvertJSConvertsShufFilePrepProcessBuilder(t *testing.T) {
 	}
 }
 
+func TestConvertJSRejectsUnresolvedFilePrepProcessBuilderVariable(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `shuf ${MISSING_INPUT} > /opt/mongoose/current/log/MAX-W10KB/items.csv.1;`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want unresolved command variable rejection")
+	}
+	if !strings.Contains(err.Error(), "unresolved variable MISSING_INPUT") {
+		t.Fatalf("error = %v, want unresolved variable MISSING_INPUT", err)
+	}
+	if gotClass := ErrorClass(err); gotClass != failureUnresolvedVariable {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", gotClass, failureUnresolvedVariable, err)
+	}
+	if got == nil || len(got.CommandOps) != 1 || got.CommandOps[0].Action != "rejected" {
+		t.Fatalf("CommandOps = %+v, want rejected command", got)
+	}
+}
+
 func TestConvertJSConvertsFilePrepProcessBuilderWithArchivedAbsoluteWorkDir(t *testing.T) {
 	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `cd /opt/mongoose/current/log/MAX-W10KB;sed '/^.\{49\}./d' items.csv > items.csv.1; sed -r '/^.{,45}$/d' items.csv.1 > items.csv;`, 1))
 
