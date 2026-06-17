@@ -37,6 +37,7 @@ const (
 	failureReplayDefaultsGeneration  = "replay_defaults_generation_error"
 )
 
+// ClassifiedError wraps replay errors with a stable failure class.
 type ClassifiedError struct {
 	Class string
 	Msg   string
@@ -183,6 +184,7 @@ func classifiedErrorf(class, format string, args ...any) error {
 	return newClassifiedError(class, fmt.Sprintf(format, args...), nil)
 }
 
+// ErrorClass returns the stable replay failure class for err.
 func ErrorClass(err error) string {
 	if err == nil {
 		return ""

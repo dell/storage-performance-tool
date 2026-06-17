@@ -869,7 +869,7 @@ func mongoosePathVariable(raw string, itemVars map[string]itemFileExpr, order *[
 }
 
 func parseItemFile(raw string) (string, string, bool) {
-	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	homeRelative, ok := normalizeArchivedMongoosePath(raw)
 	if !ok || !strings.HasPrefix(homeRelative, "log/") {
 		return "", "", false
 	}
@@ -881,7 +881,7 @@ func parseItemFile(raw string) (string, string, bool) {
 }
 
 func parseItemDir(raw string) (string, bool) {
-	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	homeRelative, ok := normalizeArchivedMongoosePath(raw)
 	if !ok || !strings.HasPrefix(homeRelative, "log/") {
 		return "", false
 	}
@@ -893,14 +893,14 @@ func parseItemDir(raw string) (string, bool) {
 }
 
 func parseMongoosePath(raw string) (string, bool) {
-	_, homeRelative, ok := normalizeArchivedMongoosePath(raw)
+	homeRelative, ok := normalizeArchivedMongoosePath(raw)
 	return homeRelative, ok
 }
 
-func normalizeArchivedMongoosePath(raw string) (string, string, bool) {
+func normalizeArchivedMongoosePath(raw string) (string, bool) {
 	pathValue := strings.Trim(strings.TrimSpace(raw), `"'`)
 	if pathValue == "" {
-		return "", "", false
+		return "", false
 	}
 	var homeRelative string
 	switch {
@@ -911,12 +911,12 @@ func normalizeArchivedMongoosePath(raw string) (string, string, bool) {
 	case strings.HasPrefix(pathValue, "/opt/mongoose/"):
 		homeRelative = strings.TrimPrefix(pathValue, "/opt/mongoose/")
 	default:
-		return "", "", false
+		return "", false
 	}
 	if homeRelative == "" || strings.Contains(homeRelative, "${") || strings.Contains(homeRelative, "..") {
-		return "", "", false
+		return "", false
 	}
-	return pathValue, homeRelative, true
+	return homeRelative, true
 }
 
 func parseSleepCommand(value string, vars map[string]string) (int, bool) {
@@ -1009,8 +1009,8 @@ func convertCommandSegment(segment, stepValue, cwdExpr string, archiveToStepID m
 	if js, rewrites, ok, err := maybeConvertCatRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
 		return js, rewrites, true, err
 	}
-	if js, ok, err := maybeConvertRMCommand(fields, stepValue, cwdExpr); ok || err != nil {
-		return js, nil, true, err
+	if js, ok := maybeConvertRMCommand(fields, cwdExpr); ok {
+		return js, nil, true, nil
 	}
 	if !isAllowedReplayCommand(fields[0]) {
 		return "", nil, false, nil
@@ -1144,22 +1144,22 @@ func maybeConvertCatLoopCommand(command, stepValue, cwdExpr string, archiveToSte
 	return fmt.Sprintf("for (var replayCatLoop = 0; replayCatLoop < %d; replayCatLoop++) {\n  runReplayProcessToFile(%s, [%s], %s, %s, true);\n}\n", count, jsQuote("cat"), strings.Join(inputExprs, ", "), cwdExpr, outputExpr), rewrites, true, nil
 }
 
-func maybeConvertRMCommand(fields []string, stepValue, cwdExpr string) (string, bool, error) {
+func maybeConvertRMCommand(fields []string, cwdExpr string) (string, bool) {
 	if len(fields) == 0 || fields[0] != "rm" {
-		return "", false, nil
+		return "", false
 	}
 	if len(fields) < 2 {
-		return "", false, nil
+		return "", false
 	}
 	args := make([]string, 0, len(fields)-1)
 	for _, raw := range fields[1:] {
 		arg := unquoteCommandToken(raw)
 		if arg == "" || strings.HasPrefix(arg, "-") || strings.Contains(arg, "/") || strings.Contains(arg, "..") || !safeCommandArgRe.MatchString(arg) {
-			return "", false, nil
+			return "", false
 		}
 		args = append(args, jsQuote(arg))
 	}
-	return fmt.Sprintf("runReplayProcess(%s, [%s], %s);\n", jsQuote("rm"), strings.Join(args, ", "), cwdExpr), true, nil
+	return fmt.Sprintf("runReplayProcess(%s, [%s], %s);\n", jsQuote("rm"), strings.Join(args, ", "), cwdExpr), true
 }
 
 func splitCommandSegments(value string) []string {
@@ -1299,14 +1299,6 @@ func isSafeReplayCommandArg(arg string) bool {
 		return false
 	}
 	return safeCommandArgRe.MatchString(arg)
-}
-
-func jsArray(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, jsQuote(value))
-	}
-	return strings.Join(quoted, ", ")
 }
 
 func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
