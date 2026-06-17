@@ -239,7 +239,7 @@ func TestConvertJSRewritesInlineOutputPathToLocalBucket(t *testing.T) {
 }
 
 func TestConvertJSRejectsUnsafeProcessBuilderCommand(t *testing.T) {
-	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `shuf /opt/mongoose/current/log/MAX-W10KB/items.csv > /opt/mongoose/current/log/MAX-W10KB/items.csv.1;`, 1))
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `rm -rf /opt/mongoose/current/log/MAX-W10KB`, 1))
 
 	got, err := ConvertJS(raw, RunScript{
 		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
@@ -256,6 +256,32 @@ func TestConvertJSRejectsUnsafeProcessBuilderCommand(t *testing.T) {
 	}
 	if got == nil || len(got.CommandOps) != 1 || got.CommandOps[0].Action != "rejected" {
 		t.Fatalf("CommandOps = %+v, want rejected command", got)
+	}
+}
+
+func TestConvertJSConvertsShufFilePrepProcessBuilder(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `sleep ${WAIT_TIME}`, `shuf /opt/mongoose/current/log/MAX-W10KB/items.csv > /opt/mongoose/current/log/MAX-W10KB/items.csv.1;`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted shuf command", got.CommandOps)
+	}
+	if hasDiagnosticContaining(got.Diagnostics, severityError, "unsupported JavaScript command") {
+		t.Fatalf("Diagnostics = %+v, want no unsupported command error", got.Diagnostics)
+	}
+	js := string(got.ScenarioJS)
+	want := `runReplayProcessToFile("shuf", [sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv.1", false);`
+	if !strings.Contains(js, want) {
+		t.Fatalf("scenario missing shuf file-prep conversion %q\n%s", want, js)
 	}
 }
 

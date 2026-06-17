@@ -82,6 +82,7 @@ const (
 var (
 	expandVarRe          = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
 	exprPlaceholderRe    = regexp.MustCompile(`"__SPT_EXPR_([A-Za-z0-9_]+)__"`)
+	catLoopCommandRe     = regexp.MustCompile(`^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s+\{1\.\.([0-9]+)\}\s*;\s*do\s+cat\s+(.+?)\s*>>\s*(\S+)\s*;\s*done$`)
 	safeCommandArgRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 	unsafeExprSentinelRe = regexp.MustCompile(`__SPT_EXPR_[A-Za-z0-9_]+__`)
 )
@@ -965,6 +966,13 @@ func convertCommandStep(value string, vars map[string]string, archiveToStepID ma
 	if len(segments) == 0 {
 		return convertedCommand{}, false, nil
 	}
+	if js, loopRewrites, ok, err := maybeConvertCatLoopCommand(strings.Join(segments, "; "), value, cwdExpr, archiveToStepID); ok || err != nil {
+		if err != nil {
+			return convertedCommand{}, true, err
+		}
+		rewrites = append(rewrites, loopRewrites...)
+		return convertedCommand{js: js, rewrites: rewrites}, true, nil
+	}
 
 	var b strings.Builder
 	for _, segment := range segments {
@@ -990,6 +998,9 @@ func convertCommandSegment(segment, stepValue, cwdExpr string, archiveToStepID m
 		return "", nil, false, nil
 	}
 	if js, rewrites, ok, err := maybeConvertSedRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
+		return js, rewrites, true, err
+	}
+	if js, rewrites, ok, err := maybeConvertShufRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
 		return js, rewrites, true, err
 	}
 	if js, rewrites, ok, err := maybeConvertCatRedirectCommand(fields, stepValue, cwdExpr, archiveToStepID); ok || err != nil {
@@ -1045,6 +1056,27 @@ func maybeConvertSedRedirectCommand(fields []string, stepValue, cwdExpr string, 
 	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, false);\n", jsQuote("sed"), strings.Join(args, ", "), cwdExpr, outputExpr), rewrites, true, nil
 }
 
+func maybeConvertShufRedirectCommand(fields []string, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
+	if len(fields) != 4 || fields[0] != "shuf" || fields[2] != ">" {
+		return "", nil, false, nil
+	}
+	inputExprs, rewrites, err := commandArgExprs([]string{fields[1]}, stepValue, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	outputExpr, rewrite, hasRewrite, supported, err := commandOutputExpr(fields[3], cwdExpr, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	if !supported {
+		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", fields[3], stepValue)
+	}
+	if hasRewrite {
+		rewrites = append(rewrites, rewrite)
+	}
+	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, false);\n", jsQuote("shuf"), strings.Join(inputExprs, ", "), cwdExpr, outputExpr), rewrites, true, nil
+}
+
 func maybeConvertCatRedirectCommand(fields []string, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
 	if len(fields) == 0 || fields[0] != "cat" {
 		return "", nil, false, nil
@@ -1081,6 +1113,32 @@ func maybeConvertCatRedirectCommand(fields []string, stepValue, cwdExpr string, 
 		rewrites = append(rewrites, rewrite)
 	}
 	return fmt.Sprintf("runReplayProcessToFile(%s, [%s], %s, %s, %t);\n", jsQuote("cat"), strings.Join(inputExprs, ", "), cwdExpr, outputExpr, appendMode), rewrites, true, nil
+}
+
+func maybeConvertCatLoopCommand(command, stepValue, cwdExpr string, archiveToStepID map[string]string) (string, []PathRewrite, bool, error) {
+	match := catLoopCommandRe.FindStringSubmatch(strings.TrimSpace(command))
+	if len(match) != 4 {
+		return "", nil, false, nil
+	}
+	count, err := strconv.Atoi(match[1])
+	if err != nil || count <= 0 {
+		return "", nil, true, fmt.Errorf("unsupported cat loop count %q in step: %s", match[1], stepValue)
+	}
+	inputExprs, rewrites, err := commandArgExprs([]string{match[2]}, stepValue, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	outputExpr, rewrite, hasRewrite, supported, err := commandOutputExpr(match[3], cwdExpr, archiveToStepID)
+	if err != nil {
+		return "", rewrites, true, err
+	}
+	if !supported {
+		return "", rewrites, true, fmt.Errorf("unsupported command argument %q in step: %s", match[3], stepValue)
+	}
+	if hasRewrite {
+		rewrites = append(rewrites, rewrite)
+	}
+	return fmt.Sprintf("for (var replayCatLoop = 0; replayCatLoop < %d; replayCatLoop++) {\n  runReplayProcessToFile(%s, [%s], %s, %s, true);\n}\n", count, jsQuote("cat"), strings.Join(inputExprs, ", "), cwdExpr, outputExpr), rewrites, true, nil
 }
 
 func maybeConvertRMCommand(fields []string, stepValue, cwdExpr string) (string, bool, error) {

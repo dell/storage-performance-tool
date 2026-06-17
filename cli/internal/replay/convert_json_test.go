@@ -649,6 +649,45 @@ func TestConvertJSONConvertsCpCatRmFilePrepCommand(t *testing.T) {
 	}
 }
 
+func TestConvertJSONConvertsCatLoopFilePrepCommand(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [
+    {"type": "load", "config": {
+      "item": {"output": {"file": "${MONGOOSE_DIR}/log/CREATE-1/items.csv"}},
+      "test": {"step": {"id": "CREATE-1", "limit": {"count": 10}}}
+    }},
+    {"type": "command", "value": "for i in {1..3};do cat ${MONGOOSE_DIR}/log/CREATE-1/items.csv >> ${MONGOOSE_DIR}/log/CREATE-1/items-100.csv; done", "blocking": true}
+  ]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`for (var replayCatLoop = 0; replayCatLoop < 3; replayCatLoop++) {`,
+		`runReplayProcessToFile("cat", [sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items.csv"], sptHomeDir, sptHomeDir + "/log/" + "replay-001-20260605.121400.000-create" + "/items-100.csv", true);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing %q\n%s", want, js)
+		}
+	}
+	if strings.Contains(js, "/log/CREATE-1") {
+		t.Fatalf("scenario retained legacy cat-loop path:\n%s", js)
+	}
+	if len(got.PathRewrites) != 2 {
+		t.Fatalf("len(PathRewrites) = %d, want 2", len(got.PathRewrites))
+	}
+	if len(got.CommandOps) != 1 || got.CommandOps[0].Action != "converted" {
+		t.Fatalf("CommandOps = %+v, want converted cat loop command", got.CommandOps)
+	}
+}
+
 func TestConvertJSONRejectsUnsafeCommand(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
