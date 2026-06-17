@@ -208,7 +208,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 }
 
 // StartEntryNodeContainer starts the entry node with worker addresses and extra args (e.g., S3 params).
-func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string) (string, error) {
+func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
 	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
 	cmd := []string{}
 	if len(workerAddresses) > 0 {
@@ -221,7 +221,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 	cfg := command.ContainerConfig{
 		Image:       image,
 		Name:        name,
-		NetworkMode: command.NetworkModeHost,
+		NetworkMode: selectedNodeNetworkMode(networkMode),
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleEntry),
 		Command:     cmd,

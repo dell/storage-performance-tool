@@ -333,6 +333,27 @@ func TestApplyReplayShapeToParamsCapturesUniformShape(t *testing.T) {
 	}
 }
 
+func TestReplayDefaultConcurrencyRequiresUniformExplicitSteps(t *testing.T) {
+	if got := replayDefaultConcurrency([]StepSummary{
+		{StepID: "step-1", Concurrency: 50, concurrencyExplicit: true},
+		{StepID: "step-2"},
+	}); got != 1 {
+		t.Fatalf("replayDefaultConcurrency() = %d, want 1 when a step omits concurrency", got)
+	}
+	if got := replayDefaultConcurrency([]StepSummary{
+		{StepID: "step-1", Concurrency: 50, concurrencyExplicit: true},
+		{StepID: "step-2", Concurrency: 50, concurrencyExplicit: true},
+	}); got != 50 {
+		t.Fatalf("replayDefaultConcurrency() = %d, want 50 for uniform explicit concurrency", got)
+	}
+	if got := replayDefaultConcurrency([]StepSummary{
+		{StepID: "step-1", Concurrency: 50, concurrencyExplicit: true},
+		{StepID: "step-2", Concurrency: 10, concurrencyExplicit: true},
+	}); got != 1 {
+		t.Fatalf("replayDefaultConcurrency() = %d, want 1 for mixed explicit concurrency", got)
+	}
+}
+
 func TestApplyReplayShapeToParamsLeavesMixedShapeBlank(t *testing.T) {
 	params := scenario.Params{}
 	applyReplayShapeToParams(&params, []StepSummary{

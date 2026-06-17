@@ -1394,7 +1394,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 				return fmt.Errorf("primary host %s has no Docker manager configured", primary.Info.Original)
 			}
 			primary.SetPhase(NodePhaseContainerStarting)
-			cid, err := primary.DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs)
+			cid, err := primary.DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
 				return err
 			}
@@ -1818,6 +1818,7 @@ func (o *MultiHostOrchestrator) startEntryNode(
 		o.image,
 		workerAddresses,
 		additionalArgs,
+		o.networkMode,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to start entry node: %w", err)

@@ -616,9 +616,9 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 }
 
 // StartEntryNodeContainer starts a container as RMI entry node with worker addresses
-func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string) (string, error) {
+func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
 	if dm.remote != nil {
-		return dm.remote.StartEntryNodeContainer(image, workerAddresses, additionalArgs)
+		return dm.remote.StartEntryNodeContainer(image, workerAddresses, additionalArgs, networkMode)
 	}
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "entry_node", "workers", len(workerAddresses))
 
@@ -641,26 +641,32 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "entry_node", "workers", len(workerAddresses), "cmd", cmd)
 
 	labels := dm.baseLabels(constants.DockerRoleEntry)
+	useHostNetwork := selectedNodeNetworkMode(networkMode) == command.NetworkModeHost
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
-		ExposedPorts: nat.PortSet{
+		Labels:       labels,
+	}
+	if !useHostNetwork {
+		containerConfig.ExposedPorts = nat.PortSet{
 			constants.SptAPIPort + "/tcp": struct{}{}, // Only REST API port needed for entry node
-		},
-		Labels: labels,
+		}
 	}
 
-	hostConfig := &container.HostConfig{
+	hostConfig := &container.HostConfig{}
+	if useHostNetwork {
+		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
+	} else {
 		// No file mounting needed - scenario content sent via API
 		// Only REST API port binding for entry node
-		PortBindings: nat.PortMap{
+		hostConfig.PortBindings = nat.PortMap{
 			constants.SptAPIPort + "/tcp": []nat.PortBinding{{
 				HostIP:   dockerBindAllInterfaces,
 				HostPort: constants.SptAPIPort,
 			}},
-		},
+		}
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled

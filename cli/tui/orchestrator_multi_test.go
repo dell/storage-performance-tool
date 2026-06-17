@@ -430,6 +430,9 @@ func TestStartEntryNode_UsesAdvertisedIPForWorkerAddresses(t *testing.T) {
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("worker addresses mismatch: got %v, want %v", got, want)
 	}
+	if calls[0].NetworkMode != constants.DefaultNetworkMode {
+		t.Fatalf("entry node network mode = %q, want %q", calls[0].NetworkMode, constants.DefaultNetworkMode)
+	}
 }
 
 func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.T) {

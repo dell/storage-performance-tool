@@ -51,7 +51,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 		AccessKey:    localAccess,
 		SecretKey:    localSecret,
 		Bucket:       generated.EffectiveBucket,
-		Threads:      maxConcurrency(generated.Steps),
+		Threads:      replayDefaultConcurrency(generated.Steps),
 		AuthVersion:  opts.AuthVersion,
 		S3Driver:     opts.S3Driver,
 		// Legacy Mongoose scenarios use the engine's repeatable data stream by default;
@@ -251,14 +251,24 @@ func safeCommandSummary(command string) string {
 	return command
 }
 
-func maxConcurrency(steps []StepSummary) int {
-	maxValue := 1
+func replayDefaultConcurrency(steps []StepSummary) int {
+	var common int
 	for _, step := range steps {
-		if step.Concurrency > maxValue {
-			maxValue = step.Concurrency
+		if !step.concurrencyExplicit || step.Concurrency <= 0 {
+			return 1
+		}
+		if common == 0 {
+			common = step.Concurrency
+			continue
+		}
+		if step.Concurrency != common {
+			return 1
 		}
 	}
-	return maxValue
+	if common > 0 {
+		return common
+	}
+	return 1
 }
 
 func applyReplayShapeToParams(params *scenario.Params, steps []StepSummary) {

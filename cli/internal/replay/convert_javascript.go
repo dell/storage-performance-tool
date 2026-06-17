@@ -61,7 +61,8 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	var commandOps []CommandOperation
 	var pathRewrites []PathRewrite
 	var processHelpersNeeded bool
-	effectiveVars := effectiveVariables(runScript.Exports, opts)
+	effectiveVars, variableDiagnostics := effectiveVariables(runScript.Exports, opts)
+	diagnostics = append(diagnostics, variableDiagnostics...)
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
@@ -73,7 +74,7 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	}
 
 	body := string(raw)
-	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body)...)
+	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body, effectiveVars)...)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
@@ -158,14 +159,24 @@ func writeJSReplayPrelude(b *strings.Builder, vars map[string]string, includePro
 	}
 }
 
-func detectUnsupportedJSProtocols(source string) []Diagnostic {
+func detectUnsupportedJSProtocols(source string, vars map[string]string) []Diagnostic {
 	var diagnostics []Diagnostic
 	seen := map[string]struct{}{}
 	for _, match := range jsDriverTypeRe.FindAllStringSubmatch(source, -1) {
 		if len(match) != 2 {
 			continue
 		}
-		driver := strings.ToLower(strings.TrimSpace(match[1]))
+		rawDriver := strings.TrimSpace(match[1])
+		if missing := unresolvedVars(rawDriver, vars); len(missing) > 0 {
+			key := "unresolved:" + missing[0]
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("storage.driver.type has unresolved variable %s", missing[0])})
+			continue
+		}
+		driver := strings.ToLower(strings.TrimSpace(expandWithExports(rawDriver, vars)))
 		if _, ok := seen[driver]; ok {
 			continue
 		}
@@ -339,14 +350,16 @@ func extractJSSteps(source string, vars map[string]string, label, baseTS string)
 		if requiresExplicitLimit(limitOp) && duration == "" && count == 0 {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("step %s has no time or count limit", archiveID)})
 		}
+		_, concurrencyExplicit := jsFieldToken(configText, "concurrency")
 		steps = append(steps, StepSummary{
-			ArchiveID:   archiveID,
-			StepID:      stepID,
-			Operation:   opSuffix,
-			Size:        jsStringField(configText, "size", vars),
-			Concurrency: intValue(jsFieldValue(configText, "concurrency", vars), nil),
-			Duration:    duration,
-			Count:       count,
+			ArchiveID:           archiveID,
+			StepID:              stepID,
+			Operation:           opSuffix,
+			Size:                jsStringField(configText, "size", vars),
+			Concurrency:         intValue(jsFieldValue(configText, "concurrency", vars), nil),
+			concurrencyExplicit: concurrencyExplicit,
+			Duration:            duration,
+			Count:               count,
 		})
 		offset = runStart + len(".run()")
 	}
@@ -484,6 +497,11 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
+		if enabled, ok := sslConfig["enabled"].(bool); ok {
+			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
+				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
+			}
+		}
 		if len(unsupportedSSLKeys) > 0 {
 			diagnostics = append(diagnostics, Diagnostic{
 				Severity: severityWarning,

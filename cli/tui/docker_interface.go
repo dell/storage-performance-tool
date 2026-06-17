@@ -23,7 +23,7 @@ type DockerInterface interface {
 	StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error)
 
 	// StartEntryNodeContainer starts a container as RMI entry node with worker addresses
-	StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string) (string, error)
+	StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error)
 
 	// StreamOutput starts streaming container output with callback functions
 	StreamOutput(containerID string, stdoutCallback func(string), stderrCallback func(string))

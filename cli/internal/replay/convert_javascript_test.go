@@ -600,6 +600,43 @@ func TestConvertJSRejectsInlineArchivedAuth(t *testing.T) {
 	}
 }
 
+func TestConvertJSRejectsInlineArchivedCamelCaseAuth(t *testing.T) {
+	raw := []byte(strings.Replace(maxS3SanityJS, `"storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70
+          }
+        }
+      }`, `"storage" : {
+        "auth" : {
+          "accessKeyId" : "archived-access",
+          "secretAccessKey" : "archived-secret"
+        },
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70
+          }
+        }
+      }`, 1))
+
+	got, err := ConvertJS(raw, RunScript{
+		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJS() error = nil, want camelCase inline auth rejection")
+	}
+	if strings.Contains(err.Error(), "archived-access") || strings.Contains(err.Error(), "archived-secret") {
+		t.Fatalf("error leaked inline auth value: %v", err)
+	}
+	if got == nil || len(got.ScenarioJS) != 0 {
+		t.Fatalf("generated = %+v, want no scenario emitted on inline auth rejection", got)
+	}
+}
+
 func TestConvertJSInfersLoadReadOperationFromOpType(t *testing.T) {
 	raw := []byte(strings.Replace(maxS3SanityJS, `ReadLoad
     .config(parentConfig_1)`, `Load

@@ -144,7 +144,7 @@ func TestRemoteDocker_StartEntryNodeContainer_IncludesWorkerAddrsAndArgs(t *test
 	workerAddrs := []string{"w1:1099", "w2:1099"}
 	extra := []string{"--storage-driver-type=s3", "--storage-net-node-addrs", "minio:9000"}
 
-	id, err := mgr.StartEntryNodeContainer(constants.DefaultSptImage, workerAddrs, extra)
+	id, err := mgr.StartEntryNodeContainer(constants.DefaultSptImage, workerAddrs, extra, constants.DefaultNetworkMode)
 	if err != nil {
 		t.Fatalf("StartEntryNodeContainer error: %v", err)
 	}

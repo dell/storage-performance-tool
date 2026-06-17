@@ -70,6 +70,9 @@ const (
 	storageDriverTypeS3AWS  = "s3-aws"
 	storageDriverTypeS3RDMA = "s3-rdma"
 
+	endpointSchemeHTTP  = "http"
+	endpointSchemeHTTPS = "https"
+
 	loadFactoryLoad         = "Load"
 	loadFactoryPrecondition = "PreconditionLoad"
 	loadFactoryRead         = "ReadLoad"
@@ -100,7 +103,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	var pathRewrites []PathRewrite
 	var stepsOut []StepSummary
 	var commandOps []CommandOperation
-	effectiveVars := effectiveVariables(runScript.Exports, opts)
+	effectiveVars, variableDiagnostics := effectiveVariables(runScript.Exports, opts)
+	diagnostics = append(diagnostics, variableDiagnostics...)
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
@@ -111,7 +115,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		effectiveVars["BUCKET"] = bucket
 	}
 
-	diagnostics = append(diagnostics, detectUnsupportedProtocols(legacy)...)
+	diagnostics = append(diagnostics, detectUnsupportedProtocols(legacy, effectiveVars)...)
 	if strings.EqualFold(legacy.Type, legacyStepTypeParallel) {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: errParallelReplayUnimplemented})
 	}
@@ -291,11 +295,12 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	archiveToStepID[archiveID] = stepID
 	diagnostics := ignoredJSONConfigDiagnostics(archiveID, step.Config)
 
-	concurrency := intValue(firstPath(step.Config,
+	concurrencyRaw, concurrencyExplicit := firstPathWithOK(step.Config,
 		[]string{legacyStepTypeLoad, legacyKeyLimit, legacyKeyConcurrency},
 		[]string{legacyKeyStorage, legacyKeyDriver, legacyKeyLimit, legacyKeyConcurrency},
 		[]string{legacyKeyStorage, legacyKeyDriver, legacyKeyConcurrency},
-	), vars)
+	)
+	concurrency := intValue(concurrencyRaw, vars)
 	itemSize := resolveString(getPath(step.Config, "item", "data", "size"), vars)
 	limitTimeRaw := getPath(step.Config, "test", "step", legacyKeyLimit, "time")
 	limitCountRaw := firstPath(step.Config,
@@ -379,6 +384,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		[]string{legacyKeyStorage, "net", "ssl"},
 	), vars); ok {
 		setPath(config, enabled, legacyKeyStorage, "net", "ssl", "enabled")
+		if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, archiveID); mismatch {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
+		}
 	}
 	if ciphers, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "ciphers"), vars); ok {
 		setPath(config, ciphers, legacyKeyStorage, "net", "ssl", "ciphers")
@@ -445,13 +453,14 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	return convertedStep{
 		js: b.String(),
 		summary: StepSummary{
-			ArchiveID:   archiveID,
-			StepID:      stepID,
-			Operation:   opSuffix,
-			Size:        itemSize,
-			Concurrency: concurrency,
-			Duration:    duration,
-			Count:       count,
+			ArchiveID:           archiveID,
+			StepID:              stepID,
+			Operation:           opSuffix,
+			Size:                itemSize,
+			Concurrency:         concurrency,
+			concurrencyExplicit: concurrencyExplicit,
+			Duration:            duration,
+			Count:               count,
 		},
 		rewrites:    rewrites,
 		diagnostics: diagnostics,
@@ -651,23 +660,24 @@ func hasJSONConfigPathPrefix(path, prefix string) bool {
 	return path == prefix || strings.HasPrefix(path, prefix+".")
 }
 
-func effectiveVariables(exports map[string]string, opts Options) map[string]string {
+func effectiveVariables(exports map[string]string, opts Options) (map[string]string, []Diagnostic) {
 	vars := make(map[string]string, len(exports)+16)
 	for k, v := range exports {
 		vars[k] = v
 	}
+	var diagnostics []Diagnostic
 	hosts := endpointHosts(opts.Endpoints)
 	if len(hosts) > 0 {
-		rebindIndexedVars(vars, "DATA_NODE", hosts)
+		diagnostics = append(diagnostics, rebindIndexedVars(vars, "DATA_NODE", hosts, "local endpoint")...)
 		vars["DATA_NODES"] = strings.Join(hosts, ",")
 		vars["ALL_NODES"] = strings.Join(hosts, ",")
 	}
 	clients := testHostnames(opts.TestHosts)
 	if len(clients) > 0 {
-		rebindIndexedVars(vars, "CLIENT", clients)
+		diagnostics = append(diagnostics, rebindIndexedVars(vars, "CLIENT", clients, "local test host")...)
 		vars["CLIENTS"] = strings.Join(clients, ",")
 	}
-	return vars
+	return vars, diagnostics
 }
 
 func testHostnames(testHosts string) []string {
@@ -698,8 +708,9 @@ func testHostnames(testHosts string) []string {
 	return hosts
 }
 
-func rebindIndexedVars(vars map[string]string, base string, localValues []string) {
+func rebindIndexedVars(vars map[string]string, base string, localValues []string, source string) []Diagnostic {
 	maxIndex := len(localValues)
+	maxReferencedIndex := 1
 	for k := range vars {
 		if k == base {
 			continue
@@ -712,6 +723,9 @@ func rebindIndexedVars(vars map[string]string, base string, localValues []string
 		if err != nil {
 			continue
 		}
+		if idx > maxReferencedIndex {
+			maxReferencedIndex = idx
+		}
 		if idx > maxIndex {
 			maxIndex = idx
 		}
@@ -720,6 +734,13 @@ func rebindIndexedVars(vars map[string]string, base string, localValues []string
 	for i := 2; i <= maxIndex; i++ {
 		vars[fmt.Sprintf("%s_%d", base, i)] = localValues[(i-1)%len(localValues)]
 	}
+	if maxReferencedIndex <= len(localValues) {
+		return nil
+	}
+	return []Diagnostic{{
+		Severity: severityWarning,
+		Message:  fmt.Sprintf("archived scenario references %s_%d but only %d %s value(s) are configured; replay reused local values deterministically", base, maxReferencedIndex, len(localValues), source),
+	}}
 }
 
 func endpointHosts(endpoints []string) []string {
@@ -808,15 +829,30 @@ func writeReplayProcessHelpers(b *strings.Builder) {
 
 func isSensitiveName(name string) bool {
 	lower := strings.ToLower(name)
-	if lower == "key" || lower == "user_id" {
+	if lower == "key" || lower == "user_id" || lower == "auth" {
 		return true
 	}
-	return strings.Contains(lower, "secret") ||
-		strings.Contains(lower, "password") ||
-		strings.Contains(lower, "token") ||
-		strings.Contains(lower, "auth") ||
-		strings.Contains(lower, "access") ||
-		strings.Contains(lower, "key")
+	if strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "token") {
+		return true
+	}
+	tokens := strings.FieldsFunc(lower, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	hasToken := func(want string) bool {
+		for _, token := range tokens {
+			if token == want {
+				return true
+			}
+		}
+		return false
+	}
+	if strings.Contains(lower, "accesskey") {
+		return true
+	}
+	if hasToken("key") {
+		return hasToken("access") || hasToken("api") || hasToken("auth") || hasToken("s3")
+	}
+	return false
 }
 
 func itemFileVariable(raw string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, order *[]string) itemFileExpr {
@@ -1301,10 +1337,14 @@ func isSafeReplayCommandArg(arg string) bool {
 	return safeCommandArgRe.MatchString(arg)
 }
 
-func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
+func detectUnsupportedProtocols(legacy legacyScenario, vars map[string]string) []Diagnostic {
 	var diagnostics []Diagnostic
 	check := func(v any) {
-		driver := strings.ToLower(resolveString(v, nil))
+		if missing := unresolvedVars(v, vars); len(missing) > 0 {
+			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("storage.driver.type has unresolved variable %s", missing[0])})
+			return
+		}
+		driver := strings.ToLower(resolveString(v, vars))
 		switch driver {
 		case "", storageDriverTypeS3, storageDriverTypeEMCS3, storageDriverTypeS3AWS, storageDriverTypeS3RDMA:
 		case "fs":
@@ -1323,6 +1363,43 @@ func detectUnsupportedProtocols(legacy legacyScenario) []Diagnostic {
 		check(getPath(step.Config, legacyKeyStorage, legacyKeyDriver, legacyKeyType))
 	}
 	return diagnostics
+}
+
+func archivedSSLMismatchWarning(archivedEnabled bool, endpoints []string, archiveID string) (string, bool) {
+	localEnabled, ok := localEndpointSSLEnabled(endpoints)
+	if !ok || archivedEnabled == localEnabled {
+		return "", false
+	}
+	return fmt.Sprintf("step %s archived SSL enabled=%t conflicts with local endpoint scheme SSL enabled=%t; replay preserved archived SSL setting", archiveID, archivedEnabled, localEnabled), true
+}
+
+func localEndpointSSLEnabled(endpoints []string) (bool, bool) {
+	var seenScheme string
+	for _, endpoint := range endpoints {
+		u, err := url.Parse(strings.TrimSpace(endpoint))
+		if err != nil || u.Scheme == "" {
+			continue
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != endpointSchemeHTTP && scheme != endpointSchemeHTTPS {
+			continue
+		}
+		if seenScheme == "" {
+			seenScheme = scheme
+			continue
+		}
+		if seenScheme != scheme {
+			return false, false
+		}
+	}
+	switch seenScheme {
+	case endpointSchemeHTTP:
+		return false, true
+	case endpointSchemeHTTPS:
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 func effectiveBucket(localBucket string, runScript RunScript) string {
@@ -1354,6 +1431,30 @@ func firstPath(m map[string]any, paths ...[]string) any {
 		}
 	}
 	return nil
+}
+
+func firstPathWithOK(m map[string]any, paths ...[]string) (any, bool) {
+	for _, p := range paths {
+		if v, ok := getPathOK(m, p...); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+func getPathOK(m map[string]any, path ...string) (any, bool) {
+	var cur any = m
+	for _, p := range path {
+		asMap, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = asMap[p]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
 func setPath(m map[string]any, value any, path ...string) {

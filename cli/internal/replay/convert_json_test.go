@@ -831,6 +831,127 @@ func TestConvertJSONRequiresLocalEndpoints(t *testing.T) {
 	}
 }
 
+func TestConvertJSONRejectsVariableResolvedUnsupportedDriver(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "${DRIVER}"}}},
+  "steps": [{"type": "load", "config": {"test": {"step": {"id": "FS-W10KB", "limit": {"count": 1}}}}}]
+}`)
+	_, err := ConvertJSON(raw, RunScript{
+		Exports:        map[string]string{"DRIVER": "fs"},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want unsupported protocol")
+	}
+	if got := ErrorClass(err); got != failureUnsupportedProtocol {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureUnsupportedProtocol, err)
+	}
+}
+
+func TestConvertJSONRejectsUnresolvedDriverVariable(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "${DRIVER}"}}},
+  "steps": [{"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}}]
+}`)
+	_, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err == nil {
+		t.Fatal("ConvertJSON() error = nil, want unresolved driver variable")
+	}
+	if got := ErrorClass(err); got != failureUnresolvedVariable {
+		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureUnresolvedVariable, err)
+	}
+}
+
+func TestConvertJSONWarnsWhenIndexedLocalTargetsAreReused(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}}]
+}`)
+	got, err := ConvertJSON(raw, RunScript{
+		Exports: map[string]string{
+			"CLIENT_3":    "archived-client-3",
+			"DATA_NODE_2": "archived-node-2",
+		},
+		ItemOutputPath: "bucket",
+	}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		TestHosts:     "local-client",
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "CLIENT_3") {
+		t.Fatalf("Diagnostics = %+v, want CLIENT_3 reuse warning", got.Diagnostics)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "DATA_NODE_2") {
+		t.Fatalf("Diagnostics = %+v, want DATA_NODE_2 reuse warning", got.Diagnostics)
+	}
+	js := string(got.ScenarioJS)
+	for _, want := range []string{
+		`var CLIENT_3 = "local-client";`,
+		`var DATA_NODE_2 = "10.0.0.1";`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing fallback binding %q\n%s", want, js)
+		}
+	}
+}
+
+func TestConvertJSONWarnsOnArchivedSSLMismatch(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}, "net": {"ssl": {"enabled": true}}}},
+  "steps": [{"type": "load", "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}}]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "archived SSL enabled=true conflicts") {
+		t.Fatalf("Diagnostics = %+v, want SSL mismatch warning", got.Diagnostics)
+	}
+}
+
+func TestConvertJSONFirstPathSkipsExplicitNullAlias(t *testing.T) {
+	raw := []byte(`{
+  "type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}}},
+  "steps": [{
+    "type": "load",
+    "config": {
+      "test": {"step": {"id": "MAX-W10KB", "limit": {"count": null}}},
+      "load": {"op": {"limit": {"count": 7}}}
+    }
+  }]
+}`)
+	got, err := ConvertJSON(raw, RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		BaseTimestamp: "20260605.121400.000",
+	})
+	if err != nil {
+		t.Fatalf("ConvertJSON() error = %v", err)
+	}
+	if len(got.Steps) != 1 || got.Steps[0].Count != 7 {
+		t.Fatalf("Steps = %+v, want fallback count 7", got.Steps)
+	}
+	if !strings.Contains(string(got.ScenarioJS), `"count": 7`) {
+		t.Fatalf("scenario missing fallback count:\n%s", got.ScenarioJS)
+	}
+}
+
 func TestConvertJSONRejectsUnknownItemFileLabel(t *testing.T) {
 	raw := []byte(`{
   "type": "sequential",
@@ -936,7 +1057,14 @@ func TestConvertJSONMasksKeyLikeExports(t *testing.T) {
 	got, err := ConvertJSON(raw, RunScript{
 		Exports: map[string]string{
 			"S3_ACCESS_KEY": "local-access-like-value",
+			"S3_KEY":        "s3-key-like-value",
 			"API_KEY":       "api-key-like-value",
+			"accessKeyId":   "camel-access-like-value",
+			"secretKey":     "camel-secret-like-value",
+			"MAX_KEYS":      "1000",
+			"SORT_KEY":      "name",
+			"PARTITION_KEY": "tenant-a",
+			"AUTH_TIMEOUT":  "30s",
 		},
 		ItemOutputPath: "bucket",
 	}, Options{
@@ -947,7 +1075,37 @@ func TestConvertJSONMasksKeyLikeExports(t *testing.T) {
 		t.Fatalf("ConvertJSON() error = %v", err)
 	}
 	js := string(got.ScenarioJS)
+	for _, forbidden := range []string{
+		"local-access-like-value",
+		"s3-key-like-value",
+		"api-key-like-value",
+		"camel-access-like-value",
+		"camel-secret-like-value",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("scenario emitted sensitive export %q:\n%s", forbidden, js)
+		}
+	}
+	for _, forbidden := range []string{
+		"var accessKeyId",
+		"var secretKey",
+		"var S3_KEY",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("scenario emitted sensitive variable declaration %q:\n%s", forbidden, js)
+		}
+	}
 	if strings.Contains(js, "local-access-like-value") || strings.Contains(js, "api-key-like-value") {
 		t.Fatalf("scenario emitted key-like exports:\n%s", js)
+	}
+	for _, want := range []string{
+		`var AUTH_TIMEOUT = "30s";`,
+		`var MAX_KEYS = "1000";`,
+		`var PARTITION_KEY = "tenant-a";`,
+		`var SORT_KEY = "name";`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("scenario missing non-secret export %q\n%s", want, js)
+		}
 	}
 }

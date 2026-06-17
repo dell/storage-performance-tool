@@ -56,13 +56,14 @@ type Artifacts struct {
 
 // StepSummary records the replay-visible shape of a converted step.
 type StepSummary struct {
-	ArchiveID   string `json:"archiveId,omitempty"`
-	StepID      string `json:"stepId"`
-	Operation   string `json:"operation"`
-	Size        string `json:"size,omitempty"`
-	Concurrency int    `json:"concurrency,omitempty"`
-	Duration    string `json:"duration,omitempty"`
-	Count       int64  `json:"count,omitempty"`
+	ArchiveID           string `json:"archiveId,omitempty"`
+	StepID              string `json:"stepId"`
+	Operation           string `json:"operation"`
+	Size                string `json:"size,omitempty"`
+	Concurrency         int    `json:"concurrency,omitempty"`
+	concurrencyExplicit bool
+	Duration            string `json:"duration,omitempty"`
+	Count               int64  `json:"count,omitempty"`
 }
 
 // PathRewrite records an item-file path conversion from legacy labels to canonical step IDs.
