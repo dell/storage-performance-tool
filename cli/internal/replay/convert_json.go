@@ -215,7 +215,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			commandOps = append(commandOps, CommandOperation{
 				Action:  commandActionRejected,
 				Command: step.Value,
-				Detail:  "not recognized by replay command whitelist",
+				Detail:  "not recognized by replay command allowlist",
 			})
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("unsupported command step: %s", step.Value)})
 			fmt.Fprintf(&body, "// Unsupported archived command skipped: %s\n\n", jsLineComment(step.Value))

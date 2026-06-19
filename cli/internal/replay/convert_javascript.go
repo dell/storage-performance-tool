@@ -241,7 +241,7 @@ func convertJSProcessBuilders(source string, vars map[string]string, archiveToSt
 				processHelpersNeeded = true
 				continue
 			}
-			detail := "not recognized by replay command whitelist"
+			detail := "not recognized by replay command allowlist"
 			message := fmt.Sprintf("unsupported JavaScript command: %s", command)
 			if err != nil {
 				detail = err.Error()

@@ -139,7 +139,7 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	for _, want := range []string{
 		"\nCommand operations\n",
-		"  - rejected: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB (not recognized by replay command whitelist)\n",
+		"  - rejected: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB (not recognized by replay command allowlist)\n",
 		"\nErrors\n  - unsupported command step: rm -rf ${MONGOOSE_DIR}/log/MAX-W10KB\n",
 		"\nWarnings\n  - converted legacy JSON scenario to JS\n  - source uses unauthenticated HTTP\n",
 	} {
