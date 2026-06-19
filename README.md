@@ -143,6 +143,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
+- **Replay Archived Workloads** – import archived SPT or legacy Mongoose artifacts from a result-folder URL and replay the equivalent S3 workload against your current target configuration.
 - **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.
 - **Mixed Workloads** – run GET, PUT, DELETE, and STAT operations concurrently with configurable weights (`spt run mixed`). Seed objects automatically, tune the operation distribution, and optionally clean up when done.
 - **Post-Quantum TLS** -- hybrid PQC key exchange on the Netty HTTPS path, enabled by default with classical fallback (see [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md)).
@@ -226,6 +227,7 @@ make build-cli        # produces ./cli/spt
 For detailed engineering notes and planning documents, browse the `docs/` directories inside `cli/` and `engine/`.
 
 - [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) — Full CLI syntax reference (all commands, flags, and examples)
+- [`cli/docs/REPLAY.md`](cli/docs/REPLAY.md) — Replay archived SPT or legacy Mongoose workloads against a current S3 target
 - [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) — S3-RDMA acceleration setup, tuning, and architecture
 - [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md) — S3 Tables (Iceberg) test vectors and usage guide
 - [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md) — Post-quantum TLS handshake support and configuration

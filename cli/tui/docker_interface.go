@@ -16,14 +16,14 @@ type DockerInterface interface {
 	// StartContainerWithScenario creates and starts a container with a scenario file
 	StartContainerWithScenario(image string, scenarioPath string, additionalArgs []string) (string, error)
 
-	// StartContainerInNodeMode starts a container in API server mode with port mapping
-	StartContainerInNodeMode(image string, apiPort string) (string, error)
+	// StartContainerInNodeMode starts a container in API server mode.
+	StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error)
 
 	// StartWorkerNodeContainer starts a container in RMI worker node mode
 	StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error)
 
 	// StartEntryNodeContainer starts a container as RMI entry node with worker addresses
-	StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string) (string, error)
+	StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error)
 
 	// StreamOutput starts streaming container output with callback functions
 	StreamOutput(containerID string, stdoutCallback func(string), stderrCallback func(string))

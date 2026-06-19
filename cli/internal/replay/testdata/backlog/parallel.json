@@ -1,0 +1,13 @@
+{
+  "type": "parallel",
+  "steps": [
+    {
+      "type": "load",
+      "config": {
+        "test": { "step": { "id": "MAX-W10KB", "limit": { "time": "60" } } },
+        "load": { "op": { "type": "create" } },
+        "item": { "data": { "size": "10KB" } }
+      }
+    }
+  ]
+}

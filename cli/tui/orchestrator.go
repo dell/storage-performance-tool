@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +20,8 @@ import (
 )
 
 const (
-	apiReadyTimeout = 60 * time.Second
+	apiReadyTimeout     = 60 * time.Second
+	startupLogTailLines = 120
 
 	// Optimized polling intervals
 	defaultMetricsInterval = constants.DefaultMetricsInterval
@@ -34,6 +36,7 @@ type TestOrchestrator struct {
 	scenarioPath  string
 	keepScenario  bool
 	apiPort       string // Configurable API port
+	networkMode   string
 	mu            sync.Mutex
 	compatOnce    sync.Once
 
@@ -58,6 +61,10 @@ type TestOrchestrator struct {
 	logJSONBodies     bool
 }
 
+type containerDiagnosticTailer interface {
+	ContainerDiagnosticTail(containerID string, maxLines int) (string, error)
+}
+
 // NewTestOrchestrator creates a new test orchestrator
 func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 	if apiPort == "" {
@@ -66,6 +73,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 	return &TestOrchestrator{
 		dockerManager:         dm,
 		apiPort:               apiPort,
+		networkMode:           constants.DefaultNetworkMode,
 		stopCh:                make(chan struct{}),
 		stoppedCh:             make(chan struct{}),
 		completionCh:          make(chan struct{}),
@@ -75,6 +83,15 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- non-crypto jitter source
 		logJSONBodies:         os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
+}
+
+// SetNetworkMode selects the Docker network mode used for API node startup.
+func (o *TestOrchestrator) SetNetworkMode(networkMode string) {
+	networkMode = strings.TrimSpace(networkMode)
+	if networkMode == "" {
+		networkMode = constants.DefaultNetworkMode
+	}
+	o.networkMode = networkMode
 }
 
 // SetCallbacks sets the callback functions for status updates
@@ -90,11 +107,24 @@ func (o *TestOrchestrator) SetCallbacks(
 	o.onError = onError
 }
 
+func (o *TestOrchestrator) containerStartupDiagnostics() string {
+	if o.dockerManager == nil || o.containerID == "" {
+		return ""
+	}
+	tailer, ok := o.dockerManager.(containerDiagnosticTailer)
+	if !ok {
+		return ""
+	}
+	diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
+	if err != nil {
+		logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
+		return ""
+	}
+	return strings.TrimSpace(diagnostics)
+}
+
 // StartTest starts a Spt test using the API approach
 func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params scenario.Params) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
 	// Generate scenario
 	scenarioContent, err := scenario.GenerateScenario(params)
 	if err != nil {
@@ -107,10 +137,22 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		return fmt.Errorf("failed to generate defaults: %w", err)
 	}
 
+	return o.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
+}
+
+// StartTestWithContent starts a Spt test with caller-provided scenario and defaults content.
+func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if len(scenarioContent) == 0 {
+		return fmt.Errorf("scenario content is empty")
+	}
+
 	// Save scenario to file if requested
 	if params.KeepScenario {
 		o.scenarioPath = fmt.Sprintf("spt-scenario-%d.js", time.Now().Unix())
-		if err := os.WriteFile(o.scenarioPath, []byte(scenarioContent), 0600); err != nil {
+		if err := os.WriteFile(o.scenarioPath, scenarioContent, 0600); err != nil {
 			logging.LogError("orchestrator", "failed to save scenario file", err)
 		} else {
 			o.keepScenario = true
@@ -119,15 +161,17 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 	}
 
 	// Start container in node mode
-	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort)
-	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort)
+	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
+	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode)
 	if err != nil {
 		return fmt.Errorf("failed to start container in node mode: %w", err)
 	}
 	o.containerID = containerID
 
 	// Create API client
-	o.apiClient = NewSptAPIClient(fmt.Sprintf("http://localhost:%s", o.apiPort))
+	if o.apiClient == nil {
+		o.apiClient = NewSptAPIClient(fmt.Sprintf("http://localhost:%s", o.apiPort))
+	}
 
 	// Wait for API to be ready
 	logging.LogInfo("orchestrator", "waiting for Spt API to be ready")
@@ -138,8 +182,20 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 	if err := o.apiClient.WaitForAPIReady(apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
+		diagnostics := o.containerStartupDiagnostics()
+		reportedDiagnostics := false
+		if diagnostics != "" && o.onError != nil {
+			o.onError("Container startup diagnostics:\n" + diagnostics)
+			reportedDiagnostics = true
+		}
 		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API failure", cleanupErr)
+		}
+		if diagnostics != "" {
+			if reportedDiagnostics {
+				return fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+			}
+			return fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 		}
 		return fmt.Errorf("spt API failed to become ready: %w", err)
 	}
@@ -158,7 +214,7 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		o.onOutput("Starting test via API...")
 	}
 
-	runID, err := o.apiClient.StartTest([]byte(scenarioContent), defaultsContent)
+	runID, err := o.apiClient.StartTest(scenarioContent, defaultsContent)
 	if err != nil {
 		// Clean up the started container since API test start failed
 		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)

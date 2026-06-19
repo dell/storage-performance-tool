@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,7 +139,7 @@ func TestOrchestratorStartTest(t *testing.T) {
 	// For now, let's test the components separately
 
 	// Start container
-	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999")
+	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999", constants.DefaultNetworkMode)
 	if err != nil {
 		t.Fatalf("Failed to start container: %v", err)
 	}
@@ -210,6 +211,199 @@ func TestOrchestratorStartTest(t *testing.T) {
 
 	// Clean up
 	orchestrator.StopTest()
+}
+
+func TestOrchestratorStartTestWithContentPostsProvidedArtifacts(t *testing.T) {
+	const runID = "replay-run-123"
+
+	var mu sync.Mutex
+	var postedScenario []byte
+	var postedDefaults []byte
+	posted := make(chan struct{}, 1)
+	metricsPayload := marshalSteps(t, []JSONMetricsStep{newTestStep()})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"node-0"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"node-0"}`))
+		case "/run":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseMultipartForm(2 << 20); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			scenarioFile, _, err := r.FormFile("scenario")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer func() { _ = scenarioFile.Close() }()
+			defaultsFile, _, err := r.FormFile("defaults")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer func() { _ = defaultsFile.Close() }()
+			scenarioBody, err := io.ReadAll(scenarioFile)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defaultsBody, err := io.ReadAll(defaultsFile)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			mu.Lock()
+			postedScenario = scenarioBody
+			postedDefaults = defaultsBody
+			mu.Unlock()
+			posted <- struct{}{}
+
+			w.Header().Set("ETag", runID)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"runId":"` + runID + `"}`))
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"COMPLETED","message":"done","runId":"` + runID + `"}`))
+		case "/metrics/json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(metricsPayload))
+		case "/shutdown":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"shutting_down"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	defer orchestrator.StopTest()
+
+	params := scenario.Params{
+		WorkloadType: "write",
+		Threads:      99,
+		ObjectSize:   "64MB",
+	}
+	replayScenario := []byte("// replay marker: do not regenerate\n")
+	replayDefaults := []byte("storage:\n  driver:\n    type: s3\n")
+
+	if err := orchestrator.StartTestWithContent(context.Background(), "test-image", params, replayScenario, replayDefaults); err != nil {
+		t.Fatalf("StartTestWithContent() error = %v", err)
+	}
+
+	select {
+	case <-posted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for /run post")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if string(postedScenario) != string(replayScenario) {
+		t.Fatalf("posted scenario = %q, want %q", postedScenario, replayScenario)
+	}
+	if string(postedDefaults) != string(replayDefaults) {
+		t.Fatalf("posted defaults = %q, want %q", postedDefaults, replayDefaults)
+	}
+	if strings.Contains(string(postedScenario), "64MB") || strings.Contains(string(postedScenario), "99") {
+		t.Fatalf("posted scenario appears to have been regenerated from params: %q", postedScenario)
+	}
+}
+
+func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/run":
+			switch r.Method {
+			case http.MethodHead:
+				w.WriteHeader(http.StatusOK)
+			case http.MethodPost:
+				w.Header().Set("ETag", `"run-network-mode"`)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"runId":"run-network-mode"}`))
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"RUNNING","message":"running"}`))
+		case "/metrics/json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name          string
+		configureMode func(*TestOrchestrator)
+		wantMode      string
+	}{
+		{
+			name:     "default host network",
+			wantMode: constants.DefaultNetworkMode,
+		},
+		{
+			name: "explicit bridge network",
+			configureMode: func(orchestrator *TestOrchestrator) {
+				orchestrator.SetNetworkMode(constants.BridgeNetworkMode)
+			},
+			wantMode: constants.BridgeNetworkMode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDM := NewMockDockerManager()
+			orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+			orchestrator.apiClient = NewSptAPIClient(server.URL)
+			if tt.configureMode != nil {
+				tt.configureMode(orchestrator)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			err := orchestrator.StartTestWithContent(ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil)
+			if err != nil {
+				t.Fatalf("StartTestWithContent() error = %v", err)
+			}
+			cancel()
+
+			calls := mockDM.GetContainerCalls()
+			if len(calls) != 1 {
+				t.Fatalf("container calls = %d, want 1", len(calls))
+			}
+			wantArg := "--network-mode=" + tt.wantMode
+			if !containsString(calls[0].Cmd, wantArg) {
+				t.Fatalf("container command = %v, want %s", calls[0].Cmd, wantArg)
+			}
+		})
+	}
 }
 
 // TestOrchestratorContainerStartFailure tests handling of container start failures
@@ -823,4 +1017,13 @@ func TestOrchestratorCleanupOnError(t *testing.T) {
 	if mockDM.GetCleanupCallCount() != 1 {
 		t.Errorf("Expected 1 cleanup call, got %d", mockDM.GetCleanupCallCount())
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -29,7 +29,7 @@ func newTestRemoteManager(t *testing.T) (*RemoteDockerManager, *command.MockComm
 func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 
-	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080")
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode)
 	if err != nil {
 		t.Fatalf("StartContainerInNodeMode error: %v", err)
 	}
@@ -61,6 +61,40 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "--name spt-node-") {
 		t.Errorf("expected docker run command to include node name prefix, got: %s", cmd)
+	}
+}
+
+func TestRemoteDocker_StartContainerInNodeMode_HostNetwork(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.HostNetworkMode)
+	if err != nil {
+		t.Fatalf("StartContainerInNodeMode error: %v", err)
+	}
+	if id == "" {
+		t.Fatal("container ID should not be empty")
+	}
+
+	executed := mock.GetExecutedCommandsMatching("docker run")
+	if len(executed) == 0 {
+		t.Fatalf("expected a docker run command to be executed")
+	}
+	cmd := strings.Join(executed[len(executed)-1].Command, " ")
+	mustContain := []string{
+		"docker run",
+		"-d",
+		"--network host",
+		constants.DefaultSptImage,
+		"--run-node=true",
+		"--run-port=10080",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(cmd, s) {
+			t.Errorf("expected docker run command to contain %q, got: %s", s, cmd)
+		}
+	}
+	if strings.Contains(cmd, "-p 10080:10080/tcp") {
+		t.Fatalf("host-network node should not publish bridge ports: %s", cmd)
 	}
 }
 
@@ -110,7 +144,7 @@ func TestRemoteDocker_StartEntryNodeContainer_IncludesWorkerAddrsAndArgs(t *test
 	workerAddrs := []string{"w1:1099", "w2:1099"}
 	extra := []string{"--storage-driver-type=s3", "--storage-net-node-addrs", "minio:9000"}
 
-	id, err := mgr.StartEntryNodeContainer(constants.DefaultSptImage, workerAddrs, extra)
+	id, err := mgr.StartEntryNodeContainer(constants.DefaultSptImage, workerAddrs, extra, constants.DefaultNetworkMode)
 	if err != nil {
 		t.Fatalf("StartEntryNodeContainer error: %v", err)
 	}

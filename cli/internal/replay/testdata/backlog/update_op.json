@@ -1,0 +1,13 @@
+{
+  "steps": [
+    {
+      "type": "load",
+      "config": {
+        "test": { "step": { "id": "MAX-U10KB" } },
+        "load": { "op": { "type": "update" } },
+        "item": { "data": { "size": "10KB" } },
+        "storage": { "driver": { "limit": { "concurrency": 64 } } }
+      }
+    }
+  ]
+}

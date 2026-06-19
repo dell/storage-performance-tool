@@ -63,6 +63,7 @@ func TestStartEntryNodeContainer(t *testing.T) {
 		"test-image",
 		workerAddresses,
 		additionalArgs,
+		"host",
 	)
 
 	if err != nil {
@@ -125,6 +126,7 @@ func TestStartEntryNodeContainer_Failure(t *testing.T) {
 		"test-image",
 		[]string{"192.168.1.100:1099"},
 		[]string{},
+		"host",
 	)
 
 	if err == nil {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
 const fileStatusMissing = "missing"
@@ -221,6 +222,14 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		}
 		// Normalize result XML: strip stale wrappers and re-wrap in a clean root element.
 		switch a.Suffix {
+		case constants.ResultsArtifactSuffixConfig:
+			var sanitizeErr error
+			size, sanitizeErr = sanitizeConfigArtifact(outPath)
+			if sanitizeErr != nil {
+				_ = os.Remove(outPath)
+				sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: "error", Error: sanitizeErr.Error()})
+				continue
+			}
 		case constants.ResultsArtifactSuffixExtResults:
 			size = normalizeResultXML(outPath, "result")
 		case constants.ResultsArtifactSuffixExtResultsThreshold:
@@ -232,6 +241,18 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 }
 
 var errNotFound = errors.New("not found")
+
+func sanitizeConfigArtifact(filePath string) (int64, error) {
+	raw, err := os.ReadFile(filePath) // #nosec G304 -- path constructed internally from results directory
+	if err != nil {
+		return 0, fmt.Errorf("read config artifact: %w", err)
+	}
+	masked := secretmask.YAML(raw)
+	if err := os.WriteFile(filePath, masked, 0o600); err != nil {
+		return 0, fmt.Errorf("write sanitized config artifact: %w", err)
+	}
+	return int64(len(masked)), nil
+}
 
 // normalizeResultXML strips any stale wrapper tags from the downloaded file and
 // re-wraps the self-closing <result .../> entries in a clean root element.

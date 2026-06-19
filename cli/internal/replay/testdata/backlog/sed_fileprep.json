@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "type": "load",
+      "config": {
+        "test": { "step": { "id": "MAX-W10KB", "limit": { "time": "60" } } },
+        "load": { "op": { "type": "create" } },
+        "item": { "data": { "size": "10KB" } },
+        "storage": { "driver": { "limit": { "concurrency": 70 } } }
+      }
+    },
+    {
+      "type": "command",
+      "value": "sed '/^.\\{6\\}./d' ${MONGOOSE_DIR}/log/items.w.10KB.csv > ${MONGOOSE_DIR}/log/items.w.10KB.csv.1",
+      "blocking": true
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "type": "load",
+      "config": {
+        "test": { "step": { "id": "MAX-W10KB", "limit": { "time": "60" } } },
+        "load": { "op": { "type": "create" } },
+        "item": { "data": { "size": "10KB" } },
+        "storage": { "driver": { "limit": { "concurrency": 70 } } }
+      }
+    },
+    {
+      "type": "command",
+      "value": "sleep ${WAIT_TIME}",
+      "blocking": true
+    }
+  ]
+}

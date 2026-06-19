@@ -156,6 +156,67 @@ func TestFetcher_MissingOptionalFiles(t *testing.T) {
 	_ = man
 }
 
+func TestFetcher_SanitizesConfigArtifact(t *testing.T) {
+	step := "replay-001-20260606.000000.000-create"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 120},
+					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`storage:
+  auth:
+    uid: LOCALACCESSKEY
+    secret: LOCALSECRETKEY
+  driver:
+    type: s3
+aws:
+  accessKeyId: AWSACCESSKEY
+  secretAccessKey: AWSSECRETKEY
+`))
+		},
+		"/logs/" + step + "/Cli":      func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
+		"/logs/" + step + "/Messages": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
+		"/logs/" + step + "/Errors":   func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("errs")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := f.FetchArtifactsForSteps(ctx, []string{step}); err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(out, step+".config.yaml"))
+	if err != nil {
+		t.Fatalf("read sanitized config: %v", err)
+	}
+	got := string(data)
+	for _, leaked := range []string{"LOCALACCESSKEY", "LOCALSECRETKEY", "AWSACCESSKEY", "AWSSECRETKEY"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("sanitized config leaked %q:\n%s", leaked, got)
+		}
+	}
+	if strings.Count(got, "***") < 4 {
+		t.Fatalf("sanitized config did not mask expected fields:\n%s", got)
+	}
+}
+
 func TestFetcher_RetryOnServerError(t *testing.T) {
 	step := "mt-001-20250101.000000.000-create"
 	var count int32

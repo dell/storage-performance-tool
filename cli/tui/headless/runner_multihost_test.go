@@ -6,6 +6,7 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -78,6 +79,79 @@ func TestNewMultiHostHeadlessRunner_CopiesExpectedStepIDs(t *testing.T) {
 	expectedStepIDs[1] = "mutated"
 	if runner.expectedStepIDs[1] != "mt-002-read" {
 		t.Fatalf("expectedStepIDs was aliased to caller slice, got %q", runner.expectedStepIDs[1])
+	}
+}
+
+func TestMultiHostShutdownResultTreatsAutoTerminateAsSuccessAfterCleanup(t *testing.T) {
+	err := multiHostShutdownResult(context.DeadlineExceeded, nil)
+	autoTerminated, cleanupComplete := AutoTerminateState(err)
+	if !autoTerminated || !cleanupComplete {
+		t.Fatalf("multiHostShutdownResult(deadline, nil) = %v, want completed auto-terminate", err)
+	}
+}
+
+func TestMultiHostShutdownResultPreservesCancellationAndCleanupFailures(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	interruptErr := errors.New("interrupted by signal")
+
+	tests := []struct {
+		name                    string
+		runErr                  error
+		stopErr                 error
+		want                    error
+		wantAuto                bool
+		wantAutoCleanupComplete bool
+	}{
+		{
+			name: "normal completion returns nil",
+		},
+		{
+			name:   "caller cancellation remains an error",
+			runErr: context.Canceled,
+			want:   context.Canceled,
+		},
+		{
+			name:    "cleanup failure after normal completion remains an error",
+			stopErr: stopErr,
+			want:    stopErr,
+		},
+		{
+			name:     "cleanup failure after auto terminate remains an error",
+			runErr:   context.DeadlineExceeded,
+			stopErr:  stopErr,
+			wantAuto: true,
+		},
+		{
+			name:    "cleanup failure joins explicit interruption",
+			runErr:  interruptErr,
+			stopErr: stopErr,
+			want:    interruptErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := multiHostShutdownResult(tt.runErr, tt.stopErr)
+			if tt.want == nil && !tt.wantAuto {
+				if err != nil {
+					t.Fatalf("multiHostShutdownResult() error = %v, want nil", err)
+				}
+				return
+			}
+			autoTerminated, cleanupComplete := AutoTerminateState(err)
+			if autoTerminated != tt.wantAuto {
+				t.Fatalf("AutoTerminateState() auto = %t, want %t", autoTerminated, tt.wantAuto)
+			}
+			if cleanupComplete != tt.wantAutoCleanupComplete {
+				t.Fatalf("AutoTerminateState() cleanupComplete = %t, want %t", cleanupComplete, tt.wantAutoCleanupComplete)
+			}
+			if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("multiHostShutdownResult() error = %v, want errors.Is(..., %v)", err, tt.want)
+			}
+			if tt.stopErr != nil && !errors.Is(err, tt.stopErr) {
+				t.Fatalf("multiHostShutdownResult() error = %v, want cleanup error %v", err, tt.stopErr)
+			}
+		})
 	}
 }
 

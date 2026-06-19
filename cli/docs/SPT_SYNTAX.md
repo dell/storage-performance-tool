@@ -7,6 +7,7 @@ The command structure follows the `docker` CLI pattern (`command subcommand [opt
 ## Main Commands
 
 - `spt run <workload>`: Execute a benchmark test.
+- `spt replay`: Replay archived SPT or legacy Mongoose workload artifacts against a current S3 target.
 - `spt verify`: Validate nodes for distributed testing infrastructure readiness.
 - `spt status`: Inspect live readiness and metrics snapshots for running nodes.
 - `spt results`: *(Stub — not yet implemented)* Manage past benchmark results.
@@ -136,7 +137,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--test-hosts` | `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
+| `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
 | `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
@@ -237,6 +238,114 @@ By default, `spt run` launches an interactive TUI. Use `--headless` for CI or un
 | `--verbose` | `false` | Show detailed Docker API calls and debug info (headless mode) |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to existing trace file instead of overwriting |
+
+---
+
+## Core Command: `spt replay`
+
+The `replay` command imports archived SPT or legacy Mongoose workload artifacts
+from a result-folder URL, remaps environment-specific settings to your current
+target configuration, and generates an equivalent S3 replay workload.
+
+```bash
+spt replay --from <archive-folder-url> [options]
+```
+
+Use `--generate-only` first when inspecting an unfamiliar archive:
+
+```bash
+spt replay \
+    --from 'https://archive.example.com/results/2031/result.2031-04-05.06:07:08/' \
+    --generate-only \
+    --output-dir ./replay-preview
+```
+
+Launch replay against a current target:
+
+```bash
+spt replay \
+    --from 'https://archive.example.com/results/2031/result.2031-04-05.06:07:08/' \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket replay-bucket \
+    --test-hosts worker1,worker2,worker3 \
+    --headless \
+    --auto-terminate-seconds 300
+```
+
+### Replay Source Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--from` | *(required)* | HTTP or HTTPS archive folder URL containing the launch script and scenario artifacts |
+| `--generate-only` | `false` | Generate replay scenario/defaults/metadata without launching containers |
+| `--output-dir`, `-O` | private temp directory for `--generate-only`; run results root for launch mode | Directory for generated replay artifacts |
+| `--label` | `replay` | Prefix for generated replay step IDs and output directories |
+
+The source URL must point to an archive folder, not an individual launch script
+or scenario file. The folder should expose a directory listing or index page
+that lets SPT discover the launch script and referenced scenario. Each fetched
+artifact is limited to 16 MiB. See [REPLAY.md](REPLAY.md) for source archive
+requirements.
+
+### Replay Target Options
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--endpoints` | `-e` | from `S3_ENDPOINTS` / `S3_ENDPOINT` | One or more current S3 endpoint URLs |
+| `--access-key` | `-a` | from `S3_ACCESS_KEY` | Current target access key |
+| `--secret-key` | `-s` | from `S3_SECRET_KEY` | Current target secret key |
+| `--bucket` | `-b` | from `S3_BUCKET` or archived bucket | Current target bucket override |
+| `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
+| `--s3-driver` | | from `SPT_S3_DRIVER` or `default` | S3 storage driver backend: `default`, `netty`, `aws`, or `rdma`. RDMA replay launch is not implemented yet; use `rdma` only with `--generate-only` |
+
+Archived credentials are sanitized from processed configuration files and are
+never reused. Provide credentials for the current target with flags or
+environment variables.
+
+### Replay Execution Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--headless` | `false` | Force headless (non-interactive) mode |
+| `--minimal` | `false` | Start TUI with only live stats panel visible |
+| `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
+| `--force` | `false` | Automatically resolve port conflicts without prompting |
+| `--api-port` | `9999` | SPT engine API port |
+| `--trace-file` | `""` | Save all output to a trace file |
+| `--trace-append` | `false` | Append to an existing trace file |
+| `--verbose` | `false` | Show detailed Docker API calls and debug information |
+| `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
+| `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
+
+### Replay Results Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--auto-results` | `true` | Automatically retrieve results artifacts at end of replay |
+| `--results-dir` | `./results` | Directory to write retrieved replay results artifacts |
+| `--auto-results-debug` | `false` | Enable verbose auto-results logs |
+| `--shutdown-on-complete` | `true` | Request `/shutdown` after fetching results |
+| `--shutdown-linger` | `5` | Seconds to wait for `/status` linger after `/shutdown` |
+
+### Replay Distributed Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
+| `--min-hosts` | `0` (all) | Minimum replay hosts that must connect |
+| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node |
+| `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
+| `--rmi-port-start` | `40000` | Starting port for RMI range |
+| `--rmi-port-count` | `10` | Number of RMI ports to verify |
+
+Run `spt verify --test-hosts ...` before distributed replay. Host networking is
+recommended unless your environment supports the engine's inter-node RMI traffic
+through another Docker network mode.
+
+For supported transformations, safety rules, limitations, and troubleshooting,
+see [REPLAY.md](REPLAY.md).
 
 ---
 

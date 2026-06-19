@@ -1,0 +1,9 @@
+{
+  "steps": [
+    {
+      "type": "command",
+      "value": "ssh ${CLIENT} 'nohup java -jar /tmp/Bucket-sizer.jar --bucket=${BUCKET} --pages=5 --no-versions --quiet > /tmp/listing-results.out &'",
+      "blocking": true
+    }
+  ]
+}

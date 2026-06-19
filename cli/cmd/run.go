@@ -996,6 +996,11 @@ Available workload types:
 				}
 
 				err := headless.StartHeadlessModeWithOrchestrator(orchestrator, sptImage, scenarioPath, params, options)
+				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
+				if autoTerminated {
+					finalizeTraceArtifact()
+					return normalizedErr
+				}
 				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
 					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
 					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1005,7 +1010,7 @@ Available workload types:
 					cleanupCancel()
 				}
 				finalizeTraceArtifact()
-				return err
+				return normalizedErr
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
@@ -1028,6 +1033,7 @@ Available workload types:
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
+			options.NetworkMode = networkMode
 			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1043,9 +1049,9 @@ Available workload types:
 		// Launch TUI with the scenario file
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err = tui.StartTUIWithScenarioAndParamsTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
+			err = tui.StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
 		} else {
-			err = tui.StartTUIWithScenarioAndParamsWithTrace(sptImage, scenarioPath, params, apiPort, setSummarySink, traceOpts.Path, traceOpts.Append)
+			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
 		waitForAutoResults(false)
 		finalizeTraceArtifact()

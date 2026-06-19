@@ -225,6 +225,11 @@ func copyScenarioForResults(srcPath, destDir string) (string, error) {
 
 	base := filepath.Base(srcPath)
 	dest := filepath.Join(destDir, base)
+	srcAbs, _ := filepath.Abs(srcPath)
+	destAbs, _ := filepath.Abs(dest)
+	if srcAbs == destAbs {
+		return base, nil
+	}
 
 	src, err := os.Open(srcPath) // #nosec G304 -- srcPath already validated by checkScenario
 	if err != nil {

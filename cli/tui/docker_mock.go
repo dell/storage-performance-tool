@@ -51,6 +51,7 @@ type MockDockerManager struct {
 		Image           string
 		WorkerAddresses []string
 		AdditionalArgs  []string
+		NetworkMode     string
 	}
 
 	// Callbacks for testing
@@ -121,8 +122,8 @@ func (m *MockDockerManager) StartContainerWithScenario(image string, scenarioPat
 	return m.containerID, nil
 }
 
-// StartContainerInNodeMode simulates starting a container in API server mode
-func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string) (string, error) {
+// StartContainerInNodeMode simulates starting a container in API server mode.
+func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -132,13 +133,18 @@ func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort strin
 		return "", fmt.Errorf("mock start container in node mode failed")
 	}
 
+	cmd := []string{dockerNodeModeArg, "--run-port=" + apiPort}
+	if networkMode != "" {
+		cmd = append(cmd, "--network-mode="+networkMode)
+	}
+
 	// Record the call for testing
 	m.containerCalls = append(m.containerCalls, struct {
 		Image string
 		Cmd   []string
 	}{
 		Image: image,
-		Cmd:   []string{dockerNodeModeArg, "--run-port=" + apiPort},
+		Cmd:   cmd,
 	})
 
 	return m.containerID, nil
@@ -172,7 +178,7 @@ func (m *MockDockerManager) StartWorkerNodeContainer(image string, rmiHostname s
 }
 
 // StartEntryNodeContainer simulates starting an entry node container
-func (m *MockDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string) (string, error) {
+func (m *MockDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -187,10 +193,12 @@ func (m *MockDockerManager) StartEntryNodeContainer(image string, workerAddresse
 		Image           string
 		WorkerAddresses []string
 		AdditionalArgs  []string
+		NetworkMode     string
 	}{
 		Image:           image,
 		WorkerAddresses: workerAddresses,
 		AdditionalArgs:  additionalArgs,
+		NetworkMode:     networkMode,
 	})
 
 	return m.containerID, nil
@@ -368,6 +376,7 @@ func (m *MockDockerManager) GetEntryNodeCalls() []struct {
 	Image           string
 	WorkerAddresses []string
 	AdditionalArgs  []string
+	NetworkMode     string
 } {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -375,6 +384,7 @@ func (m *MockDockerManager) GetEntryNodeCalls() []struct {
 		Image           string
 		WorkerAddresses []string
 		AdditionalArgs  []string
+		NetworkMode     string
 	}, len(m.entryNodeCalls))
 	copy(result, m.entryNodeCalls)
 	return result

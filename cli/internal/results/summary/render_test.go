@@ -65,6 +65,7 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 
 	mustContain(t, report, "Environment")
 	mustContain(t, report, "Workload Configuration")
+	mustContain(t, report, "• Object size        1.00 MiB (2500 objects)")
 	mustContain(t, report, "Performance by Phase")
 	mustContain(t, report, "Run Totals")
 	mustContain(t, report, "Create")
@@ -85,6 +86,26 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 	if !headerFound {
 		t.Fatalf("table header not found in report:\n%s", report)
 	}
+}
+
+func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {
+	t.Parallel()
+
+	summary := &RunSummary{
+		Workload: WorkloadSummary{
+			Type:            "replay",
+			ObjectSizeHuman: "10.00 KiB",
+			ObjectCount:     0,
+			DurationRequest: "30s",
+		},
+	}
+
+	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
+	report := renderer.FullReport(summary)
+
+	mustContain(t, report, "• Object size        10.00 KiB")
+	mustContain(t, report, "• Requested duration 30s")
+	mustNotContain(t, report, "0 objects")
 }
 
 func TestRendererConsoleSnippetTruncates(t *testing.T) {
