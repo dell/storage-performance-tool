@@ -60,7 +60,7 @@ Authentication defaults to Signature Version 4. Add `--auth-version 2` only when
 
 ## Features
 
-- **Intuitive CLI**: Docker-style command structure (`spt run`, `spt results`)
+- **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
 - **Multiple Workload Types**: Support for write, read, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
@@ -73,6 +73,7 @@ Authentication defaults to Signature Version 4. Add `--auth-version 2` only when
 - **SigV4-First Auth**: Defaults to Signature Version 4 while allowing an opt-in downgrade for legacy V2-only targets
 - **Comprehensive Logging**: Configurable file-based logging for debugging
 - **Infrastructure Verification**: Pre-flight checks for distributed testing nodes
+- **Replay Archived Workloads**: Import archived SPT or legacy Mongoose artifacts and replay the equivalent S3 workload against a current target
 - **S3 Compatible**: Works with any S3-compatible storage endpoint
 
 ## Installation
@@ -383,6 +384,30 @@ Multi-endpoint options:
 - `--trace-append`: Append to existing trace file (default: overwrite)
 - `--verbose`: Show detailed Docker API calls and debug information
 
+#### `spt replay`
+
+Imports archived SPT or legacy Mongoose workload artifacts from a result-folder
+URL, remaps the workload to your current S3 target configuration, and launches
+an equivalent replay workload.
+
+```bash
+spt replay \
+  --from 'https://archive.example.com/results/2031/result.2031-04-05.06:07:08/' \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket replay-bucket \
+  --test-hosts worker1,worker2,worker3 \
+  --headless
+```
+
+Use `--generate-only --output-dir ./replay-preview` to inspect the generated
+scenario, defaults, metadata, warnings, and command transformations without
+launching containers. RDMA replay launch is not implemented yet; `--s3-driver
+rdma` is limited to generate-only inspection. See [`REPLAY.md`](docs/REPLAY.md)
+for source archive requirements, supported transformations, limitations, and
+troubleshooting.
+
 #### `spt verify`
 
 Pre-flight verification of distributed testing infrastructure. Ensures all specified nodes are ready for coordinated Spt testing.
@@ -491,7 +516,7 @@ Lists and inspects past benchmark results. This feature is under development.
 ``` text
 cli/
 ├── cmd/                  # Command implementations
-├── tui/                  # Terminal UI components  
+├── tui/                  # Terminal UI components
 ├── internal/
 │   ├── logging/          # Logging utilities
 │   ├── scenario/         # JavaScript scenario generation

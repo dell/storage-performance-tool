@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Replay archived workloads documentation** — added public user documentation for `spt replay`, including source archive requirements, environment remapping behavior, supported safe file-preparation transformations, generate-only inspection, distributed replay guidance, limitations, and troubleshooting.
+
 ## [5.10.4] - 2026-06-01
 
 ### Changed
