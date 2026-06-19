@@ -179,7 +179,7 @@ func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
 		logging.LogWarn("docker", "failed to create node log capture directory", "error", err.Error())
 		return nil, nil
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directory requires owner execute bit for traversal
 		_ = os.RemoveAll(dir)
 		logging.LogWarn("docker", "failed to secure node log capture directory", "error", err.Error())
 		return nil, nil

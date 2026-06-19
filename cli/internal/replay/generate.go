@@ -128,7 +128,7 @@ func WriteGeneratedWithOptions(g *Generated, opts WriteGeneratedOptions) (Output
 	} else if err = os.MkdirAll(dir, 0o700); err != nil {
 		return OutputPaths{}, err
 	}
-	if chmodErr := os.Chmod(dir, 0o700); chmodErr != nil {
+	if chmodErr := os.Chmod(dir, 0o700); chmodErr != nil { // #nosec G302 -- directory requires owner execute bit for traversal
 		return OutputPaths{}, chmodErr
 	}
 	paths := OutputPaths{
