@@ -28,7 +28,7 @@ dependencies {
 
 	// Test-only dependencies
 	testImplementation libs.mockito.core
-	testImplementation "org.junit.jupiter:junit-jupiter-params:5.10.2"
+	testImplementation libs.junit.jupiter.params
 
 	// External dependencies that will be bundled
 	implementation(
