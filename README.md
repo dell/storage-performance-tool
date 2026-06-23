@@ -4,7 +4,7 @@ The Dell **Storage Performance Tool (SPT)** is an open-source benchmark suite pu
 
 - spin up realistic object workloads in minutes;
 - orchestrate single-node or distributed runs without handcrafting scripts;
-- monitor live latency/throughput in an interactive terminal UI or headless CI logs;
+- monitor live throughput and latency in an interactive terminal UI or headless CI logs, with TTFB reported for READ/LIST samples when available;
 - reuse the same configuration flow for both mock runs and production endpoints.
 
 SPT packages two tightly integrated components:
@@ -140,7 +140,7 @@ For the full CLI reference (all flags, workload types, distributed options, RDMA
 - **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
 - **S3 Checksum Validation** -- compute and send checksums on write requests with `--checksum` (`crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`). When combined with multipart upload, checksums are applied per part. Supported by the Netty, AWS SDK, and RDMA drivers.
 - **Data Compressibility & Deduplication Controls** -- shape generated object data for storage-efficiency benchmarks with `--object-data-compressibility` (0-100% target compressibility) and `--object-data-dedupable=false` (per-4KB anti-dedupe stamping).
-- **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
+- **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD, with TTFB shown for READ/LIST samples when available.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
 - **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
 - **Replay Archived Workloads** – import archived SPT or legacy Mongoose artifacts from a result-folder URL and replay the equivalent S3 workload against your current target configuration.

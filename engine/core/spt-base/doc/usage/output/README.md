@@ -249,6 +249,12 @@ LatencyLoQ[us]  | Low quartile of the operations latency distribution
 LatencyMed[us]  | Median of the operations latency distribution
 LatencyHiQ[us]  | High quartile of the operations latency distribution
 LatencyMax[us]  | Maximum operation latency
+TtfbAvg[us]     | Total average Time to First Byte for operations with response body samples
+TtfbMin[us]     | Minimum Time to First Byte
+TtfbQ_*[us]     | Configured Time to First Byte quantiles, emitted with the configured quantile value in the field name
+TtfbMax[us]     | Maximum Time to First Byte
+
+Time to First Byte is populated for body-returning operations when first response body bytes are observed, currently READ and LIST. Non-body operations and empty/no-body samples do not contribute TTFB values.
 
 Again, spt only uses 2^10 (1024) multiplier. So 1MB is 1_048_576 bytes.
 
@@ -297,11 +303,14 @@ Console summary metrics output has YAML format for the better readability:
     Med:                       115
     HiQ:                       2683
     Max:                       216495
+  Time To First Byte [us]:
+    N/A
 ```
 
 * The console summary is displayed only on the entry node. It's not displayed on the additional nodes in the distributed mode.
 * The equation (CONFIGURED_CURRENCY_LEVEL * DRIVER_COUNT * ELAPSED_TIME / OPERATIONS_DURATION_SUM) may be used as efficiency estimate.
 * *Mean* rates are calculated as current total count of items/bytes divided by current elapsed time.
+* `Time To First Byte [us]` is reported when the load step has TTFB samples; otherwise it is shown as `N/A`.
 * *Last* rates are calculated as [exponentially decaying moving average](https://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average) where
 
   ![alpha](http://i.piccy.info/i9/c211a78abdaeec65da61020c5dc83008/1485332899/627/722110/CodeCogsEqn.png)
