@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
-- **Dependency updates** — refreshed Go indirect modules and JVM dependencies for the 5.11.0 release prep, including AWS SDK 2.46.17, AWS CRT 0.47.1, Bouncy Castle 1.84, JUnit Jupiter 5.14.4, SnakeYAML 2.6, commons-codec 1.22.0, Javassist 3.32.0-GA, hadoop-shaded-guava 1.5.0, and stax2-api 4.3.0.
+- **Dependency updates** — refreshed Go indirect modules and JVM dependencies for the 5.11.0 release prep, including Jackson Core/Databind/YAML 2.22.0 with Jackson Annotations 2.22, AWS SDK 2.46.17, AWS CRT 0.47.1, Bouncy Castle 1.84, JUnit Jupiter 5.14.4, SnakeYAML 2.6, commons-codec 1.22.0, Javassist 3.32.0-GA, hadoop-shaded-guava 1.5.0, and stax2-api 4.3.0.
 
 ## [5.10.4] - 2026-06-01
 

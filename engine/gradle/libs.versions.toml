@@ -13,7 +13,8 @@ commonsLang = "3.20.0"  # Updated from 3.14.0
 commonsText = "1.15.0"  # Updated from 1.12.0
 
 # Jackson - SECURITY UPDATE
-jackson = "2.19.4"  # Updated from 2.18.6
+jacksonCore = "2.22.0"  # Updated from 2.18.6
+jacksonAnnotations = "2.22"
 
 # Networking
 jetty = "9.4.56.v20240826"  # Updated from 9.4.14 - security fixes, staying on 9.x for compatibility
@@ -82,10 +83,10 @@ commons-lang = { module = "org.apache.commons:commons-lang3", version.ref = "com
 commons-text = { module = "org.apache.commons:commons-text", version.ref = "commonsText" }
 
 # Jackson
-jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
-jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
-jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
-jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jacksonAnnotations" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jacksonCore" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jacksonCore" }
+jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jacksonCore" }
 
 # Scala
 scala-library = { module = "org.scala-lang:scala-library", version.ref = "scala" }
