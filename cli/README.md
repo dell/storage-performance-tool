@@ -65,7 +65,7 @@ Authentication defaults to Signature Version 4. Add `--auth-version 2` only when
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
-- **Real-time Performance Visualization**: Dual synchronized ASCII bar charts showing ops/sec and latency, with headless output and final summaries also reporting TTFB for READ/LIST samples when available
+- **Real-time Performance Visualization**: Dual synchronized ASCII bar charts showing ops/sec and latency
 - **Historical Data Navigation**: Interactive time-based navigation through performance samples
 - **Auto-Detection**: Automatically switches to headless mode when no TTY is available
 - **Trace File Support**: Comprehensive output capture for debugging and analysis
@@ -566,7 +566,7 @@ When run in a terminal with TTY support, spt displays an interactive interface w
 
 Auto Results and Shutdown
 - `--auto-results` (default: true): automatically discovers step IDs, waits for terminal state via `/status` + idle JSON, then fetches artifacts (preferring per-step `/logs/<stepId>/index.json`).
-- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained; READ/LIST rows include `TTFB P50` when samples are available.
+- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained.
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.
 - `--shutdown-on-complete` (default: true): after a successful fetch, POST `/shutdown` to all Spt hosts and wait for `/status` to linger in a terminal state.
