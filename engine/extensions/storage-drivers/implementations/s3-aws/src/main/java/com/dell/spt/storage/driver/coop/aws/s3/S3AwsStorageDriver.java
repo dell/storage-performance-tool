@@ -66,6 +66,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptListTtfbOperation");
+	private static final ExecutionInterceptor LIST_TTFB_INTERCEPTOR = new ListTtfbExecutionInterceptor();
 	private static final SdkPlugin LIST_TTFB_SDK_PLUGIN = new ListTtfbSdkPlugin();
 
 	// S3 API constants for multipart upload
@@ -897,7 +898,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	static final class ListTtfbSdkPlugin implements SdkPlugin {
 		@Override
 		public void configureClient(final SdkServiceClientConfiguration.Builder builder) {
-			builder.overrideConfiguration(b -> b.addExecutionInterceptor(new ListTtfbExecutionInterceptor()));
+			builder.overrideConfiguration(b -> b.addExecutionInterceptor(LIST_TTFB_INTERCEPTOR));
 		}
 	}
 
