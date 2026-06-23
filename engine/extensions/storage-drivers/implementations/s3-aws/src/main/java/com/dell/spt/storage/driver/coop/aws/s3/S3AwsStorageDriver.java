@@ -65,8 +65,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				implements ListDiscoveryProbe {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
-	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE =
-					new ExecutionAttribute<>("sptListTtfbOperation");
+	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptListTtfbOperation");
 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";

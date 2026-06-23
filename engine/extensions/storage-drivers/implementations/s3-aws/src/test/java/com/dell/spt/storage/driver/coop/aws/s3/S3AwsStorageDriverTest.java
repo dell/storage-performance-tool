@@ -916,8 +916,8 @@ public class S3AwsStorageDriverTest {
 			assertSame(
 							op,
 							cap.getValue().overrideConfiguration().get()
-										.executionAttributes()
-										.getAttribute(S3AwsStorageDriver.LIST_TTFB_OPERATION_ATTRIBUTE));
+											.executionAttributes()
+											.getAttribute(S3AwsStorageDriver.LIST_TTFB_OPERATION_ATTRIBUTE));
 			assertFalse(cap.getValue().overrideConfiguration().get().plugins().isEmpty());
 			verify(op, never()).startDataResponse();
 		}
@@ -936,8 +936,10 @@ public class S3AwsStorageDriverTest {
 					public void cancel() {}
 				});
 				subscriber.onNext(ByteBuffer.allocate(0));
-				subscriber.onNext(ByteBuffer.wrap(new byte[]{1}));
-				subscriber.onNext(ByteBuffer.wrap(new byte[]{2}));
+				subscriber.onNext(ByteBuffer.wrap(new byte[]{1
+				}));
+				subscriber.onNext(ByteBuffer.wrap(new byte[]{2
+				}));
 				subscriber.onComplete();
 			};
 
