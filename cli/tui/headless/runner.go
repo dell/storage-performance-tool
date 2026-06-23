@@ -582,9 +582,10 @@ func (r *HeadlessRunner) output(category, format string, args ...interface{}) {
 
 // outputMetrics outputs parsed metrics in human-readable format
 func (r *HeadlessRunner) outputMetrics(metric tui.PerformanceMetric) {
-	r.output("METRICS", "ops/sec=%d latency=%dµs type=%s success=%d concurrency=%.1f",
+	r.output("METRICS", "ops/sec=%d latency=%dµs ttfb=%dµs type=%s success=%d concurrency=%.1f",
 		metric.OpsPerSec,
 		metric.MeanLatency,
+		metric.MeanTTFB,
 		metric.OpType,
 		metric.SuccessCount,
 		metric.ConcurrencyMean,
@@ -594,10 +595,11 @@ func (r *HeadlessRunner) outputMetrics(metric tui.PerformanceMetric) {
 // outputMetricsJSON outputs parsed metrics in JSON format
 func (r *HeadlessRunner) outputMetricsJSON(metric tui.PerformanceMetric) {
 	timestamp := time.Now().Format("2006-01-02T15:04:05.000Z")
-	jsonLine := fmt.Sprintf(`{"timestamp":"%s","type":"metrics","data":{"ops_per_sec":%d,"latency_us":%d,"operation_type":"%s","success_count":%d,"failed_count":%d,"concurrency":%.1f}}`,
+	jsonLine := fmt.Sprintf(`{"timestamp":"%s","type":"metrics","data":{"ops_per_sec":%d,"latency_us":%d,"ttfb_us":%d,"operation_type":"%s","success_count":%d,"failed_count":%d,"concurrency":%.1f}}`,
 		timestamp,
 		metric.OpsPerSec,
 		metric.MeanLatency,
+		metric.MeanTTFB,
 		metric.OpType,
 		metric.SuccessCount,
 		metric.FailedCount,

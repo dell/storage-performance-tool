@@ -27,16 +27,27 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
+import software.amazon.awssdk.core.SdkPlugin;
+import software.amazon.awssdk.core.SdkServiceClientConfiguration;
+import software.amazon.awssdk.core.interceptor.Context;
+import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
@@ -54,6 +65,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				implements ListDiscoveryProbe {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
+	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE =
+					new ExecutionAttribute<>("sptListTtfbOperation");
 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";
@@ -752,7 +765,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
 						.bucket(targetBucket)
-						.maxKeys(maxKeys);
+						.maxKeys(maxKeys)
+						.overrideConfiguration(b -> b
+										.putExecutionAttribute(LIST_TTFB_OPERATION_ATTRIBUTE, listOp)
+										.addPlugin(new ListTtfbSdkPlugin()));
 
 		// Prefix from the item name (the framework sets item name as the listing prefix)
 		final var prefix = op.item().name();
@@ -780,7 +796,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return s3AsyncClient.listObjectsV2(reqBuilder.build())
 						.thenAccept(resp -> {
-							markListDataResponseStart(listOp);
 							int objectCount = 0;
 							long bytesTotal = 0;
 							String firstKey = null;
@@ -820,13 +835,66 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						});
 	}
 
-	private void markListDataResponseStart(final ListOperation<? extends PathItem> op) {
+	private static void markListDataResponseStart(final ListOperation<? extends PathItem> op) {
 		if (op.respDataTimeStart() == 0) {
 			try {
 				op.startDataResponse();
 			} catch (final IllegalStateException e) {
 				LOG.debug("{}: failed to mark LIST data response start", op, e);
 			}
+		}
+	}
+
+	static Publisher<ByteBuffer> wrapListDataResponsePublisher(
+					final Publisher<ByteBuffer> delegate,
+					final ListOperation<? extends PathItem> op) {
+		final AtomicBoolean firstBodyBytesObserved = new AtomicBoolean(false);
+		return subscriber -> delegate.subscribe(new Subscriber<>() {
+			@Override
+			public void onSubscribe(final Subscription subscription) {
+				subscriber.onSubscribe(subscription);
+			}
+
+			@Override
+			public void onNext(final ByteBuffer byteBuffer) {
+				if (byteBuffer != null
+								&& byteBuffer.remaining() > 0
+								&& firstBodyBytesObserved.compareAndSet(false, true)) {
+					markListDataResponseStart(op);
+				}
+				subscriber.onNext(byteBuffer);
+			}
+
+			@Override
+			public void onError(final Throwable throwable) {
+				subscriber.onError(throwable);
+			}
+
+			@Override
+			public void onComplete() {
+				subscriber.onComplete();
+			}
+		});
+	}
+
+	static final class ListTtfbExecutionInterceptor implements ExecutionInterceptor {
+		@Override
+		public Optional<Publisher<ByteBuffer>> modifyAsyncHttpResponseContent(
+						final Context.ModifyHttpResponse context,
+						final ExecutionAttributes executionAttributes) {
+			final ListOperation<? extends PathItem> op = executionAttributes.getAttribute(LIST_TTFB_OPERATION_ATTRIBUTE);
+			if (op == null) {
+				return context.responsePublisher();
+			}
+			return context.responsePublisher()
+							.map(publisher -> wrapListDataResponsePublisher(publisher, op));
+		}
+	}
+
+	static final class ListTtfbSdkPlugin implements SdkPlugin {
+		@Override
+		public void configureClient(final SdkServiceClientConfiguration.Builder builder) {
+			builder.overrideConfiguration(b -> b.addExecutionInterceptor(new ListTtfbExecutionInterceptor()));
 		}
 	}
 

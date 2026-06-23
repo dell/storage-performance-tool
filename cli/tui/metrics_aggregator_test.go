@@ -92,6 +92,22 @@ func TestMetricsAggregatorAggregatesMultipleNodes(t *testing.T) {
 	}
 }
 
+func TestMetricsAggregatorAggregatesTTFB(t *testing.T) {
+	aggregator := NewMetricsAggregator()
+	node1 := newNodeMetric(1000, 100, 500, 5, 50, 70, 10, 8)
+	node1.MeanTTFB = 20
+	node2 := newNodeMetric(1500, 150, 900, 2, 40, 60, 12, 9)
+	node2.MeanTTFB = 30
+
+	aggregated := aggregator.Aggregate(map[string]*PerformanceMetric{"node1": node1, "node2": node2})
+	if aggregated == nil {
+		t.Fatal("expected aggregated metric")
+	}
+	if aggregated.MeanTTFB != 26 {
+		t.Errorf("expected weighted TTFB 26, got %d", aggregated.MeanTTFB)
+	}
+}
+
 func TestMetricsAggregatorOpCountCompletion(t *testing.T) {
 	aggregator := NewMetricsAggregator()
 	node1 := newNodeMetric(100, 0, 1000, 0, 0, 0, 0, 0)

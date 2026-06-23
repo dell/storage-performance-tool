@@ -91,6 +91,7 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	var (
 		totalLatencyWeight   int64
 		totalDurationWeight  int64
+		totalTTFBWeight      int64
 		completionSum        float64
 		completionWeight     float64
 		overallCompletionSum float64
@@ -124,8 +125,10 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		}
 		result.MeanLatency += metric.MeanLatency * opsWeight
 		result.MeanDuration += metric.MeanDuration * opsWeight
+		result.MeanTTFB += metric.MeanTTFB * opsWeight
 		totalLatencyWeight += opsWeight
 		totalDurationWeight += opsWeight
+		totalTTFBWeight += opsWeight
 
 		if !metric.Unbounded {
 			allUnbounded = false
@@ -182,6 +185,9 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	if totalLatencyWeight > 0 {
 		result.MeanLatency /= totalLatencyWeight
 		result.MeanDuration /= totalDurationWeight
+	}
+	if totalTTFBWeight > 0 {
+		result.MeanTTFB /= totalTTFBWeight
 	}
 
 	if completionWeight > 0 {
@@ -286,7 +292,7 @@ func clampPercentage(v float64) float64 {
 // aggregate plus a per-op-type map. For non-mixed workloads (single metric) the
 // aggregate is the metric itself and the map has one entry. For mixed workloads
 // the aggregate sums additive fields (ops/s, MB/s, counts) across op types and
-// uses ops-weighted averages for latency/duration.
+// uses ops-weighted averages for latency/duration/TTFB.
 func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetric, perOp map[string]*PerformanceMetric) {
 	if len(metrics) == 0 {
 		return nil, nil
@@ -303,7 +309,7 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 
 	// Build combined aggregate by summing additive fields.
 	var agg PerformanceMetric
-	var totalLatencyWeight, totalDurationWeight int64
+	var totalLatencyWeight, totalDurationWeight, totalTTFBWeight int64
 	first := metrics[0]
 
 	// Copy identity fields from the first (latest) metric.
@@ -336,8 +342,10 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 		}
 		agg.MeanLatency += m.MeanLatency * w
 		agg.MeanDuration += m.MeanDuration * w
+		agg.MeanTTFB += m.MeanTTFB * w
 		totalLatencyWeight += w
 		totalDurationWeight += w
+		totalTTFBWeight += w
 
 		if m.TestState > agg.TestState {
 			agg.TestState = m.TestState
@@ -355,6 +363,9 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	if totalLatencyWeight > 0 {
 		agg.MeanLatency /= totalLatencyWeight
 		agg.MeanDuration /= totalDurationWeight
+	}
+	if totalTTFBWeight > 0 {
+		agg.MeanTTFB /= totalTTFBWeight
 	}
 
 	// Completion: use the first metric's values (all ops in a mixed step

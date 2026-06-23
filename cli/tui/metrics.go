@@ -33,7 +33,8 @@ type PerformanceMetric struct {
 	OpsPerSec          int64   // Last Rate [op/s] - primary chart metric
 	MBPerSec           int64   // Last Rate [MB/s] - secondary chart metric
 	MeanLatency        int64   // Display latency [us]; schema 3 prefers p50 with mean fallback
-	MeanDuration       int64   // Mean Duration [us]
+	MeanDuration       int64   // Display duration [us]; schema 3 prefers p50 with mean fallback
+	MeanTTFB           int64   // Display TTFB [us]; schema 3 prefers p50 with mean fallback
 	FailureIncrement   int64   // Incremental failures since last sample
 
 	MetricsSchema int

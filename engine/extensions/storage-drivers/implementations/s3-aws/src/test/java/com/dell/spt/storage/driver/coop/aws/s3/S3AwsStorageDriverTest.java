@@ -42,6 +42,7 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
@@ -49,6 +50,10 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -889,7 +894,7 @@ public class S3AwsStorageDriverTest {
 
 		@SuppressWarnings("unchecked")
 		@Test
-		void listStartsDataResponseTimingWhenResponseArrives() throws Exception {
+		void listRequestCarriesDataResponseTimingAttribute() throws Exception {
 			ListOperation<PathItem> op = mock(ListOperation.class);
 			PathItem item = mock(PathItem.class);
 			when(op.type()).thenReturn(OpType.LIST);
@@ -897,7 +902,6 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("");
 			when(op.item()).thenReturn(item);
 			when(op.options()).thenReturn(ListOptions.DEFAULT);
-			when(op.respDataTimeStart()).thenReturn(0L);
 
 			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
 							.thenReturn(CompletableFuture.completedFuture(buildListResponse(
@@ -906,7 +910,56 @@ public class S3AwsStorageDriverTest {
 
 			drv.execute((Operation<Item>) (Operation<?>) op).join();
 
-			verify(op).startDataResponse();
+			ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client).listObjectsV2(cap.capture());
+			assertTrue(cap.getValue().overrideConfiguration().isPresent());
+			assertSame(
+							op,
+							cap.getValue().overrideConfiguration().get()
+										.executionAttributes()
+										.getAttribute(S3AwsStorageDriver.LIST_TTFB_OPERATION_ATTRIBUTE));
+			assertFalse(cap.getValue().overrideConfiguration().get().plugins().isEmpty());
+			verify(op, never()).startDataResponse();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void wrappedListResponsePublisherStartsDataResponseOnFirstNonEmptyBodyBytes() {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			when(op.respDataTimeStart()).thenReturn(0L);
+			Publisher<ByteBuffer> publisher = subscriber -> {
+				subscriber.onSubscribe(new Subscription() {
+					@Override
+					public void request(final long n) {}
+
+					@Override
+					public void cancel() {}
+				});
+				subscriber.onNext(ByteBuffer.allocate(0));
+				subscriber.onNext(ByteBuffer.wrap(new byte[]{1}));
+				subscriber.onNext(ByteBuffer.wrap(new byte[]{2}));
+				subscriber.onComplete();
+			};
+
+			S3AwsStorageDriver.wrapListDataResponsePublisher(publisher, op).subscribe(new Subscriber<>() {
+				@Override
+				public void onSubscribe(final Subscription subscription) {
+					subscription.request(Long.MAX_VALUE);
+				}
+
+				@Override
+				public void onNext(final ByteBuffer byteBuffer) {}
+
+				@Override
+				public void onError(final Throwable throwable) {
+					fail(throwable);
+				}
+
+				@Override
+				public void onComplete() {}
+			});
+
+			verify(op, times(1)).startDataResponse();
 		}
 
 		@SuppressWarnings("unchecked")

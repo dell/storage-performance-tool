@@ -258,6 +258,36 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	public void markListSuccessRecordsTimeToFirstByte() throws Exception {
+		testConfig.val("load-op-recycle-mode", false);
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("listTtfb");
+		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(metrics);
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"step-list-ttfb", (LoadGenerator<Item, Operation<Item>>) generator,
+						(DummyStorageDriverMock<Item, Operation<Item>>) (DummyStorageDriverMock) mockDriver,
+						trackingCtx,
+						testConfig.configVal("load"),
+						false);
+
+		final ListOperation<PathItemImpl> listOp = new ListOperationImpl<>(0, OpType.LIST, new PathItemImpl("prefix"), null);
+		listOp.reset();
+		listOp.startRequest();
+		listOp.finishRequest();
+		listOp.startResponse();
+		listOp.startDataResponse();
+		listOp.finishResponse();
+		listOp.status(Operation.Status.SUCC);
+		listOp.objectsListed(3);
+		listOp.bytesListed(123);
+		listOp.countBytesDone(123);
+
+		assertTrue(stepCtx.put((Operation) listOp));
+		assertEquals(3L, trackingCtx.successCount.get());
+		assertEquals(123L, trackingCtx.byteCount.get());
+		assertTrue(trackingCtx.arrayTtfb.get() > 0L);
+	}
+
+	@Test
 	void readTtfbEqualToDurationIsRecorded() throws Exception {
 		testConfig.val("load-op-recycle-mode", false);
 		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(buildMetricsCtx("read-ttfb-equal"));
@@ -442,6 +472,7 @@ public class LoadStepContextImplTest {
 		final AtomicLong successCount = new AtomicLong();
 		final AtomicLong byteCount = new AtomicLong();
 		final AtomicLong singleTtfb = new AtomicLong();
+		final AtomicLong arrayTtfb = new AtomicLong();
 
 		TrackingMetricsContext(final MetricsContext<AllMetricsSnapshot> delegate) {
 			this.delegate = delegate;
@@ -514,6 +545,9 @@ public class LoadStepContextImplTest {
 						final long[] ttfbValues) {
 			successCount.addAndGet(count);
 			byteCount.addAndGet(bytes);
+			if (ttfbValues != null && ttfbValues.length > 0) {
+				arrayTtfb.set(ttfbValues[0]);
+			}
 			delegate.markSucc(count, bytes, durationValues, latencyValues, ttfbValues);
 		}
 
