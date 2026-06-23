@@ -20,6 +20,7 @@ additional VFS layer. The measured rates may be:
         * random byte ranges
         * fixed byte ranges
         * content verification
+        * first byte timing for READ TTFB metrics
     * `update`
         * full (overwrite)
         * random byte ranges

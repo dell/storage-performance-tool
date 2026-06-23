@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Added
 
 - **Replay archived workloads documentation** — added public user documentation for `spt replay`, including source archive requirements, environment remapping behavior, supported safe file-preparation transformations, generate-only inspection, distributed replay guidance, limitations, and troubleshooting.
+- **READ/LIST TTFB reporting** — Time to First Byte is now tracked for body-returning READ and LIST operations, including local filesystem reads and AWS SDK S3 LIST responses. Live/headless metrics and final summaries report TTFB only when samples are available, avoiding misleading mixed-workload or non-body-operation TTFB values.
 
 ## [5.10.4] - 2026-06-01
 

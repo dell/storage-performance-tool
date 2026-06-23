@@ -624,8 +624,10 @@ When no TTY is available (CI/CD environments, Docker containers, etc.), spt auto
 [2025-08-06 14:23:46] [DOCKER] Container started: abc123def456
 [2025-08-06 14:23:47] [SPT] Spt v5.0.2 starting...
 [2025-08-06 14:23:48] [METRICS] ops/sec=45 latency=1024µs type=CREATE success=100 concurrency=8.0
-[2025-08-06 14:23:49] [METRICS] ops/sec=52 latency=956µs type=CREATE success=156 concurrency=8.0
+[2025-08-06 14:23:49] [METRICS] ops/sec=52 latency=956µs ttfb=430µs type=READ success=156 concurrency=8.0
 ```
+
+The `ttfb` field is emitted only for samples that include Time to First Byte data, currently READ and LIST operation metrics.
 
 **Trace Files:**
 

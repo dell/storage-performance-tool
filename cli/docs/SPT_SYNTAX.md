@@ -231,6 +231,8 @@ Set any operation weight to `0` to exclude it. For example, `--get-distrib 60 --
 
 By default, `spt run` launches an interactive TUI. Use `--headless` for CI or unattended runs.
 
+Live metrics include throughput, latency, duration, and progress. Time to First Byte (TTFB) is reported for READ and LIST samples when the engine records first response body bytes; headless text/JSON output omits the TTFB field when it is unavailable.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--headless` | `false` | Force headless (non-interactive) mode |

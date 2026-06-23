@@ -651,6 +651,7 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 	step.Bandwidth.BytesRateLast = 104_857_600.0
 	step.Timing.LatencyMeanUs = 1850.0
 	step.Timing.DurationMeanUs = 2250.0
+	step.Timing.TTFB = &JSONTimingStat{Count: 10, MeanUs: 950.0}
 	step.Concurrency.Current = 12
 	step.Concurrency.Mean = 11.8
 	jsonData := marshalSteps(t, []JSONMetricsStep{step})
@@ -686,6 +687,8 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 		"MBPerSec":                 int64(104), // Converted from 104857600.0 / 1_000_000
 		"MeanLatency":              int64(1850),
 		"MeanDuration":             int64(2250),
+		"MeanTTFB":                 int64(950),
+		"HasTTFB":                  true,
 		"CompletionPercent":        float64(step.CompletionPercent),
 		"OverallCompletionPercent": float64(step.OverallCompletion),
 		"Unbounded":                false,
@@ -771,6 +774,14 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 			if metricValue.MeanDuration != expectedValue.(int64) {
 				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.MeanDuration)
 			}
+		case "MeanTTFB":
+			if metricValue.MeanTTFB != expectedValue.(int64) {
+				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.MeanTTFB)
+			}
+		case "HasTTFB":
+			if metricValue.HasTTFB != expectedValue.(bool) {
+				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.HasTTFB)
+			}
 		case "CompletionPercent":
 			if metricValue.CompletionPercent != expectedValue.(float64) {
 				t.Errorf("Field %s: expected %v, got %.1f", fieldName, expectedValue, metricValue.CompletionPercent)
@@ -822,6 +833,7 @@ func TestSchema3TimingPrefersLatencyP50(t *testing.T) {
 	step.Timing.DurationMeanUs = 20_000
 	step.Timing.Latency = &JSONTimingStat{Count: 3, MeanUs: 10_000, P50Us: 2_500}
 	step.Timing.Duration = &JSONTimingStat{Count: 3, MeanUs: 20_000, P50Us: 3_500}
+	step.Timing.TTFB = &JSONTimingStat{Count: 3, MeanUs: 4_000, P50Us: 750}
 
 	client := NewSptAPIClient("http://test")
 	metrics, err := client.ParseJSONMetrics(marshalSteps(t, []JSONMetricsStep{step}))
@@ -836,6 +848,54 @@ func TestSchema3TimingPrefersLatencyP50(t *testing.T) {
 	}
 	if metrics[0].MeanDuration != 3_500 {
 		t.Fatalf("expected schema-v3 duration display value to use p50, got %d", metrics[0].MeanDuration)
+	}
+	if metrics[0].MeanTTFB != 750 {
+		t.Fatalf("expected schema-v3 TTFB display value to use p50, got %d", metrics[0].MeanTTFB)
+	}
+	if !metrics[0].HasTTFB {
+		t.Fatal("expected schema-v3 TTFB sample to be marked available")
+	}
+}
+
+func TestParseJSONMetricsMarksMissingTTFBUnavailable(t *testing.T) {
+	step := newTestStep()
+	step.MetricsSchema = 3
+	step.Timing.TTFB = nil
+
+	client := NewSptAPIClient("http://test")
+	metrics, err := client.ParseJSONMetrics(marshalSteps(t, []JSONMetricsStep{step}))
+	if err != nil {
+		t.Fatalf("ParseJSONMetrics failed: %v", err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(metrics))
+	}
+	if metrics[0].HasTTFB {
+		t.Fatal("expected missing TTFB sample to be marked unavailable")
+	}
+	if metrics[0].MeanTTFB != 0 {
+		t.Fatalf("expected unavailable TTFB value to remain zero internally, got %d", metrics[0].MeanTTFB)
+	}
+}
+
+func TestParseJSONMetricsMarksNullCountTTFBUnavailable(t *testing.T) {
+	step := newTestStep()
+	step.MetricsSchema = 3
+	step.Timing.TTFB = &JSONTimingStat{Count: 0, MeanUs: 950.0, P50Us: 900}
+
+	client := NewSptAPIClient("http://test")
+	metrics, err := client.ParseJSONMetrics(marshalSteps(t, []JSONMetricsStep{step}))
+	if err != nil {
+		t.Fatalf("ParseJSONMetrics failed: %v", err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(metrics))
+	}
+	if metrics[0].HasTTFB {
+		t.Fatal("expected zero-count TTFB sample to be marked unavailable")
+	}
+	if metrics[0].MeanTTFB != 0 {
+		t.Fatalf("expected zero-count TTFB value to remain zero internally, got %d", metrics[0].MeanTTFB)
 	}
 }
 
@@ -901,28 +961,28 @@ func TestAggregateByOpType_FourOps(t *testing.T) {
 	metrics := []*PerformanceMetric{
 		{
 			OpType: "READ", OpsPerSec: 4000, MBPerSec: 4,
-			MeanLatency: 900, MeanDuration: 950,
+			MeanLatency: 900, MeanDuration: 950, MeanTTFB: 300, HasTTFB: true,
 			SuccessCount: 240000, FailedCount: 2,
 			ConcurrencyCurrent: 5, ConcurrencyMean: 4.5,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
 			OpType: "CREATE", OpsPerSec: 20, MBPerSec: 1,
-			MeanLatency: 2500, MeanDuration: 2800,
+			MeanLatency: 2500, MeanDuration: 2800, MeanTTFB: 700,
 			SuccessCount: 1200, FailedCount: 0,
 			ConcurrencyCurrent: 1, ConcurrencyMean: 0.1,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
 			OpType: "DELETE", OpsPerSec: 18, MBPerSec: 0,
-			MeanLatency: 1300, MeanDuration: 1500,
+			MeanLatency: 1300, MeanDuration: 1500, MeanTTFB: 450,
 			SuccessCount: 1080, FailedCount: 0,
 			ConcurrencyCurrent: 1, ConcurrencyMean: 0.04,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
 			OpType: "STAT", OpsPerSec: 1400, MBPerSec: 0,
-			MeanLatency: 1500, MeanDuration: 1650,
+			MeanLatency: 1500, MeanDuration: 1650, MeanTTFB: 500,
 			SuccessCount: 84000, FailedCount: 5,
 			ConcurrencyCurrent: 2, ConcurrencyMean: 1.4,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
@@ -986,6 +1046,30 @@ func TestAggregateByOpType_FourOps(t *testing.T) {
 	// Just verify it's between the min and max input latencies.
 	if combined.MeanLatency < 900 || combined.MeanLatency > 2500 {
 		t.Errorf("weighted MeanLatency %d outside expected range [900, 2500]", combined.MeanLatency)
+	}
+	if combined.HasTTFB {
+		t.Error("mixed READ/CREATE/DELETE/STAT aggregate must not publish a blended TTFB")
+	}
+	if combined.MeanTTFB != 0 {
+		t.Errorf("mixed aggregate TTFB should remain unset internally, got %d", combined.MeanTTFB)
+	}
+}
+
+func TestAggregateByOpTypeAggregatesSameOpTTFB(t *testing.T) {
+	metrics := []*PerformanceMetric{
+		{OpType: "READ", OpsPerSec: 100, MeanLatency: 1000, MeanDuration: 1200, MeanTTFB: 200, HasTTFB: true},
+		{OpType: "READ", OpsPerSec: 300, MeanLatency: 2000, MeanDuration: 2200, MeanTTFB: 400, HasTTFB: true},
+	}
+
+	combined, _ := AggregateByOpType(metrics)
+	if combined == nil {
+		t.Fatal("combined aggregate must not be nil")
+	}
+	if !combined.HasTTFB {
+		t.Fatal("expected same-op READ aggregate TTFB to be available")
+	}
+	if combined.MeanTTFB != 350 {
+		t.Fatalf("expected ops-weighted TTFB 350, got %d", combined.MeanTTFB)
 	}
 }
 

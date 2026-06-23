@@ -258,6 +258,36 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	public void markListSuccessRecordsTimeToFirstByte() throws Exception {
+		testConfig.val("load-op-recycle-mode", false);
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("listTtfb");
+		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(metrics);
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"step-list-ttfb", (LoadGenerator<Item, Operation<Item>>) generator,
+						(DummyStorageDriverMock<Item, Operation<Item>>) (DummyStorageDriverMock) mockDriver,
+						trackingCtx,
+						testConfig.configVal("load"),
+						false);
+
+		@SuppressWarnings("unchecked")
+		final ListOperation<PathItemImpl> listOp = mock(ListOperation.class);
+		when(listOp.status()).thenReturn(Operation.Status.SUCC);
+		when(listOp.type()).thenReturn(OpType.LIST);
+		when(listOp.duration()).thenReturn(200L);
+		when(listOp.latency()).thenReturn(25L);
+		when(listOp.reqTimeDone()).thenReturn(1_000L);
+		when(listOp.respDataTimeStart()).thenReturn(1_123L);
+		when(listOp.objectsListed()).thenReturn(3);
+		when(listOp.bytesListed()).thenReturn(123L);
+		when(listOp.options()).thenReturn(ListOptions.DEFAULT);
+
+		assertTrue(stepCtx.put((Operation) listOp));
+		assertEquals(3L, trackingCtx.successCount.get());
+		assertEquals(123L, trackingCtx.byteCount.get());
+		assertEquals(123L, trackingCtx.arrayTtfb.get());
+	}
+
+	@Test
 	void readTtfbEqualToDurationIsRecorded() throws Exception {
 		testConfig.val("load-op-recycle-mode", false);
 		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(buildMetricsCtx("read-ttfb-equal"));
@@ -442,6 +472,7 @@ public class LoadStepContextImplTest {
 		final AtomicLong successCount = new AtomicLong();
 		final AtomicLong byteCount = new AtomicLong();
 		final AtomicLong singleTtfb = new AtomicLong();
+		final AtomicLong arrayTtfb = new AtomicLong();
 
 		TrackingMetricsContext(final MetricsContext<AllMetricsSnapshot> delegate) {
 			this.delegate = delegate;
@@ -514,6 +545,9 @@ public class LoadStepContextImplTest {
 						final long[] ttfbValues) {
 			successCount.addAndGet(count);
 			byteCount.addAndGet(bytes);
+			if (ttfbValues != null && ttfbValues.length > 0) {
+				arrayTtfb.set(ttfbValues[0]);
+			}
 			delegate.markSucc(count, bytes, durationValues, latencyValues, ttfbValues);
 		}
 

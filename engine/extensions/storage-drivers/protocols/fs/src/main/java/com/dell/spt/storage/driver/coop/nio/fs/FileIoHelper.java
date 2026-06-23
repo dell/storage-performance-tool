@@ -51,6 +51,16 @@ public interface FileIoHelper {
 		return countBytesDone >= contentSize;
 	}
 
+	static void markDataResponseStartedOnRead(final DataOperation<?> op, final int bytesRead) {
+		if (bytesRead > 0 && op.respDataTimeStart() == 0 && op.reqTimeDone() > 0) {
+			try {
+				op.startDataResponse();
+			} catch (final IllegalStateException e) {
+				Loggers.MSG.debug("{}: failed to mark READ data response start", op, e);
+			}
+		}
+	}
+
 	static <I extends DataItem, O extends DataOperation<I>> boolean invokeReadAndVerify(
 					final I fileItem, final O op, final ReadableByteChannel srcChannel) throws DataSizeException, DataCorruptionException, IOException {
 		long countBytesDone = op.countBytesDone();
@@ -67,6 +77,7 @@ public interface FileIoHelper {
 					if (n < 0) {
 						throw new DataSizeException(contentSize, countBytesDone);
 					} else {
+						markDataResponseStartedOnRead(op, n);
 						inBuff.flip();
 						currRange.verify(inBuff);
 						currRange.position(currRange.position() + n);
@@ -84,6 +95,7 @@ public interface FileIoHelper {
 				if (n < 0) {
 					throw new DataSizeException(contentSize, countBytesDone);
 				} else {
+					markDataResponseStartedOnRead(op, n);
 					inBuff.flip();
 					fileItem.verify(inBuff);
 					fileItem.position(fileItem.position() + n);
@@ -130,6 +142,7 @@ public interface FileIoHelper {
 			if (n < 0) {
 				throw new DataSizeException(rangesSizeSum, countBytesDone);
 			} else {
+				markDataResponseStartedOnRead(op, n);
 				inBuff.flip();
 				try {
 					range2read.verify(inBuff);
@@ -207,6 +220,7 @@ public interface FileIoHelper {
 					// expected more data within the fixed range
 					throw new DataSizeException(fixedRangesSizeSum, rangeBytesDone);
 				} else {
+					markDataResponseStartedOnRead(op, m);
 					inBuff.flip();
 					try {
 						currRange.verify(inBuff);
@@ -248,6 +262,7 @@ public interface FileIoHelper {
 				fileItem.size(countBytesDone);
 				return true;
 			} else {
+				markDataResponseStartedOnRead(op, n);
 				countBytesDone += n;
 				op.countBytesDone(countBytesDone);
 			}
@@ -286,6 +301,7 @@ public interface FileIoHelper {
 				op.countBytesDone(countBytesDone);
 				return true;
 			}
+			markDataResponseStartedOnRead(op, n);
 			countBytesDone += n;
 			if (countBytesDone == currRangeSize && countBytesDone < rangesSizeSum) {
 				op.currRangeIdx(currRangeIdx + 1);
@@ -329,6 +345,7 @@ public interface FileIoHelper {
 					op.countBytesDone(countBytesDone);
 					return true;
 				}
+				markDataResponseStartedOnRead(op, n);
 				countBytesDone += n;
 				if (countBytesDone == rangeSize) {
 					op.currRangeIdx(currRangeIdx + 1);

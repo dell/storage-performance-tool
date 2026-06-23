@@ -39,6 +39,7 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 					DataBytes:         2620391424,
 					ThroughputAvgOps:  334.6964,
 					LatencyHeadlineMs: 79.9,
+					TTFBMedianMs:      12.3,
 					BandwidthAvgMBps:  334.6964,
 					ObjectSizeHuman:   "1.00 MiB",
 				},
@@ -70,6 +71,8 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 	mustContain(t, report, "Run Totals")
 	mustContain(t, report, "Create")
 	mustContain(t, report, "Delete")
+	mustContain(t, report, "TTFB P50")
+	mustContain(t, report, "12.3 ms")
 
 	lines := strings.Split(report, "\n")
 	if len(lines) < 10 {

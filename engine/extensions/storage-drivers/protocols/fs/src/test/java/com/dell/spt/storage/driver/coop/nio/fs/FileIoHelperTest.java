@@ -5,6 +5,7 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.github.akurilov.commons.collection.Range;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -14,6 +15,7 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -113,6 +115,39 @@ public class FileIoHelperTest {
 		}
 		assertTrue(done);
 		assertEquals(data.length, op.countBytesDone());
+	}
+
+	@Test
+	public void invokeReadStartsDataResponseOnFirstBytes() throws IOException {
+		final byte[] data = new byte[]{1, 2, 3, 4, 5
+		};
+		final ReadableByteChannel ch = Channels.newChannel(new java.io.ByteArrayInputStream(data));
+
+		final DataItemImpl item = new DataItemImpl("x", 0, data.length);
+		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.READ, item, null, null, null, null, 0);
+		op.startRequest();
+		op.finishRequest();
+
+		assertTrue(FileIoHelper.invokeRead(item, op, ch));
+		assertEquals(data.length, op.countBytesDone());
+		assertTrue(op.respDataTimeStart() > 0);
+	}
+
+	@Test
+	public void invokeReadFixedRangesStartsDataResponseOnFirstBytes() throws IOException {
+		final Path src = Files.createTempFile("fs-fixed-read-", ".bin");
+		Files.write(src, new byte[]{1, 2, 3, 4, 5
+		});
+		final List<Range> ranges = List.of(new Range(1L, 3L, -1L));
+		final DataItemImpl item = new DataItemImpl("x", 0, 5);
+		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.READ, item, null, null, null, ranges, 0);
+		op.startRequest();
+		op.finishRequest();
+
+		try (final FileChannel ch = FileChannel.open(src, StandardOpenOption.READ)) {
+			assertTrue(FileIoHelper.invokeReadFixedRanges(item, op, ch, ranges));
+		}
+		assertTrue(op.respDataTimeStart() > 0);
 	}
 
 	@Test

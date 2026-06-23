@@ -4,7 +4,7 @@ The Dell **Storage Performance Tool (SPT)** is an open-source benchmark suite pu
 
 - spin up realistic object workloads in minutes;
 - orchestrate single-node or distributed runs without handcrafting scripts;
-- monitor live latency/throughput in an interactive terminal UI or headless CI logs;
+- monitor live throughput and latency in an interactive terminal UI or headless CI logs;
 - reuse the same configuration flow for both mock runs and production endpoints.
 
 SPT packages two tightly integrated components:

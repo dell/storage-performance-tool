@@ -27,6 +27,7 @@ const (
 	defaultSnippetLineCap = 40
 	headerIOPSAvg         = "IOPS Avg"
 	headerLatencyP50      = "Latency P50"
+	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
 )
 
@@ -207,7 +208,7 @@ func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {
 }
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {
-	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerBandwidthAvg}
+	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerTTFBP50, headerBandwidthAvg}
 	isList := strings.EqualFold(summary.Workload.Type, workloadTypeList)
 	if isList {
 		headers[4] = "Ops/s Avg"
@@ -229,14 +230,15 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			formatBytesHuman(m.DataBytes),
 			formatNumber(m.ThroughputAvgOps, "ops/s"),
 			mixedLatencyCell(step, m),
+			mixedTTFBCell(step, m),
 			formatNumber(m.BandwidthAvgMBps, "MB/s"),
 		}
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—"})
+		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—", "—"})
 	}
-	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
 }
 
 func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
@@ -262,7 +264,7 @@ func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *Run
 		if mixedStepCount > 1 && step.StepID != "" {
 			fmt.Fprintf(b, "Step: %s\n", step.StepID)
 		}
-		headers := []string{"Operation", "Configured", "Actual Ops", headerIOPSAvg, headerLatencyP50}
+		headers := []string{"Operation", "Configured", "Actual Ops", headerIOPSAvg, headerLatencyP50, headerTTFBP50}
 		rows := make([][]string, 0, len(step.OperationBreakdown))
 		for _, op := range step.OperationBreakdown {
 			rows = append(rows, []string{
@@ -271,9 +273,10 @@ func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *Run
 				formatActualOps(op.ActualShare, op.ActualOps),
 				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
 				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
+				formatTTFBNumber(op.Metrics.TTFBMedianMs),
 			})
 		}
-		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight}))
+		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight}))
 		b.WriteByte('\n')
 	}
 }
@@ -291,7 +294,7 @@ func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary
 		if configured := configuredDistributionText(summary.Workload.MixedDistribution); configured != "" {
 			fmt.Fprintf(b, "Configured distribution: %s\n", configured)
 		}
-		headers := []string{"Operation", "Configured", "Actual Ops", "Success", "Failure", "Data Moved", headerIOPSAvg, headerBandwidthAvg, headerLatencyP50}
+		headers := []string{"Operation", "Configured", "Actual Ops", "Success", "Failure", "Data Moved", headerIOPSAvg, headerBandwidthAvg, headerLatencyP50, headerTTFBP50}
 		rows := make([][]string, 0, len(step.OperationBreakdown))
 		for _, op := range step.OperationBreakdown {
 			rows = append(rows, []string{
@@ -304,9 +307,10 @@ func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary
 				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
 				formatNumber(op.Metrics.BandwidthAvgMBps, "MB/s"),
 				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
+				formatTTFBNumber(op.Metrics.TTFBMedianMs),
 			})
 		}
-		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight}))
+		b.WriteString(renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight}))
 		b.WriteString("\n\n")
 	}
 }
@@ -461,6 +465,20 @@ func mixedLatencyCell(step StepSummary, metrics *PhaseMetrics) string {
 		return "see ops"
 	}
 	return formatNumber(metrics.LatencyHeadlineMs, "ms")
+}
+
+func mixedTTFBCell(step StepSummary, metrics *PhaseMetrics) string {
+	if step.IsMixed {
+		return "see ops"
+	}
+	return formatTTFBNumber(metrics.TTFBMedianMs)
+}
+
+func formatTTFBNumber(value float64) string {
+	if value <= 0 {
+		return "—"
+	}
+	return formatNumber(value, "ms")
 }
 
 func configuredDistributionText(dist MixedDistribution) string {

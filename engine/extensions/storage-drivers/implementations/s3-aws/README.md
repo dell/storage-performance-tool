@@ -61,7 +61,7 @@ The driver uses `S3AsyncClient` with CompletableFuture for all S3 operations:
 - `putObject()` - Uses `AsyncRequestBody` for uploads
 - `readObject()` - Uses `AsyncResponseTransformer.toBytes()` for downloads
 - `deleteObject()` - Async delete operation
-- `listObjects()` - Async list operation with pagination
+- `listObjects()` - Async list operation with pagination and first response body byte timing for LIST TTFB metrics
 
 ### Blocking Compatibility
 

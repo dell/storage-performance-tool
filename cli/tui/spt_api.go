@@ -548,13 +548,12 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 
 // stepToMetric converts a validated JSONMetricsStep into a PerformanceMetric.
 func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time) *PerformanceMetric {
-	latencyUs := step.Timing.LatencyMeanUs
-	if step.MetricsSchema >= 3 && step.Timing.Latency != nil && step.Timing.Latency.P50Us > 0 {
-		latencyUs = float64(step.Timing.Latency.P50Us)
-	}
-	durationUs := step.Timing.DurationMeanUs
-	if step.MetricsSchema >= 3 && step.Timing.Duration != nil && step.Timing.Duration.P50Us > 0 {
-		durationUs = float64(step.Timing.Duration.P50Us)
+	latencyUs := displayTimingUs(step.MetricsSchema, step.Timing.LatencyMeanUs, step.Timing.Latency)
+	durationUs := displayTimingUs(step.MetricsSchema, step.Timing.DurationMeanUs, step.Timing.Duration)
+	hasTTFB := step.Timing.TTFB != nil && step.Timing.TTFB.Count > 0
+	ttfbUs := float64(0)
+	if hasTTFB {
+		ttfbUs = displayStatTimingUs(step.Timing.TTFB)
 	}
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
@@ -572,6 +571,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		MBPerSec:                 int64(step.Bandwidth.BytesRateLast / 1_000_000), // Convert bytes to MB
 		MeanLatency:              int64(math.Round(latencyUs)),                    // Schema 3 prefers p50.
 		MeanDuration:             int64(math.Round(durationUs)),
+		MeanTTFB:                 int64(math.Round(ttfbUs)),
+		HasTTFB:                  hasTTFB,
 		CompletionPercent:        float64(step.CompletionPercent),
 		OverallCompletionPercent: float64(step.OverallCompletion),
 		Unbounded:                step.Unbounded,
@@ -595,6 +596,26 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 	}
 
 	return metric
+}
+
+func displayTimingUs(schema int, legacyMeanUs float64, stat *JSONTimingStat) float64 {
+	if schema >= 3 && stat != nil && stat.P50Us > 0 {
+		return float64(stat.P50Us)
+	}
+	return legacyMeanUs
+}
+
+func displayStatTimingUs(stat *JSONTimingStat) float64 {
+	if stat == nil {
+		return 0
+	}
+	if stat.P50Us > 0 {
+		return float64(stat.P50Us)
+	}
+	if stat.MeanUs > 0 {
+		return stat.MeanUs
+	}
+	return 0
 }
 
 func parseSampleTimestamp(raw string) (time.Time, error) {
