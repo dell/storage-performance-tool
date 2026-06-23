@@ -550,7 +550,11 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time) *PerformanceMetric {
 	latencyUs := displayTimingUs(step.MetricsSchema, step.Timing.LatencyMeanUs, step.Timing.Latency)
 	durationUs := displayTimingUs(step.MetricsSchema, step.Timing.DurationMeanUs, step.Timing.Duration)
-	ttfbUs := displayStatTimingUs(step.Timing.TTFB)
+	hasTTFB := step.Timing.TTFB != nil && step.Timing.TTFB.Count > 0
+	ttfbUs := float64(0)
+	if hasTTFB {
+		ttfbUs = displayStatTimingUs(step.Timing.TTFB)
+	}
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
 		SampleTimestamp:          sampleTimestamp,
@@ -568,6 +572,7 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		MeanLatency:              int64(math.Round(latencyUs)),                    // Schema 3 prefers p50.
 		MeanDuration:             int64(math.Round(durationUs)),
 		MeanTTFB:                 int64(math.Round(ttfbUs)),
+		HasTTFB:                  hasTTFB,
 		CompletionPercent:        float64(step.CompletionPercent),
 		OverallCompletionPercent: float64(step.OverallCompletion),
 		Unbounded:                step.Unbounded,
@@ -594,10 +599,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 }
 
 func displayTimingUs(schema int, legacyMeanUs float64, stat *JSONTimingStat) float64 {
-	if schema >= 3 {
-		if statUs := displayStatTimingUs(stat); statUs > 0 {
-			return statUs
-		}
+	if schema >= 3 && stat != nil && stat.P50Us > 0 {
+		return float64(stat.P50Us)
 	}
 	return legacyMeanUs
 }

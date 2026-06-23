@@ -38,6 +38,8 @@ import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.interceptor.Context;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -47,9 +49,12 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
@@ -962,6 +967,134 @@ public class S3AwsStorageDriverTest {
 			});
 
 			verify(op, times(1)).startDataResponse();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void wrappedListResponsePublisherDoesNotStartOnEmptyBodyBuffers() {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			when(op.respDataTimeStart()).thenReturn(0L);
+			Publisher<ByteBuffer> publisher = subscriber -> {
+				subscriber.onSubscribe(new Subscription() {
+					@Override
+					public void request(final long n) {}
+
+					@Override
+					public void cancel() {}
+				});
+				subscriber.onNext(ByteBuffer.allocate(0));
+				subscriber.onComplete();
+			};
+
+			S3AwsStorageDriver.wrapListDataResponsePublisher(publisher, op).subscribe(new Subscriber<>() {
+				@Override
+				public void onSubscribe(final Subscription subscription) {
+					subscription.request(Long.MAX_VALUE);
+				}
+
+				@Override
+				public void onNext(final ByteBuffer byteBuffer) {}
+
+				@Override
+				public void onError(final Throwable throwable) {
+					fail(throwable);
+				}
+
+				@Override
+				public void onComplete() {}
+			});
+
+			verify(op, never()).startDataResponse();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void wrappedListResponsePublisherPropagatesError() {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			RuntimeException expected = new RuntimeException("boom");
+			Publisher<ByteBuffer> publisher = subscriber -> {
+				subscriber.onSubscribe(new Subscription() {
+					@Override
+					public void request(final long n) {}
+
+					@Override
+					public void cancel() {}
+				});
+				subscriber.onError(expected);
+			};
+			AtomicReference<Throwable> observed = new AtomicReference<>();
+
+			S3AwsStorageDriver.wrapListDataResponsePublisher(publisher, op).subscribe(new Subscriber<>() {
+				@Override
+				public void onSubscribe(final Subscription subscription) {
+					subscription.request(Long.MAX_VALUE);
+				}
+
+				@Override
+				public void onNext(final ByteBuffer byteBuffer) {}
+
+				@Override
+				public void onError(final Throwable throwable) {
+					observed.set(throwable);
+				}
+
+				@Override
+				public void onComplete() {}
+			});
+
+			assertSame(expected, observed.get());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void wrappedListResponsePublisherPropagatesComplete() {
+			ListOperation<PathItem> op = mock(ListOperation.class);
+			Publisher<ByteBuffer> publisher = subscriber -> {
+				subscriber.onSubscribe(new Subscription() {
+					@Override
+					public void request(final long n) {}
+
+					@Override
+					public void cancel() {}
+				});
+				subscriber.onComplete();
+			};
+			AtomicBoolean completed = new AtomicBoolean(false);
+
+			S3AwsStorageDriver.wrapListDataResponsePublisher(publisher, op).subscribe(new Subscriber<>() {
+				@Override
+				public void onSubscribe(final Subscription subscription) {
+					subscription.request(Long.MAX_VALUE);
+				}
+
+				@Override
+				public void onNext(final ByteBuffer byteBuffer) {}
+
+				@Override
+				public void onError(final Throwable throwable) {
+					fail(throwable);
+				}
+
+				@Override
+				public void onComplete() {
+					completed.set(true);
+				}
+			});
+
+			assertTrue(completed.get());
+		}
+
+		@Test
+		void listTtfbExecutionInterceptorNoOpsWithoutAttribute() {
+			Publisher<ByteBuffer> publisher = subscriber -> {};
+			Optional<Publisher<ByteBuffer>> expected = Optional.of(publisher);
+			Context.ModifyHttpResponse context = mock(Context.ModifyHttpResponse.class);
+			when(context.responsePublisher()).thenReturn(expected);
+
+			Optional<Publisher<ByteBuffer>> actual = new S3AwsStorageDriver.ListTtfbExecutionInterceptor()
+							.modifyAsyncHttpResponseContent(context, new ExecutionAttributes());
+
+			assertSame(expected, actual);
 		}
 
 		@SuppressWarnings("unchecked")

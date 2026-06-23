@@ -269,22 +269,22 @@ public class LoadStepContextImplTest {
 						testConfig.configVal("load"),
 						false);
 
-		final ListOperation<PathItemImpl> listOp = new ListOperationImpl<>(0, OpType.LIST, new PathItemImpl("prefix"), null);
-		listOp.reset();
-		listOp.startRequest();
-		listOp.finishRequest();
-		listOp.startResponse();
-		listOp.startDataResponse();
-		listOp.finishResponse();
-		listOp.status(Operation.Status.SUCC);
-		listOp.objectsListed(3);
-		listOp.bytesListed(123);
-		listOp.countBytesDone(123);
+		@SuppressWarnings("unchecked")
+		final ListOperation<PathItemImpl> listOp = mock(ListOperation.class);
+		when(listOp.status()).thenReturn(Operation.Status.SUCC);
+		when(listOp.type()).thenReturn(OpType.LIST);
+		when(listOp.duration()).thenReturn(200L);
+		when(listOp.latency()).thenReturn(25L);
+		when(listOp.reqTimeDone()).thenReturn(1_000L);
+		when(listOp.respDataTimeStart()).thenReturn(1_123L);
+		when(listOp.objectsListed()).thenReturn(3);
+		when(listOp.bytesListed()).thenReturn(123L);
+		when(listOp.options()).thenReturn(ListOptions.DEFAULT);
 
 		assertTrue(stepCtx.put((Operation) listOp));
 		assertEquals(3L, trackingCtx.successCount.get());
 		assertEquals(123L, trackingCtx.byteCount.get());
-		assertTrue(trackingCtx.arrayTtfb.get() > 0L);
+		assertEquals(123L, trackingCtx.arrayTtfb.get());
 	}
 
 	@Test

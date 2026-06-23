@@ -92,6 +92,10 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		totalLatencyWeight   int64
 		totalDurationWeight  int64
 		totalTTFBWeight      int64
+		metricCount          int
+		ttfbMetricCount      int
+		firstTTFBOpType      string
+		allSameTTFBOpType    = true
 		completionSum        float64
 		completionWeight     float64
 		overallCompletionSum float64
@@ -112,6 +116,12 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 			continue
 		}
 
+		metricCount++
+		if firstTTFBOpType == "" {
+			firstTTFBOpType = metric.OpType
+		} else if !strings.EqualFold(firstTTFBOpType, metric.OpType) {
+			allSameTTFBOpType = false
+		}
 		result.OpsPerSec += metric.OpsPerSec
 		result.MBPerSec += metric.MBPerSec
 		result.SuccessCount += metric.SuccessCount
@@ -125,10 +135,13 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		}
 		result.MeanLatency += metric.MeanLatency * opsWeight
 		result.MeanDuration += metric.MeanDuration * opsWeight
-		result.MeanTTFB += metric.MeanTTFB * opsWeight
 		totalLatencyWeight += opsWeight
 		totalDurationWeight += opsWeight
-		totalTTFBWeight += opsWeight
+		if metric.HasTTFB {
+			result.MeanTTFB += metric.MeanTTFB * opsWeight
+			totalTTFBWeight += opsWeight
+			ttfbMetricCount++
+		}
 
 		if !metric.Unbounded {
 			allUnbounded = false
@@ -186,8 +199,12 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		result.MeanLatency /= totalLatencyWeight
 		result.MeanDuration /= totalDurationWeight
 	}
-	if totalTTFBWeight > 0 {
+	if totalTTFBWeight > 0 && ttfbMetricCount == metricCount && allSameTTFBOpType && isTTFBEligibleOpType(firstTTFBOpType) {
 		result.MeanTTFB /= totalTTFBWeight
+		result.HasTTFB = true
+	} else {
+		result.MeanTTFB = 0
+		result.HasTTFB = false
 	}
 
 	if completionWeight > 0 {
@@ -288,11 +305,16 @@ func clampPercentage(v float64) float64 {
 	return v
 }
 
+func isTTFBEligibleOpType(opType string) bool {
+	return strings.EqualFold(opType, "READ") || strings.EqualFold(opType, "LIST")
+}
+
 // AggregateByOpType groups a slice of metrics by OpType and produces a combined
 // aggregate plus a per-op-type map. For non-mixed workloads (single metric) the
 // aggregate is the metric itself and the map has one entry. For mixed workloads
 // the aggregate sums additive fields (ops/s, MB/s, counts) across op types and
-// uses ops-weighted averages for latency/duration/TTFB.
+// uses ops-weighted averages for latency/duration. Combined TTFB is populated only
+// when every contributor has TTFB for the same READ or LIST operation type.
 func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetric, perOp map[string]*PerformanceMetric) {
 	if len(metrics) == 0 {
 		return nil, nil
@@ -310,7 +332,9 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	// Build combined aggregate by summing additive fields.
 	var agg PerformanceMetric
 	var totalLatencyWeight, totalDurationWeight, totalTTFBWeight int64
+	var ttfbMetricCount int
 	first := metrics[0]
+	allSameTTFBOpType := true
 
 	// Copy identity fields from the first (latest) metric.
 	agg.StepID = first.StepID
@@ -329,6 +353,9 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	agg.SptTimestamp = first.SptTimestamp
 
 	for _, m := range metrics {
+		if !strings.EqualFold(first.OpType, m.OpType) {
+			allSameTTFBOpType = false
+		}
 		agg.OpsPerSec += m.OpsPerSec
 		agg.MBPerSec += m.MBPerSec
 		agg.SuccessCount += m.SuccessCount
@@ -342,10 +369,13 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 		}
 		agg.MeanLatency += m.MeanLatency * w
 		agg.MeanDuration += m.MeanDuration * w
-		agg.MeanTTFB += m.MeanTTFB * w
 		totalLatencyWeight += w
 		totalDurationWeight += w
-		totalTTFBWeight += w
+		if m.HasTTFB {
+			agg.MeanTTFB += m.MeanTTFB * w
+			totalTTFBWeight += w
+			ttfbMetricCount++
+		}
 
 		if m.TestState > agg.TestState {
 			agg.TestState = m.TestState
@@ -364,8 +394,12 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 		agg.MeanLatency /= totalLatencyWeight
 		agg.MeanDuration /= totalDurationWeight
 	}
-	if totalTTFBWeight > 0 {
+	if totalTTFBWeight > 0 && ttfbMetricCount == len(metrics) && allSameTTFBOpType && isTTFBEligibleOpType(first.OpType) {
 		agg.MeanTTFB /= totalTTFBWeight
+		agg.HasTTFB = true
+	} else {
+		agg.MeanTTFB = 0
+		agg.HasTTFB = false
 	}
 
 	// Completion: use the first metric's values (all ops in a mixed step

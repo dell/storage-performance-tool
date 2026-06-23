@@ -66,6 +66,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptListTtfbOperation");
+	private static final SdkPlugin LIST_TTFB_SDK_PLUGIN = new ListTtfbSdkPlugin();
 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";
@@ -767,7 +768,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.maxKeys(maxKeys)
 						.overrideConfiguration(b -> b
 										.putExecutionAttribute(LIST_TTFB_OPERATION_ATTRIBUTE, listOp)
-										.addPlugin(new ListTtfbSdkPlugin()));
+										.addPlugin(LIST_TTFB_SDK_PLUGIN));
 
 		// Prefix from the item name (the framework sets item name as the listing prefix)
 		final var prefix = op.item().name();
@@ -831,6 +832,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 								listOp.startAfter(lastKey);
 							}
 							listOp.countBytesDone(listOp.bytesListed());
+							if (listOp.respDataTimeStart() == 0) {
+								LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
+							}
 						});
 	}
 

@@ -246,6 +246,92 @@ func TestHeadlessRunner_MetricsOutput(t *testing.T) {
 	runner.outputMetricsJSON(testMetric)
 }
 
+func TestHeadlessRunner_MetricsOutputOmitsUnavailableTTFB(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "metrics_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	runner.outputMetrics(tui.PerformanceMetric{
+		OpsPerSec:       45,
+		MeanLatency:     1024,
+		OpType:          "CREATE",
+		SuccessCount:    100,
+		ConcurrencyMean: 8.0,
+	})
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	if strings.Contains(string(content), "ttfb=") {
+		t.Fatalf("headless metrics output must omit unavailable TTFB, got %q", string(content))
+	}
+}
+
+func TestHeadlessRunner_MetricsJSONOmitsUnavailableTTFB(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "json_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile, JSONMode: true})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	runner.outputMetricsJSON(tui.PerformanceMetric{
+		OpsPerSec:       45,
+		MeanLatency:     1024,
+		OpType:          "CREATE",
+		SuccessCount:    100,
+		ConcurrencyMean: 8.0,
+	})
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	if strings.Contains(string(content), "ttfb_us") {
+		t.Fatalf("headless JSON metrics output must omit unavailable TTFB, got %q", string(content))
+	}
+}
+
+func TestHeadlessRunner_MetricsOutputIncludesAvailableTTFB(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "metrics_trace.log")
+
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	defer runner.Close()
+
+	runner.outputMetrics(tui.PerformanceMetric{
+		OpsPerSec:       45,
+		MeanLatency:     1024,
+		MeanTTFB:        512,
+		HasTTFB:         true,
+		OpType:          "READ",
+		SuccessCount:    100,
+		ConcurrencyMean: 8.0,
+	})
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("Failed to read trace file: %v", err)
+	}
+	if !strings.Contains(string(content), "ttfb=512µs") {
+		t.Fatalf("headless metrics output should include available TTFB, got %q", string(content))
+	}
+}
+
 func TestHeadlessRunner_MixedMetricsPerOpOutput(t *testing.T) {
 	mockDocker := &tui.MockDockerManager{}
 
