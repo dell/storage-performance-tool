@@ -1114,7 +1114,8 @@ public class S3AwsStorageDriverTest {
 					@Override
 					public void cancel() {}
 				});
-				subscriber.onNext(ByteBuffer.wrap(new byte[]{1}));
+				subscriber.onNext(ByteBuffer.wrap(new byte[]{1
+				}));
 				subscriber.onComplete();
 			};
 			Context.ModifyHttpResponse context = mock(Context.ModifyHttpResponse.class);
