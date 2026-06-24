@@ -7,7 +7,7 @@ buildscript {
 	}
 	dependencies {
 		classpath(
-			"org.yaml:snakeyaml:1.24",
+			"org.yaml:snakeyaml:2.6",
 		)
 	}
 }
@@ -110,8 +110,8 @@ dependencies {
 		//   - LogMessageBaseTest.scala  
 		//   - DelayedTransferBufferPerfTest.scala
 		// These can be migrated to JUnit 5 or removed as a future cleanup task
-		"org.junit.jupiter:junit-jupiter-params:5.10.2", // JUnit 5 parameterized test support
-		"org.scala-lang:scala-compiler:2.13.14",
+		libs.junit.jupiter.params,
+		libs.scala.compiler,
 		libs.scala.library,
 		libs.docker.java,
 		libs.commons.csv,

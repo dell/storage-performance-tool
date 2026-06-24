@@ -1,17 +1,20 @@
 [versions]
 # Core libraries
 junit = "4.13.2"  # Minor update within JUnit 4 (JUnit 5 requires major test rewrite)
+junitJupiter = "5.14.4"
+junitPlatform = "1.14.4"
 log4j = "2.25.3"  # Updated from 2.19.0 — many bug fixes and security hardening
 scala = "2.13.18"
 slf4j = "1.7.25"
 
 # Apache Commons
-commonsCodec = "1.21.0"  # Updated from 1.17.1
+commonsCodec = "1.22.0"  # Updated from 1.17.1
 commonsLang = "3.20.0"  # Updated from 3.14.0
 commonsText = "1.15.0"  # Updated from 1.12.0
 
 # Jackson - SECURITY UPDATE
-jackson = "2.19.4"  # Updated from 2.18.6
+jacksonCore = "2.22.0"  # Updated from 2.18.6
+jacksonAnnotations = "2.22"
 
 # Networking
 jetty = "9.4.56.v20240826"  # Updated from 9.4.14 - security fixes, staying on 9.x for compatibility
@@ -29,7 +32,7 @@ javaCommons = "2.3.6"
 disruptor = "3.4.2"
 fastutil = "8.5.18"
 hdrHistogram = "2.2.2"
-javassist = "3.30.2-GA"  # Updated from 3.29.2-GA
+javassist = "3.32.0-GA"  # Updated from 3.29.2-GA
 prometheus = "0.16.0"  # Updated from 0.6.0 - significant improvements
 nashorn = "15.7"
 
@@ -45,11 +48,11 @@ avro = "1.11.4"
 hadoop = "3.3.6"
 
 # AWS SDK
-awsSdk = "2.42.28"
-awsCrt = "0.45.1"  # Latest stable version for AWS SDK 2.42.28
+awsSdk = "2.46.17"
+awsCrt = "0.47.1"  # Latest stable version for AWS SDK 2.46.17
 
 # Crypto / TLS
-bouncycastle = "1.78.1"
+bouncycastle = "1.84"
 
 # Build tools
 dockerJava = "3.1.5"
@@ -61,6 +64,10 @@ versions = "0.54.0"
 [libraries]
 # Testing
 junit = { module = "junit:junit", version.ref = "junit" }
+junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junitJupiter" }
+junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junitJupiter" }
+junit-jupiter-params = { module = "org.junit.jupiter:junit-jupiter-params", version.ref = "junitJupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junitPlatform" }
 
 # Logging
 log4j-api = { module = "org.apache.logging.log4j:log4j-api", version.ref = "log4j" }
@@ -76,10 +83,10 @@ commons-lang = { module = "org.apache.commons:commons-lang3", version.ref = "com
 commons-text = { module = "org.apache.commons:commons-text", version.ref = "commonsText" }
 
 # Jackson
-jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
-jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
-jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
-jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jacksonAnnotations" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jacksonCore" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jacksonCore" }
+jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jacksonCore" }
 
 # Scala
 scala-library = { module = "org.scala-lang:scala-library", version.ref = "scala" }
@@ -132,9 +139,9 @@ parquet-avro = { module = "org.apache.parquet:parquet-avro", version.ref = "parq
 avro = { module = "org.apache.avro:avro", version.ref = "avro" }
 hadoop-common = { module = "org.apache.hadoop:hadoop-common", version.ref = "hadoop" }
 hadoop-mapreduce-client-core = { module = "org.apache.hadoop:hadoop-mapreduce-client-core", version.ref = "hadoop" }
-hadoop-thirdparty = { module = "org.apache.hadoop.thirdparty:hadoop-shaded-guava", version = "1.1.1" }
+hadoop-thirdparty = { module = "org.apache.hadoop.thirdparty:hadoop-shaded-guava", version = "1.5.0" }
 woodstox-core = { module = "com.fasterxml.woodstox:woodstox-core", version = "5.4.0" }
-stax2-api = { module = "org.codehaus.woodstox:stax2-api", version = "4.2.1" }
+stax2-api = { module = "org.codehaus.woodstox:stax2-api", version = "4.3.0" }
 commons-collections = { module = "commons-collections:commons-collections", version = "3.2.2" }
 
 # Docker
