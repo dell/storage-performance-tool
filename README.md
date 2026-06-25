@@ -35,7 +35,7 @@ The top-level repository represents the SPT product. The `cli` and `engine` dire
 Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [GitHub Release](https://github.com/dell/storage-performance-tool/releases). Download the latest release for your platform, extract, and run:
 
 ```bash
-# Example: Linux amd64
+# Example: Linux amd64 (use linux-arm64 on Arm systems)
 gunzip spt-*-linux-amd64.gz
 chmod +x spt-*-linux-amd64
 mv spt-*-linux-amd64 spt

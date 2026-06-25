@@ -64,7 +64,7 @@ help:
 	@echo "  tidy         - Tidy Go module dependencies"
 	@echo "  run          - Build and run the application"
 	@echo "  build-all    - Build binaries for Linux, macOS, and Windows"
-	@echo "  build-linux  - Build Linux AMD64 binary"
+	@echo "  build-linux  - Build Linux AMD64 and ARM64 binaries"
 	@echo "  build-darwin - Build macOS AMD64 and ARM64 binaries"
 	@echo "  build-windows- Build Windows AMD64 binary"
 	@echo "  dev          - Development workflow: format, vet, test, build"
@@ -198,6 +198,7 @@ build-all: build-linux build-darwin build-windows
 build-linux:
 	@echo "Building for Linux..."
 	GOOS=linux GOARCH=amd64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64
+	GOOS=linux GOARCH=arm64 $(GOCMD) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64
 
 build-darwin:
 	@echo "Building for macOS..."

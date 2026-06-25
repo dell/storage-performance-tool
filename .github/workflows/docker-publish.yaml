@@ -9,11 +9,9 @@
 
 name: Publish Docker Image
 
-# Trigger on version tags only
-on:
-  push:
-    tags:
-      - 'v*'
+# Manual Docker image publishing. Tag-driven release Docker publishing is owned by
+# release-artifacts.yaml so GitHub Release publication can depend on the pushed image.
+'on':
   workflow_dispatch:
     inputs:
       version:
@@ -34,67 +32,8 @@ env:
   IMAGE_NAME: dell/storage-performance-tool
 
 jobs:
-  # Gate: ensure CI has passed for this commit before publishing
-  # For tag pushes, we verify the CI workflow succeeded for the tagged commit
-  verify-ci:
-    name: Verify CI Status
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check CI workflow status
-        if: github.event_name == 'push'
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const sha = context.sha;
-            const ciCheckNames = ['Engine Build & Tests', 'Go Quality Suite'];
-            const maxAttempts = 60;
-            const intervalMs = 30000;
-
-            console.log(`Checking CI status for commit ${sha}`);
-            console.log(`Will poll up to ${maxAttempts} times (${maxAttempts * intervalMs / 1000}s) for: ${ciCheckNames.join(', ')}`);
-
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-              const { data: checkRuns } = await github.rest.checks.listForRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: sha,
-              });
-
-              const passed = new Set();
-              const pending = [];
-              for (const name of ciCheckNames) {
-                const run = checkRuns.check_runs.find(r => r.name === name);
-                if (!run) {
-                  pending.push(name);
-                  console.log(`Attempt ${attempt}/${maxAttempts}: "${name}" not found yet.`);
-                } else if (run.conclusion === 'success') {
-                  passed.add(name);
-                } else if (run.conclusion) {
-                  core.setFailed(`CI check "${name}" failed (conclusion: ${run.conclusion}). Cannot publish image.`);
-                  return;
-                } else {
-                  pending.push(name);
-                  console.log(`Attempt ${attempt}/${maxAttempts}: "${name}" still in progress...`);
-                }
-              }
-
-              if (passed.size === ciCheckNames.length) {
-                console.log(`All CI checks passed: ${[...passed].join(', ')}`);
-                return;
-              }
-
-              console.log(`Attempt ${attempt}/${maxAttempts}: ${passed.size}/${ciCheckNames.length} passed, waiting on: ${pending.join(', ')}`);
-
-              if (attempt < maxAttempts) {
-                await new Promise(r => setTimeout(r, intervalMs));
-              }
-            }
-
-            core.setFailed(`CI checks did not complete within ${maxAttempts * intervalMs / 1000}s. Re-run this workflow after CI passes.`);
-
   prepare:
     name: Prepare Version
-    needs: verify-ci
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -248,8 +187,8 @@ jobs:
           context: engine/bundle
           file: engine/bundle/Dockerfile
           platforms: linux/amd64,linux/arm64
-          # Push on tag events, or on workflow_dispatch if dry_run is false
-          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+          # Manual workflow dispatch pushes unless dry_run is true.
+          push: ${{ !inputs.dry_run }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
