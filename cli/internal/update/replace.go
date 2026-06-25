@@ -14,6 +14,35 @@ func ResolveExecutableTarget(path string) (string, error) {
 	return resolved, nil
 }
 
+func VerifyReplaceAccess(target string) error {
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("target %q is a directory", target)
+	}
+	f, err := os.OpenFile(target, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, ".spt-access-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	closeErr := tmp.Close()
+	removeErr := os.Remove(name)
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
+}
+
 func ReplaceExecutable(target string, data []byte) error {
 	info, err := os.Stat(target)
 	if err != nil {

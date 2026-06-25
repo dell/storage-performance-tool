@@ -954,6 +954,8 @@ current=5.10.4 latest=5.11.0 available=true
 
 - Local/dev builds such as `dev`, `*-dev+<commit>`, and `*-SNAPSHOT` refuse running-binary self-update so local development binaries are not overwritten by a GitHub release.
 - Dev builds may still use `--output <path>` to download and verify a release binary without replacing themselves.
+- Windows running-binary self-update is disabled for now; use `--output <path>` to download a verified Windows release binary.
+- Before downloading assets for running-binary replacement, `spt update` verifies that the resolved target can be replaced and reports whether to re-run with elevated privileges or use `--output`.
 - If `SPT_IMAGE` is set, self-update warns that engine runs will continue using the pinned image until the override is changed or removed.
 - `--check` does not query GHCR and does not create or truncate the default `spt.log`; an explicitly supplied `--log-file` is still honored.
 

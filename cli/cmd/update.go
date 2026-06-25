@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -34,8 +35,12 @@ var (
 	updateRuntimeGOOS     = func() string { return runtime.GOOS }
 	updateRuntimeGOARCH   = func() string { return runtime.GOARCH }
 	updateNewGitHubClient = func(timeout time.Duration, token string) updater.GitHubClient {
-		return updater.NewGitHubClient(timeout, token)
+		client := updater.NewGitHubClient(timeout, token)
+		client.UserAgent = "spt/" + buildinfo.Version
+		return client
 	}
+	updateVerifyReplaceAccess = updater.VerifyReplaceAccess
+	updateIsTerminalInput     = isTerminalInput
 )
 
 func newUpdateCommand() *cobra.Command {
@@ -64,7 +69,9 @@ func newUpdateCommand() *cobra.Command {
 func updatePreRun(cmd *cobra.Command) error {
 	config.LoadDotEnv()
 	if inheritedFlagChanged(cmd, "log-file") {
-		return initializeLogger()
+		if err := initializeLogger(); err != nil {
+			return updateUserError(cmd, "%v", err)
+		}
 	}
 	return nil
 }
@@ -111,6 +118,49 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 	if err != nil {
 		return updateUserError(cmd, "failed to parse latest release tag %q: %v", latest.TagName, err)
 	}
+	current := updateCurrentVersion()
+	currentVersion, currentVersionErr := updater.ParseVersion(current)
+	available := currentVersionErr == nil && updater.UpdateAvailable(currentVersion, latestVersion)
+	if opts.check {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "current=%s latest=%s available=%t\n", current, latestVersion.String(), available)
+		if available {
+			return &ExitCodeError{Code: 10}
+		}
+		return nil
+	}
+
+	target := ""
+	if opts.output == "" {
+		if currentVersionErr == nil && !available {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "spt is already up to date: current=%s latest=%s\n", current, latestVersion.String())
+			return nil
+		}
+		if updateRuntimeGOOS() == "windows" {
+			return updateUserError(cmd, "running-binary self-update is not enabled on Windows yet; use --output <path> to download the verified release binary")
+		}
+		if ok, reason := updater.CanSelfUpdateCurrentBuild(current); !ok {
+			return updateUserError(cmd, "cannot self-update this build (%s): %s", current, reason)
+		}
+		exe, err := updateExecutable()
+		if err != nil {
+			return updateUserError(cmd, "failed to resolve current executable: %v", err)
+		}
+		target, err = updater.ResolveExecutableTarget(exe)
+		if err != nil {
+			return updateUserError(cmd, "failed to resolve executable target %s: %v", exe, err)
+		}
+		if err := updateVerifyReplaceAccess(target); err != nil {
+			return updateUserError(cmd, "cannot replace %s before downloading update: %v. Re-run with sufficient privileges (for example sudo) or use --output <path> to write the release binary elsewhere", target, err)
+		}
+		warnImageOverride(cmd)
+		if err := confirmUpdateIfNeeded(cmd, opts, latestVersion.String(), target, latest.HTMLURL, current); err != nil {
+			return err
+		}
+	} else if currentVersionErr == nil && !available {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "spt is already up to date: current=%s latest=%s\n", current, latestVersion.String())
+		return nil
+	}
+
 	assetName, err := updater.AssetNameForPlatform(latestVersion.String(), updateRuntimeGOOS(), updateRuntimeGOARCH())
 	if err != nil {
 		return updateUserError(cmd, "%v", err)
@@ -120,31 +170,8 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 		return updateUserError(cmd, "%v", err)
 	}
 	checksumAsset, err := updater.FindAsset(latest.Assets, updater.ChecksumAssetName)
-	if err != nil && !opts.check {
+	if err != nil {
 		return updateUserError(cmd, "%v", err)
-	}
-
-	current := updateCurrentVersion()
-	available := updateAvailableForCurrent(current, latestVersion)
-	if opts.check {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "current=%s latest=%s available=%t\n", current, latestVersion.String(), available)
-		if available {
-			return &ExitCodeError{Code: 10}
-		}
-		return nil
-	}
-	if !available {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "spt is already up to date: current=%s latest=%s\n", current, latestVersion.String())
-		return nil
-	}
-	if opts.output == "" {
-		if ok, reason := updater.CanSelfUpdateCurrentBuild(current); !ok {
-			return updateUserError(cmd, "cannot self-update this build (%s): %s", current, reason)
-		}
-		warnImageOverride(cmd)
-		if err := confirmUpdateIfNeeded(cmd, opts, latestVersion.String()); err != nil {
-			return err
-		}
 	}
 
 	assetBytes, err := client.DownloadAsset(ctx, asset)
@@ -173,27 +200,11 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Wrote spt %s to %s\n", latestVersion.String(), opts.output)
 		return nil
 	}
-	exe, err := updateExecutable()
-	if err != nil {
-		return updateUserError(cmd, "failed to resolve current executable: %v", err)
-	}
-	target, err := updater.ResolveExecutableTarget(exe)
-	if err != nil {
-		return updateUserError(cmd, "failed to resolve executable target %s: %v", exe, err)
-	}
 	if err := updater.ReplaceExecutable(target, binary); err != nil {
 		return updateUserError(cmd, "failed to replace %s: %v", target, err)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Update complete: installed spt %s at %s. Re-run spt to use the new version.\n", latestVersion.String(), target)
 	return nil
-}
-
-func updateAvailableForCurrent(current string, latest updater.Version) bool {
-	currentVersion, err := updater.ParseVersion(current)
-	if err != nil {
-		return true
-	}
-	return updater.UpdateAvailable(currentVersion, latest)
 }
 
 func resolveUpdateToken(flagToken string) string {
@@ -212,18 +223,19 @@ func warnImageOverride(cmd *cobra.Command) {
 	}
 }
 
-func confirmUpdateIfNeeded(cmd *cobra.Command, opts *updateOptions, latest string) error {
+func confirmUpdateIfNeeded(cmd *cobra.Command, opts *updateOptions, latest, target, releaseURL, current string) error {
 	if opts.yes {
 		return nil
 	}
-	if !isTerminalInput(cmd.InOrStdin()) {
+	if !updateIsTerminalInput(cmd.InOrStdin()) {
 		return updateUserError(cmd, "non-interactive update requires --yes")
 	}
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Install spt %s? [y/N] ", latest)
-	var answer string
-	if _, err := fmt.Fscan(cmd.InOrStdin(), &answer); err != nil {
-		return err
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Update spt from %s to %s?\ntarget: %s\nrelease: %s\nProceed? [y/N] ", current, latest, target, releaseURL)
+	answer, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return updateUserError(cmd, "failed to read confirmation: %v", err)
 	}
+	answer = strings.TrimSpace(answer)
 	if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
 		return updateUserError(cmd, "update cancelled")
 	}
