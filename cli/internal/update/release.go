@@ -25,6 +25,10 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
+func (r Release) Version() (Version, error) {
+	return ParseTag(r.TagName)
+}
+
 func SelectLatestRelease(releases []Release, channel Channel) (Release, error) {
 	var best Release
 	found := false
