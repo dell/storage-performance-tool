@@ -330,6 +330,24 @@ These flags are available for all commands:
 - `--log-file string`: Specify log file path - default: "spt.log"
 - `--log-append`: Append to existing log file (default is to create new)
 
+#### `spt update`
+
+Checks GitHub Releases for newer SPT CLI binaries and can install a verified release binary.
+
+```bash
+spt update --check
+spt update --yes
+spt update --output /tmp/spt-release
+```
+
+Key behavior:
+
+- `--check` prints `current=<version> latest=<version> available=<true|false>` without downloading or writing files. Exit code `10` means a newer release is available; `0` means up to date.
+- Downloads are verified against the release `SHA256SUMS` file before any output file or running binary is replaced. This is integrity verification, not signed authenticity verification.
+- Local/dev builds (`dev`, `*-dev+<commit>`, `*-SNAPSHOT`) refuse running-binary self-update so local development binaries are not overwritten by a GitHub release. Use `--output <path>` to download a release binary separately.
+- `--pre` includes prerelease tags, `--timeout` controls GitHub requests, and `--token` can be used for GitHub API rate limits; prefer `SPT_GITHUB_TOKEN` or `GITHUB_TOKEN` over passing a token on the command line.
+- If `SPT_IMAGE` is set, self-update warns that engine runs will continue using that pinned image until the override is changed or removed.
+
 #### `spt run <type>`
 
 Executes a benchmark test with the specified workload type.

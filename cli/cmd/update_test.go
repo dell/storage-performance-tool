@@ -43,6 +43,30 @@ func TestUpdatePreRunDoesNotCreateDefaultLogFile(t *testing.T) {
 	}
 }
 
+func TestUpdatePreRunHonorsExplicitLogFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "update.log")
+	oldDebug, oldLevel, oldFile, oldAppend := debug, logLevel, logFile, logAppend
+	defer func() {
+		debug, logLevel, logFile, logAppend = oldDebug, oldLevel, oldFile, oldAppend
+	}()
+	debug = false
+	logLevel = "info"
+	logAppend = false
+
+	cmd := newUpdateCommand()
+	cmd.Flags().StringVar(&logFile, "log-file", "spt.log", "")
+	if err := cmd.Flags().Set("log-file", path); err != nil {
+		t.Fatalf("set log-file: %v", err)
+	}
+	if err := cmd.PersistentPreRunE(cmd, nil); err != nil {
+		t.Fatalf("update pre-run returned error: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("explicit log file was not created: %v", err)
+	}
+}
+
 func TestUpdateRejectsCheckWithOutput(t *testing.T) {
 	cmd := newUpdateCommand()
 	cmd.SetArgs([]string{"--check", "--output", filepath.Join(t.TempDir(), "spt")})
