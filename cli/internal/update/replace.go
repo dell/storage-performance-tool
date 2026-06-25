@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 )
 
+// ResolveExecutableTarget resolves symlinks for the current executable path.
 func ResolveExecutableTarget(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -14,6 +15,7 @@ func ResolveExecutableTarget(path string) (string, error) {
 	return resolved, nil
 }
 
+// VerifyReplaceAccess checks that target and its parent directory are writable.
 func VerifyReplaceAccess(target string) error {
 	info, err := os.Stat(target)
 	if err != nil {
@@ -43,6 +45,7 @@ func VerifyReplaceAccess(target string) error {
 	return removeErr
 }
 
+// ReplaceExecutable replaces target with data while preserving target permissions.
 func ReplaceExecutable(target string, data []byte) error {
 	info, err := os.Stat(target)
 	if err != nil {
@@ -58,6 +61,7 @@ func ReplaceExecutable(target string, data []byte) error {
 	return WriteFileAtomic(target, data, mode)
 }
 
+// WriteFileAtomic writes data to path through a same-directory temporary file.
 func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o755
@@ -103,6 +107,6 @@ func syncParentDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	return d.Sync()
 }

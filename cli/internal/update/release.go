@@ -2,13 +2,17 @@ package update
 
 import "fmt"
 
+// Channel selects which release channel should be considered for updates.
 type Channel int
 
 const (
+	// ChannelStable selects only stable release tags.
 	ChannelStable Channel = iota
+	// ChannelPrerelease selects stable and prerelease tags.
 	ChannelPrerelease
 )
 
+// Release is the GitHub release metadata used by update selection.
 type Release struct {
 	TagName    string  `json:"tag_name"`
 	Draft      bool    `json:"draft"`
@@ -18,6 +22,7 @@ type Release struct {
 	version    Version
 }
 
+// Asset is the GitHub release asset metadata used by the updater.
 type Asset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -25,10 +30,12 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
+// Version parses the release tag into a semantic version.
 func (r Release) Version() (Version, error) {
 	return ParseTag(r.TagName)
 }
 
+// SelectLatestRelease returns the highest-precedence release for channel.
 func SelectLatestRelease(releases []Release, channel Channel) (Release, error) {
 	var best Release
 	found := false

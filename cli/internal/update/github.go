@@ -14,12 +14,18 @@ import (
 )
 
 const (
+	// DefaultGitHubAPIBaseURL is the default GitHub REST API base URL.
 	DefaultGitHubAPIBaseURL = "https://api.github.com"
-	DefaultGitHubOwner      = "dell"
-	DefaultGitHubRepo       = "storage-performance-tool"
-	defaultMaxReleasePages  = 10
+	// DefaultGitHubOwner is the GitHub owner that publishes SPT releases.
+	DefaultGitHubOwner = "dell"
+	// DefaultGitHubRepo is the GitHub repository that publishes SPT releases.
+	DefaultGitHubRepo      = "storage-performance-tool"
+	githubAPIHost          = "api.github.com"
+	githubWebHost          = "github.com"
+	defaultMaxReleasePages = 10
 )
 
+// GitHubClient lists releases and downloads release assets from GitHub.
 type GitHubClient struct {
 	HTTPClient *http.Client
 	BaseURL    string
@@ -30,6 +36,7 @@ type GitHubClient struct {
 	MaxPages   int
 }
 
+// PageLimitError reports that GitHub release pagination exceeded the configured cap.
 type PageLimitError struct {
 	Limit int
 }
@@ -38,6 +45,7 @@ func (e *PageLimitError) Error() string {
 	return fmt.Sprintf("GitHub release pagination exceeded %d pages", e.Limit)
 }
 
+// NewGitHubClient returns a GitHub client with default SPT repository settings.
 func NewGitHubClient(timeout time.Duration, token string) GitHubClient {
 	return GitHubClient{
 		HTTPClient: &http.Client{Timeout: timeout},
@@ -48,6 +56,7 @@ func NewGitHubClient(timeout time.Duration, token string) GitHubClient {
 	}
 }
 
+// ListReleases returns all release pages needed for update selection.
 func (c GitHubClient) ListReleases(ctx context.Context) ([]Release, error) {
 	client := c.hardenedHTTPClient()
 	baseURL := strings.TrimRight(c.BaseURL, "/")
@@ -77,17 +86,17 @@ func (c GitHubClient) ListReleases(ctx context.Context) ([]Release, error) {
 			return nil, &PageLimitError{Limit: maxPages}
 		}
 		var releasePage []Release
-		resp, err := c.getJSON(ctx, client, pageURL, &releasePage)
+		headers, err := c.getJSON(ctx, client, pageURL, &releasePage)
 		if err != nil {
 			return nil, err
 		}
 		releases = append(releases, releasePage...)
-		pageURL = nextLink(resp.Header.Get("Link"))
+		pageURL = nextLink(headers.Get("Link"))
 	}
 	return releases, nil
 }
 
-func (c GitHubClient) getJSON(ctx context.Context, client *http.Client, rawURL string, out any) (*http.Response, error) {
+func (c GitHubClient) getJSON(ctx context.Context, client *http.Client, rawURL string, out any) (http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -102,7 +111,7 @@ func (c GitHubClient) getJSON(ctx context.Context, client *http.Client, rawURL s
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) && resp.Header.Get("X-RateLimit-Remaining") == "0" {
@@ -113,7 +122,7 @@ func (c GitHubClient) getJSON(ctx context.Context, client *http.Client, rawURL s
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return nil, err
 	}
-	return resp, nil
+	return resp.Header.Clone(), nil
 }
 
 func nextLink(linkHeader string) string {
@@ -135,6 +144,7 @@ func nextLink(linkHeader string) string {
 	return ""
 }
 
+// DownloadAsset downloads a release asset with size and transport checks.
 func (c GitHubClient) DownloadAsset(ctx context.Context, asset Asset) ([]byte, error) {
 	client := c.hardenedHTTPClient()
 	downloadURL := asset.BrowserDownloadURL
@@ -162,7 +172,7 @@ func (c GitHubClient) DownloadAsset(ctx context.Context, asset Asset) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("asset download failed: %s", resp.Status)
 	}
@@ -223,7 +233,7 @@ func validateGitHubURL(rawURL string) error {
 	if isLocalHTTP(u) {
 		return nil
 	}
-	if host := strings.ToLower(u.Hostname()); host != "api.github.com" {
+	if host := strings.ToLower(u.Hostname()); host != githubAPIHost {
 		return fmt.Errorf("refusing non-GitHub API host %q", host)
 	}
 	return nil
@@ -241,7 +251,7 @@ func validateAssetDownloadURL(rawURL string, authenticatedAPI bool) error {
 		return nil
 	}
 	host := strings.ToLower(u.Hostname())
-	if authenticatedAPI && host != "api.github.com" {
+	if authenticatedAPI && host != githubAPIHost {
 		return fmt.Errorf("refusing to send authenticated asset request to non-GitHub API host %q", host)
 	}
 	if !allowedGitHubAssetHost(host) {
@@ -267,7 +277,7 @@ func isLocalHTTP(u *url.URL) bool {
 }
 
 func allowedGitHubAssetHost(host string) bool {
-	return host == "api.github.com" || host == "github.com" || strings.HasSuffix(host, ".githubusercontent.com")
+	return host == githubAPIHost || host == githubWebHost || strings.HasSuffix(host, ".githubusercontent.com")
 }
 
 func sameHost(a, b *url.URL) bool {

@@ -70,6 +70,7 @@ It provides a user-friendly interface to execute various benchmark tests (e.g., 
 	},
 }
 
+// ExitCodeError carries a specific process exit code for command failures.
 type ExitCodeError struct {
 	Code int
 	Msg  string

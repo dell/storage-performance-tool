@@ -9,10 +9,13 @@ import (
 )
 
 const (
-	ChecksumAssetName       = "SHA256SUMS"
+	// ChecksumAssetName is the release asset containing SHA-256 digests.
+	ChecksumAssetName = "SHA256SUMS"
+	// MaxCompressedAssetBytes is the maximum release archive download size.
 	MaxCompressedAssetBytes = 100 * 1024 * 1024
 )
 
+// AssetNameForPlatform returns the expected release asset name for a platform.
 func AssetNameForPlatform(version, goos, goarch string) (string, error) {
 	suffix, ok := platformAssetSuffix(goos, goarch)
 	if !ok {
@@ -21,6 +24,7 @@ func AssetNameForPlatform(version, goos, goarch string) (string, error) {
 	return "spt-" + version + suffix, nil
 }
 
+// FindAsset finds a release asset by exact name.
 func FindAsset(assets []Asset, name string) (Asset, error) {
 	for _, asset := range assets {
 		if asset.Name == name {
@@ -30,6 +34,7 @@ func FindAsset(assets []Asset, name string) (Asset, error) {
 	return Asset{}, fmt.Errorf("release asset %q not found", name)
 }
 
+// FindChecksum returns the SHA-256 hex digest for assetName from SHA256SUMS data.
 func FindChecksum(contents []byte, assetName string) (string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(string(contents)))
 	var found string
@@ -66,6 +71,7 @@ func FindChecksum(contents []byte, assetName string) (string, error) {
 	return strings.ToLower(found), nil
 }
 
+// VerifyChecksum checks that data matches the expected SHA-256 digest.
 func VerifyChecksum(data []byte, wantHex string) error {
 	sum := sha256.Sum256(data)
 	got := hex.EncodeToString(sum[:])

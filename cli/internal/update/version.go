@@ -13,6 +13,7 @@ var (
 	devVersionRE = regexp.MustCompile(`(?:^dev$|-dev(?:[+.-]|$)|-SNAPSHOT$)`)
 )
 
+// Version is a parsed semantic version without build metadata.
 type Version struct {
 	major int
 	minor int
@@ -20,6 +21,7 @@ type Version struct {
 	pre   []string
 }
 
+// ParseVersion parses a semantic version string without a leading v prefix.
 func ParseVersion(s string) (Version, error) {
 	m := versionRE.FindStringSubmatch(s)
 	if m == nil {
@@ -43,6 +45,7 @@ func ParseVersion(s string) (Version, error) {
 	return v, nil
 }
 
+// ParseTag parses a GitHub release tag with the required leading v prefix.
 func ParseTag(tag string) (Version, error) {
 	if !strings.HasPrefix(tag, "v") {
 		return Version{}, fmt.Errorf("release tag %q does not start with v", tag)
@@ -58,10 +61,12 @@ func (v Version) String() string {
 	return base + "-" + strings.Join(v.pre, ".")
 }
 
+// IsPrerelease reports whether v has a prerelease suffix.
 func (v Version) IsPrerelease() bool {
 	return len(v.pre) > 0
 }
 
+// Compare compares v with other using semantic-version precedence.
 func (v Version) Compare(other Version) int {
 	if c := compareInt(v.major, other.major); c != 0 {
 		return c
@@ -75,6 +80,7 @@ func (v Version) Compare(other Version) int {
 	return comparePrerelease(v.pre, other.pre)
 }
 
+// CanSelfUpdateCurrentBuild reports whether a current version may replace itself.
 func CanSelfUpdateCurrentBuild(version string) (bool, string) {
 	if version == "" {
 		return false, "empty version"
@@ -88,7 +94,8 @@ func CanSelfUpdateCurrentBuild(version string) (bool, string) {
 	return true, ""
 }
 
-func UpdateAvailable(current, latest Version) bool {
+// Available reports whether latest has higher precedence than current.
+func Available(current, latest Version) bool {
 	return latest.Compare(current) > 0
 }
 

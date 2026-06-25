@@ -54,7 +54,7 @@ func TestSelectLatestReleaseSkipsPrereleaseFlagMismatch(t *testing.T) {
 	}
 }
 
-func TestUpdateAvailable(t *testing.T) {
+func TestAvailable(t *testing.T) {
 	tests := []struct {
 		current string
 		latest  string
@@ -71,8 +71,8 @@ func TestUpdateAvailable(t *testing.T) {
 		t.Run(tt.current+"_to_"+tt.latest, func(t *testing.T) {
 			current := mustParseVersion(t, tt.current)
 			latest := mustParseVersion(t, tt.latest)
-			if got := UpdateAvailable(current, latest); got != tt.want {
-				t.Fatalf("UpdateAvailable(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
+			if got := Available(current, latest); got != tt.want {
+				t.Fatalf("Available(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
 			}
 		})
 	}

@@ -120,7 +120,7 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 	}
 	current := updateCurrentVersion()
 	currentVersion, currentVersionErr := updater.ParseVersion(current)
-	available := currentVersionErr == nil && updater.UpdateAvailable(currentVersion, latestVersion)
+	available := currentVersionErr == nil && updater.Available(currentVersion, latestVersion)
 	if opts.check {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "current=%s latest=%s available=%t\n", current, latestVersion.String(), available)
 		if available {

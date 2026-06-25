@@ -1,3 +1,4 @@
+// Package update implements release discovery, download, verification, and replacement helpers.
 package update
 
 import (
@@ -10,8 +11,10 @@ import (
 	"strings"
 )
 
+// MaxDecompressedBinaryBytes is the maximum extracted CLI binary size.
 const MaxDecompressedBinaryBytes = 250 * 1024 * 1024
 
+// ExtractBinary extracts a single CLI binary from a supported release archive.
 func ExtractBinary(assetName string, archiveBytes []byte) ([]byte, error) {
 	return extractBinaryWithLimit(assetName, archiveBytes, MaxDecompressedBinaryBytes)
 }
@@ -32,7 +35,7 @@ func extractGzipBinary(archiveBytes []byte, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	return readBounded(zr, maxBytes)
 }
 
@@ -56,7 +59,7 @@ func extractZipBinary(assetName string, archiveBytes []byte, maxBytes int64) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	return readBounded(r, maxBytes)
 }
 
