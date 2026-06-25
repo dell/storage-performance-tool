@@ -91,15 +91,5 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	keepTemp = false
-	_ = syncParentDir(dir)
 	return nil
-}
-
-func syncParentDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = d.Close() }()
-	return d.Sync()
 }
