@@ -10,6 +10,7 @@ The command structure follows the `docker` CLI pattern (`command subcommand [opt
 - `spt replay`: Replay archived SPT or legacy Mongoose workload artifacts against a current S3 target.
 - `spt verify`: Validate nodes for distributed testing infrastructure readiness.
 - `spt status`: Inspect live readiness and metrics snapshots for running nodes.
+- `spt update`: Check for and install newer SPT CLI releases.
 - `spt results`: *(Stub — not yet implemented)* Manage past benchmark results.
 - `spt version`: Print build metadata (version, commit, build date).
 
@@ -911,6 +912,55 @@ Node status (port 9999)
 
 ---
 
+## Maintenance Command: `spt update`
+
+The `update` command checks GitHub Releases for newer SPT CLI binaries and can
+install a verified release binary. Release downloads are checked against the
+release `SHA256SUMS` file before any output file or running binary is replaced.
+This is integrity verification, not signed authenticity verification.
+
+### Syntax
+
+```bash
+spt update [--check] [--pre] [--yes] [--timeout 30s] [--output <path>] [--token <token>]
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--check` | `false` | Report current/latest CLI versions without downloading or writing files |
+| `--pre` | `false` | Include prerelease tags such as `-rc.1` when selecting the latest release |
+| `--yes`, `-y` | `false` | Skip the interactive confirmation prompt for self-replacement |
+| `--timeout` | `30s` | Network timeout for GitHub API and asset downloads |
+| `--output` | `""` | Write the release binary to an explicit path instead of replacing the running binary |
+| `--token` | `""` | GitHub token for rate limits/private assets; prefer `SPT_GITHUB_TOKEN` or `GITHUB_TOKEN` |
+
+### Exit Codes for `--check`
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Check succeeded and the CLI is already up to date |
+| `10` | Check succeeded and a newer release is available |
+| `1` | Check failed, for example due to network, rate-limit, parse, or unsupported-platform errors |
+
+`--check` prints one stable line, for example:
+
+```text
+current=5.10.4 latest=5.11.0 available=true
+```
+
+### Notes
+
+- Local/dev builds such as `dev`, `*-dev+<commit>`, and `*-SNAPSHOT` refuse running-binary self-update so local development binaries are not overwritten by a GitHub release.
+- Dev builds may still use `--output <path>` to download and verify a release binary without replacing themselves.
+- Windows running-binary self-update is disabled for now; use `--output <path>` to download a verified Windows release binary.
+- Before downloading assets for running-binary replacement, `spt update` verifies that the resolved target can be replaced and reports whether to re-run with elevated privileges or use `--output`.
+- If `SPT_IMAGE` is set, self-update warns that engine runs will continue using the pinned image until the override is changed or removed.
+- `--check` does not query GHCR and does not create or truncate the default `spt.log`; an explicitly supplied `--log-file` is still honored.
+
+---
+
 ## Implementation Status
 
 | Feature | Status |
@@ -922,6 +972,7 @@ Node status (port 9999)
 | `tables` workload (S3 Tables / Iceberg) | Implemented |
 | `verify` command | Implemented |
 | `status` command | Implemented |
+| `update` command | Implemented (`--output` only for Windows self-update) |
 | Post-test cleanup (`--cleanup`) | Implemented |
 | Auto-results retrieval | Implemented |
 | Save/reuse item lists (`--save-items` / `--items-file`) | Implemented |

@@ -3,6 +3,7 @@ package constants
 // Environment variable keys used by spt
 const (
 	EnvSptImage       = "SPT_IMAGE"
+	EnvSptGitHubToken = "SPT_GITHUB_TOKEN" // #nosec G101 -- env var name only
 	EnvHosts          = "HOSTS"
 	EnvS3Endpoint     = "S3_ENDPOINT"
 	EnvS3AccessKey    = "S3_ACCESS_KEY" // #nosec G101 -- env var names only

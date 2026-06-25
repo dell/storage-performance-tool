@@ -7,6 +7,7 @@ Copyright © 2025 Dell Technologies
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -69,13 +70,36 @@ It provides a user-friendly interface to execute various benchmark tests (e.g., 
 	},
 }
 
+// ExitCodeError carries a specific process exit code for command failures.
+type ExitCodeError struct {
+	Code int
+	Msg  string
+}
+
+func (e *ExitCodeError) Error() string {
+	return e.Msg
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
-		os.Exit(1)
+	os.Exit(executeRoot())
+}
+
+func executeRoot() int {
+	return executeCommandCode(rootCmd)
+}
+
+func executeCommandCode(cmd *cobra.Command) int {
+	err := cmd.Execute()
+	if err == nil {
+		return 0
 	}
+	var exitErr *ExitCodeError
+	if errors.As(err, &exitErr) {
+		return exitErr.Code
+	}
+	return 1
 }
 
 // initializeLogger sets up the slog logger based on command-line flags

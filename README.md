@@ -39,6 +39,9 @@ Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [
 gunzip spt-*-linux-amd64.gz
 chmod +x spt-*-linux-amd64
 mv spt-*-linux-amd64 spt
+
+# Later, check for CLI updates
+./spt update --check
 ```
 
 ### Prerequisites
