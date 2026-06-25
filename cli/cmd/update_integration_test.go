@@ -156,7 +156,7 @@ func withUpdateCommandTestHooks(t *testing.T, currentVersion string, fn func(*ht
 	updateRuntimeGOOS = func() string { return "linux" }
 	updateRuntimeGOARCH = func() string { return "amd64" }
 	updateNewGitHubClient = func(timeout time.Duration, token string) updater.GitHubClient {
-		return updater.GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: updater.DefaultGitHubOwner, Repo: updater.DefaultGitHubRepo, Token: token}
+		return updater.GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: updater.DefaultGitHubOwner, Repo: updater.DefaultGitHubRepo, Token: token, AllowInsecureLocalHTTP: true}
 	}
 	defer func() {
 		updateCurrentVersion = oldVersion

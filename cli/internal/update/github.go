@@ -27,13 +27,14 @@ const (
 
 // GitHubClient lists releases and downloads release assets from GitHub.
 type GitHubClient struct {
-	HTTPClient *http.Client
-	BaseURL    string
-	Owner      string
-	Repo       string
-	Token      string
-	UserAgent  string
-	MaxPages   int
+	HTTPClient             *http.Client
+	BaseURL                string
+	Owner                  string
+	Repo                   string
+	Token                  string
+	UserAgent              string
+	MaxPages               int
+	AllowInsecureLocalHTTP bool
 }
 
 // PageLimitError reports that GitHub release pagination exceeded the configured cap.
@@ -53,6 +54,7 @@ func NewGitHubClient(timeout time.Duration, token string) GitHubClient {
 		Owner:      DefaultGitHubOwner,
 		Repo:       DefaultGitHubRepo,
 		Token:      token,
+		UserAgent:  "spt/unknown",
 	}
 }
 
@@ -63,7 +65,7 @@ func (c GitHubClient) ListReleases(ctx context.Context) ([]Release, error) {
 	if baseURL == "" {
 		baseURL = DefaultGitHubAPIBaseURL
 	}
-	if err := validateGitHubURL(baseURL); err != nil {
+	if err := validateGitHubURL(baseURL, c.AllowInsecureLocalHTTP); err != nil {
 		return nil, err
 	}
 	owner := c.Owner
@@ -156,7 +158,7 @@ func (c GitHubClient) DownloadAsset(ctx context.Context, asset Asset) ([]byte, e
 	if downloadURL == "" {
 		return nil, fmt.Errorf("asset %q has no download URL", asset.Name)
 	}
-	if err := validateAssetDownloadURL(downloadURL, usingAssetAPI); err != nil {
+	if err := validateAssetDownloadURL(downloadURL, usingAssetAPI, c.AllowInsecureLocalHTTP); err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
@@ -198,7 +200,7 @@ func (c GitHubClient) hardenedHTTPClient() *http.Client {
 	clone := *base
 	previous := base.CheckRedirect
 	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if err := validateAssetDownloadURL(req.URL.String(), false); err != nil {
+		if err := validateAssetDownloadURL(req.URL.String(), false, c.AllowInsecureLocalHTTP); err != nil {
 			return err
 		}
 		if len(via) > 0 && !sameHost(via[len(via)-1].URL, req.URL) {
@@ -222,15 +224,15 @@ func (c GitHubClient) userAgent() string {
 	return "spt/unknown"
 }
 
-func validateGitHubURL(rawURL string) error {
+func validateGitHubURL(rawURL string, allowInsecureLocalHTTP bool) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return err
 	}
-	if !secureURL(u) {
+	if !secureURL(u, allowInsecureLocalHTTP) {
 		return fmt.Errorf("refusing non-HTTPS GitHub URL %q", rawURL)
 	}
-	if isLocalHTTP(u) {
+	if allowInsecureLocalHTTP && isLocalHTTP(u) {
 		return nil
 	}
 	if host := strings.ToLower(u.Hostname()); host != githubAPIHost {
@@ -239,15 +241,15 @@ func validateGitHubURL(rawURL string) error {
 	return nil
 }
 
-func validateAssetDownloadURL(rawURL string, authenticatedAPI bool) error {
+func validateAssetDownloadURL(rawURL string, authenticatedAPI, allowInsecureLocalHTTP bool) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return err
 	}
-	if !secureURL(u) {
+	if !secureURL(u, allowInsecureLocalHTTP) {
 		return fmt.Errorf("refusing non-HTTPS asset URL %q", rawURL)
 	}
-	if isLocalHTTP(u) {
+	if allowInsecureLocalHTTP && isLocalHTTP(u) {
 		return nil
 	}
 	host := strings.ToLower(u.Hostname())
@@ -260,8 +262,8 @@ func validateAssetDownloadURL(rawURL string, authenticatedAPI bool) error {
 	return nil
 }
 
-func secureURL(u *url.URL) bool {
-	return u.Scheme == "https" || isLocalHTTP(u)
+func secureURL(u *url.URL, allowInsecureLocalHTTP bool) bool {
+	return u.Scheme == "https" || (allowInsecureLocalHTTP && isLocalHTTP(u))
 }
 
 func isLocalHTTP(u *url.URL) bool {

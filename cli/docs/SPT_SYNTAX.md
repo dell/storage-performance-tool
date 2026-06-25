@@ -972,7 +972,7 @@ current=5.10.4 latest=5.11.0 available=true
 | `tables` workload (S3 Tables / Iceberg) | Implemented |
 | `verify` command | Implemented |
 | `status` command | Implemented |
-| `update` command | Implemented |
+| `update` command | Implemented (`--output` only for Windows self-update) |
 | Post-test cleanup (`--cleanup`) | Implemented |
 | Auto-results retrieval | Implemented |
 | Save/reuse item lists (`--save-items` / `--items-file`) | Implemented |

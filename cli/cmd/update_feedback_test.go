@@ -42,6 +42,22 @@ func TestUpdateCheckDoesNotRequirePlatformAsset(t *testing.T) {
 	})
 }
 
+func TestUpdateCheckUnsupportedPlatformFails(t *testing.T) {
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "5.10.4", goos: "linux", goarch: "386"}, func(_ *customUpdateServer) {
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--check"})
+		var errOut bytes.Buffer
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("Execute() accepted unsupported check platform")
+		}
+		if !strings.Contains(errOut.String(), "unsupported platform linux/386") {
+			t.Fatalf("stderr = %q", errOut.String())
+		}
+	})
+}
+
 func TestUpdateCheckDevBuildReportsAvailableFalse(t *testing.T) {
 	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "dev"}, func(_ *customUpdateServer) {
 		cmd := newUpdateCommand()
@@ -263,7 +279,7 @@ func withCustomUpdateServer(t *testing.T, opts customUpdateServerOptions, fn fun
 		return "amd64"
 	}
 	updateNewGitHubClient = func(timeout time.Duration, token string) updater.GitHubClient {
-		return updater.GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: updater.DefaultGitHubOwner, Repo: updater.DefaultGitHubRepo, Token: token, UserAgent: "spt/test"}
+		return updater.GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: updater.DefaultGitHubOwner, Repo: updater.DefaultGitHubRepo, Token: token, UserAgent: "spt/test", AllowInsecureLocalHTTP: true}
 	}
 	updateVerifyReplaceAccess = func(string) error { return nil }
 	defer func() {

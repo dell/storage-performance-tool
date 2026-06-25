@@ -30,7 +30,7 @@ func TestGitHubClientListReleasesPaginates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool"}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", AllowInsecureLocalHTTP: true}
 	releases, err := client.ListReleases(context.Background())
 	if err != nil {
 		t.Fatalf("ListReleases returned error: %v", err)
@@ -52,7 +52,7 @@ func TestGitHubClientListReleasesUsesToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", Token: "test-token"}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", Token: "test-token", AllowInsecureLocalHTTP: true}
 	if _, err := client.ListReleases(context.Background()); err != nil {
 		t.Fatalf("ListReleases returned error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestGitHubClientListReleasesRateLimitError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool"}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", AllowInsecureLocalHTTP: true}
 	if _, err := client.ListReleases(context.Background()); err == nil {
 		t.Fatal("ListReleases accepted rate-limit response")
 	}

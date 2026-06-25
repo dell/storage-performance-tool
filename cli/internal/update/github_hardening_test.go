@@ -18,7 +18,7 @@ func TestGitHubClientSetsUserAgent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", UserAgent: "spt/5.10.4"}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", UserAgent: "spt/5.10.4", AllowInsecureLocalHTTP: true}
 	if _, err := client.ListReleases(context.Background()); err != nil {
 		t.Fatalf("ListReleases returned error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestGitHubClientRateLimitErrorIsActionable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool"}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", AllowInsecureLocalHTTP: true}
 	_, err := client.ListReleases(context.Background())
 	if err == nil {
 		t.Fatal("ListReleases accepted rate-limit response")
@@ -75,7 +75,7 @@ func TestGitHubClientPageCap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", MaxPages: 1}
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", MaxPages: 1, AllowInsecureLocalHTTP: true}
 	_, err := client.ListReleases(context.Background())
 	if err == nil {
 		t.Fatal("ListReleases followed pagination beyond cap")

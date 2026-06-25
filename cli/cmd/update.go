@@ -118,6 +118,10 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 	if err != nil {
 		return updateUserError(cmd, "failed to parse latest release tag %q: %v", latest.TagName, err)
 	}
+	assetName, err := updater.AssetNameForPlatform(latestVersion.String(), updateRuntimeGOOS(), updateRuntimeGOARCH())
+	if err != nil {
+		return updateUserError(cmd, "%v", err)
+	}
 	current := updateCurrentVersion()
 	currentVersion, currentVersionErr := updater.ParseVersion(current)
 	available := currentVersionErr == nil && updater.Available(currentVersion, latestVersion)
@@ -161,10 +165,6 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 		return nil
 	}
 
-	assetName, err := updater.AssetNameForPlatform(latestVersion.String(), updateRuntimeGOOS(), updateRuntimeGOARCH())
-	if err != nil {
-		return updateUserError(cmd, "%v", err)
-	}
 	asset, err := updater.FindAsset(latest.Assets, assetName)
 	if err != nil {
 		return updateUserError(cmd, "%v", err)

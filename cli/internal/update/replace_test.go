@@ -29,6 +29,20 @@ func TestWriteFileAtomicCreatesOutput(t *testing.T) {
 	}
 }
 
+func TestVerifyReplaceAccessAllowsReadOnlyTargetInWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission model test")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spt")
+	if err := os.WriteFile(path, []byte("old"), 0o444); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := VerifyReplaceAccess(path); err != nil {
+		t.Fatalf("VerifyReplaceAccess returned error: %v", err)
+	}
+}
+
 func TestReplaceExecutablePreservesExistingMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode preservation is Unix-specific")

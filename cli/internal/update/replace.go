@@ -15,7 +15,7 @@ func ResolveExecutableTarget(path string) (string, error) {
 	return resolved, nil
 }
 
-// VerifyReplaceAccess checks that target and its parent directory are writable.
+// VerifyReplaceAccess checks that target is a file and its parent directory is writable.
 func VerifyReplaceAccess(target string) error {
 	info, err := os.Stat(target)
 	if err != nil {
@@ -23,13 +23,6 @@ func VerifyReplaceAccess(target string) error {
 	}
 	if info.IsDir() {
 		return fmt.Errorf("target %q is a directory", target)
-	}
-	f, err := os.OpenFile(target, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
 	}
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".spt-access-*")
