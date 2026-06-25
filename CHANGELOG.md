@@ -6,15 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.11.0] - 2026-06-25
+
 ### Added
 
+- **Archived workload replay** — added `spt replay --from <archive-folder-url>` to import archived SPT or legacy Mongoose workload artifacts, convert archived JSON or JavaScript scenarios, sanitize credentials, remap target environments, apply supported safe file-preparation transforms, generate equivalent S3 workloads, and launch single-host, remote-host, or distributed replay runs with trace capture and auto-results.
+- **Linux arm64 CLI release binaries** — official GitHub releases now publish `spt-<version>-linux-arm64.gz` alongside the existing CLI assets, with checksum coverage for every packaged CLI binary.
 - **SPT CLI self-update command** — added `spt update` for checking GitHub Releases and installing verified CLI release binaries. The command supports lightweight `--check` probes with distinct exit codes, prerelease selection, `--output` downloads, checksum verification, archive hardening, pre-download replace-access checks, and hardened GitHub transport. Windows running-binary replacement is intentionally disabled for now; use `--output` to download a verified Windows binary.
-- **Replay archived workloads documentation** — added public user documentation for `spt replay`, including source archive requirements, environment remapping behavior, supported safe file-preparation transformations, generate-only inspection, distributed replay guidance, limitations, and troubleshooting.
 - **READ/LIST TTFB reporting** — Time to First Byte is now tracked for body-returning READ and LIST operations, including local filesystem reads and AWS SDK S3 LIST responses. Live/headless metrics and final summaries report TTFB only when samples are available, avoiding misleading mixed-workload or non-body-operation TTFB values.
 
 ### Changed
 
-- **Dependency updates** — refreshed Go indirect modules and JVM dependencies for the 5.11.0 release prep, including Jackson Core/Databind/YAML 2.22.0 with Jackson Annotations 2.22, AWS SDK 2.46.17, AWS CRT 0.47.1, Bouncy Castle 1.84, JUnit Jupiter 5.14.4, SnakeYAML 2.6, commons-codec 1.22.0, Javassist 3.32.0-GA, hadoop-shaded-guava 1.5.0, and stax2-api 4.3.0.
+- **Mixed workload reporting** — mixed runs now render per-operation breakdowns in console/TUI final summaries, correct mixed interval/total CSV row shapes, suppress false artifact-health warnings when seed steps intentionally skip summary persistence, and emit final auto-results summaries after shutdown completes.
+- **Release artifact gating** — GitHub release publication now waits for the published multi-architecture engine image before attaching release artifacts, and prerelease Docker tag validation now handles prerelease tags correctly.
+- **Dependency updates** — refreshed Go indirect modules, GitHub Actions dependencies, and JVM dependencies for the 5.11.0 release prep, including Jackson Core/Databind/YAML 2.22.0 with Jackson Annotations 2.22, AWS SDK 2.46.17, AWS CRT 0.47.1, Bouncy Castle 1.84, JUnit Jupiter 5.14.4, SnakeYAML 2.6, commons-codec 1.22.0, Javassist 3.32.0-GA, hadoop-shaded-guava 1.5.0, and stax2-api 4.3.0.
 
 ## [5.10.4] - 2026-06-01
 
