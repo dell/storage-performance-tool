@@ -122,7 +122,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             # Exact version tag: v5.0.2
-            type=semver,pattern=v{{version}},value=${{ needs.prepare.outputs.version }}
+            type=raw,value=v${{ needs.prepare.outputs.version }}
             # Floating minor tag: v5.0 (only for stable releases)
             type=semver,pattern=v{{major}}.{{minor}},value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.is_prerelease == 'false' }}
             # Floating major tag: v5 (only for stable releases)
