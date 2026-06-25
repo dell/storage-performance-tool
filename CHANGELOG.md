@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- **SPT CLI self-update command** — added `spt update` for checking GitHub Releases and installing verified CLI release binaries. The command supports lightweight `--check` probes with distinct exit codes, prerelease selection, `--output` downloads, checksum verification, archive hardening, pre-download replace-access checks, and hardened GitHub transport. Windows running-binary replacement is intentionally disabled for now; use `--output` to download a verified Windows binary.
 - **Replay archived workloads documentation** — added public user documentation for `spt replay`, including source archive requirements, environment remapping behavior, supported safe file-preparation transformations, generate-only inspection, distributed replay guidance, limitations, and troubleshooting.
 - **READ/LIST TTFB reporting** — Time to First Byte is now tracked for body-returning READ and LIST operations, including local filesystem reads and AWS SDK S3 LIST responses. Live/headless metrics and final summaries report TTFB only when samples are available, avoiding misleading mixed-workload or non-body-operation TTFB values.
 
