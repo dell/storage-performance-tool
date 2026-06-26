@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.11.1] - 2026-06-26
+
 ### Added
 
 - **Bounded read-phase shuffle controls** — `spt run read` now supports `--shuffle` and `--shuffle-batch-size` to widen read randomness within the `ReadLoad` phase without globally exposing unbounded `load.batch.size`. The batch override is read-only, defaults to a bounded window when omitted, and is capped to avoid pathological buffer growth.
