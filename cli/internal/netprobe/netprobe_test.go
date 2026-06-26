@@ -36,6 +36,10 @@ func (m *mockExec) set(cmd string, out, errStr string, err error) {
 	}{out, errStr, err}
 }
 
+func (m *mockExec) CopyFile(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
 func (m *mockExec) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, cmd []string) (string, string, error) {
 	key := strings.Join(cmd, " ")
 	m.calls = append(m.calls, key)

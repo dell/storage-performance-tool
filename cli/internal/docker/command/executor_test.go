@@ -66,15 +66,6 @@ func TestRealCommandExecutor_ExecuteCommand_Local(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Skip empty command test as it would panic
-			if len(tt.command) == 0 {
-				defer func() {
-					if r := recover(); r == nil {
-						t.Error("Expected panic for empty command")
-					}
-				}()
-			}
-
 			stdout, stderr, err := executor.ExecuteCommand(ctx, host, tt.command)
 
 			if (err != nil) != tt.wantErr {

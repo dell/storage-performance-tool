@@ -43,6 +43,7 @@ type ContainerConfig struct {
 	Devices      []string          // Host devices to pass through (--device flags)
 	CapAdd       []string          // Linux capabilities to add (--cap-add flags)
 	Ulimits      []string          // Resource limits (--ulimit flags, e.g. "memlock=-1:-1")
+	BindMounts   []string          // Docker bind specs, e.g. host:container:ro
 }
 
 // PortMapping represents a Docker port mapping

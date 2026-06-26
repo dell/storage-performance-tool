@@ -21,6 +21,7 @@ type MockCommandExecutor struct {
 
 	// ExecutedCommands tracks what commands were executed
 	ExecutedCommands []ExecutedCommand
+	CopiedFiles      []CopiedFile
 
 	// FailureMode simulates specific failures
 	FailureMode string
@@ -42,6 +43,13 @@ type ExecutedCommand struct {
 	Host    *hostparse.HostInfo
 	Command []string
 	Context context.Context
+}
+
+// CopiedFile tracks file copy operations.
+type CopiedFile struct {
+	Host       *hostparse.HostInfo
+	LocalPath  string
+	RemotePath string
 }
 
 // NewMockCommandExecutor creates a new MockCommandExecutor
@@ -100,6 +108,15 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 
 	// Return default response
 	return m.DefaultResponse.Stdout, m.DefaultResponse.Stderr, m.DefaultResponse.Error
+}
+
+// CopyFile simulates copying a local file to a host.
+func (m *MockCommandExecutor) CopyFile(_ context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
+	m.CopiedFiles = append(m.CopiedFiles, CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath})
+	if m.FailureMode == "copy_failure" {
+		return fmt.Errorf("copy failed")
+	}
+	return nil
 }
 
 // SetCommandResponse sets the response for a specific command

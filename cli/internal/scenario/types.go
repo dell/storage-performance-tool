@@ -29,6 +29,9 @@ type Params struct {
 	SeedCount int    // Number of seed objects for read benchmark (default: 2500)
 	ItemsFile string // Path to a local items.csv for read workload (skips seed phase)
 
+	// External item files bind-mounted into the engine container.
+	ItemFileMounts []FileMount
+
 	// Write workload
 	SaveItems bool // Save items.csv to the step log directory for later retrieval
 

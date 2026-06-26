@@ -715,6 +715,10 @@ type FlexibleMockCommandExecutor struct {
 	ExecutedCommands []MockCommandExecution
 }
 
+func (m *FlexibleMockCommandExecutor) CopyFile(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
 func (m *FlexibleMockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {
 	// Record the execution
 	m.ExecutedCommands = append(m.ExecutedCommands, MockCommandExecution{
@@ -748,6 +752,10 @@ type cleanupOnFailureExecutor struct {
 	ExecutedCommands []MockCommandExecution
 	cleanupCalls     int
 	cleanupTarget    string
+}
+
+func (m *cleanupOnFailureExecutor) CopyFile(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
 }
 
 func (m *cleanupOnFailureExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {

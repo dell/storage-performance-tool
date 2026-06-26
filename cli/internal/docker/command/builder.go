@@ -88,6 +88,10 @@ func (b *DockerCommandBuilderImpl) BuildRunCommand(config ContainerConfig) []str
 		dockerArgs = append(dockerArgs, "--ulimit", ulimit)
 	}
 
+	for _, bind := range config.BindMounts {
+		dockerArgs = append(dockerArgs, "-v", bind)
+	}
+
 	// Add image
 	dockerArgs = append(dockerArgs, config.Image)
 

@@ -21,6 +21,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -68,6 +69,7 @@ type DockerManager struct {
 	hostInfo    *hostparse.HostInfo  // New field to track host information
 	remote      *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
 	nodeLogDir  string               // Host-side temp dir mounted for node startup diagnostics
+	fileMounts  []scenario.FileMount
 }
 
 func skipImagePull(image string) bool {
@@ -92,6 +94,26 @@ func (dm *DockerManager) ContainerID() string {
 		return dm.remote.ContainerID()
 	}
 	return dm.containerID
+}
+
+// SetFileMounts configures read-only external files that must be visible inside SPT containers.
+func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
+	if dm.remote != nil {
+		return dm.remote.SetFileMounts(mounts)
+	}
+	dm.fileMounts = append([]scenario.FileMount(nil), mounts...)
+	return nil
+}
+
+func (dm *DockerManager) itemFileBindSpecs() []string {
+	if len(dm.fileMounts) == 0 {
+		return nil
+	}
+	binds := make([]string, 0, len(dm.fileMounts))
+	for _, mount := range dm.fileMounts {
+		binds = append(binds, fmt.Sprintf("%s:%s:ro", mount.HostPath, mount.ContainerPath))
+	}
+	return binds
 }
 
 // HostInfo returns the host information for this Docker manager
@@ -356,9 +378,9 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 		AttachStderr: true,
 		Env:          envVars,
 	}, &container.HostConfig{
-		Binds: []string{
+		Binds: append([]string{
 			fmt.Sprintf("%s:/tmp/scenario.js:ro", absScenarioPath),
-		},
+		}, dm.itemFileBindSpecs()...),
 	}, nil, nil, "")
 
 	if err != nil {
@@ -426,7 +448,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 
 	useHostNetwork := selectedNodeNetworkMode(networkMode) == command.NetworkModeHost
 	hostConfig := &container.HostConfig{
-		Binds: logBinds,
+		Binds: append(logBinds, dm.itemFileBindSpecs()...),
 	}
 	if useHostNetwork {
 		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
@@ -567,6 +589,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 
 	hostConfig := &container.HostConfig{
 		PortBindings: portBindings,
+		Binds:        dm.itemFileBindSpecs(),
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -655,7 +678,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 		}
 	}
 
-	hostConfig := &container.HostConfig{}
+	hostConfig := &container.HostConfig{Binds: dm.itemFileBindSpecs()}
 	if useHostNetwork {
 		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
 	} else {

@@ -38,6 +38,7 @@ const (
 // SSH connection constants
 const (
 	SSHCommand        = "ssh"
+	SCPCommand        = "scp"
 	SSHConnectTimeout = "ConnectTimeout=10"
 	SSHBatchMode      = "BatchMode=yes"
 )
@@ -108,6 +109,13 @@ const (
 // REST API endpoint constants
 const (
 	SptMetricsEndpoint = "/metrics/json"
+)
+
+// Engine log artifact constants
+const (
+	// EngineLogArtifactPageSize mirrors LogServlet.LOG_PAGE_SIZE_LIMIT.
+	EngineLogArtifactPageSize      = 1024 * 1024
+	EnginePlainLogArtifactMaxBytes = EngineLogArtifactPageSize - 1
 )
 
 // Progress indicator constants

@@ -65,6 +65,21 @@ type containerDiagnosticTailer interface {
 	ContainerDiagnosticTail(containerID string, maxLines int) (string, error)
 }
 
+type fileMountConfigurer interface {
+	SetFileMounts([]scenario.FileMount) error
+}
+
+func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	configurer, ok := dm.(fileMountConfigurer)
+	if !ok {
+		return fmt.Errorf("docker manager does not support external item file mounts")
+	}
+	return configurer.SetFileMounts(mounts)
+}
+
 // NewTestOrchestrator creates a new test orchestrator
 func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
 	if apiPort == "" {
@@ -125,6 +140,12 @@ func (o *TestOrchestrator) containerStartupDiagnostics() string {
 
 // StartTest starts a Spt test using the API approach
 func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params scenario.Params) error {
+	var err error
+	params, err = scenario.PrepareExternalItemFiles(params)
+	if err != nil {
+		return err
+	}
+
 	// Generate scenario
 	scenarioContent, err := scenario.GenerateScenario(params)
 	if err != nil {
@@ -158,6 +179,10 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 			o.keepScenario = true
 			logging.LogInfo("orchestrator", "saved scenario file", "path", o.scenarioPath)
 		}
+	}
+
+	if err := configureDockerFileMounts(o.dockerManager, params.ItemFileMounts); err != nil {
+		return err
 	}
 
 	// Start container in node mode
