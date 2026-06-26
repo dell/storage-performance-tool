@@ -1,6 +1,7 @@
 package results
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,7 +19,10 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
-const fileStatusMissing = "missing"
+const (
+	fileStatusMissing   = "missing"
+	logArtifactPageSize = 1024 * 1024
+)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -211,7 +215,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		}
 		idxItem := indexMap[selected]
 		outPath := filepath.Join(f.OutputDir, name)
-		size, err := f.downloadOne(ctx, stepID, selected, outPath)
+		size, err := f.downloadOne(ctx, stepID, selected, outPath, idxItem.Size)
 		if err != nil {
 			status := fileStatusMissing
 			if !errors.Is(err, errNotFound) {
@@ -294,17 +298,23 @@ func normalizeResultXML(filePath, rootTag string) int64 {
 	return int64(len(out))
 }
 
-func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath string) (int64, error) {
+func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath string, expectedSize int64) (int64, error) {
 	u, err := url.Parse(f.BaseURL)
 	if err != nil {
 		return 0, fmt.Errorf("parse base url: %w", err)
 	}
 	u.Path = path.Join(u.Path, "/logs/", stepID, logger)
+	if expectedSize > logArtifactPageSize {
+		return f.downloadOneRanged(ctx, u.String(), outPath, expectedSize)
+	}
+	return f.downloadOnePlain(ctx, u.String(), outPath, expectedSize)
+}
 
+func (f *Fetcher) downloadOnePlain(ctx context.Context, url, outPath string, _ int64) (int64, error) {
 	var lastErr error
 	var bytesWritten int64
 	for attempt := 0; attempt < max(1, f.Retries); attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return 0, fmt.Errorf("new request: %w", err)
 		}
@@ -316,67 +326,161 @@ func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath strin
 				defer func() { _ = resp.Body.Close() }()
 				switch resp.StatusCode {
 				case http.StatusOK:
-					// Write to temp then rename
-					tmpDir := filepath.Dir(outPath)
-					if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-						lastErr = fmt.Errorf("mkdir: %w", err)
-						return
-					}
-					tmp, err := os.CreateTemp(tmpDir, ".part-*")
+					n, err := writeResponseToFile(resp.Body, outPath)
 					if err != nil {
-						lastErr = fmt.Errorf("create temp: %w", err)
+						lastErr = err
 						return
 					}
-					n, copyErr := io.Copy(tmp, resp.Body)
-					if closeErr := tmp.Close(); closeErr != nil && copyErr == nil {
-						copyErr = closeErr
-					}
-					if copyErr != nil {
-						_ = os.Remove(tmp.Name())
-						lastErr = fmt.Errorf("write file: %w", copyErr)
-						return
-					}
-					if err := os.Rename(tmp.Name(), outPath); err != nil {
-						_ = os.Remove(tmp.Name())
-						lastErr = fmt.Errorf("rename file: %w", err)
-						return
-					}
-					// success
 					lastErr = nil
 					bytesWritten = n
-					return
 				case http.StatusNotFound:
 					lastErr = errNotFound
 				default:
-					b, _ := io.ReadAll(resp.Body)
-					if len(b) > 0 {
-						lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
-					} else {
-						lastErr = fmt.Errorf("status %d", resp.StatusCode)
-					}
+					lastErr = responseStatusError(resp)
 				}
 			}()
 		}
-
 		if lastErr == nil {
 			return bytesWritten, nil
 		}
-
-		// Stop retrying on 404
 		if errors.Is(lastErr, errNotFound) {
 			break
 		}
-		// Delay before next attempt unless last attempt
-		if attempt < f.Retries-1 && f.RetryDelay > 0 && f.Sleeper != nil {
-			f.Sleeper(f.RetryDelay)
-		}
+		f.sleepBeforeRetry(attempt)
 	}
-
 	if lastErr == nil {
-		// Shouldn't happen; treat as error
 		return 0, fmt.Errorf("unknown download state")
 	}
 	return 0, lastErr
+}
+
+func (f *Fetcher) downloadOneRanged(ctx context.Context, url, outPath string, expectedSize int64) (int64, error) {
+	tmpDir := filepath.Dir(outPath)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return 0, fmt.Errorf("mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, ".part-*")
+	if err != nil {
+		return 0, fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	var bytesWritten int64
+	defer func() { _ = os.Remove(tmpName) }()
+	for start := int64(0); start < expectedSize; start += logArtifactPageSize {
+		end := min(start+logArtifactPageSize-1, expectedSize-1)
+		n, err := f.downloadRangeChunk(ctx, url, tmp, start, end)
+		if err != nil {
+			_ = tmp.Close()
+			return 0, err
+		}
+		want := end - start + 1
+		if n != want {
+			_ = tmp.Close()
+			return 0, fmt.Errorf("range %d-%d returned %d bytes, want %d", start, end, n, want)
+		}
+		bytesWritten += n
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, fmt.Errorf("close temp: %w", err)
+	}
+	if bytesWritten != expectedSize {
+		return 0, fmt.Errorf("downloaded size %d does not match index size %d", bytesWritten, expectedSize)
+	}
+	if err := os.Rename(tmpName, outPath); err != nil {
+		return 0, fmt.Errorf("rename file: %w", err)
+	}
+	return bytesWritten, nil
+}
+
+func (f *Fetcher) downloadRangeChunk(ctx context.Context, url string, out io.Writer, start, end int64) (int64, error) {
+	var lastErr error
+	var bytesWritten int64
+	for attempt := 0; attempt < max(1, f.Retries); attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return 0, fmt.Errorf("new request: %w", err)
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		resp, err := f.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			func() {
+				defer func() { _ = resp.Body.Close() }()
+				switch resp.StatusCode {
+				case http.StatusOK, http.StatusPartialContent:
+					var buf bytes.Buffer
+					bytesWritten, lastErr = io.Copy(&buf, resp.Body)
+					if lastErr != nil {
+						lastErr = fmt.Errorf("read range %d-%d: %w", start, end, lastErr)
+						return
+					}
+					n, err := out.Write(buf.Bytes())
+					if err != nil {
+						lastErr = fmt.Errorf("write range %d-%d: %w", start, end, err)
+						return
+					}
+					if int64(n) != bytesWritten {
+						lastErr = fmt.Errorf("write range %d-%d: %w", start, end, io.ErrShortWrite)
+					}
+				case http.StatusNotFound:
+					lastErr = errNotFound
+				default:
+					lastErr = responseStatusError(resp)
+				}
+			}()
+		}
+		if lastErr == nil {
+			return bytesWritten, nil
+		}
+		if errors.Is(lastErr, errNotFound) {
+			break
+		}
+		f.sleepBeforeRetry(attempt)
+	}
+	if lastErr == nil {
+		return 0, fmt.Errorf("unknown range download state")
+	}
+	return 0, lastErr
+}
+
+func (f *Fetcher) sleepBeforeRetry(attempt int) {
+	if attempt < f.Retries-1 && f.RetryDelay > 0 && f.Sleeper != nil {
+		f.Sleeper(f.RetryDelay)
+	}
+}
+
+func writeResponseToFile(body io.Reader, outPath string) (int64, error) {
+	tmpDir := filepath.Dir(outPath)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return 0, fmt.Errorf("mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, ".part-*")
+	if err != nil {
+		return 0, fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	n, copyErr := io.Copy(tmp, body)
+	if closeErr := tmp.Close(); closeErr != nil && copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		_ = os.Remove(tmpName)
+		return 0, fmt.Errorf("write file: %w", copyErr)
+	}
+	if err := os.Rename(tmpName, outPath); err != nil {
+		_ = os.Remove(tmpName)
+		return 0, fmt.Errorf("rename file: %w", err)
+	}
+	return n, nil
+}
+
+func responseStatusError(resp *http.Response) error {
+	b, _ := io.ReadAll(resp.Body)
+	if len(b) > 0 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
+	}
+	return fmt.Errorf("status %d", resp.StatusCode)
 }
 
 // stepIndexItem represents one item in /logs/<stepId>/index.json
