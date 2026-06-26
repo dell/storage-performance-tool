@@ -7,6 +7,7 @@ package command
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -19,6 +20,9 @@ type Executor interface {
 	// ExecuteCommand executes a command on the given host (local or remote via SSH)
 	// Returns stdout, stderr, and error
 	ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error)
+
+	// CopyFile copies a local file to the given host path.
+	CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error
 }
 
 // RealCommandExecutor implements Executor using actual system commands
@@ -39,6 +43,10 @@ type CommandExecutor = Executor
 // returns stdout, stderr (when available), and an error value.
 func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {
 	var cmd *exec.Cmd
+
+	if len(command) == 0 {
+		return "", "", fmt.Errorf("empty command")
+	}
 
 	if host.IsLocal {
 		// Local execution
@@ -68,4 +76,26 @@ func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 	}
 
 	return strings.TrimSpace(string(stdoutBytes)), "", nil
+}
+
+// CopyFile copies a local file to the target host path.
+func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
+	var cmd *exec.Cmd
+	if host.IsLocal {
+		cmd = exec.CommandContext(ctx, "cp", localPath, remotePath) // #nosec G204 -- paths are user-selected SPT artifacts.
+	} else {
+		sshTarget := host.GetSSHTarget() + ":" + remotePath
+		scpArgs := []string{
+			"-o", constants.SSHConnectTimeout,
+			"-o", constants.SSHBatchMode,
+			localPath,
+			sshTarget,
+		}
+		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP target is built from parsed host info.
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s to %s:%s failed: %w: %s", localPath, host.Original, remotePath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

@@ -5,12 +5,14 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 func newTestRemoteManager(t *testing.T) (*RemoteDockerManager, *command.MockCommandExecutor, *hostparse.HostInfo) {
@@ -61,6 +63,38 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "--name spt-node-") {
 		t.Errorf("expected docker run command to include node name prefix, got: %s", cmd)
+	}
+}
+
+func TestRemoteDocker_StartContainerInNodeMode_StagesAndMountsItemFiles(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	localItems := filepath.Join(t.TempDir(), "items.csv")
+	mounts := []scenario.FileMount{{HostPath: localItems, ContainerPath: "/spt-input/items/read-items.csv"}}
+	if err := mgr.SetFileMounts(mounts); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode)
+	if err != nil {
+		t.Fatalf("StartContainerInNodeMode error: %v", err)
+	}
+	if id == "" {
+		t.Fatal("container ID should not be empty")
+	}
+	if len(mock.CopiedFiles) != 1 {
+		t.Fatalf("copied files = %d, want 1", len(mock.CopiedFiles))
+	}
+	if mock.CopiedFiles[0].LocalPath != localItems {
+		t.Fatalf("copied local path = %q, want %q", mock.CopiedFiles[0].LocalPath, localItems)
+	}
+	executed := mock.GetExecutedCommandsMatching("docker run")
+	if len(executed) == 0 {
+		t.Fatalf("expected a docker run command to be executed")
+	}
+	cmd := strings.Join(executed[len(executed)-1].Command, " ")
+	wantBind := mock.CopiedFiles[0].RemotePath + ":/spt-input/items/read-items.csv:ro"
+	if !strings.Contains(cmd, "-v "+wantBind) {
+		t.Fatalf("docker run missing item bind %q: %s", wantBind, cmd)
 	}
 }
 

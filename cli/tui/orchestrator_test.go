@@ -326,6 +326,49 @@ func TestOrchestratorStartTestWithContentPostsProvidedArtifacts(t *testing.T) {
 	}
 }
 
+func TestOrchestratorStartTestConfiguresItemFileMounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ok"}`))
+		case "/run":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Header().Set("ETag", `"run-items"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"runId":"run-items"}`))
+		case "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"RUNNING"}`))
+		case "/metrics/json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
+	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeRead, ItemFileMounts: mounts}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orchestrator.StartTestWithContent(ctx, "test-image", params, []byte(`Load.run({})`), nil); err != nil {
+		t.Fatalf("StartTestWithContent() error = %v", err)
+	}
+	got := mockDM.GetFileMounts()
+	if len(got) != 1 || got[0] != mounts[0] {
+		t.Fatalf("configured mounts = %#v, want %#v", got, mounts)
+	}
+}
+
 func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

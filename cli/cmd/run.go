@@ -709,6 +709,10 @@ Available workload types:
 		// Lock the base timestamp so that every GenerateScenario call
 		// (here and later in the orchestrator) produces identical step IDs.
 		params.BaseTimestamp = scenario.BaseTimestamp()
+		params, err = scenario.PrepareExternalItemFiles(params)
+		if err != nil {
+			return err
+		}
 
 		// Generate scenario content
 		scenarioContent, err := scenario.GenerateScenario(params)

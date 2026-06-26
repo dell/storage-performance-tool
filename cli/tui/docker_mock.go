@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 // MockDockerManager is a mock implementation of DockerInterface for testing
@@ -24,6 +26,7 @@ type MockDockerManager struct {
 	startCallCount   int
 	cleanupCallCount int
 	closeCallCount   int
+	fileMounts       []scenario.FileMount
 
 	// For testing scenario support
 	scenarioCalls []struct {
@@ -76,6 +79,14 @@ func (m *MockDockerManager) ContainerID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.containerID
+}
+
+// SetFileMounts records configured file mounts.
+func (m *MockDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fileMounts = append([]scenario.FileMount(nil), mounts...)
+	return nil
 }
 
 // StartContainer simulates starting a container
@@ -311,6 +322,15 @@ func (m *MockDockerManager) GetCloseCallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.closeCallCount
+}
+
+// GetFileMounts returns configured file mounts.
+func (m *MockDockerManager) GetFileMounts() []scenario.FileMount {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]scenario.FileMount, len(m.fileMounts))
+	copy(result, m.fileMounts)
+	return result
 }
 
 // GetScenarioCalls returns all scenario-based container starts

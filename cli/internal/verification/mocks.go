@@ -79,6 +79,11 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 	return "", "", fmt.Errorf("mock: unexpected command %s", cmdStr)
 }
 
+// CopyFile records no file copy behavior for verification tests.
+func (m *MockCommandExecutor) CopyFile(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
 // SetupDockerSuccess configures mock to return successful Docker responses
 func (m *MockCommandExecutor) SetupDockerSuccess() {
 	m.mu.Lock()

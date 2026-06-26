@@ -697,7 +697,8 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 	defer cancel()
 	replayScenario := []byte(`var step = "replay-001-max-w10kb"; Load.config({}).run();`)
 	replayDefaults := []byte("storage:\n  driver:\n    type: s3\n")
-	params := scenario.ScenarioParams{WorkloadType: "write", Threads: 1}
+	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
+	params := scenario.ScenarioParams{WorkloadType: "write", Threads: 1, ItemFileMounts: mounts}
 	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
 		t.Fatalf("StartTestWithContent() error = %v", err)
 	}
@@ -725,6 +726,12 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 	wantWorkerAddr := "127.0.0.1:" + constants.RMIRegistryPort
 	if len(entryCalls[0].WorkerAddresses) != 1 || entryCalls[0].WorkerAddresses[0] != wantWorkerAddr {
 		t.Fatalf("entry worker addresses = %v, want [%s]", entryCalls[0].WorkerAddresses, wantWorkerAddr)
+	}
+	if got := entryDM.GetFileMounts(); len(got) != 1 || got[0] != mounts[0] {
+		t.Fatalf("entry item mounts = %#v, want %#v", got, mounts)
+	}
+	if got := workerDM.GetFileMounts(); len(got) != 1 || got[0] != mounts[0] {
+		t.Fatalf("worker item mounts = %#v, want %#v", got, mounts)
 	}
 	if orchestrator.hosts[0].APIClient == nil {
 		t.Fatal("expected entry API client to be attached after readiness")

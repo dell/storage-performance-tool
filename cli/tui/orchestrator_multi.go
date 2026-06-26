@@ -80,6 +80,7 @@ type MultiHostOrchestrator struct {
 	image           string
 	apiPort         string
 	attachWorkers   bool
+	itemFileMounts  []scenario.FileMount
 
 	// RMI Configuration
 	networkMode  string
@@ -467,6 +468,21 @@ func (o *MultiHostOrchestrator) GetReadyHosts() []*HostConnection {
 	return readyHosts
 }
 
+func (o *MultiHostOrchestrator) configureItemFileMounts(hosts []*HostConnection, mounts []scenario.FileMount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	for _, host := range hosts {
+		if host.DockerManager == nil {
+			return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+		}
+		if err := configureDockerFileMounts(host.DockerManager, mounts); err != nil {
+			return fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
+		}
+	}
+	return nil
+}
+
 // StartContainers starts Spt containers on all ready hosts
 func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string, _ string) error {
 	o.mu.Lock()
@@ -476,6 +492,9 @@ func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string,
 	readyHosts := o.GetReadyHosts()
 	if len(readyHosts) == 0 {
 		return fmt.Errorf("no ready hosts available for container startup")
+	}
+	if err := o.configureItemFileMounts(readyHosts, o.itemFileMounts); err != nil {
+		return err
 	}
 
 	o.notifyf("🚀 Starting containers on %d host(s)...", len(readyHosts))
@@ -1304,6 +1323,11 @@ collectLoop:
 
 // StartTest starts monitoring tests on all hosts
 func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string, params scenario.ScenarioParams) error {
+	var err error
+	params, err = scenario.PrepareExternalItemFiles(params)
+	if err != nil {
+		return err
+	}
 	readyHosts := m.multiHost.GetReadyHosts()
 
 	if len(readyHosts) == 0 {
@@ -1490,7 +1514,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		}
 
 		// Use the full distributed test flow with RMI coordination
-		err := m.multiHost.StartDistributedTest(ctx, image, params)
+		err = m.multiHost.StartDistributedTest(ctx, image, params)
 		if err != nil {
 			return err
 		}
@@ -1512,6 +1536,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
+	m.multiHost.itemFileMounts = params.ItemFileMounts
 	if len(readyHosts) != 1 {
 		if m.onStatusUpdate != nil {
 			m.onStatusUpdate(&TestStatus{
@@ -1867,6 +1892,9 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Contex
 
 	entryNode := o.hosts[0]
 	workerNodes := o.hosts[1:]
+	if err := o.configureItemFileMounts(o.hosts, params.ItemFileMounts); err != nil {
+		return err
+	}
 
 	logging.LogInfo("orchestrator", "starting distributed test",
 		"entry_node", entryNode.Info.Host,

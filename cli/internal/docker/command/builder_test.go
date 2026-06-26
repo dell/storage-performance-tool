@@ -149,6 +149,16 @@ func TestDockerCommandBuilderImpl_BuildRunCommand(t *testing.T) {
 			},
 		},
 		{
+			name: "container with bind mount",
+			config: ContainerConfig{
+				Image:      constants.DefaultSptImage,
+				BindMounts: []string{"/tmp/items.csv:/spt-input/items/read-items.csv:ro"},
+			},
+			expected: []string{
+				"docker", "run", "-v", "/tmp/items.csv:/spt-input/items/read-items.csv:ro", constants.DefaultSptImage,
+			},
+		},
+		{
 			name: "empty container name",
 			config: ContainerConfig{
 				Image:    constants.DefaultSptImage,

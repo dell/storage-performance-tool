@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -16,17 +17,20 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/remoteip"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 // RemoteDockerManager implements DockerInterface by executing docker CLI via SSH
 // using the shared command layer (internal/docker/command).
 // It is used for remote hosts where the Docker SDK ssh:// transport is unavailable.
 type RemoteDockerManager struct {
-	host        *hostparse.HostInfo
-	exec        command.CommandExecutor
-	ops         command.DockerOperations
-	containerID string
-	proberRun   func(ctx context.Context, baseURL string, pollInterval time.Duration) error
+	host             *hostparse.HostInfo
+	exec             command.CommandExecutor
+	ops              command.DockerOperations
+	containerID      string
+	proberRun        func(ctx context.Context, baseURL string, pollInterval time.Duration) error
+	stagedBindMounts []string
+	stagingDir       string
 }
 
 func sanitizeHostComponent(host string) string {
@@ -99,6 +103,41 @@ func NewRemoteDockerManager(host *hostparse.HostInfo) (*RemoteDockerManager, err
 // ContainerID returns the last started container ID (if any)
 func (m *RemoteDockerManager) ContainerID() string { return m.containerID }
 
+func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) {
+	if m.stagingDir == "" {
+		return
+	}
+	_, _, _ = m.exec.ExecuteCommand(ctx, m.host, []string{"rm", "-rf", m.stagingDir})
+	m.stagingDir = ""
+	m.stagedBindMounts = nil
+}
+
+// SetFileMounts stages local item files onto the remote Docker host for bind mounting.
+func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
+	m.stagedBindMounts = nil
+	m.stagingDir = ""
+	if len(mounts) == 0 {
+		return nil
+	}
+	m.stagingDir = fmt.Sprintf("/tmp/spt-items-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	defer cancel()
+	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"mkdir", "-p", m.stagingDir}); err != nil {
+		return fmt.Errorf("create remote item staging directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+	}
+	for _, mount := range mounts {
+		remotePath := path.Join(m.stagingDir, path.Base(mount.ContainerPath))
+		if err := m.exec.CopyFile(ctx, m.host, mount.HostPath, remotePath); err != nil {
+			return err
+		}
+		if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"chmod", "0444", remotePath}); err != nil {
+			return fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+		}
+		m.stagedBindMounts = append(m.stagedBindMounts, fmt.Sprintf("%s:%s:ro", remotePath, mount.ContainerPath))
+	}
+	return nil
+}
+
 // StartContainer is not used for remote multi-host mode; return a clear error
 func (m *RemoteDockerManager) StartContainer(_ string, _ []string) (string, error) {
 	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
@@ -125,6 +164,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleNode),
 		Command:     []string{dockerNodeModeArg, "--run-port=" + apiPort},
+		BindMounts:  m.stagedBindMounts,
 	}
 	if mode != command.NetworkModeHost {
 		cfg.PortMappings = []command.PortMapping{{HostPort: port, ContainerPort: port}}
@@ -135,6 +175,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 
 	id, _, err := m.ops.StartContainer(ctx, cfg)
 	if err != nil {
+		m.cleanupStaging(ctx)
 		return "", err
 	}
 	m.containerID = strings.TrimSpace(id)
@@ -173,7 +214,8 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 		},
-		Command: []string{dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099"},
+		Command:    []string{dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099"},
+		BindMounts: m.stagedBindMounts,
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -191,6 +233,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 
 	id, _, err := m.ops.StartContainer(ctx, cfg)
 	if err != nil {
+		m.cleanupStaging(ctx)
 		return "", err
 	}
 	m.containerID = strings.TrimSpace(id)
@@ -225,6 +268,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleEntry),
 		Command:     cmd,
+		BindMounts:  m.stagedBindMounts,
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -239,6 +283,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 
 	id, _, err := m.ops.StartContainer(ctx, cfg)
 	if err != nil {
+		m.cleanupStaging(ctx)
 		return "", err
 	}
 	m.containerID = strings.TrimSpace(id)
@@ -276,15 +321,15 @@ func (m *RemoteDockerManager) StreamOutput(containerID string, stdoutCallback fu
 
 // Cleanup force-removes the last started container (if any)
 func (m *RemoteDockerManager) Cleanup() error {
-	if m.containerID == "" {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := m.ops.StopContainer(ctx, m.containerID); err != nil {
-		return err
+	if m.containerID != "" {
+		if err := m.ops.StopContainer(ctx, m.containerID); err != nil {
+			return err
+		}
+		m.containerID = ""
 	}
-	m.containerID = ""
+	m.cleanupStaging(ctx)
 	return nil
 }
 

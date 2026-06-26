@@ -38,6 +38,7 @@ const (
 // SSH connection constants
 const (
 	SSHCommand        = "ssh"
+	SCPCommand        = "scp"
 	SSHConnectTimeout = "ConnectTimeout=10"
 	SSHBatchMode      = "BatchMode=yes"
 )

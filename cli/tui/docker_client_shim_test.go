@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -31,6 +32,7 @@ type fakeDockerClient struct {
 	logOptions       container.LogsOptions
 	stopErr          error
 	removeErr        error
+	createHostConfig *container.HostConfig
 }
 
 func (f *fakeDockerClient) ImageInspect(ctx context.Context, imageID string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
@@ -50,6 +52,7 @@ func (f *fakeDockerClient) ContainerLogs(ctx context.Context, container string, 
 	return io.NopCloser(bytes.NewReader(logs.Bytes())), nil
 }
 func (f *fakeDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+	f.createHostConfig = hostConfig
 	return container.CreateResponse{ID: "abc"}, nil
 }
 func (f *fakeDockerClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
@@ -99,6 +102,25 @@ func TestEnsureImageAvailable_DevImagePresent(t *testing.T) {
 	}
 	if dm.client.(*fakeDockerClient).pulled {
 		t.Fatalf("did not expect pull for present dev image")
+	}
+}
+
+func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, ctx: context.Background()}
+	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
+	if err := dm.SetFileMounts(mounts); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+		t.Fatalf("StartContainerInNodeMode() error = %v", err)
+	}
+	if f.createHostConfig == nil {
+		t.Fatal("ContainerCreate host config was nil")
+	}
+	want := "/host/items.csv:/spt-input/items/read-items.csv:ro"
+	if !containsString(f.createHostConfig.Binds, want) {
+		t.Fatalf("host binds = %v, want %q", f.createHostConfig.Binds, want)
 	}
 }
 
