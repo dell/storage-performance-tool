@@ -7,6 +7,8 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 const defaultListBatchSize = 1000
@@ -114,17 +116,30 @@ func GenerateReadScenario(params Params) (string, error) {
 		seedCount = 2500
 	}
 
+	readShuffleBatchSize := 0
+	if params.ReadShuffle {
+		readShuffleBatchSize = params.ReadShuffleBatchSize
+		switch {
+		case readShuffleBatchSize <= 0:
+			readShuffleBatchSize = constants.ReadShuffleDefaultBatchSize
+		case readShuffleBatchSize > constants.ReadShuffleMaxBatchSize:
+			readShuffleBatchSize = constants.ReadShuffleMaxBatchSize
+		}
+	}
+
 	data := map[string]interface{}{
-		templateKeyConcurrency:       params.Threads,
-		templateKeyItemSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
-		templateKeyItemCount:         params.ObjectCount,
-		templateKeyOutputPath:        fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
-		templateKeyDuration:          fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
-		templateKeyPartSize:          fmt.Sprintf(`"%s"`, escapeJSONString(params.PartSize)),
-		templateKeyHasPartSize:       params.PartSize != "",
-		templateKeyTimestamp:         time.Now().Unix(),
-		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
-		templateKeySeedCount:         seedCount,
+		templateKeyConcurrency:          params.Threads,
+		templateKeyItemSize:             fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
+		templateKeyItemCount:            params.ObjectCount,
+		templateKeyOutputPath:           fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
+		templateKeyDuration:             fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
+		templateKeyPartSize:             fmt.Sprintf(`"%s"`, escapeJSONString(params.PartSize)),
+		templateKeyHasPartSize:          params.PartSize != "",
+		templateKeyTimestamp:            time.Now().Unix(),
+		templateKeyStorageDriverType:    fmt.Sprintf(`"%s"`, driverType),
+		templateKeySeedCount:            seedCount,
+		templateKeyReadShuffle:          params.ReadShuffle,
+		templateKeyReadShuffleBatchSize: readShuffleBatchSize,
 		// Step IDs: seed=1, read=2, delete=3 (read-from-file: read=1, delete=2)
 		templateKeyStepIDSeed:   formatStepID(1, ts, stepOpSeed),
 		templateKeyStepIDRead:   formatStepID(2, ts, stepOpRead),

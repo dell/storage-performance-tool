@@ -26,8 +26,10 @@ type Params struct {
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
 	// Read workload
-	SeedCount int    // Number of seed objects for read benchmark (default: 2500)
-	ItemsFile string // Path to a local items.csv for read workload (skips seed phase)
+	SeedCount            int    // Number of seed objects for read benchmark (default: 2500)
+	ItemsFile            string // Path to a local items.csv for read workload (skips seed phase)
+	ReadShuffle          bool   // Enable batch-local item shuffling for the read phase
+	ReadShuffleBatchSize int    // Read-phase batch size override used when ReadShuffle is enabled
 
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts []FileMount

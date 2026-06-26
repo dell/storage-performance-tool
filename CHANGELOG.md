@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Bounded read-phase shuffle controls** — `spt run read` now supports `--shuffle` and `--shuffle-batch-size` to widen read randomness within the `ReadLoad` phase without globally exposing unbounded `load.batch.size`. The batch override is read-only, defaults to a bounded window when omitted, and is capped to avoid pathological buffer growth.
+
 ### Fixed
 
 - **External items files in Docker runs** — `--items-file`, mixed `--read-items-file`, and mixed `--delete-items-file` are now rewritten to stable container paths and mounted into local or remote Docker test containers, allowing saved item catalogs to be reused by later read/delete workflows.

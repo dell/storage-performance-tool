@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/spf13/cobra"
 )
 
@@ -275,6 +276,163 @@ func TestValidateDurationOrCount(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("ValidateDurationOrCount() error = %v, want error containing %v", err.Error(), tt.errContains)
 				}
+			}
+		})
+	}
+}
+
+func TestValidateReadShuffleFlags(t *testing.T) {
+	tests := []struct {
+		name         string
+		workloadType string
+		setup        func(*testing.T, *cobra.Command)
+		wantErr      bool
+		errContains  string
+	}{
+		{
+			name:         "read workload allows shuffle only",
+			workloadType: WorkloadTypeRead,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+		},
+		{
+			name:         "read workload allows shuffle batch override",
+			workloadType: WorkloadTypeRead,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+				if err := cmd.Flags().Set(flagReadShuffleBatchSize, "512000"); err != nil {
+					t.Fatalf("set shuffle-batch-size: %v", err)
+				}
+			},
+		},
+		{
+			name:         "shuffle batch requires shuffle",
+			workloadType: WorkloadTypeRead,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffleBatchSize, "512000"); err != nil {
+					t.Fatalf("set shuffle-batch-size: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: ErrReadShuffleBatchRequiresToggle,
+		},
+		{
+			name:         "shuffle batch must be positive",
+			workloadType: WorkloadTypeRead,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+				if err := cmd.Flags().Set(flagReadShuffleBatchSize, "0"); err != nil {
+					t.Fatalf("set shuffle-batch-size: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: ErrReadShuffleBatchPositive,
+		},
+		{
+			name:         "shuffle batch must not exceed max",
+			workloadType: WorkloadTypeRead,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+				if err := cmd.Flags().Set(flagReadShuffleBatchSize, strconv.Itoa(constants.ReadShuffleMaxBatchSize+1)); err != nil {
+					t.Fatalf("set shuffle-batch-size: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: strconv.Itoa(constants.ReadShuffleMaxBatchSize),
+		},
+		{
+			name:         "write workload rejects shuffle flag",
+			workloadType: WorkloadTypeWrite,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for write workload",
+		},
+		{
+			name:         "delete workload rejects shuffle flag",
+			workloadType: WorkloadTypeDelete,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for delete workload",
+		},
+		{
+			name:         "mixed workload rejects shuffle flag",
+			workloadType: WorkloadTypeMixed,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for mixed workload",
+		},
+		{
+			name:         "list workload rejects shuffle flag",
+			workloadType: WorkloadTypeList,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for list workload",
+		},
+		{
+			name:         "mock workload rejects shuffle flag",
+			workloadType: WorkloadTypeMock,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for mock workload",
+		},
+		{
+			name:         "write workload rejects shuffle batch flag",
+			workloadType: WorkloadTypeWrite,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffleBatchSize, "512000"); err != nil {
+					t.Fatalf("set shuffle-batch-size: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle-batch-size flag is not supported for write workload",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool(flagReadShuffle, false, "")
+			cmd.Flags().Int(flagReadShuffleBatchSize, 0, "")
+			if tt.setup != nil {
+				tt.setup(t, cmd)
+			}
+
+			err := validateReadShuffleFlags(cmd, tt.workloadType)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateReadShuffleFlags() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if err != nil && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("validateReadShuffleFlags() error = %v, want containing %q", err, tt.errContains)
 			}
 		})
 	}

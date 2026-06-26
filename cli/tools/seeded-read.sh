@@ -30,6 +30,8 @@ SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o Co
 SPT_IMAGE=${SPT_IMAGE:-""}
 SKIP_IMAGE_PULL=${SPT_SKIP_IMAGE_PULL:-false}
 S3_DRIVER=${SPT_S3_DRIVER:-"default"}
+READ_SHUFFLE=${READ_SHUFFLE:-true}
+READ_SHUFFLE_BATCH_SIZE=${READ_SHUFFLE_BATCH_SIZE:-""}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +49,9 @@ while [ $# -gt 0 ]; do
     --results-dir) RESULTS_DIR="${2:-}"; shift 2 ;;
     --label-prefix) LABEL_PREFIX="${2:-}"; shift 2 ;;
     --s3-driver) S3_DRIVER="${2:-}"; shift 2 ;;
+    --shuffle) READ_SHUFFLE=true; shift 1 ;;
+    --no-shuffle) READ_SHUFFLE=false; shift 1 ;;
+    --shuffle-batch-size) READ_SHUFFLE_BATCH_SIZE="${2:-}"; shift 2 ;;
     --image) SPT_IMAGE="${2:-}"; shift 2 ;;
     --skip-image-pull) SKIP_IMAGE_PULL=true; shift 1 ;;
     --verbose) VERBOSE=true; shift 1 ;;
@@ -84,6 +89,8 @@ Workload:
   --object-count N         Objects to seed and default read count (default: $OBJECT_COUNT)
   --read-count N           Read operation count (default: object-count)
   --min-hosts N            Minimum hosts required (default: $MIN_HOSTS)
+  --[no-]shuffle           Enable batch-local shuffling for the read phase (default: $READ_SHUFFLE)
+  --shuffle-batch-size N   Optional read-phase shuffle batch size override (default: CLI bounded default)
 
 Output:
   --results-dir DIR        Auto-results root (default: $RESULTS_DIR)
@@ -113,6 +120,11 @@ EOF
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$READ_SHUFFLE" != true ] && [ -n "$READ_SHUFFLE_BATCH_SIZE" ]; then
+  echo "--shuffle-batch-size requires shuffle to be enabled" >&2
+  exit 2
+fi
 
 [ -n "$SPT_IMAGE" ] && export SPT_IMAGE
 if [ "$SKIP_IMAGE_PULL" = true ]; then
@@ -265,6 +277,15 @@ echo "Results: $RESULTS_DIR"
 if [ "$S3_DRIVER" != "default" ]; then
   echo "S3 Driver: $S3_DRIVER"
 fi
+if [ "$READ_SHUFFLE" = true ]; then
+  if [ -n "$READ_SHUFFLE_BATCH_SIZE" ]; then
+    echo "Read shuffle: enabled (batch size: $READ_SHUFFLE_BATCH_SIZE)"
+  else
+    echo "Read shuffle: enabled (batch size: CLI bounded default)"
+  fi
+else
+  echo "Read shuffle: disabled"
+fi
 [ -n "$SPT_IMAGE" ] && echo "Image: $SPT_IMAGE"
 [ "$SKIP_IMAGE_PULL" = true ] && echo "Skip image pull: true"
 $CLEANUP && echo "Cleanup: read phase will delete seeded objects" || echo "Cleanup: disabled"
@@ -301,6 +322,10 @@ read_cmd=("$ROOT_DIR"/spt --debug run read --headless
   --items-file "$ITEMS_FILE"
 )
 add_common_args read_cmd
+$READ_SHUFFLE && read_cmd+=(--shuffle) || true
+if [ -n "$READ_SHUFFLE_BATCH_SIZE" ]; then
+  read_cmd+=(--shuffle-batch-size "$READ_SHUFFLE_BATCH_SIZE")
+fi
 $CLEANUP && read_cmd+=(--cleanup) || true
 
 echo "=== Phase 2/2: read back $READ_COUNT objects from saved items.csv ==="

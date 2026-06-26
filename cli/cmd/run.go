@@ -32,6 +32,8 @@ const (
 	flagSkipImagePull         = "skip-image-pull"
 	flagSptImage              = "spt-image"
 	flagAttachExistingWorkers = "attach-existing"
+	flagReadShuffle           = "shuffle"
+	flagReadShuffleBatchSize  = "shuffle-batch-size"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -1101,6 +1103,8 @@ func init() {
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
+	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
+	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
 
 	// Mixed Workload Distribution Options (defaults: GET 45 / STAT 30 / PUT 15 / DELETE 10)
@@ -1304,6 +1308,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	itemsFile, _ := cmd.Flags().GetString("items-file")
 	params.ItemsFile = itemsFile
+
+	readShuffle, _ := cmd.Flags().GetBool(flagReadShuffle)
+	params.ReadShuffle = readShuffle
+
+	readShuffleBatchSize, _ := cmd.Flags().GetInt(flagReadShuffleBatchSize)
+	params.ReadShuffleBatchSize = readShuffleBatchSize
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads

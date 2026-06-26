@@ -1,9 +1,12 @@
 package scenario
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 // removed unused helper 'min' (no longer needed)
@@ -1645,6 +1648,90 @@ func TestGenerateReadScenario(t *testing.T) {
 				t.Error("Read scenario must contain ReadLoad")
 			}
 		})
+	}
+}
+
+func TestGenerateReadScenario_NoReadShuffleByDefault(t *testing.T) {
+	got, err := GenerateReadScenario(Params{
+		WorkloadType: "read",
+		Bucket:       "shuffle-bucket",
+		Threads:      8,
+		ObjectSize:   "10KB",
+		Duration:     "2m",
+		Cleanup:      true,
+		SeedCount:    64,
+	})
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() unexpected error: %v", err)
+	}
+
+	if strings.Contains(got, `"shuffle": true`) {
+		t.Fatalf("expected read scenario without shuffle to omit shuffle toggle\nGot:\n%s", got)
+	}
+	if strings.Contains(got, `"batch": {`) {
+		t.Fatalf("expected read scenario without shuffle to omit read batch override\nGot:\n%s", got)
+	}
+}
+
+func TestGenerateReadScenario_ReadShuffleDefaultBatch(t *testing.T) {
+	got, err := GenerateReadScenario(Params{
+		WorkloadType: "read",
+		Bucket:       "shuffle-bucket",
+		Threads:      8,
+		ObjectSize:   "10KB",
+		Duration:     "2m",
+		Cleanup:      true,
+		SeedCount:    64,
+		ReadShuffle:  true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() unexpected error: %v", err)
+	}
+
+	if !strings.Contains(got, `"shuffle": true`) {
+		t.Fatalf("expected read scenario to enable shuffle\nGot:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf(`"size": %d`, constants.ReadShuffleDefaultBatchSize)) {
+		t.Fatalf("expected read scenario to use default shuffle batch size %d\nGot:\n%s", constants.ReadShuffleDefaultBatchSize, got)
+	}
+	if count := strings.Count(got, `"batch": {`); count != 1 {
+		t.Fatalf("expected exactly one read batch override, got %d\n%s", count, got)
+	}
+	if count := strings.Count(got, `"shuffle": true`); count != 1 {
+		t.Fatalf("expected exactly one read shuffle toggle, got %d\n%s", count, got)
+	}
+}
+
+func TestGenerateReadScenario_FromFileShuffleBatchCap(t *testing.T) {
+	got, err := GenerateReadScenario(Params{
+		WorkloadType:         "read",
+		Bucket:               "shuffle-bucket",
+		Threads:              4,
+		ObjectSize:           "10KB",
+		ItemsFile:            "/data/items.csv",
+		ObjectCount:          500,
+		Cleanup:              true,
+		ReadShuffle:          true,
+		ReadShuffleBatchSize: constants.ReadShuffleMaxBatchSize + 1,
+	})
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() unexpected error: %v", err)
+	}
+
+	if strings.Contains(got, "PreconditionLoad") {
+		t.Fatalf("read-from-file shuffle scenario should not contain a seed phase\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf(`"size": %d`, constants.ReadShuffleMaxBatchSize)) {
+		t.Fatalf("expected read-from-file shuffle scenario to clamp batch size to %d\n%s", constants.ReadShuffleMaxBatchSize, got)
+	}
+	if count := strings.Count(got, `"batch": {`); count != 1 {
+		t.Fatalf("expected exactly one read batch override, got %d\n%s", count, got)
+	}
+	if count := strings.Count(got, `"shuffle": true`); count != 1 {
+		t.Fatalf("expected exactly one read shuffle toggle, got %d\n%s", count, got)
+	}
+	if !strings.Contains(got, "DeleteLoad") {
+		t.Fatalf("expected read-from-file cleanup scenario to retain cleanup phase\n%s", got)
 	}
 }
 

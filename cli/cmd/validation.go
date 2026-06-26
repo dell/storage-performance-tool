@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/spf13/cobra"
 )
@@ -137,6 +138,36 @@ func ValidateMixedFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+func validateReadShuffleFlags(cmd *cobra.Command, workloadType string) error {
+	shuffleChanged := cmd.Flags().Changed(flagReadShuffle)
+	batchChanged := cmd.Flags().Changed(flagReadShuffleBatchSize)
+
+	if workloadType != WorkloadTypeRead {
+		if shuffleChanged {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagReadShuffle, workloadType)
+		}
+		if batchChanged {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagReadShuffleBatchSize, workloadType)
+		}
+		return nil
+	}
+
+	shuffleEnabled, _ := cmd.Flags().GetBool(flagReadShuffle)
+	batchSize, _ := cmd.Flags().GetInt(flagReadShuffleBatchSize)
+
+	if batchChanged && !shuffleEnabled {
+		return errors.New(ErrReadShuffleBatchRequiresToggle)
+	}
+	if batchChanged && batchSize <= 0 {
+		return errors.New(ErrReadShuffleBatchPositive)
+	}
+	if batchChanged && batchSize > constants.ReadShuffleMaxBatchSize {
+		return fmt.Errorf(ErrReadShuffleBatchTooLarge, constants.ReadShuffleMaxBatchSize)
+	}
+
+	return nil
+}
+
 // ValidateRunCommand performs all validation for the run command
 func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	workloadType := args[0]
@@ -165,6 +196,11 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = false
 			return err
 		}
+	}
+
+	if err := validateReadShuffleFlags(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
 	}
 
 	// Validate duration vs object-count

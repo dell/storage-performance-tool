@@ -82,6 +82,8 @@ const (
 	templateKeyMaxKeys              = "MaxKeys"
 	templateKeySaveItems            = "SaveItems"
 	templateKeyItemsFile            = "ItemsFile"
+	templateKeyReadShuffle          = "ReadShuffle"
+	templateKeyReadShuffleBatchSize = "ReadShuffleBatchSize"
 
 	stepOpCreate = "create"
 	stepOpRead   = "read"
