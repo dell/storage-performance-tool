@@ -111,6 +111,13 @@ const (
 	SptMetricsEndpoint = "/metrics/json"
 )
 
+// Engine log artifact constants
+const (
+	// EngineLogArtifactPageSize mirrors LogServlet.LOG_PAGE_SIZE_LIMIT.
+	EngineLogArtifactPageSize      = 1024 * 1024
+	EnginePlainLogArtifactMaxBytes = EngineLogArtifactPageSize - 1
+)
+
 // Progress indicator constants
 const (
 	ProgressSpinner = "⏳"

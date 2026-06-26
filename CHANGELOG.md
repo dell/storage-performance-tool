@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **External items files in Docker runs** — `--items-file`, mixed `--read-items-file`, and mixed `--delete-items-file` are now rewritten to stable container paths and mounted into local or remote Docker test containers, allowing saved item catalogs to be reused by later read/delete workflows.
+- **Large auto-results artifacts** — CLI artifact retrieval now downloads engine log artifacts larger than the engine log page size with HTTP range requests, preserving large `items.csv` files instead of truncating them at the first page.
+
 ## [5.11.0] - 2026-06-25
 
 ### Added

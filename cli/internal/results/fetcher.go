@@ -19,10 +19,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
-const (
-	fileStatusMissing   = "missing"
-	logArtifactPageSize = 1024 * 1024
-)
+const fileStatusMissing = "missing"
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -298,19 +295,49 @@ func normalizeResultXML(filePath, rootTag string) int64 {
 	return int64(len(out))
 }
 
-func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath string, expectedSize int64) (int64, error) {
+func (f *Fetcher) downloadOne(ctx context.Context, stepID, logger, outPath string, indexedSize int64) (int64, error) {
 	u, err := url.Parse(f.BaseURL)
 	if err != nil {
 		return 0, fmt.Errorf("parse base url: %w", err)
 	}
 	u.Path = path.Join(u.Path, "/logs/", stepID, logger)
-	if expectedSize > logArtifactPageSize {
+	expectedSize, err := f.resolveArtifactSize(ctx, u.String(), indexedSize)
+	if err != nil {
+		return 0, err
+	}
+	if expectedSize > constants.EnginePlainLogArtifactMaxBytes {
 		return f.downloadOneRanged(ctx, u.String(), outPath, expectedSize)
 	}
 	return f.downloadOnePlain(ctx, u.String(), outPath, expectedSize)
 }
 
-func (f *Fetcher) downloadOnePlain(ctx context.Context, url, outPath string, _ int64) (int64, error) {
+func (f *Fetcher) resolveArtifactSize(ctx context.Context, url string, indexedSize int64) (int64, error) {
+	if indexedSize > 0 {
+		return indexedSize, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("new HEAD request: %w", err)
+	}
+	resp, err := f.HTTPClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("resolve artifact size with HEAD: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if resp.ContentLength >= 0 {
+			return resp.ContentLength, nil
+		}
+		return 0, fmt.Errorf("artifact size missing in index and HEAD response")
+	case http.StatusNotFound:
+		return 0, errNotFound
+	default:
+		return 0, responseStatusError(resp)
+	}
+}
+
+func (f *Fetcher) downloadOnePlain(ctx context.Context, url, outPath string, expectedSize int64) (int64, error) {
 	var lastErr error
 	var bytesWritten int64
 	for attempt := 0; attempt < max(1, f.Retries); attempt++ {
@@ -329,6 +356,11 @@ func (f *Fetcher) downloadOnePlain(ctx context.Context, url, outPath string, _ i
 					n, err := writeResponseToFile(resp.Body, outPath)
 					if err != nil {
 						lastErr = err
+						return
+					}
+					if n < expectedSize {
+						_ = os.Remove(outPath)
+						lastErr = fmt.Errorf("downloaded size %d is smaller than index size %d", n, expectedSize)
 						return
 					}
 					lastErr = nil
@@ -366,19 +398,30 @@ func (f *Fetcher) downloadOneRanged(ctx context.Context, url, outPath string, ex
 	tmpName := tmp.Name()
 	var bytesWritten int64
 	defer func() { _ = os.Remove(tmpName) }()
-	for start := int64(0); start < expectedSize; start += logArtifactPageSize {
-		end := min(start+logArtifactPageSize-1, expectedSize-1)
-		n, err := f.downloadRangeChunk(ctx, url, tmp, start, end)
+	// Keep chunks aligned with LogServlet.LOG_PAGE_SIZE_LIMIT;
+	// the engine caps each ranged response at that size.
+	for start := int64(0); start < expectedSize; start += constants.EngineLogArtifactPageSize {
+		end := min(start+constants.EngineLogArtifactPageSize-1, expectedSize-1)
+		chunk, err := f.downloadRangeChunk(ctx, url, start, end)
 		if err != nil {
 			_ = tmp.Close()
 			return 0, err
 		}
 		want := end - start + 1
-		if n != want {
+		if int64(len(chunk)) != want {
 			_ = tmp.Close()
-			return 0, fmt.Errorf("range %d-%d returned %d bytes, want %d", start, end, n, want)
+			return 0, fmt.Errorf("range %d-%d returned %d bytes, want %d", start, end, len(chunk), want)
 		}
-		bytesWritten += n
+		n, err := tmp.Write(chunk)
+		if err != nil {
+			_ = tmp.Close()
+			return 0, fmt.Errorf("write range %d-%d: %w", start, end, err)
+		}
+		if n != len(chunk) {
+			_ = tmp.Close()
+			return 0, fmt.Errorf("write range %d-%d: %w", start, end, io.ErrShortWrite)
+		}
+		bytesWritten += int64(n)
 	}
 	if err := tmp.Close(); err != nil {
 		return 0, fmt.Errorf("close temp: %w", err)
@@ -392,46 +435,39 @@ func (f *Fetcher) downloadOneRanged(ctx context.Context, url, outPath string, ex
 	return bytesWritten, nil
 }
 
-func (f *Fetcher) downloadRangeChunk(ctx context.Context, url string, out io.Writer, start, end int64) (int64, error) {
+func (f *Fetcher) downloadRangeChunk(ctx context.Context, url string, start, end int64) ([]byte, error) {
 	var lastErr error
-	var bytesWritten int64
 	for attempt := 0; attempt < max(1, f.Retries); attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return 0, fmt.Errorf("new request: %w", err)
+			return nil, fmt.Errorf("new request: %w", err)
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 		resp, err := f.HTTPClient.Do(req)
 		if err != nil {
 			lastErr = err
 		} else {
+			var chunk []byte
 			func() {
 				defer func() { _ = resp.Body.Close() }()
 				switch resp.StatusCode {
 				case http.StatusOK, http.StatusPartialContent:
 					var buf bytes.Buffer
-					bytesWritten, lastErr = io.Copy(&buf, resp.Body)
+					_, lastErr = io.Copy(&buf, resp.Body)
 					if lastErr != nil {
 						lastErr = fmt.Errorf("read range %d-%d: %w", start, end, lastErr)
 						return
 					}
-					n, err := out.Write(buf.Bytes())
-					if err != nil {
-						lastErr = fmt.Errorf("write range %d-%d: %w", start, end, err)
-						return
-					}
-					if int64(n) != bytesWritten {
-						lastErr = fmt.Errorf("write range %d-%d: %w", start, end, io.ErrShortWrite)
-					}
+					chunk = buf.Bytes()
 				case http.StatusNotFound:
 					lastErr = errNotFound
 				default:
 					lastErr = responseStatusError(resp)
 				}
 			}()
-		}
-		if lastErr == nil {
-			return bytesWritten, nil
+			if lastErr == nil {
+				return chunk, nil
+			}
 		}
 		if errors.Is(lastErr, errNotFound) {
 			break
@@ -439,9 +475,9 @@ func (f *Fetcher) downloadRangeChunk(ctx context.Context, url string, out io.Wri
 		f.sleepBeforeRetry(attempt)
 	}
 	if lastErr == nil {
-		return 0, fmt.Errorf("unknown range download state")
+		return nil, fmt.Errorf("unknown range download state")
 	}
-	return 0, lastErr
+	return nil, lastErr
 }
 
 func (f *Fetcher) sleepBeforeRetry(attempt int) {

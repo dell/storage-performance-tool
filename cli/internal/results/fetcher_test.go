@@ -24,6 +24,37 @@ func newTestServer(t *testing.T, handlers map[string]http.HandlerFunc) *httptest
 	return httptest.NewServer(mux)
 }
 
+func enginePagedArtifactHandler(content []byte, pageSize int, plainCalls, rangeCalls *int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			return
+		}
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader == "" {
+			if plainCalls != nil {
+				atomic.AddInt32(plainCalls, 1)
+			}
+			_, _ = w.Write(content[:min(len(content), pageSize-1)])
+			return
+		}
+		if rangeCalls != nil {
+			atomic.AddInt32(rangeCalls, 1)
+		}
+		var start, end int64
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		if start < 0 || end < start || start >= int64(len(content)) {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		n := min(end+1, int64(pageSize), int64(len(content))-start)
+		_, _ = w.Write(content[int(start):int(start+n)])
+	}
+}
+
 func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 	step := "mt-001-20250101.000000.000-create"
 	srv := newTestServer(t, map[string]http.HandlerFunc{
@@ -36,11 +67,11 @@ func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
 					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
 					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
-					{"logger": "metrics.File", "href": "/logs/" + step + "/metrics.File", "size": 5},
+					{"logger": "metrics.File", "href": "/logs/" + step + "/metrics.File", "size": 4},
 					{"logger": "Scenario", "href": "/logs/" + step + "/Scenario", "size": 3},
 					{"logger": "metrics.threshold.FileTotal", "href": "/logs/" + step + "/metrics.threshold.FileTotal", "size": 2},
 					{"logger": "OpTraces", "href": "/logs/" + step + "/OpTraces", "size": 5},
-					{"logger": "PartsUpload", "href": "/logs/" + step + "/PartsUpload", "size": 10},
+					{"logger": "PartsUpload", "href": "/logs/" + step + "/PartsUpload", "size": 12},
 				},
 			}
 			_ = json.NewEncoder(w).Encode(idx)
@@ -124,25 +155,7 @@ func TestFetcher_DownloadsLargeArtifactsWithRanges(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(idx)
 		},
 		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
-		"/logs/" + step + "/items.csv": func(w http.ResponseWriter, r *http.Request) {
-			rangeHeader := r.Header.Get("Range")
-			if rangeHeader == "" {
-				atomic.AddInt32(&plainItemsCalls, 1)
-				_, _ = w.Write(largeContent[:pageSize])
-				return
-			}
-			atomic.AddInt32(&rangeCalls, 1)
-			var start, end int
-			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
-				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			if start < 0 || end < start || end >= len(largeContent) {
-				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			_, _ = w.Write(largeContent[start : end+1])
-		},
+		"/logs/" + step + "/items.csv":         enginePagedArtifactHandler(largeContent, pageSize, &plainItemsCalls, &rangeCalls),
 	})
 	defer srv.Close()
 
@@ -172,6 +185,190 @@ func TestFetcher_DownloadsLargeArtifactsWithRanges(t *testing.T) {
 	}
 	if atomic.LoadInt32(&plainItemsCalls) != 0 {
 		t.Fatal("large artifact should not be fetched with a plain GET")
+	}
+}
+
+func TestFetcher_DownloadsPageSizedArtifactWithRanges(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	const pageSize = 1024 * 1024
+	content := bytes.Repeat([]byte("x"), pageSize)
+	var rangeCalls int32
+	var plainCalls int32
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "items.csv", "href": "/logs/" + step + "/items.csv", "size": len(content)},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/items.csv":         enginePagedArtifactHandler(content, pageSize, &plainCalls, &rangeCalls),
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Artifacts = []ArtifactSpec{
+		{Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true},
+		{Loggers: []string{"items.csv"}, Suffix: "items.csv", Required: false},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := f.FetchArtifactsForSteps(ctx, []string{step}); err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(out, step+".items.csv"))
+	if err != nil {
+		t.Fatalf("read items artifact: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("downloaded items length/content mismatch: got %d bytes, want %d", len(got), len(content))
+	}
+	if atomic.LoadInt32(&rangeCalls) == 0 || atomic.LoadInt32(&plainCalls) != 0 {
+		t.Fatalf("rangeCalls=%d plainCalls=%d, want ranged only", rangeCalls, plainCalls)
+	}
+}
+
+func TestFetcher_UsesHeadSizeWhenIndexOmitsSize(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	const pageSize = 1024 * 1024
+	content := bytes.Repeat([]byte("abcdef"), (pageSize+100)/6+1)
+	content = content[:pageSize+100]
+	var rangeCalls int32
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "items.csv", "href": "/logs/" + step + "/items.csv"},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/items.csv":         enginePagedArtifactHandler(content, pageSize, nil, &rangeCalls),
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Artifacts = []ArtifactSpec{
+		{Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true},
+		{Loggers: []string{"items.csv"}, Suffix: "items.csv", Required: false},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := f.FetchArtifactsForSteps(ctx, []string{step}); err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(out, step+".items.csv"))
+	if err != nil {
+		t.Fatalf("read items artifact: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("downloaded items length/content mismatch: got %d bytes, want %d", len(got), len(content))
+	}
+	if atomic.LoadInt32(&rangeCalls) == 0 {
+		t.Fatal("expected range requests after resolving size with HEAD")
+	}
+}
+
+func TestFetcher_SmallArtifactCanGrowAfterIndex(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Messages":          func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs\n")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Artifacts = []ArtifactSpec{
+		{Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true},
+		{Loggers: []string{"Messages"}, Suffix: "messages.log", Required: true},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	var messagesStatus *FileStatus
+	for i := range man.Steps[0].Files {
+		if man.Steps[0].Files[i].Name == step+".messages.log" {
+			messagesStatus = &man.Steps[0].Files[i]
+			break
+		}
+	}
+	if messagesStatus == nil {
+		t.Fatal("messages status not recorded")
+	}
+	if messagesStatus.Status != "ok" || messagesStatus.Size != 5 {
+		t.Fatalf("messages status = %#v, want ok with fetched size 5", messagesStatus)
+	}
+}
+
+func TestFetcher_SmallArtifactSizeMismatchMarksError(t *testing.T) {
+	step := "mt-001-20250101.000000.000-create"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "items.csv", "href": "/logs/" + step + "/items.csv", "size": 7},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/items.csv":         func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("short!")) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	f.Artifacts = []ArtifactSpec{
+		{Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true},
+		{Loggers: []string{"items.csv"}, Suffix: "items.csv", Required: false},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	var itemStatus *FileStatus
+	for i := range man.Steps[0].Files {
+		if man.Steps[0].Files[i].Name == step+".items.csv" {
+			itemStatus = &man.Steps[0].Files[i]
+			break
+		}
+	}
+	if itemStatus == nil {
+		t.Fatal("items.csv status not recorded")
+	}
+	if itemStatus.Status != "error" || !strings.Contains(itemStatus.Error, "downloaded size 6 is smaller than index size 7") {
+		t.Fatalf("items.csv status = %#v, want short-read error", itemStatus)
 	}
 }
 
@@ -290,13 +487,23 @@ func TestFetcher_MissingOptionalFiles(t *testing.T) {
 
 func TestFetcher_SanitizesConfigArtifact(t *testing.T) {
 	step := "replay-001-20260606.000000.000-create"
+	configArtifact := []byte(`storage:
+  auth:
+    uid: LOCALACCESSKEY
+    secret: LOCALSECRETKEY
+  driver:
+    type: s3
+aws:
+  accessKeyId: AWSACCESSKEY
+  secretAccessKey: AWSSECRETKEY
+`)
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
 			idx := map[string]any{
 				"step_id": step,
 				"items": []map[string]any{
 					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
-					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 120},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": len(configArtifact)},
 					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
 					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
 					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
@@ -306,16 +513,7 @@ func TestFetcher_SanitizesConfigArtifact(t *testing.T) {
 		},
 		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
 		"/logs/" + step + "/Config": func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`storage:
-  auth:
-    uid: LOCALACCESSKEY
-    secret: LOCALSECRETKEY
-  driver:
-    type: s3
-aws:
-  accessKeyId: AWSACCESSKEY
-  secretAccessKey: AWSSECRETKEY
-`))
+			_, _ = w.Write(configArtifact)
 		},
 		"/logs/" + step + "/Cli":      func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cli")) },
 		"/logs/" + step + "/Messages": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("msgs")) },
@@ -503,8 +701,8 @@ func TestFetcher_UsesIndexJsonForDiscovery(t *testing.T) {
 					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5, "modified": time.Now().UTC().Format(time.RFC1123), "content_type": "text/csv"},
 					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": 3, "modified": time.Now().UTC().Format(time.RFC1123), "content_type": "text/yaml"},
 					{"logger": "Cli", "href": "/logs/" + step + "/Cli", "size": 3},
-					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 4},
-					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 4},
+					{"logger": "Messages", "href": "/logs/" + step + "/Messages", "size": 3},
+					{"logger": "Errors", "href": "/logs/" + step + "/Errors", "size": 3},
 				},
 			}
 			_ = json.NewEncoder(w).Encode(idx)
