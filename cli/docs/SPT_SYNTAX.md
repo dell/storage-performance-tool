@@ -104,10 +104,14 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
 | `--items-file` | | `""` | Path to a saved `items.csv` for `read` (skips seed phase) |
+| `--shuffle` | | `false` | `read` only. Shuffle items within each fetched read batch before issuing reads |
+| `--shuffle-batch-size` | | `0` | `read` only. Batch size override used with `--shuffle` (`0` = bounded default `512000`, max `1000000`) |
 
 *Typically specify either `--object-count` or `--duration`, not both.*
 
 **`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
+
+**`--shuffle` / `--shuffle-batch-size` behavior:** These flags apply only to `read` workloads and only affect the `ReadLoad` phase. `--shuffle` enables engine-side item shuffling within each fetched batch. `--shuffle-batch-size` requires `--shuffle`, uses the bounded default when omitted, and is capped to avoid large buffer growth in seed/scatter/cleanup paths.
 
 #### 3. Test Behavior Options
 
@@ -465,7 +469,26 @@ spt run read \
     --seed-objects 5000 \
     --duration 5m \
     --cleanup
+
+# Same read pattern, but widen randomness within each fetched batch
+spt run read \
+    --endpoints https://s3.example.com \
+    --access-key "$S3_ACCESS_KEY" \
+    --secret-key "$S3_SECRET_KEY" \
+    --bucket benchmark-test \
+    --threads 16 \
+    --object-size 10KB \
+    --seed-objects 500000 \
+    --duration 5m \
+    --shuffle \
+    --shuffle-batch-size 512000 \
+    --cleanup
 ```
+
+Notes:
+- `--shuffle` only changes the read benchmark phase; it does not widen the seed or cleanup phases.
+- The default shuffle window is `512000` when `--shuffle` is enabled without `--shuffle-batch-size`.
+- `--shuffle-batch-size` is capped at `1000000` to keep engine buffer growth bounded.
 
 ### Write-Then-Read Workflow
 

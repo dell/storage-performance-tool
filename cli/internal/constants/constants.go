@@ -118,6 +118,14 @@ const (
 	EnginePlainLogArtifactMaxBytes = EngineLogArtifactPageSize - 1
 )
 
+// Read shuffle tuning constants
+const (
+	// ReadShuffleDefaultBatchSize is the implicit read-phase batch size when --shuffle is enabled without an explicit override.
+	ReadShuffleDefaultBatchSize = 512000
+	// ReadShuffleMaxBatchSize bounds --shuffle-batch-size to avoid pathological engine buffer growth.
+	ReadShuffleMaxBatchSize = 1000000
+)
+
 // Progress indicator constants
 const (
 	ProgressSpinner = "⏳"

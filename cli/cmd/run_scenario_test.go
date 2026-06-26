@@ -309,6 +309,38 @@ func TestBuildScenarioParams(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:         "read workload with shuffle override",
+			workloadType: "read",
+			flags: map[string]interface{}{
+				"endpoint":               "http://localhost:9000",
+				"access-key":             "test",
+				"secret-key":             "test123",
+				"bucket":                 "read-bucket",
+				"threads":                4,
+				"object-size":            "100KB",
+				"duration":               "5m",
+				flagReadShuffle:          true,
+				flagReadShuffleBatchSize: 1000000,
+			},
+			expected: scenario.Params{
+				WorkloadType:         "read",
+				Endpoint:             "http://localhost:9000",
+				Endpoints:            []string{"http://localhost:9000"},
+				AccessKey:            "test",
+				SecretKey:            "test123",
+				Bucket:               "read-bucket",
+				AuthVersion:          4,
+				Threads:              4,
+				ObjectSize:           "100KB",
+				ObjectCount:          0,
+				Duration:             "5m",
+				ReadShuffle:          true,
+				ReadShuffleBatchSize: 1000000,
+				ObjectDataDedupable:  true,
+			},
+			wantErr: false,
+		},
+		{
 			name:         "mixed workload",
 			workloadType: "mixed",
 			flags: map[string]interface{}{
@@ -445,6 +477,8 @@ func TestBuildScenarioParams(t *testing.T) {
 			cmd.Flags().Int("object-count", 0, "")
 			cmd.Flags().String("duration", "", "")
 			cmd.Flags().Bool("cleanup", false, "")
+			cmd.Flags().Bool(flagReadShuffle, false, "")
+			cmd.Flags().Int(flagReadShuffleBatchSize, 0, "")
 			cmd.Flags().Bool("create-prefix", false, "")
 			cmd.Flags().Int("service-threads", 0, "")
 			cmd.Flags().String("s3-driver", "default", "")
@@ -569,6 +603,8 @@ func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 			cmd.Flags().String("object-size", "", "")
 			cmd.Flags().Int("object-count", 0, "")
 			cmd.Flags().String("duration", "", "")
+			cmd.Flags().Bool(flagReadShuffle, false, "")
+			cmd.Flags().Int(flagReadShuffleBatchSize, 0, "")
 			cmd.Flags().String("s3-driver", "default", "")
 			cmd.Flags().Bool("use-rdma", false, "")
 			cmd.Flags().String("rdma-local-ip", "", "")
@@ -620,6 +656,8 @@ func TestBuildScenarioParamsServiceThreads(t *testing.T) {
 			cmd.Flags().String("object-size", "", "")
 			cmd.Flags().Int("object-count", 0, "")
 			cmd.Flags().String("duration", "", "")
+			cmd.Flags().Bool(flagReadShuffle, false, "")
+			cmd.Flags().Int(flagReadShuffleBatchSize, 0, "")
 			cmd.Flags().Int("service-threads", 0, "")
 			cmd.Flags().String("s3-driver", "default", "")
 			cmd.Flags().Bool("use-rdma", false, "")
@@ -659,6 +697,8 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		cmd.Flags().String("object-size", "", "")
 		cmd.Flags().Int("object-count", 0, "")
 		cmd.Flags().String("duration", "", "")
+		cmd.Flags().Bool(flagReadShuffle, false, "")
+		cmd.Flags().Int(flagReadShuffleBatchSize, 0, "")
 		cmd.Flags().Bool("cleanup", false, "")
 		cmd.Flags().Int("service-threads", 0, "")
 		cmd.Flags().String("s3-driver", "default", "")

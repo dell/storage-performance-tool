@@ -58,6 +58,24 @@ Need to profile how fast an existing namespace can be enumerated? The list workl
 Tip: If you omit both `--object-count` and `--duration`, the list workload will continue until you stop it. Always set `--auto-terminate-seconds` for unattended runs so CI jobs do not hang.
 Authentication defaults to Signature Version 4. Add `--auth-version 2` only when working with a legacy S3 implementation that rejects SigV4.
 
+For read benchmarks, `spt` can seed an item set automatically and optionally widen read randomness within each fetched batch:
+
+```bash
+# Seed 5,000 objects, then read them with bounded batch-local shuffling
+./spt run read \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket benchmark-test \
+  --threads 16 \
+  --object-size 10KB \
+  --seed-objects 5000 \
+  --duration 5m \
+  --shuffle \
+  --shuffle-batch-size 512000 \
+  --cleanup
+```
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
@@ -383,6 +401,10 @@ Executes a benchmark test with the specified workload type.
 - `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
+- `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
+- `--items-file`: Path to a saved `items.csv` for `read` workloads (skips the seed phase)
+- `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
+- `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
 - `--cleanup`: Delete all created objects after test completion
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports

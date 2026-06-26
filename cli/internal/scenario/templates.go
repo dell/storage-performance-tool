@@ -586,8 +586,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 }
@@ -726,8 +730,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 },
@@ -859,8 +867,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 }
@@ -969,8 +981,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 },
@@ -1086,8 +1102,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 }
@@ -1193,8 +1213,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 }
@@ -1272,8 +1296,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 },
@@ -1351,8 +1379,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 }
@@ -1453,8 +1485,12 @@ ReadLoad
             }
         },
         "load": {
-            "op": {
-                "type": "read",
+{{if .ReadShuffle}}            "batch": {
+                "size": {{.ReadShuffleBatchSize}}
+            },
+{{end}}            "op": {
+                "type": "read",{{if .ReadShuffle}}
+                "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
                 },
