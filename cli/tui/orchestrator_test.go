@@ -21,6 +21,18 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
+func TestNewTestOrchestratorConfiguresNodeLogResultsRoot(t *testing.T) {
+	resultsRoot := t.TempDir()
+	dm := &DockerManager{}
+	_ = NewTestOrchestrator(dm, constants.SptAPIPort, resultsRoot)
+	if dm.nodeLogResultsRoot != resultsRoot {
+		t.Fatalf("nodeLogResultsRoot = %q, want %q", dm.nodeLogResultsRoot, resultsRoot)
+	}
+	if dm.preserveNodeLogDir {
+		t.Fatal("preserveNodeLogDir should remain false until capture is prepared")
+	}
+}
+
 // TestOrchestratorStartTest tests the complete test start flow
 func TestOrchestratorStartTest(t *testing.T) {
 	// Create a mock API server
@@ -92,7 +104,7 @@ func TestOrchestratorStartTest(t *testing.T) {
 	mockDM := NewMockDockerManager()
 
 	// Create orchestrator
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Track callbacks
 	var statusUpdates []*TestStatus
@@ -291,7 +303,7 @@ func TestOrchestratorStartTestWithContentPostsProvidedArtifacts(t *testing.T) {
 	defer server.Close()
 
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 	defer orchestrator.StopTest()
 
@@ -353,7 +365,7 @@ func TestOrchestratorStartTestConfiguresItemFileMounts(t *testing.T) {
 	defer server.Close()
 
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
 	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeRead, ItemFileMounts: mounts}
@@ -422,7 +434,7 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockDM := NewMockDockerManager()
-			orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+			orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 			orchestrator.apiClient = NewSptAPIClient(server.URL)
 			if tt.configureMode != nil {
 				tt.configureMode(orchestrator)
@@ -454,7 +466,7 @@ func TestOrchestratorContainerStartFailure(t *testing.T) {
 	mockDM := NewMockDockerManager()
 	mockDM.SetFailOnStart(true)
 
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	params := scenario.ScenarioParams{
 		WorkloadType: "mock",
@@ -482,7 +494,7 @@ func TestOrchestratorAPIReadyTimeout(t *testing.T) {
 	defer server.Close()
 
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Set up the orchestrator with test server BEFORE trying to connect
 	orchestrator.containerID = "test-container"
@@ -534,7 +546,7 @@ func TestOrchestratorStopTest(t *testing.T) {
 	defer server.Close()
 
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Set up callbacks
 	var outputLines []string
@@ -585,7 +597,7 @@ func TestOrchestratorStopTest(t *testing.T) {
 // TestOrchestratorScenarioFilePersistence tests scenario file handling
 func TestOrchestratorScenarioFilePersistence(t *testing.T) {
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Test with KeepScenario = true
 	params := scenario.ScenarioParams{
@@ -656,7 +668,7 @@ func TestOrchestratorCallbacks(t *testing.T) {
 	defer server.Close()
 
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Track all callbacks
 	var statusCount, metricsCount, outputCount, errorCount int
@@ -714,7 +726,7 @@ func TestOrchestratorCallbacks(t *testing.T) {
 // TestOrchestratorConcurrentOperations tests concurrent goroutine safety
 func TestOrchestratorConcurrentOperations(t *testing.T) {
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Set up a simple test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -801,7 +813,7 @@ func TestOrchestratorMetricsParsing(t *testing.T) {
 	}))
 	defer server.Close()
 
-	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 	// Track metrics received
@@ -852,7 +864,7 @@ func TestOrchestratorMetricsCompatibilityWarning(t *testing.T) {
 	}))
 	defer server.Close()
 
-	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 	var outputs []string
@@ -899,7 +911,7 @@ func TestOrchestratorFetchesVerbosePayloadOnParseError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 	metric, source, err := orchestrator.tryJSONMetrics()
@@ -933,7 +945,7 @@ func TestOrchestratorIdleNodeMarkedInactive(t *testing.T) {
 	}))
 	defer server.Close()
 
-	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -992,7 +1004,7 @@ func TestOrchestratorTestCompletion(t *testing.T) {
 			}))
 			defer server.Close()
 
-			orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+			orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 			orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 			// Track output
@@ -1030,7 +1042,7 @@ func TestOrchestratorTestCompletion(t *testing.T) {
 // TestOrchestratorCleanupOnError tests cleanup when operations fail
 func TestOrchestratorCleanupOnError(t *testing.T) {
 	mockDM := NewMockDockerManager()
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Create a scenario file to test cleanup
 	tmpFile, err := os.CreateTemp("", "test-scenario-*.js")

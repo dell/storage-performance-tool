@@ -69,6 +69,10 @@ type fileMountConfigurer interface {
 	SetFileMounts([]scenario.FileMount) error
 }
 
+type nodeLogResultsRootConfigurer interface {
+	setNodeLogResultsRoot(string)
+}
+
 func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) error {
 	if len(mounts) == 0 {
 		return nil
@@ -81,9 +85,12 @@ func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) 
 }
 
 // NewTestOrchestrator creates a new test orchestrator
-func NewTestOrchestrator(dm DockerInterface, apiPort string) *TestOrchestrator {
+func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot string) *TestOrchestrator {
 	if apiPort == "" {
 		apiPort = constants.SptAPIPort
+	}
+	if configurer, ok := dm.(nodeLogResultsRootConfigurer); ok {
+		configurer.setNodeLogResultsRoot(nodeLogResultsRoot)
 	}
 	return &TestOrchestrator{
 		dockerManager:         dm,
