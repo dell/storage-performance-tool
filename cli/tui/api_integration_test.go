@@ -186,7 +186,7 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 	mockDM := NewMockDockerManager()
 
 	// Create orchestrator
-	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort)
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
 	// Track all interactions
 	var statusUpdates []string

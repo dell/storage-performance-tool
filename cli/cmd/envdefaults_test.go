@@ -41,16 +41,44 @@ func newVerifyLikeCmd() *cobra.Command {
 	return c
 }
 
+func clearEnvDefaultsTestEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"S3_ENDPOINT",
+		"S3_ENDPOINTS",
+		"S3_ACCESS_KEY",
+		"S3_SECRET_KEY",
+		"S3_BUCKET",
+		"HOSTS",
+		"THREADS",
+		constants.EnvSkipImagePull,
+		constants.EnvS3AuthVersion,
+		constants.EnvRdmaEnabled,
+		constants.EnvRdmaLocalIP,
+		constants.EnvRdmaDevice,
+		constants.EnvRdmaLogLevel,
+		constants.EnvRdmaThreshold,
+		constants.EnvRdmaTimeout,
+		constants.EnvRdmaFallback,
+		constants.EnvServiceThreads,
+		constants.EnvPartSize,
+		constants.EnvS3Driver,
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestApplyEnvDefaultsToRunFlags(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
 	// Seed env
-	os.Setenv("S3_ENDPOINT", "http://env:9000")
-	os.Setenv("S3_ACCESS_KEY", "AKIA")
-	os.Setenv("S3_SECRET_KEY", "SECRET")
-	os.Setenv("S3_BUCKET", "bucket1")
-	os.Setenv("HOSTS", "h1,h2")
-	os.Setenv(constants.EnvSkipImagePull, "1")
+	t.Setenv("S3_ENDPOINT", "http://env:9000")
+	t.Setenv("S3_ACCESS_KEY", "AKIA")
+	t.Setenv("S3_SECRET_KEY", "SECRET")
+	t.Setenv("S3_BUCKET", "bucket1")
+	t.Setenv("HOSTS", "h1,h2")
+	t.Setenv(constants.EnvSkipImagePull, "1")
 	t.Cleanup(func() {
 		os.Unsetenv("S3_ENDPOINT")
 		os.Unsetenv("S3_ACCESS_KEY")
@@ -90,8 +118,9 @@ func TestApplyEnvDefaultsToRunFlags(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_S3Endpoints(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 	// Only S3_ENDPOINTS is set; ensure endpoints are used and single endpoint not set
-	os.Setenv("S3_ENDPOINTS", "http://s3a:9000,http://s3b:9000")
+	t.Setenv("S3_ENDPOINTS", "http://s3a:9000,http://s3b:9000")
 	t.Cleanup(func() { os.Unsetenv("S3_ENDPOINTS") })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -109,9 +138,10 @@ func TestApplyEnvDefaultsToRunFlags_S3Endpoints(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_EndpointsFlagWins(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 	// User provided endpoints flag; env should not override
 	_ = cmd.Flags().Set("endpoints", "http://cli1:9000,http://cli2:9000")
-	os.Setenv("S3_ENDPOINTS", "http://env1:9000,http://env2:9000")
+	t.Setenv("S3_ENDPOINTS", "http://env1:9000,http://env2:9000")
 	t.Cleanup(func() { os.Unsetenv("S3_ENDPOINTS") })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -125,11 +155,12 @@ func TestApplyEnvDefaultsToRunFlags_EndpointsFlagWins(t *testing.T) {
 
 func TestApplyEnvDefaults_RespectUserFlags(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 	// User provided an explicit flag
 	cmd.Flags().Set("endpoint", "http://cli:9000")
 	cmd.Flags().Set(flagSkipImagePull, "true")
-	os.Setenv("S3_ENDPOINT", "http://env:9000")
-	os.Setenv(constants.EnvSkipImagePull, "0")
+	t.Setenv("S3_ENDPOINT", "http://env:9000")
+	t.Setenv(constants.EnvSkipImagePull, "0")
 	t.Cleanup(func() {
 		os.Unsetenv("S3_ENDPOINT")
 		os.Unsetenv(constants.EnvSkipImagePull)
@@ -153,9 +184,10 @@ func TestApplyEnvDefaults_RespectUserFlags(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_ThreadsFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 	// Ensure user did not set --threads
 	// Provide THREADS through env
-	os.Setenv("THREADS", "16")
+	t.Setenv("THREADS", "16")
 	t.Cleanup(func() { os.Unsetenv("THREADS") })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -169,7 +201,8 @@ func TestApplyEnvDefaultsToRunFlags_ThreadsFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToVerifyFlags(t *testing.T) {
 	cmd := newVerifyLikeCmd()
-	os.Setenv("HOSTS", "v1,v2")
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv("HOSTS", "v1,v2")
 	t.Cleanup(func() { os.Unsetenv("HOSTS") })
 
 	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
@@ -192,14 +225,15 @@ func TestApplyEnvDefaultsToVerifyFlags(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvRdmaEnabled, "true")
-	os.Setenv(constants.EnvRdmaLocalIP, "10.247.128.125")
-	os.Setenv(constants.EnvRdmaDevice, "mlx5_0")
-	os.Setenv(constants.EnvRdmaLogLevel, "DEBUG")
-	os.Setenv(constants.EnvRdmaThreshold, "4194304")
-	os.Setenv(constants.EnvRdmaTimeout, "60000")
-	os.Setenv(constants.EnvRdmaFallback, "false")
+	t.Setenv(constants.EnvRdmaEnabled, "true")
+	t.Setenv(constants.EnvRdmaLocalIP, "10.247.128.125")
+	t.Setenv(constants.EnvRdmaDevice, "mlx5_0")
+	t.Setenv(constants.EnvRdmaLogLevel, "DEBUG")
+	t.Setenv(constants.EnvRdmaThreshold, "4194304")
+	t.Setenv(constants.EnvRdmaTimeout, "60000")
+	t.Setenv(constants.EnvRdmaFallback, "false")
 	t.Cleanup(func() {
 		os.Unsetenv(constants.EnvRdmaEnabled)
 		os.Unsetenv(constants.EnvRdmaLocalIP)
@@ -239,12 +273,13 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaFlagWinsOverEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
 	// User explicitly sets --use-rdma=false on CLI
 	_ = cmd.Flags().Set("use-rdma", "false")
 
 	// Env says true
-	os.Setenv(constants.EnvRdmaEnabled, "true")
+	t.Setenv(constants.EnvRdmaEnabled, "true")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -259,8 +294,9 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFlagWinsOverEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaInvalidThreshold(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvRdmaThreshold, "not-a-number")
+	t.Setenv(constants.EnvRdmaThreshold, "not-a-number")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaThreshold) })
 
 	err := applyEnvDefaultsToRunFlags(cmd)
@@ -274,8 +310,9 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidThreshold(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaInvalidTimeout(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvRdmaTimeout, "abc")
+	t.Setenv(constants.EnvRdmaTimeout, "abc")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaTimeout) })
 
 	err := applyEnvDefaultsToRunFlags(cmd)
@@ -289,8 +326,9 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidTimeout(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaHumanizedThreshold(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvRdmaThreshold, "256KB")
+	t.Setenv(constants.EnvRdmaThreshold, "256KB")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaThreshold) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -303,9 +341,10 @@ func TestApplyEnvDefaultsToRunFlags_RdmaHumanizedThreshold(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaInvalidBoolIgnored(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
 	// Invalid bool for SPT_RDMA should be silently ignored (not error)
-	os.Setenv(constants.EnvRdmaEnabled, "maybe")
+	t.Setenv(constants.EnvRdmaEnabled, "maybe")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -320,9 +359,10 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidBoolIgnored(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_RdmaInvalidFallbackIgnored(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
 	// Invalid bool for RDMA_FALLBACK_ENABLED should be silently ignored
-	os.Setenv(constants.EnvRdmaFallback, "sometimes")
+	t.Setenv(constants.EnvRdmaFallback, "sometimes")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaFallback) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -337,8 +377,9 @@ func TestApplyEnvDefaultsToRunFlags_RdmaInvalidFallbackIgnored(t *testing.T) {
 
 func TestApplyEnvDefaultsToVerifyFlags_RdmaFromEnv(t *testing.T) {
 	cmd := newVerifyLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvRdmaEnabled, "1")
+	t.Setenv(constants.EnvRdmaEnabled, "1")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvRdmaEnabled) })
 
 	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
@@ -352,8 +393,9 @@ func TestApplyEnvDefaultsToVerifyFlags_RdmaFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvServiceThreads, "32")
+	t.Setenv(constants.EnvServiceThreads, "32")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -367,8 +409,9 @@ func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFlagOverridesEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvServiceThreads, "32")
+	t.Setenv(constants.EnvServiceThreads, "32")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
 
 	// Simulate explicit flag usage
@@ -385,8 +428,9 @@ func TestApplyEnvDefaultsToRunFlags_ServiceThreadsFlagOverridesEnv(t *testing.T)
 
 func TestApplyEnvDefaultsToRunFlags_ServiceThreadsInvalidEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvServiceThreads, "not-a-number")
+	t.Setenv(constants.EnvServiceThreads, "not-a-number")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvServiceThreads) })
 
 	err := applyEnvDefaultsToRunFlags(cmd)
@@ -400,8 +444,9 @@ func TestApplyEnvDefaultsToRunFlags_ServiceThreadsInvalidEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_PartSizeFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvPartSize, "64MB")
+	t.Setenv(constants.EnvPartSize, "64MB")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -415,10 +460,11 @@ func TestApplyEnvDefaultsToRunFlags_PartSizeFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_PartSizeFlagWinsOverEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
 	_ = cmd.Flags().Set("part-size", "32MB")
 
-	os.Setenv(constants.EnvPartSize, "64MB")
+	t.Setenv(constants.EnvPartSize, "64MB")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -432,8 +478,9 @@ func TestApplyEnvDefaultsToRunFlags_PartSizeFlagWinsOverEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_PartSizeInvalidEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvPartSize, "not-a-size")
+	t.Setenv(constants.EnvPartSize, "not-a-size")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvPartSize) })
 
 	err := applyEnvDefaultsToRunFlags(cmd)
@@ -447,8 +494,9 @@ func TestApplyEnvDefaultsToRunFlags_PartSizeInvalidEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_S3DriverFromEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvS3Driver, "aws")
+	t.Setenv(constants.EnvS3Driver, "aws")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvS3Driver) })
 
 	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
@@ -463,8 +511,9 @@ func TestApplyEnvDefaultsToRunFlags_S3DriverFromEnv(t *testing.T) {
 
 func TestApplyEnvDefaultsToRunFlags_S3DriverFlagWinsOverEnv(t *testing.T) {
 	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
 
-	os.Setenv(constants.EnvS3Driver, "aws")
+	t.Setenv(constants.EnvS3Driver, "aws")
 	t.Cleanup(func() { os.Unsetenv(constants.EnvS3Driver) })
 
 	_ = cmd.Flags().Set("s3-driver", "rdma") // explicit flag

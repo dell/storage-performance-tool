@@ -35,13 +35,14 @@ import (
 )
 
 const (
-	dockerBindAllInterfaces    = "0.0.0.0"
-	dockerCgroupPermissionsRWM = "rwm"
-	dockerLabelTrue            = "true"
-	dockerMemlockUlimitName    = "memlock"
-	dockerNodeModeArg          = "--run-node=true"
-	dockerNodeLogMount         = "/spt-node-logs"
-	nodeLogDirPattern          = "spt-node-logs-*"
+	dockerBindAllInterfaces     = "0.0.0.0"
+	dockerCgroupPermissionsRWM  = "rwm"
+	dockerLabelTrue             = "true"
+	dockerMemlockUlimitName     = "memlock"
+	dockerNodeModeArg           = "--run-node=true"
+	dockerNodeLogMount          = "/spt-node-logs"
+	dockerNodeLogResultsDirName = ".node-home"
+	nodeLogDirPattern           = "spt-node-logs-*"
 )
 
 // DockerManager handles Docker operations for the TUI
@@ -62,14 +63,16 @@ type dockerClient interface {
 // dockerClient interface for easier testing and can delegate to a
 // RemoteDockerManager when managing remote hosts.
 type DockerManager struct {
-	client      dockerClient
-	containerID string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	hostInfo    *hostparse.HostInfo  // New field to track host information
-	remote      *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
-	nodeLogDir  string               // Host-side temp dir mounted for node startup diagnostics
-	fileMounts  []scenario.FileMount
+	client             dockerClient
+	containerID        string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	hostInfo           *hostparse.HostInfo  // New field to track host information
+	remote             *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
+	nodeLogDir         string
+	nodeLogResultsRoot string
+	preserveNodeLogDir bool
+	fileMounts         []scenario.FileMount
 }
 
 func skipImagePull(image string) bool {
@@ -191,22 +194,46 @@ func (dm *DockerManager) pullImage(imageName string) error {
 	return nil
 }
 
+func (dm *DockerManager) setNodeLogResultsRoot(resultsRoot string) {
+	dm.nodeLogResultsRoot = strings.TrimSpace(resultsRoot)
+}
+
 func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
 	if dm.nodeLogDir != "" {
 		_ = os.RemoveAll(dm.nodeLogDir)
 		dm.nodeLogDir = ""
 	}
-	dir, err := os.MkdirTemp("", nodeLogDirPattern)
+	preserve := dm.nodeLogResultsRoot != ""
+	var (
+		dir string
+		err error
+	)
+	if preserve {
+		if dir, err = filepath.Abs(filepath.Join(dm.nodeLogResultsRoot, dockerNodeLogResultsDirName)); err != nil {
+			logging.LogWarn("docker", "failed to resolve node log capture directory", "path", dm.nodeLogResultsRoot, "error", err.Error())
+			return nil, nil
+		}
+		if err = os.RemoveAll(dir); err != nil {
+			logging.LogWarn("docker", "failed to reset node log capture directory", "path", dir, "error", err.Error())
+			return nil, nil
+		}
+		err = os.MkdirAll(dir, 0o777) // #nosec G301 -- container user must be able to traverse and write the bind mount
+	} else {
+		dir, err = os.MkdirTemp("", nodeLogDirPattern)
+	}
 	if err != nil {
 		logging.LogWarn("docker", "failed to create node log capture directory", "error", err.Error())
 		return nil, nil
 	}
-	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directory requires owner execute bit for traversal
-		_ = os.RemoveAll(dir)
-		logging.LogWarn("docker", "failed to secure node log capture directory", "error", err.Error())
+	if err := os.Chmod(dir, 0o777); err != nil { // #nosec G302 -- container user must be able to traverse and write the bind mount
+		if !preserve {
+			_ = os.RemoveAll(dir)
+		}
+		logging.LogWarn("docker", "failed to prepare node log capture directory permissions", "path", dir, "error", err.Error())
 		return nil, nil
 	}
 	dm.nodeLogDir = dir
+	dm.preserveNodeLogDir = preserve
 	return []string{fmt.Sprintf("%s:%s", dir, dockerNodeLogMount)}, []string{"SPT_LOG_DIR=" + dockerNodeLogMount}
 }
 
@@ -916,6 +943,10 @@ func (dm *DockerManager) Cleanup() error {
 
 func (dm *DockerManager) cleanupNodeLogDir() {
 	if dm.nodeLogDir == "" {
+		return
+	}
+	if dm.preserveNodeLogDir {
+		dm.nodeLogDir = ""
 		return
 	}
 	if err := os.RemoveAll(dm.nodeLogDir); err != nil {

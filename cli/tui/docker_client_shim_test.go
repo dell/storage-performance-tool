@@ -24,15 +24,16 @@ import (
 
 // fakeDockerClient implements dockerClient for tests
 type fakeDockerClient struct {
-	pulled           bool
-	stopped, removed int
-	ver              types.Version
-	inspectErr       error
-	logBody          []byte
-	logOptions       container.LogsOptions
-	stopErr          error
-	removeErr        error
-	createHostConfig *container.HostConfig
+	pulled                bool
+	stopped, removed      int
+	ver                   types.Version
+	inspectErr            error
+	logBody               []byte
+	logOptions            container.LogsOptions
+	stopErr               error
+	removeErr             error
+	createHostConfig      *container.HostConfig
+	createContainerConfig *container.Config
 }
 
 func (f *fakeDockerClient) ImageInspect(ctx context.Context, imageID string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
@@ -52,6 +53,7 @@ func (f *fakeDockerClient) ContainerLogs(ctx context.Context, container string, 
 	return io.NopCloser(bytes.NewReader(logs.Bytes())), nil
 }
 func (f *fakeDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+	f.createContainerConfig = config
 	f.createHostConfig = hostConfig
 	return container.CreateResponse{ID: "abc"}, nil
 }
@@ -236,5 +238,112 @@ func TestContainerDiagnosticTailIncludesDockerAndEngineErrors(t *testing.T) {
 	}
 	if f.logOptions.Tail != "7" {
 		t.Fatalf("docker log tail = %q, want 7", f.logOptions.Tail)
+	}
+}
+
+func TestDockerManager_PrepareNodeLogCaptureUsesConfiguredResultsRoot(t *testing.T) {
+	resultsRoot := t.TempDir()
+	dm := &DockerManager{}
+	dm.setNodeLogResultsRoot(resultsRoot)
+
+	binds, env := dm.prepareNodeLogCapture()
+	wantDir := filepath.Join(resultsRoot, dockerNodeLogResultsDirName)
+	if dm.nodeLogDir != wantDir {
+		t.Fatalf("nodeLogDir = %q, want %q", dm.nodeLogDir, wantDir)
+	}
+	if !dm.preserveNodeLogDir {
+		t.Fatal("preserveNodeLogDir = false, want true")
+	}
+	if len(binds) != 1 || binds[0] != wantDir+":"+dockerNodeLogMount {
+		t.Fatalf("binds = %v, want %q", binds, wantDir+":"+dockerNodeLogMount)
+	}
+	if len(env) != 1 || env[0] != "SPT_LOG_DIR="+dockerNodeLogMount {
+		t.Fatalf("env = %v", env)
+	}
+	info, err := os.Stat(wantDir)
+	if err != nil {
+		t.Fatalf("stat node log dir: %v", err)
+	}
+	if info.Mode().Perm()&0o003 != 0o003 {
+		t.Fatalf("node log dir perms = %o, want other write+execute set", info.Mode().Perm())
+	}
+}
+
+func TestDockerManager_PrepareNodeLogCaptureResolvesRelativeResultsRoot(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	dm := &DockerManager{}
+	relativeRoot := filepath.Join("results", "run-123")
+	dm.setNodeLogResultsRoot(relativeRoot)
+
+	binds, _ := dm.prepareNodeLogCapture()
+	wantDir := filepath.Join(cwd, relativeRoot, dockerNodeLogResultsDirName)
+	if dm.nodeLogDir != wantDir {
+		t.Fatalf("nodeLogDir = %q, want %q", dm.nodeLogDir, wantDir)
+	}
+	if len(binds) != 1 || binds[0] != wantDir+":"+dockerNodeLogMount {
+		t.Fatalf("binds = %v, want %q", binds, wantDir+":"+dockerNodeLogMount)
+	}
+}
+
+func TestDockerManager_CleanupRemovesTemporaryNodeLogDir(t *testing.T) {
+	dm := &DockerManager{}
+	dm.prepareNodeLogCapture()
+	logDir := dm.nodeLogDir
+	if logDir == "" {
+		t.Fatal("nodeLogDir not set")
+	}
+	if err := dm.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, err := os.Stat(logDir); !os.IsNotExist(err) {
+		t.Fatalf("temp node log dir still exists, stat err = %v", err)
+	}
+}
+
+func TestDockerManager_CleanupPreservesConfiguredNodeLogDir(t *testing.T) {
+	resultsRoot := t.TempDir()
+	dm := &DockerManager{}
+	dm.setNodeLogResultsRoot(resultsRoot)
+	dm.prepareNodeLogCapture()
+	logDir := dm.nodeLogDir
+	marker := filepath.Join(logDir, "marker.txt")
+	if err := os.WriteFile(marker, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if err := dm.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker missing after cleanup: %v", err)
+	}
+}
+
+func TestStartContainerInNodeModeUsesConfiguredNodeLogDir(t *testing.T) {
+	resultsRoot := t.TempDir()
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, ctx: context.Background()}
+	dm.setNodeLogResultsRoot(resultsRoot)
+
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+		t.Fatalf("StartContainerInNodeMode() error = %v", err)
+	}
+	wantDir := filepath.Join(resultsRoot, dockerNodeLogResultsDirName)
+	wantBind := wantDir + ":" + dockerNodeLogMount
+	if f.createHostConfig == nil {
+		t.Fatal("ContainerCreate host config was nil")
+	}
+	if !containsString(f.createHostConfig.Binds, wantBind) {
+		t.Fatalf("host binds = %v, want %q", f.createHostConfig.Binds, wantBind)
+	}
+	if f.createContainerConfig == nil {
+		t.Fatal("ContainerCreate container config was nil")
+	}
+	if !containsString(f.createContainerConfig.Env, "SPT_LOG_DIR="+dockerNodeLogMount) {
+		t.Fatalf("env = %v, want SPT_LOG_DIR", f.createContainerConfig.Env)
 	}
 }

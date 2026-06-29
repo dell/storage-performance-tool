@@ -1040,6 +1040,7 @@ Available workload types:
 
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
 			options.NetworkMode = networkMode
+			options.ResultsRoot = plannedResultsRoot
 			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1055,9 +1056,9 @@ Available workload types:
 		// Launch TUI with the scenario file
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err = tui.StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
+			err = tui.StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
 		} else {
-			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, setSummarySink, traceOpts.Path, traceOpts.Append)
+			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
 		waitForAutoResults(false)
 		finalizeTraceArtifact()

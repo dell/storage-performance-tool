@@ -443,7 +443,7 @@ func TestOrchestratorJSONMetricsRetrieval(t *testing.T) {
 			defer server.Close()
 
 			// Create orchestrator with test API client
-			orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort)
+			orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 			orchestrator.apiClient = NewSptAPIClient(server.URL)
 
 			// Call the optimized metrics method

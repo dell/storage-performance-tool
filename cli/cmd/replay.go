@@ -332,6 +332,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
 		options.NetworkMode = networkMode
+		options.ResultsRoot = plannedResultsRoot
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
@@ -344,12 +345,12 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Starting TUI...")
 	if autoTerminate > 0 {
 		_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
-		err := tui.StartTUIWithScenarioContentAndParamsTimeoutWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+		err := tui.StartTUIWithScenarioContentAndParamsTimeoutWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, plannedResultsRoot, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 		waitForAutoResults()
 		finalizeTraceArtifact()
 		return err
 	}
-	err = tui.StartTUIWithScenarioContentAndParamsWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+	err = tui.StartTUIWithScenarioContentAndParamsWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, plannedResultsRoot, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
 	waitForAutoResults()
 	finalizeTraceArtifact()
 	return err

@@ -39,6 +39,7 @@ type HeadlessRunner struct {
 	scenarioPath  string
 	apiPort       string
 	networkMode   string
+	resultsRoot   string
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -53,6 +54,7 @@ type HeadlessOptions struct {
 	JSONMode    bool
 	MetricsOnly bool
 	DryRun      bool
+	ResultsRoot string
 	// KeepScenario removed - this belongs in scenario.Params
 	AutoTerminateSeconds int // 0 = unlimited
 	// In multi-host runs, let auto-results fetch artifacts and request shutdown
@@ -102,6 +104,7 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		dryRun:        options.DryRun,
 		apiPort:       apiPort,
 		networkMode:   networkMode,
+		resultsRoot:   options.ResultsRoot,
 		// keepScenario will be set when RunWithScenario is called
 	}
 
@@ -463,7 +466,7 @@ func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image stri
 
 func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, startTest func(*tui.TestOrchestrator) error) error {
 	// Create the orchestrator for API-based control
-	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort)
+	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort, r.resultsRoot)
 	r.orchestrator.SetNetworkMode(r.networkMode)
 
 	// Set up callbacks to handle orchestrator events
