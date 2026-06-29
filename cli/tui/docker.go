@@ -217,7 +217,7 @@ func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
 			logging.LogWarn("docker", "failed to reset node log capture directory", "path", dir, "error", err.Error())
 			return nil, nil
 		}
-		err = os.MkdirAll(dir, 0o777)
+		err = os.MkdirAll(dir, 0o777) // #nosec G301 -- container user must be able to traverse and write the bind mount
 	} else {
 		dir, err = os.MkdirTemp("", nodeLogDirPattern)
 	}
