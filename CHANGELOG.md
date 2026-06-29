@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.11.2] - 2026-06-29
+
+### Changed
+
+- **Dependency updates** — bumped `golang.org/x/tools` in the Go dependency group.
+
+### Fixed
+
+- **Local auto-results node log capture** — single-host local container runs now persist engine-side logs under a writable results-backed `.node-home` bind mount, allowing `--save-items` and other log artifacts to be written successfully without requiring host/container UID alignment.
+
 ## [5.11.1] - 2026-06-26
 
 ### Added
