@@ -71,6 +71,25 @@ func TestGitHubClientListReleasesRateLimitError(t *testing.T) {
 	}
 }
 
+func TestGitHubClientListReleasesSecondaryRateLimitError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Secondary/abuse limits return 403 with Retry-After and no
+		// X-RateLimit-Remaining: 0.
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "secondary rate limit", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := GitHubClient{HTTPClient: server.Client(), BaseURL: server.URL, Owner: "dell", Repo: "storage-performance-tool", AllowInsecureLocalHTTP: true}
+	_, err := client.ListReleases(context.Background())
+	if err == nil {
+		t.Fatal("ListReleases accepted secondary rate-limit response")
+	}
+	if !IsRateLimitError(err) {
+		t.Fatalf("err = %v, want RateLimitError for secondary rate limit", err)
+	}
+}
+
 func serverURL(t *testing.T, r *http.Request) string {
 	t.Helper()
 	return "http://" + r.Host + r.URL.Path

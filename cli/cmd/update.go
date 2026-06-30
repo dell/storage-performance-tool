@@ -29,6 +29,20 @@ type updateOptions struct {
 	token   string
 }
 
+type updateTokenSource string
+
+const (
+	updateTokenSourceNone updateTokenSource = ""
+	updateTokenSourceFlag updateTokenSource = "flag"
+	updateTokenSourceEnv  updateTokenSource = "env"
+)
+
+type updateToken struct {
+	Value string
+	Name  string
+	Src   updateTokenSource
+}
+
 var (
 	updateCurrentVersion  = func() string { return buildinfo.Version }
 	updateExecutable      = os.Executable
@@ -97,12 +111,8 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 		return updateUserError(cmd, "--timeout must be positive")
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), opts.timeout)
-	defer cancel()
-
 	token := resolveUpdateToken(opts.token)
-	client := updateNewGitHubClient(opts.timeout, token)
-	releases, err := client.ListReleases(ctx)
+	releases, client, err := listUpdateReleases(cmd.Context(), cmd, opts.timeout, token)
 	if err != nil {
 		return updateUserError(cmd, "failed to list GitHub releases: %v", err)
 	}
@@ -174,11 +184,13 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 		return updateUserError(cmd, "%v", err)
 	}
 
-	assetBytes, err := client.DownloadAsset(ctx, asset)
+	dlCtx, dlCancel := context.WithTimeout(cmd.Context(), opts.timeout)
+	defer dlCancel()
+	assetBytes, err := client.DownloadAsset(dlCtx, asset)
 	if err != nil {
 		return updateUserError(cmd, "failed to download %s: %v", asset.Name, err)
 	}
-	checksumBytes, err := client.DownloadAsset(ctx, checksumAsset)
+	checksumBytes, err := client.DownloadAsset(dlCtx, checksumAsset)
 	if err != nil {
 		return updateUserError(cmd, "failed to download %s: %v", checksumAsset.Name, err)
 	}
@@ -207,14 +219,61 @@ func runUpdateCommand(cmd *cobra.Command, opts *updateOptions) error {
 	return nil
 }
 
-func resolveUpdateToken(flagToken string) string {
-	if strings.TrimSpace(flagToken) != "" {
-		return strings.TrimSpace(flagToken)
+func resolveUpdateToken(flagToken string) updateToken {
+	if v := strings.TrimSpace(flagToken); v != "" {
+		return updateToken{Value: v, Name: "--token", Src: updateTokenSourceFlag}
 	}
 	if v := strings.TrimSpace(os.Getenv(constants.EnvSptGitHubToken)); v != "" {
-		return v
+		return updateToken{Value: v, Name: constants.EnvSptGitHubToken, Src: updateTokenSourceEnv}
 	}
-	return strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	if v := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); v != "" {
+		return updateToken{Value: v, Name: "GITHUB_TOKEN", Src: updateTokenSourceEnv}
+	}
+	return updateToken{Src: updateTokenSourceNone}
+}
+
+// listUpdateReleases resolves the release list, choosing how to apply any token.
+//
+// An explicit --token expresses deliberate intent, so it is sent on the first
+// request and an invalid value fails clearly. An ambient env/dotenv token is
+// treated as best-effort: release lookup is attempted unauthenticated first so a
+// stale token cannot break public-repo access, and the token is only used to
+// retry when the unauthenticated attempt is rate-limited.
+func listUpdateReleases(ctx context.Context, cmd *cobra.Command, timeout time.Duration, token updateToken) ([]updater.Release, updater.GitHubClient, error) {
+	listOnce := func(client updater.GitHubClient) ([]updater.Release, error) {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return client.ListReleases(attemptCtx)
+	}
+
+	if token.Src == updateTokenSourceFlag {
+		client := updateNewGitHubClient(timeout, token.Value)
+		releases, err := listOnce(client)
+		if err != nil && updater.IsBadCredentialsError(err) {
+			return nil, client, fmt.Errorf("GitHub token from --token appears invalid: %w", err)
+		}
+		return releases, client, err
+	}
+
+	unauthClient := updateNewGitHubClient(timeout, "")
+	releases, err := listOnce(unauthClient)
+	if err == nil || token.Value == "" || !updater.IsRateLimitError(err) {
+		return releases, unauthClient, err
+	}
+
+	authClient := updateNewGitHubClient(timeout, token.Value)
+	authReleases, authErr := listOnce(authClient)
+	if authErr == nil {
+		return authReleases, authClient, nil
+	}
+	if updater.IsBadCredentialsError(authErr) {
+		// The ambient token is invalid. Surface the original rate-limit error
+		// (an unauthenticated retry would hit the same limit) and tell the user
+		// the token is being ignored so they can clean it up.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s appears invalid; ignoring it for GitHub release lookup\n", token.Name)
+		return nil, unauthClient, err
+	}
+	return nil, authClient, authErr
 }
 
 func warnImageOverride(cmd *cobra.Command) {
