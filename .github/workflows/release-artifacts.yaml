@@ -172,6 +172,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      CGO_ENABLED: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -190,6 +192,15 @@ jobs:
 
       - name: Verify Linux ARM64 binary
         run: test -s cli/build/spt-linux-arm64
+
+      - name: Verify Linux binaries are static
+        run: |
+          set -euo pipefail
+          file cli/build/spt-linux-amd64 | tee /tmp/spt-linux-amd64.file
+          file cli/build/spt-linux-arm64 | tee /tmp/spt-linux-arm64.file
+          grep -q 'statically linked' /tmp/spt-linux-amd64.file
+          grep -q 'statically linked' /tmp/spt-linux-arm64.file
+          ldd cli/build/spt-linux-amd64 2>&1 | grep -q 'not a dynamic executable'
 
       - name: Package binaries
         run: |
