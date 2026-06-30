@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -44,6 +45,47 @@ type PageLimitError struct {
 
 func (e *PageLimitError) Error() string {
 	return fmt.Sprintf("GitHub release pagination exceeded %d pages", e.Limit)
+}
+
+// RateLimitError reports a GitHub API rate-limit response (primary or secondary).
+type RateLimitError struct {
+	Reset      string
+	RetryAfter string
+}
+
+func (e *RateLimitError) Error() string {
+	when := e.Reset
+	label := "X-RateLimit-Reset"
+	if when == "" && e.RetryAfter != "" {
+		when = e.RetryAfter
+		label = "Retry-After"
+	}
+	if when == "" {
+		when = "unknown"
+	}
+	return fmt.Sprintf("GitHub API rate limit exceeded; set SPT_GITHUB_TOKEN or GITHUB_TOKEN to raise the limit and retry (%s=%s)", label, when)
+}
+
+// IsRateLimitError reports whether err is a GitHub API rate-limit response.
+func IsRateLimitError(err error) bool {
+	var rateErr *RateLimitError
+	return errors.As(err, &rateErr)
+}
+
+// BadCredentialsError reports a GitHub API authentication failure.
+type BadCredentialsError struct {
+	Status string
+	Body   string
+}
+
+func (e *BadCredentialsError) Error() string {
+	return fmt.Sprintf("GitHub API request failed: %s: %s", e.Status, e.Body)
+}
+
+// IsBadCredentialsError reports whether err is a GitHub API authentication failure.
+func IsBadCredentialsError(err error) bool {
+	var authErr *BadCredentialsError
+	return errors.As(err, &authErr)
 }
 
 // NewGitHubClient returns a GitHub client with default SPT repository settings.
@@ -116,10 +158,18 @@ func (c GitHubClient) getJSON(ctx context.Context, client *http.Client, rawURL s
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) && resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return nil, rateLimitError(resp)
+		bodyText := strings.TrimSpace(string(body))
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			// Primary rate limits report X-RateLimit-Remaining: 0; secondary
+			// (abuse) limits report Retry-After without that header.
+			if resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "" {
+				return nil, rateLimitError(resp)
+			}
 		}
-		return nil, fmt.Errorf("GitHub API request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, &BadCredentialsError{Status: resp.Status, Body: bodyText}
+		}
+		return nil, fmt.Errorf("GitHub API request failed: %s: %s", resp.Status, bodyText)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return nil, err
@@ -287,9 +337,8 @@ func sameHost(a, b *url.URL) bool {
 }
 
 func rateLimitError(resp *http.Response) error {
-	reset := resp.Header.Get("X-RateLimit-Reset")
-	if reset == "" {
-		reset = "unknown"
+	return &RateLimitError{
+		Reset:      resp.Header.Get("X-RateLimit-Reset"),
+		RetryAfter: resp.Header.Get("Retry-After"),
 	}
-	return fmt.Errorf("GitHub API rate limit exceeded; set SPT_GITHUB_TOKEN or GITHUB_TOKEN to raise the limit and retry (X-RateLimit-Reset=%s)", reset)
 }

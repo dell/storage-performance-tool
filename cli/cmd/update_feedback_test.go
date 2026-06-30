@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	updater "github.com/dell/storage-performance-tool/cli/internal/update"
 )
 
@@ -91,6 +92,175 @@ func TestUpdateAlreadyUpToDateDoesNotDownload(t *testing.T) {
 			t.Fatalf("stdout = %q", out.String())
 		}
 	})
+}
+
+func TestUpdateCheckIgnoresEnvTokenWhenUnauthenticatedLookupSucceeds(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "stale-token")
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "5.10.4"}, func(s *customUpdateServer) {
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--check"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		var exitErr *ExitCodeError
+		if !errors.As(err, &exitErr) || exitErr.Code != 10 {
+			t.Fatalf("Execute() error = %v, want exit 10", err)
+		}
+		if got := s.releaseAuthHeaders; len(got) != 1 || got[0] != "" {
+			t.Fatalf("release auth headers = %#v, want unauthenticated request", got)
+		}
+		if errOut.String() != "" {
+			t.Fatalf("stderr = %q", errOut.String())
+		}
+		if !strings.Contains(out.String(), "available=true") {
+			t.Fatalf("stdout = %q", out.String())
+		}
+	})
+}
+
+func TestUpdateCheckRetriesWithEnvTokenOnRateLimit(t *testing.T) {
+	t.Setenv("SPT_GITHUB_TOKEN", "good-token")
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "5.10.4", rateLimitUnauth: true, acceptedToken: "good-token"}, func(s *customUpdateServer) {
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--check"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		var exitErr *ExitCodeError
+		if !errors.As(err, &exitErr) || exitErr.Code != 10 {
+			t.Fatalf("Execute() error = %v, want exit 10", err)
+		}
+		want := []string{"", "Bearer good-token"}
+		if got := s.releaseAuthHeaders; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("release auth headers = %#v, want %#v", got, want)
+		}
+		if errOut.String() != "" {
+			t.Fatalf("stderr = %q", errOut.String())
+		}
+		if !strings.Contains(out.String(), "available=true") {
+			t.Fatalf("stdout = %q", out.String())
+		}
+	})
+}
+
+// Explicit --token expresses intent, so it must be sent (and validated) on the
+// first request even when an unauthenticated lookup would have succeeded.
+func TestUpdateCheckReportsExplicitBadTokenEvenWhenUnauthWouldSucceed(t *testing.T) {
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "5.10.4", acceptedToken: "good-token"}, func(s *customUpdateServer) {
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--check", "--token", "bad-token"})
+		var errOut bytes.Buffer
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("Execute() accepted bad explicit token")
+		}
+		for _, want := range []string{"--token", "invalid"} {
+			if !strings.Contains(errOut.String(), want) {
+				t.Fatalf("stderr = %q missing %q", errOut.String(), want)
+			}
+		}
+		if got := s.releaseAuthHeaders; len(got) != 1 || got[0] != "Bearer bad-token" {
+			t.Fatalf("release auth headers = %#v, want a single authenticated request", got)
+		}
+	})
+}
+
+// A bad ambient token must not trigger a doomed unauthenticated retry: the
+// original rate-limit error is surfaced and the token is reported as ignored.
+func TestUpdateCheckWarnsAndReturnsRateLimitWhenEnvTokenIsBad(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "bad-token")
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "5.10.4", rateLimitUnauth: true, acceptedToken: "good-token"}, func(s *customUpdateServer) {
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--check"})
+		var errOut bytes.Buffer
+		cmd.SetErr(&errOut)
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("Execute() accepted rate-limited unauthenticated lookup with bad env token")
+		}
+		wantHeaders := []string{"", "Bearer bad-token"}
+		if got := s.releaseAuthHeaders; len(got) != len(wantHeaders) || got[0] != wantHeaders[0] || got[1] != wantHeaders[1] {
+			t.Fatalf("release auth headers = %#v, want %#v (no doomed third request)", got, wantHeaders)
+		}
+		for _, want := range []string{"warning: GITHUB_TOKEN appears invalid", "rate limit"} {
+			if !strings.Contains(errOut.String(), want) {
+				t.Fatalf("stderr = %q missing %q", errOut.String(), want)
+			}
+		}
+	})
+}
+
+// The client returned from the rate-limit retry must be the authenticated one,
+// and it must carry the token through to the asset download.
+func TestUpdateDownloadsWithAuthClientAfterRateLimitRetry(t *testing.T) {
+	t.Setenv("SPT_GITHUB_TOKEN", "good-token")
+	withCustomUpdateServer(t, customUpdateServerOptions{currentVersion: "dev", rateLimitUnauth: true, acceptedToken: "good-token", assetUsesAPIURL: true}, func(s *customUpdateServer) {
+		outPath := filepath.Join(t.TempDir(), "spt-release")
+		cmd := newUpdateCommand()
+		cmd.SetArgs([]string{"--output", outPath})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		got, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("ReadFile output: %v", err)
+		}
+		if string(got) != "release binary" {
+			t.Fatalf("output file = %q", got)
+		}
+		wantReleaseHeaders := []string{"", "Bearer good-token"}
+		if h := s.releaseAuthHeaders; len(h) != len(wantReleaseHeaders) || h[0] != wantReleaseHeaders[0] || h[1] != wantReleaseHeaders[1] {
+			t.Fatalf("release auth headers = %#v, want %#v", h, wantReleaseHeaders)
+		}
+		if len(s.assetAuthHeaders) == 0 {
+			t.Fatal("no asset downloads recorded")
+		}
+		for i, h := range s.assetAuthHeaders {
+			if h != "Bearer good-token" {
+				t.Fatalf("asset auth header[%d] = %q, want authenticated download", i, h)
+			}
+		}
+	})
+}
+
+func TestResolveUpdateTokenPrecedence(t *testing.T) {
+	cases := []struct {
+		name      string
+		flag      string
+		sptEnv    string
+		githubEnv string
+		wantValue string
+		wantName  string
+		wantSrc   updateTokenSource
+	}{
+		{name: "flag wins over env", flag: "flag-token", sptEnv: "spt-token", githubEnv: "gh-token", wantValue: "flag-token", wantName: "--token", wantSrc: updateTokenSourceFlag},
+		{name: "spt env wins over github env", sptEnv: "spt-token", githubEnv: "gh-token", wantValue: "spt-token", wantName: constants.EnvSptGitHubToken, wantSrc: updateTokenSourceEnv},
+		{name: "github env used when others unset", githubEnv: "gh-token", wantValue: "gh-token", wantName: "GITHUB_TOKEN", wantSrc: updateTokenSourceEnv},
+		{name: "none when all unset", wantValue: "", wantSrc: updateTokenSourceNone},
+		{name: "whitespace flag is ignored", flag: "   ", githubEnv: "gh-token", wantValue: "gh-token", wantName: "GITHUB_TOKEN", wantSrc: updateTokenSourceEnv},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(constants.EnvSptGitHubToken, tt.sptEnv)
+			t.Setenv("GITHUB_TOKEN", tt.githubEnv)
+			got := resolveUpdateToken(tt.flag)
+			if got.Value != tt.wantValue {
+				t.Fatalf("Value = %q, want %q", got.Value, tt.wantValue)
+			}
+			if got.Src != tt.wantSrc {
+				t.Fatalf("Src = %q, want %q", got.Src, tt.wantSrc)
+			}
+			if tt.wantName != "" && got.Name != tt.wantName {
+				t.Fatalf("Name = %q, want %q", got.Name, tt.wantName)
+			}
+		})
+	}
 }
 
 func TestUpdateChecksumMismatchDoesNotReplace(t *testing.T) {
@@ -215,16 +385,21 @@ func TestConfirmUpdateIfNeededReadsLine(t *testing.T) {
 }
 
 type customUpdateServerOptions struct {
-	currentVersion string
-	releaseAssets  []updater.Asset
-	badChecksum    bool
-	goos           string
-	goarch         string
+	currentVersion  string
+	releaseAssets   []updater.Asset
+	badChecksum     bool
+	goos            string
+	goarch          string
+	rateLimitUnauth bool
+	acceptedToken   string
+	assetUsesAPIURL bool
 }
 
 type customUpdateServer struct {
-	server         *httptest.Server
-	assetDownloads int
+	server             *httptest.Server
+	assetDownloads     int
+	releaseAuthHeaders []string
+	assetAuthHeaders   []string
 }
 
 func withCustomUpdateServer(t *testing.T, opts customUpdateServerOptions, fn func(*customUpdateServer)) {
@@ -246,16 +421,37 @@ func withCustomUpdateServer(t *testing.T, opts customUpdateServerOptions, fn fun
 			{Name: "spt-5.10.5-linux-amd64.gz", BrowserDownloadURL: server.URL + "/assets/spt.gz", Size: int64(len(archive))},
 			{Name: updater.ChecksumAssetName, BrowserDownloadURL: server.URL + "/assets/SHA256SUMS", Size: int64(len(checksumLine))},
 		}
+		if opts.assetUsesAPIURL {
+			// Setting the asset API URL makes the client authenticate the
+			// download, so we can observe which client performed the fetch.
+			assets[0].URL = server.URL + "/assets/spt.gz"
+			assets[1].URL = server.URL + "/assets/SHA256SUMS"
+		}
 	}
-	mux.HandleFunc("/repos/dell/storage-performance-tool/releases", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/dell/storage-performance-tool/releases", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		state.releaseAuthHeaders = append(state.releaseAuthHeaders, auth)
+		if opts.rateLimitUnauth && auth == "" {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", "1782420000")
+			http.Error(w, "rate limited", http.StatusForbidden)
+			return
+		}
+		if opts.acceptedToken != "" && auth != "Bearer "+opts.acceptedToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials","status":"401"}`))
+			return
+		}
 		writeFeedbackJSON(t, w, []updater.Release{{TagName: "v5.10.5", HTMLURL: "https://github.com/dell/storage-performance-tool/releases/tag/v5.10.5", Assets: assets}})
 	})
-	mux.HandleFunc("/assets/spt.gz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/assets/spt.gz", func(w http.ResponseWriter, r *http.Request) {
 		state.assetDownloads++
+		state.assetAuthHeaders = append(state.assetAuthHeaders, r.Header.Get("Authorization"))
 		_, _ = w.Write(archive)
 	})
-	mux.HandleFunc("/assets/SHA256SUMS", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/assets/SHA256SUMS", func(w http.ResponseWriter, r *http.Request) {
 		state.assetDownloads++
+		state.assetAuthHeaders = append(state.assetAuthHeaders, r.Header.Get("Authorization"))
 		_, _ = w.Write([]byte(checksumLine))
 	})
 	defer server.Close()
