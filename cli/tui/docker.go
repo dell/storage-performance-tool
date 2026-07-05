@@ -7,6 +7,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,6 +73,11 @@ type DockerManager struct {
 	nodeLogDir         string
 	nodeLogResultsRoot string
 	preserveNodeLogDir bool
+	diagnosticsRoot    string
+	diagnosticsDir     string
+	diagnosticsRole    string
+	diagnosticsDone    bool
+	diagnosticsRec     *diagnosticsRecord
 	fileMounts         []scenario.FileMount
 }
 
@@ -125,7 +131,7 @@ func (dm *DockerManager) HostInfo() *hostparse.HostInfo {
 }
 
 func (dm *DockerManager) baseLabels(role string) map[string]string {
-	hostName := "localhost"
+	hostName := diagnosticsDefaultHost
 	if dm.hostInfo != nil && strings.TrimSpace(dm.hostInfo.Host) != "" {
 		hostName = dm.hostInfo.Host
 	}
@@ -196,6 +202,14 @@ func (dm *DockerManager) pullImage(imageName string) error {
 
 func (dm *DockerManager) setNodeLogResultsRoot(resultsRoot string) {
 	dm.nodeLogResultsRoot = strings.TrimSpace(resultsRoot)
+	dm.setDiagnosticsResultsRoot(resultsRoot)
+}
+
+func (dm *DockerManager) setDiagnosticsResultsRoot(resultsRoot string) {
+	dm.diagnosticsRoot = strings.TrimSpace(resultsRoot)
+	if dm.remote != nil {
+		dm.remote.setDiagnosticsResultsRoot(resultsRoot)
+	}
 }
 
 func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
@@ -235,6 +249,116 @@ func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
 	dm.nodeLogDir = dir
 	dm.preserveNodeLogDir = preserve
 	return []string{fmt.Sprintf("%s:%s", dir, dockerNodeLogMount)}, []string{"SPT_LOG_DIR=" + dockerNodeLogMount}
+}
+
+func (dm *DockerManager) prepareDiagnosticsCapture(role string) []string {
+	if !diagnosticsEnabled() {
+		return nil
+	}
+	if dm.diagnosticsDir != "" {
+		dm.cleanupDiagnosticsDir()
+	}
+	host := diagnosticsDefaultHost
+	if dm.hostInfo != nil {
+		host = dm.hostInfo.Host
+	}
+	preserve := dm.diagnosticsRoot != ""
+	var (
+		dir string
+		err error
+	)
+	if preserve {
+		if dir, err = filepath.Abs(diagnosticsLocalDir(dm.diagnosticsRoot, host, role)); err != nil {
+			logging.LogWarn("docker", "failed to resolve diagnostics directory", "path", dm.diagnosticsRoot, "error", err.Error())
+			return nil
+		}
+		if err = os.RemoveAll(dir); err != nil {
+			logging.LogWarn("docker", "failed to reset diagnostics directory", "path", dir, "error", err.Error())
+			return nil
+		}
+		err = os.MkdirAll(dir, 0o777) // #nosec G301 -- container user must be able to write JVM diagnostics.
+	} else {
+		dir, err = os.MkdirTemp("", "spt-diagnostics-*")
+	}
+	if err != nil {
+		logging.LogWarn("docker", "failed to create diagnostics directory", "error", err.Error())
+		return nil
+	}
+	if err := os.Chmod(dir, 0o777); err != nil { // #nosec G302 -- container user must be able to write JVM diagnostics.
+		if !preserve {
+			_ = os.RemoveAll(dir)
+		}
+		logging.LogWarn("docker", "failed to prepare diagnostics directory permissions", "path", dir, "error", err.Error())
+		return nil
+	}
+	dm.diagnosticsDir = dir
+	dm.diagnosticsRole = role
+	dm.diagnosticsDone = false
+	dm.diagnosticsRec = nil
+	return []string{fmt.Sprintf("%s:%s", dir, dockerDiagnosticsMount)}
+}
+
+func (dm *DockerManager) cleanupDiagnosticsDir() {
+	if dm.diagnosticsDir == "" {
+		return
+	}
+	if dm.diagnosticsRoot != "" {
+		dm.diagnosticsDir = ""
+		return
+	}
+	if err := os.RemoveAll(dm.diagnosticsDir); err != nil {
+		logging.LogWarn("docker", "failed to remove diagnostics directory", "path", dm.diagnosticsDir, "error", err.Error())
+	}
+	dm.diagnosticsDir = ""
+	dm.diagnosticsRole = ""
+	dm.diagnosticsDone = false
+	dm.diagnosticsRec = nil
+}
+
+func (dm *DockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	if dm.remote != nil {
+		return dm.remote.collectDiagnostics(ctx)
+	}
+	if dm.diagnosticsDir == "" {
+		return nil, nil
+	}
+	if dm.diagnosticsDone && dm.diagnosticsRec != nil {
+		return dm.diagnosticsRec, nil
+	}
+	host := diagnosticsDefaultHost
+	if dm.hostInfo != nil {
+		host = dm.hostInfo.Original
+	}
+	record := diagnosticsRecord{
+		Host:         host,
+		Role:         dm.diagnosticsRole,
+		ContainerID:  dm.containerID,
+		ContainerDir: dockerDiagnosticsMount,
+		LocalDir:     dm.diagnosticsDir,
+	}
+	files, err := listDiagnosticFiles(dm.diagnosticsDir)
+	if err != nil {
+		record.Error = err.Error()
+		_ = writeDiagnosticsRecordManifest(dm.diagnosticsDir, record)
+		dm.diagnosticsRec = &record
+		return &record, fmt.Errorf("list local diagnostics: %w", err)
+	}
+	record.Files = files
+	record.Collected = true
+	if err := writeDiagnosticsRecordManifest(dm.diagnosticsDir, record); err != nil {
+		dm.diagnosticsRec = &record
+		return &record, fmt.Errorf("write diagnostics manifest: %w", err)
+	}
+	dm.diagnosticsDone = true
+	dm.diagnosticsRec = &record
+	return &record, nil
+}
+
+func (dm *DockerManager) diagnosticsRecord() *diagnosticsRecord {
+	if dm.remote != nil {
+		return dm.remote.diagnosticsRecord()
+	}
+	return dm.diagnosticsRec
 }
 
 // ContainerDiagnosticTail returns recent container startup diagnostics from Docker logs
@@ -340,6 +464,12 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 		return "", err
 	}
 
+	var envVars []string
+	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
+		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
+	}
+	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
+
 	// Create container
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
 		Image:        image,
@@ -347,10 +477,12 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 		Tty:          false,
 		AttachStdout: true,
 		AttachStderr: true,
-	}, nil, nil, nil, "")
+		Env:          envVars,
+	}, &container.HostConfig{Binds: diagnosticBinds}, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container", err, "image", image)
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -360,6 +492,7 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 	// Start container
 	if err := dm.client.ContainerStart(dm.ctx, resp.ID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start container", err, "container_id", resp.ID)
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
 
@@ -392,9 +525,10 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 
 	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
 	var envVars []string
-	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
-		envVars = append(envVars, "SPT_JAVA_OPTS="+v)
+	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
+		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
+	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 
 	// Create container with volume mount
 	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
@@ -405,13 +539,14 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 		AttachStderr: true,
 		Env:          envVars,
 	}, &container.HostConfig{
-		Binds: append([]string{
+		Binds: append(append([]string{
 			fmt.Sprintf("%s:/tmp/scenario.js:ro", absScenarioPath),
-		}, dm.itemFileBindSpecs()...),
+		}, diagnosticBinds...), dm.itemFileBindSpecs()...),
 	}, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container", err, "image", image)
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -421,6 +556,7 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	// Start container
 	if err := dm.client.ContainerStart(dm.ctx, resp.ID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start container", err, "container_id", resp.ID)
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
 
@@ -465,17 +601,18 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	}
 
 	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
-	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
-		envVars = append(envVars, "SPT_JAVA_OPTS="+v)
+	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
+		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
 	logBinds, logEnv := dm.prepareNodeLogCapture()
+	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 	envVars = append(envVars, logEnv...)
 
 	labels := dm.baseLabels(constants.DockerRoleNode)
 
 	useHostNetwork := selectedNodeNetworkMode(networkMode) == command.NetworkModeHost
 	hostConfig := &container.HostConfig{
-		Binds: append(logBinds, dm.itemFileBindSpecs()...),
+		Binds: append(append(logBinds, diagnosticBinds...), dm.itemFileBindSpecs()...),
 	}
 	if useHostNetwork {
 		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
@@ -518,6 +655,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)
 		dm.cleanupNodeLogDir()
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -536,6 +674,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 		}
 		dm.containerID = ""
 		dm.cleanupNodeLogDir()
+		dm.cleanupDiagnosticsDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
@@ -601,9 +740,10 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 		fmt.Sprintf("JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=%s", rmiHostname),
 	}
 	// Forward SPT_JAVA_OPTS to the container so the entrypoint can append it to JAVA_OPTS
-	if v := os.Getenv("SPT_JAVA_OPTS"); v != "" {
-		workerEnv = append(workerEnv, "SPT_JAVA_OPTS="+v)
+	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
+		workerEnv = append(workerEnv, constants.EnvSptJavaOpts+"="+v)
 	}
+	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleWorker)
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
@@ -616,7 +756,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 
 	hostConfig := &container.HostConfig{
 		PortBindings: portBindings,
-		Binds:        dm.itemFileBindSpecs(),
+		Binds:        append(diagnosticBinds, dm.itemFileBindSpecs()...),
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -640,6 +780,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		logging.LogError("docker", "failed to create worker node container", err, "image", image, "rmi_hostname", rmiHostname)
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -657,6 +798,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
 		}
 		dm.containerID = ""
+		dm.cleanupDiagnosticsDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
@@ -692,11 +834,17 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 
 	labels := dm.baseLabels(constants.DockerRoleEntry)
 	useHostNetwork := selectedNodeNetworkMode(networkMode) == command.NetworkModeHost
+	var envVars []string
+	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
+		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
+	}
+	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleEntry)
 	containerConfig := &container.Config{
 		Image:        image,
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
+		Env:          envVars,
 		Labels:       labels,
 	}
 	if !useHostNetwork {
@@ -705,7 +853,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 		}
 	}
 
-	hostConfig := &container.HostConfig{Binds: dm.itemFileBindSpecs()}
+	hostConfig := &container.HostConfig{Binds: append(diagnosticBinds, dm.itemFileBindSpecs()...)}
 	if useHostNetwork {
 		hostConfig.NetworkMode = container.NetworkMode(command.NetworkModeHost)
 	} else {
@@ -740,6 +888,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		logging.LogError("docker", "failed to create entry node container", err, "image", image, "workers", len(workerAddresses))
+		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -757,6 +906,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
 		}
 		dm.containerID = ""
+		dm.cleanupDiagnosticsDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
@@ -910,6 +1060,7 @@ func (dm *DockerManager) Cleanup() error {
 		return dm.remote.Cleanup()
 	}
 	defer dm.cleanupNodeLogDir()
+	defer dm.cleanupDiagnosticsDir()
 	if dm.containerID == "" {
 		return nil
 	}
@@ -918,6 +1069,9 @@ func (dm *DockerManager) Cleanup() error {
 
 	// Stop the container
 	timeout := 10
+	if dm.diagnosticsDir != "" {
+		timeout = dockerDiagnosticsStopTimeoutSeconds
+	}
 	err := dm.client.ContainerStop(dm.ctx, dm.containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
@@ -928,17 +1082,35 @@ func (dm *DockerManager) Cleanup() error {
 
 	logging.LogContainerEvent("stopped", dm.containerID)
 
+	var cleanupErrs []error
+	var diagnosticsRecords []diagnosticsRecord
+	if dm.diagnosticsDir != "" && !dm.diagnosticsDone {
+		record, err := dm.collectDiagnostics(dm.ctx)
+		if record != nil {
+			diagnosticsRecords = append(diagnosticsRecords, *record)
+		}
+		if err != nil {
+			logging.LogWarn("docker", "diagnostics collection failed", "path", dm.diagnosticsDir, "error", err.Error())
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+
 	// Remove the container
 	err = dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{
 		Force: true,
 	})
 	if err != nil && !isNoSuchContainer(err) {
 		logging.LogError("docker", "failed to remove container", err, "container_id", dm.containerID)
-		return fmt.Errorf("failed to remove container: %w", err)
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("failed to remove container: %w", err))
+		return errors.Join(cleanupErrs...)
 	}
 
 	logging.LogContainerEvent("removed", dm.containerID)
-	return nil
+	dm.containerID = ""
+	if err := writeDiagnosticsAggregateManifest(dm.diagnosticsRoot, diagnosticsRecords); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func (dm *DockerManager) cleanupNodeLogDir() {

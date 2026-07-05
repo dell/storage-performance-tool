@@ -84,6 +84,11 @@ func (m *MockCommandExecutor) CopyFile(context.Context, *hostparse.HostInfo, str
 	return nil
 }
 
+// CopyFromHost records no reverse file copy behavior for verification tests.
+func (m *MockCommandExecutor) CopyFromHost(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
 // SetupDockerSuccess configures mock to return successful Docker responses
 func (m *MockCommandExecutor) SetupDockerSuccess() {
 	m.mu.Lock()

@@ -972,7 +972,18 @@ Available workload types:
 			// Provide image to orchestrator for preflight image checks
 			orchestrator.SetImage(sptImage)
 			orchestrator.SetAttachExistingWorkers(attachExisting)
+			orchestrator.SetResultsRoot(plannedResultsRoot)
 			ctx := context.Background()
+			collectDiagnostics := func() {
+				if plannedResultsRoot == "" {
+					return
+				}
+				diagCtx, diagCancel := context.WithTimeout(context.Background(), constants.DiagnosticsCollectionTimeout)
+				defer diagCancel()
+				if err := orchestrator.CollectDiagnostics(diagCtx); err != nil {
+					logger.Warn("Diagnostics collection completed with warnings", "error", err.Error())
+				}
+			}
 
 			// Respect force cleanup for preflight conflicts
 			forceMode, _ := cmd.Flags().GetBool("force")
@@ -1007,7 +1018,11 @@ Available workload types:
 					finalizeTraceArtifact()
 					return normalizedErr
 				}
-				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
+				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults)
+				if autoResultsComplete && delegateShutdownToAutoResults {
+					collectDiagnostics()
+				}
+				if !autoResultsComplete && delegateShutdownToAutoResults {
 					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
 					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 					if stopErr := orchestrator.StopAllContainers(cleanupCtx); stopErr != nil {
@@ -1023,12 +1038,18 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				waitForAutoResults(false)
+				autoResultsComplete := waitForAutoResults(false)
+				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
+					collectDiagnostics()
+				}
 				finalizeTraceArtifact()
 				return err
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
-			waitForAutoResults(false)
+			autoResultsComplete := waitForAutoResults(false)
+			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
+				collectDiagnostics()
+			}
 			finalizeTraceArtifact()
 			return err
 		}

@@ -30,6 +30,7 @@ type fakeDockerClient struct {
 	inspectErr            error
 	logBody               []byte
 	logOptions            container.LogsOptions
+	stopOptions           container.StopOptions
 	stopErr               error
 	removeErr             error
 	createHostConfig      *container.HostConfig
@@ -62,6 +63,7 @@ func (f *fakeDockerClient) ContainerStart(ctx context.Context, containerID strin
 }
 func (f *fakeDockerClient) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
 	f.stopped++
+	f.stopOptions = options
 	return f.stopErr
 }
 func (f *fakeDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
@@ -345,5 +347,50 @@ func TestStartContainerInNodeModeUsesConfiguredNodeLogDir(t *testing.T) {
 	}
 	if !containsString(f.createContainerConfig.Env, "SPT_LOG_DIR="+dockerNodeLogMount) {
 		t.Fatalf("env = %v, want SPT_LOG_DIR", f.createContainerConfig.Env)
+	}
+}
+
+func TestStartContainerInNodeModeUsesDiagnosticsMountWhenJavaOptsSet(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log")
+	resultsRoot := t.TempDir()
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, ctx: context.Background()}
+	dm.setDiagnosticsResultsRoot(resultsRoot)
+
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+		t.Fatalf("StartContainerInNodeMode() error = %v", err)
+	}
+	wantDir := filepath.Join(resultsRoot, dockerDiagnosticsResultsDirName, "localhost", constants.DockerRoleNode)
+	wantBind := wantDir + ":" + dockerDiagnosticsMount
+	if !containsString(f.createHostConfig.Binds, wantBind) {
+		t.Fatalf("host binds = %v, want %q", f.createHostConfig.Binds, wantBind)
+	}
+	if !containsString(f.createContainerConfig.Env, constants.EnvSptJavaOpts+"=-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log") {
+		t.Fatalf("env = %v, want SPT_JAVA_OPTS", f.createContainerConfig.Env)
+	}
+}
+
+func TestDockerManager_CleanupUsesDiagnosticsStopTimeoutAndManifest(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log")
+	resultsRoot := t.TempDir()
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, ctx: context.Background()}
+	dm.setDiagnosticsResultsRoot(resultsRoot)
+
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+		t.Fatalf("StartContainerInNodeMode() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dm.diagnosticsDir, "spt-gc-123.log"), []byte("gc"), 0o600); err != nil {
+		t.Fatalf("write diagnostics fixture: %v", err)
+	}
+	if err := dm.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if f.stopOptions.Timeout == nil || *f.stopOptions.Timeout != dockerDiagnosticsStopTimeoutSeconds {
+		t.Fatalf("stop timeout = %v, want %d", f.stopOptions.Timeout, dockerDiagnosticsStopTimeoutSeconds)
+	}
+	manifest := filepath.Join(resultsRoot, dockerDiagnosticsResultsDirName, "localhost", constants.DockerRoleNode, dockerDiagnosticsManifestFileName)
+	if _, err := os.Stat(manifest); err != nil {
+		t.Fatalf("expected diagnostics manifest: %v", err)
 	}
 }

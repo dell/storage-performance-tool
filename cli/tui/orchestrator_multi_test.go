@@ -220,6 +220,148 @@ func TestMultiHostOrchestrator_StopAllContainers_ReadySnapshots(t *testing.T) {
 	}
 }
 
+type orderedDiagnosticsDockerManager struct {
+	*MockDockerManager
+
+	mu     sync.Mutex
+	events []string
+	record *diagnosticsRecord
+}
+
+func newOrderedDiagnosticsDockerManager() *orderedDiagnosticsDockerManager {
+	return &orderedDiagnosticsDockerManager{MockDockerManager: NewMockDockerManager()}
+}
+
+func (m *orderedDiagnosticsDockerManager) Cleanup() error {
+	m.appendEvent("cleanup")
+	m.record = &diagnosticsRecord{
+		Host:        "host1",
+		Role:        constants.DockerRoleWorker,
+		Collected:   true,
+		ContainerID: "container-1",
+	}
+	return m.MockDockerManager.Cleanup()
+}
+
+func (m *orderedDiagnosticsDockerManager) collectDiagnostics(context.Context) (*diagnosticsRecord, error) {
+	m.appendEvent("collect")
+	return m.record, nil
+}
+
+func (m *orderedDiagnosticsDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	m.appendEvent("record")
+	return m.record
+}
+
+func (m *orderedDiagnosticsDockerManager) appendEvent(event string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+}
+
+func (m *orderedDiagnosticsDockerManager) eventList() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.events...)
+}
+
+func TestMultiHostOrchestrator_StopAllContainers_DiagnosticsAfterCleanup(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "host1", Original: "host1"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	h := orchestrator.hosts[0]
+	h.SetStatus(HostStatusRunning)
+	h.ContainerID = "container-1"
+	h.DockerManager = newOrderedDiagnosticsDockerManager()
+	h.SetManaged(true)
+
+	if err := orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("StopAllContainers() error = %v", err)
+	}
+
+	got := strings.Join(h.DockerManager.(*orderedDiagnosticsDockerManager).eventList(), ",")
+	if got != "cleanup,record" {
+		t.Fatalf("diagnostics order = %q, want cleanup,record", got)
+	}
+}
+
+type blockingDiagnosticsDockerManager struct {
+	*MockDockerManager
+
+	host    string
+	started chan<- string
+	release <-chan struct{}
+}
+
+func (m *blockingDiagnosticsDockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	select {
+	case m.started <- m.host:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-m.release:
+		return &diagnosticsRecord{
+			Host:      m.host,
+			Role:      constants.DockerRoleWorker,
+			Collected: true,
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *blockingDiagnosticsDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	return nil
+}
+
+func TestMultiHostOrchestrator_CollectDiagnosticsRunsHostsConcurrently(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "host1", Original: "host1"},
+		{Host: "host2", Original: "host2"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetResultsRoot(t.TempDir())
+
+	started := make(chan string, len(hostInfos))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	for _, host := range orchestrator.hosts {
+		host.SetManaged(true)
+		host.DockerManager = &blockingDiagnosticsDockerManager{
+			MockDockerManager: NewMockDockerManager(),
+			host:              host.Info.Original,
+			started:           started,
+			release:           release,
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- orchestrator.CollectDiagnostics(ctx)
+	}()
+
+	for range hostInfos {
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			releaseOnce.Do(func() { close(release) })
+			t.Fatal("CollectDiagnostics did not start all host collectors concurrently")
+		}
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CollectDiagnostics() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CollectDiagnostics did not complete after host collectors were released")
+	}
+}
+
 func TestMultiHostOrchestrator_GetHostsInfo_CompleteInfo(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},

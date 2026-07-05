@@ -7,6 +7,8 @@ package command
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ type MockCommandExecutor struct {
 	// ExecutedCommands tracks what commands were executed
 	ExecutedCommands []ExecutedCommand
 	CopiedFiles      []CopiedFile
+	CopiedFromFiles  []CopiedFile
 
 	// FailureMode simulates specific failures
 	FailureMode string
@@ -50,6 +53,7 @@ type CopiedFile struct {
 	Host       *hostparse.HostInfo
 	LocalPath  string
 	RemotePath string
+	Content    string
 }
 
 // NewMockCommandExecutor creates a new MockCommandExecutor
@@ -112,11 +116,27 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 
 // CopyFile simulates copying a local file to a host.
 func (m *MockCommandExecutor) CopyFile(_ context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
-	m.CopiedFiles = append(m.CopiedFiles, CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath})
+	copied := CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath}
+	if data, err := os.ReadFile(localPath); err == nil {
+		copied.Content = string(data)
+	}
+	m.CopiedFiles = append(m.CopiedFiles, copied)
 	if m.FailureMode == "copy_failure" {
 		return fmt.Errorf("copy failed")
 	}
 	return nil
+}
+
+// CopyFromHost simulates copying a file from a host to the local filesystem.
+func (m *MockCommandExecutor) CopyFromHost(_ context.Context, host *hostparse.HostInfo, remotePath, localPath string) error {
+	m.CopiedFromFiles = append(m.CopiedFromFiles, CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath})
+	if m.FailureMode == "copy_from_failure" {
+		return fmt.Errorf("copy from host failed")
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(localPath, []byte("mock remote file\n"), 0o600)
 }
 
 // SetCommandResponse sets the response for a specific command

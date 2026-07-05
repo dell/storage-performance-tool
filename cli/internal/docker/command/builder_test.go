@@ -159,6 +159,16 @@ func TestDockerCommandBuilderImpl_BuildRunCommand(t *testing.T) {
 			},
 		},
 		{
+			name: "container with env-file",
+			config: ContainerConfig{
+				Image:    constants.DefaultSptImage,
+				EnvFiles: []string{"/tmp/spt.env"},
+			},
+			expected: []string{
+				"docker", "run", "--env-file", "/tmp/spt.env", constants.DefaultSptImage,
+			},
+		},
+		{
 			name: "empty container name",
 			config: ContainerConfig{
 				Image:    constants.DefaultSptImage,

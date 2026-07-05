@@ -14,8 +14,9 @@ const (
 	PortCheckTimeout    = 2 * time.Second        // Timeout for checking if a port is open
 
 	// Container lifecycle timeouts
-	ContainerShutdownGrace = 2 * time.Second // Grace period for container graceful shutdown
-	APILingerDefault       = 5 * time.Second // Default /status linger window after /shutdown
+	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown
+	APILingerDefault             = 5 * time.Second // Default /status linger window after /shutdown
+	DiagnosticsCollectionTimeout = 5 * time.Minute // Per-host timeout for copying JVM diagnostics artifacts
 
 	// Metrics collection intervals
 	DefaultMetricsInterval = 500 * time.Millisecond // Default interval for metrics collection
