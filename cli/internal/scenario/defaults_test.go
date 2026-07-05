@@ -1258,3 +1258,89 @@ func TestGenerateDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateDefaultsAppliesEngineOverrides(t *testing.T) {
+	data, err := GenerateDefaults(Params{
+		WorkloadType: "write",
+		Endpoint:     "http://minio:9000",
+		AccessKey:    "testkey",
+		SecretKey:    "testsecret",
+		Bucket:       "testbucket",
+		Threads:      4,
+		EngineOverrides: []string{
+			"storage.driver.threads=6",
+			"storage.net.http.max.chunk.size=1048576",
+			"storage.net.ioRatio=80",
+			"storage.net.ssl.protocols=[TLSv1.3,TLSv1.2]",
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateDefaults() error = %v", err)
+	}
+
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("unmarshal defaults: %v", err)
+	}
+	storage := root["storage"].(map[string]any)
+	driver := storage["driver"].(map[string]any)
+	netCfg := storage["net"].(map[string]any)
+	http := netCfg["http"].(map[string]any)
+	max := http["max"].(map[string]any)
+	chunk := max["chunk"].(map[string]any)
+	ssl := netCfg["ssl"].(map[string]any)
+
+	if got := driver["threads"]; got != 6 {
+		t.Errorf("storage.driver.threads = %v, want 6", got)
+	}
+	if got := chunk["size"]; got != 1048576 {
+		t.Errorf("storage.net.http.max.chunk.size = %v, want 1048576", got)
+	}
+	if got := netCfg["ioRatio"]; got != 80 {
+		t.Errorf("storage.net.ioRatio = %v, want 80", got)
+	}
+	protocols, ok := ssl["protocols"].([]any)
+	if !ok || len(protocols) != 2 || protocols[0] != "TLSv1.3" || protocols[1] != "TLSv1.2" {
+		t.Errorf("storage.net.ssl.protocols = %#v, want TLSv1.3,TLSv1.2", ssl["protocols"])
+	}
+}
+
+func TestGenerateDefaultsAppliesDashSeparatedEngineOverrides(t *testing.T) {
+	data, err := GenerateDefaults(Params{
+		WorkloadType: "write",
+		Endpoint:     "http://minio:9000",
+		AccessKey:    "testkey",
+		SecretKey:    "testsecret",
+		Bucket:       "testbucket",
+		Threads:      4,
+		EngineOverrides: []string{
+			"storage-net-http-max-chunk-size=131072",
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateDefaults() error = %v", err)
+	}
+	if !strings.Contains(string(data), "size: 131072") {
+		t.Fatalf("expected dash-separated override to write nested max.chunk.size, got:\n%s", string(data))
+	}
+}
+
+func TestGenerateDefaultsRejectsInvalidEngineOverrides(t *testing.T) {
+	_, err := GenerateDefaults(Params{
+		WorkloadType: "write",
+		Endpoint:     "http://minio:9000",
+		AccessKey:    "testkey",
+		SecretKey:    "testsecret",
+		Bucket:       "testbucket",
+		Threads:      4,
+		EngineOverrides: []string{
+			"storage.driver.threads",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid engine override to fail")
+	}
+	if !strings.Contains(err.Error(), "path=value") {
+		t.Fatalf("expected path=value error, got %v", err)
+	}
+}

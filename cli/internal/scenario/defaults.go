@@ -412,5 +412,102 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal defaults config: %w", err)
 	}
 
+	if len(params.EngineOverrides) > 0 {
+		data, err = applyEngineOverrides(data, params.EngineOverrides)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return data, nil
+}
+
+func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse defaults before applying engine overrides: %w", err)
+	}
+
+	for _, override := range overrides {
+		if err := applyEngineOverride(root, override); err != nil {
+			return nil, err
+		}
+	}
+
+	merged, err := yaml.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal defaults after applying engine overrides: %w", err)
+	}
+	return merged, nil
+}
+
+func applyEngineOverride(root map[string]any, override string) error {
+	rawPath, rawValue, ok := strings.Cut(override, "=")
+	if !ok {
+		return fmt.Errorf("invalid engine override %q: expected path=value", override)
+	}
+
+	parts := splitEngineOverridePath(rawPath)
+	if len(parts) == 0 {
+		return fmt.Errorf("invalid engine override %q: path is empty", override)
+	}
+
+	value, err := parseEngineOverrideValue(rawValue)
+	if err != nil {
+		return fmt.Errorf("invalid engine override %q: %w", override, err)
+	}
+
+	node := root
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := node[part]
+		if !ok || next == nil {
+			child := map[string]any{}
+			node[part] = child
+			node = child
+			continue
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid engine override %q: %s already contains a scalar value", override, part)
+		}
+		node = child
+	}
+
+	node[parts[len(parts)-1]] = value
+	return nil
+}
+
+func splitEngineOverridePath(path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	separator := "."
+	if !strings.Contains(path, ".") {
+		separator = "-"
+	}
+
+	rawParts := strings.Split(path, separator)
+	parts := make([]string, 0, len(rawParts))
+	for _, part := range rawParts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func parseEngineOverrideValue(raw string) (any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+
+	var value any
+	if err := yaml.Unmarshal([]byte(raw), &value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }

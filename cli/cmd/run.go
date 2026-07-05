@@ -34,6 +34,7 @@ const (
 	flagAttachExistingWorkers = "attach-existing"
 	flagReadShuffle           = "shuffle"
 	flagReadShuffleBatchSize  = "shuffle-batch-size"
+	flagEngineOverride        = "engine-override"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -1137,6 +1138,7 @@ func init() {
 	runCmd.Flags().String("read-items-file", "", "Items file for mixed workload READ pool (skips seed phase; --cleanup not allowed)")
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
+	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
@@ -1339,6 +1341,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
+
+	engineOverrides, _ := cmd.Flags().GetStringArray(flagEngineOverride)
+	if len(engineOverrides) > 0 {
+		params.EngineOverrides = engineOverrides
+	}
 
 	// S3 Tables parameters
 	if workloadType == WorkloadTypeTables {

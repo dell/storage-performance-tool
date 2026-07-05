@@ -124,6 +124,17 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// Advanced engine config overrides. Multiple env values are separated by semicolons or newlines.
+	if f := cmd.Flags().Lookup(flagEngineOverride); f != nil && !cmd.Flags().Changed(flagEngineOverride) {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvEngineOverrides)); v != "" {
+			for _, override := range splitEngineOverridesEnv(v) {
+				if err := cmd.Flags().Set(flagEngineOverride, override); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	// RDMA string settings
 	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
 	_ = setIf("rdma-device", constants.EnvRdmaDevice)
@@ -182,6 +193,20 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	}
 
 	return nil
+}
+
+func splitEngineOverridesEnv(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == '\n' || r == '\r'
+	})
+	overrides := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			overrides = append(overrides, field)
+		}
+	}
+	return overrides
 }
 
 // applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided.

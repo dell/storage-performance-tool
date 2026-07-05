@@ -20,7 +20,8 @@ type Params struct {
 	Cleanup      bool // Automatically delete created objects after test
 	KeepScenario bool // Keep the scenario file after test completes
 	// Engine tuning
-	ServiceThreads int // VT carrier thread parallelism (0 = JVM default)
+	ServiceThreads  int      // VT carrier thread parallelism (0 = JVM default)
+	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries
 
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs

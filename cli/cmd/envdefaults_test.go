@@ -28,6 +28,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
 	c.Flags().Int("service-threads", 0, "")
+	c.Flags().StringArray(flagEngineOverride, []string{}, "")
 	c.Flags().String("s3-driver", "default", "")
 	c.Flags().String("part-size", "", "")
 	c.Flags().Int("auth-version", 4, "")
@@ -61,6 +62,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		constants.EnvRdmaTimeout,
 		constants.EnvRdmaFallback,
 		constants.EnvServiceThreads,
+		constants.EnvEngineOverrides,
 		constants.EnvPartSize,
 		constants.EnvS3Driver,
 	} {
@@ -439,6 +441,47 @@ func TestApplyEnvDefaultsToRunFlags_ServiceThreadsInvalidEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), constants.EnvServiceThreads) {
 		t.Errorf("error should mention env var name, got: %v", err)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_EngineOverridesFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	t.Setenv(constants.EnvEngineOverrides, "storage.driver.threads=6; storage.net.http.max.chunk.size=1048576")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvEngineOverrides) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetStringArray(flagEngineOverride)
+	want := []string{"storage.driver.threads=6", "storage.net.http.max.chunk.size=1048576"}
+	if len(got) != len(want) {
+		t.Fatalf("engine overrides = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("engine overrides = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_EngineOverrideFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	_ = cmd.Flags().Set(flagEngineOverride, "storage.driver.threads=8")
+	t.Setenv(constants.EnvEngineOverrides, "storage.driver.threads=6")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvEngineOverrides) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetStringArray(flagEngineOverride)
+	if len(got) != 1 || got[0] != "storage.driver.threads=8" {
+		t.Fatalf("engine override flag should win over env, got %v", got)
 	}
 }
 

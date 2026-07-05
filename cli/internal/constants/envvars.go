@@ -2,19 +2,20 @@ package constants
 
 // Environment variable keys used by spt
 const (
-	EnvSptImage       = "SPT_IMAGE"
-	EnvSptGitHubToken = "SPT_GITHUB_TOKEN" // #nosec G101 -- env var name only
-	EnvHosts          = "HOSTS"
-	EnvS3Endpoint     = "S3_ENDPOINT"
-	EnvS3AccessKey    = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
-	EnvS3SecretKey    = "S3_SECRET_KEY" // #nosec G101 -- env var names only
-	EnvS3Bucket       = "S3_BUCKET"
-	EnvS3AuthVersion  = "S3_AUTH_VERSION"
-	EnvSkipImagePull  = "SPT_SKIP_IMAGE_PULL"
-	EnvSptJavaOpts    = "SPT_JAVA_OPTS"
-	EnvRdmaEnabled    = "SPT_RDMA"
-	EnvS3Driver       = "SPT_S3_DRIVER"
-	EnvServiceThreads = "SPT_SERVICE_THREADS"
+	EnvSptImage        = "SPT_IMAGE"
+	EnvSptGitHubToken  = "SPT_GITHUB_TOKEN" // #nosec G101 -- env var name only
+	EnvHosts           = "HOSTS"
+	EnvS3Endpoint      = "S3_ENDPOINT"
+	EnvS3AccessKey     = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
+	EnvS3SecretKey     = "S3_SECRET_KEY" // #nosec G101 -- env var names only
+	EnvS3Bucket        = "S3_BUCKET"
+	EnvS3AuthVersion   = "S3_AUTH_VERSION"
+	EnvSkipImagePull   = "SPT_SKIP_IMAGE_PULL"
+	EnvSptJavaOpts     = "SPT_JAVA_OPTS"
+	EnvRdmaEnabled     = "SPT_RDMA"
+	EnvS3Driver        = "SPT_S3_DRIVER"
+	EnvServiceThreads  = "SPT_SERVICE_THREADS"
+	EnvEngineOverrides = "SPT_ENGINE_OVERRIDES"
 
 	// Multipart upload configuration
 	EnvPartSize = "SPT_PART_SIZE"
