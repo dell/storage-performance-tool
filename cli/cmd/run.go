@@ -122,7 +122,9 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 
 // startAutoResults kicks off background completion tracking and artifact fetching.
 // After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
-func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string) chan struct{} {
+// preSummaryHook, if non-nil, runs after shutdown completes but before the run
+// summary is generated — see its call site below for why that ordering matters.
+func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func()) chan struct{} {
 	done := make(chan struct{}, 1)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -174,7 +176,10 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		seen := make(map[string]struct{})
 		fleetSeen := make(map[string]struct{})
 		stopCh := make(chan struct{})
+		var pollWG sync.WaitGroup
+		pollWG.Add(1)
 		go func() {
+			defer pollWG.Done()
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
 			for {
@@ -228,6 +233,12 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		}()
 		_, _ = tracker.WaitForCompletion(ctx, expectedStepIDs)
 		close(stopCh)
+		// Wait for the polling goroutine to actually observe stopCh and return
+		// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
+		// otherwise a still-in-flight tick could race a caller's test-time
+		// reassignment of those (package-level, test-injectable) function
+		// variables once this function's goroutine finishes.
+		pollWG.Wait()
 		// One final fleet discovery after completion (may not have been picked up during polling)
 		if fids, err := discoverFleetStepIDsFunc(baseURL); err == nil && len(fids) > 0 {
 			mu.Lock()
@@ -329,6 +340,16 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 				writeProgress("Shutdown completed with warnings; see logs for details.\n")
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
+			}
+
+			// Diagnostics collection and full container/staging cleanup must
+			// happen before the summary below, not after: a consumer that
+			// treats the summary (or its results_summary.txt file) as "the
+			// run is done" should not be able to observe it before
+			// diagnostics/diagnostics_manifest.json and copied GC/JFR files
+			// exist.
+			if preSummaryHook != nil {
+				preSummaryHook()
 			}
 		}
 
@@ -909,10 +930,39 @@ Available workload types:
 			setSummarySink = summaryWriter.SetSink
 		}
 
+		// Construct the multi-host orchestrator now (before starting the
+		// auto-results background tracker below) so FinalizeDiagnosticsAndCleanup
+		// can run as startAutoResults' pre-summary hook. Construction itself is
+		// cheap (no I/O) — ConnectHosts and everything else that actually talks
+		// to the hosts still happens later, in its original place.
+		var multiHostOrchestrator *tui.MultiHostOrchestrator
+		if len(hostInfos) > 1 {
+			rmiConfig := tui.RMIConfig{
+				NetworkMode: networkMode,
+				PortStart:   rmiPortStart,
+				PortCount:   rmiPortCount,
+			}
+			multiHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
+			// Provide image to orchestrator for preflight image checks
+			multiHostOrchestrator.SetImage(sptImage)
+			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
+			multiHostOrchestrator.SetResultsRoot(plannedResultsRoot)
+		}
+		finalizeMultiHost := func() {
+			if multiHostOrchestrator == nil || plannedResultsRoot == "" {
+				return
+			}
+			diagCtx, diagCancel := context.WithTimeout(context.Background(), constants.DiagnosticsCollectionTimeout)
+			defer diagCancel()
+			if err := multiHostOrchestrator.FinalizeDiagnosticsAndCleanup(diagCtx); err != nil {
+				logger.Warn("Diagnostics collection/cleanup completed with warnings", "error", err.Error())
+			}
+		}
+
 		// Start background auto-results tracker/fetcher if enabled
 		var autoResultsDone chan struct{}
 		if resultsOpts.AutoResults {
-			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path)
+			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost)
 		}
 		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
@@ -963,28 +1013,10 @@ Available workload types:
 				fmt.Println("Attach mode enabled: expecting worker nodes prestarted with --run-node; spt will launch the entry node.")
 			}
 
-			rmiConfig := tui.RMIConfig{
-				NetworkMode: networkMode,
-				PortStart:   rmiPortStart,
-				PortCount:   rmiPortCount,
-			}
-
-			orchestrator := tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
-			// Provide image to orchestrator for preflight image checks
-			orchestrator.SetImage(sptImage)
-			orchestrator.SetAttachExistingWorkers(attachExisting)
-			orchestrator.SetResultsRoot(plannedResultsRoot)
+			// Already constructed above (before startAutoResults) so its
+			// FinalizeDiagnosticsAndCleanup could be wired in as a pre-summary hook.
+			orchestrator := multiHostOrchestrator
 			ctx := context.Background()
-			collectDiagnostics := func() {
-				if plannedResultsRoot == "" {
-					return
-				}
-				diagCtx, diagCancel := context.WithTimeout(context.Background(), constants.DiagnosticsCollectionTimeout)
-				defer diagCancel()
-				if err := orchestrator.CollectDiagnostics(diagCtx); err != nil {
-					logger.Warn("Diagnostics collection completed with warnings", "error", err.Error())
-				}
-			}
 
 			// Respect force cleanup for preflight conflicts
 			forceMode, _ := cmd.Flags().GetBool("force")
@@ -1020,16 +1052,24 @@ Available workload types:
 					return normalizedErr
 				}
 				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults)
+				// finalizeMultiHost normally already ran as startAutoResults'
+				// pre-summary hook by the time we get here; calling it again
+				// is a safe, near-instant no-op (FinalizeDiagnosticsAndCleanup
+				// runs at most once). This remains the fallback path for
+				// AutoResults-without-ShutdownOnComplete, and for auto-terminate
+				// (which bypasses startAutoResults' shutdown step below via the
+				// autoTerminated return above).
 				if autoResultsComplete && delegateShutdownToAutoResults {
-					collectDiagnostics()
+					finalizeMultiHost()
 				}
 				if !autoResultsComplete && delegateShutdownToAutoResults {
-					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
-					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-					if stopErr := orchestrator.StopAllContainers(cleanupCtx); stopErr != nil {
-						logger.Error("Failed to clean up containers after auto-results timeout", "error", stopErr.Error())
-					}
-					cleanupCancel()
+					// The pre-summary hook may still be running (e.g. a slow
+					// diagnostics copy) — finalizeMultiHost/
+					// FinalizeDiagnosticsAndCleanup is safe to call concurrently
+					// with it and will simply wait for that single execution
+					// rather than duplicating it.
+					logger.Warn("Timed out waiting for auto-results; forcing diagnostics collection and container cleanup")
+					finalizeMultiHost()
 				}
 				finalizeTraceArtifact()
 				return normalizedErr
@@ -1041,7 +1081,7 @@ Available workload types:
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
 				autoResultsComplete := waitForAutoResults(false)
 				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
-					collectDiagnostics()
+					finalizeMultiHost()
 				}
 				finalizeTraceArtifact()
 				return err
@@ -1049,7 +1089,7 @@ Available workload types:
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
 			autoResultsComplete := waitForAutoResults(false)
 			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
-				collectDiagnostics()
+				finalizeMultiHost()
 			}
 			finalizeTraceArtifact()
 			return err

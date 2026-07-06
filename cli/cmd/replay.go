@@ -249,7 +249,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		if autoResultsDone != nil || !resultsOpts.AutoResults {
 			return
 		}
-		autoResultsDone = startAutoResults(metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir, replayStepIDs(generated), resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario, metadata, out, out, traceOpts.Path)
+		// Replay does not currently wire a pre-summary diagnostics/cleanup hook
+		// (see run.go's finalizeMultiHost for the run-command equivalent); its
+		// own StopAllContainers-based cleanup (below) still runs after
+		// waitForAutoResults, same as before.
+		autoResultsDone = startAutoResults(metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir, replayStepIDs(generated), resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario, metadata, out, out, traceOpts.Path, nil)
 	}
 	waitForAutoResults := func() bool {
 		if autoResultsDone == nil {

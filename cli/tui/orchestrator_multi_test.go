@@ -451,6 +451,114 @@ func TestMultiHostOrchestrator_CollectDiagnosticsStillCollectsWhenStopFails(t *t
 	}
 }
 
+type finalizeOrderDockerManager struct {
+	*MockDockerManager
+
+	mu     sync.Mutex
+	events []string
+}
+
+func (m *finalizeOrderDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	m.record("stop")
+	return nil
+}
+
+func (m *finalizeOrderDockerManager) collectDiagnostics(context.Context) (*diagnosticsRecord, error) {
+	m.record("collect")
+	return &diagnosticsRecord{Host: "host1", Collected: true}, nil
+}
+
+func (m *finalizeOrderDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	return nil
+}
+
+func (m *finalizeOrderDockerManager) Cleanup() error {
+	m.record("cleanup")
+	return m.MockDockerManager.Cleanup()
+}
+
+func (m *finalizeOrderDockerManager) record(event string) {
+	m.mu.Lock()
+	m.events = append(m.events, event)
+	m.mu.Unlock()
+}
+
+func (m *finalizeOrderDockerManager) eventList() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.events...)
+}
+
+func newFinalizeTestOrchestrator(t *testing.T) (*MultiHostOrchestrator, *finalizeOrderDockerManager) {
+	t.Helper()
+	hostInfos := []*hostparse.HostInfo{{Host: "host1", Original: "host1"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.SetResultsRoot(t.TempDir())
+	h := orchestrator.hosts[0]
+	h.SetStatus(HostStatusRunning)
+	h.ContainerID = "container-1"
+	fake := &finalizeOrderDockerManager{MockDockerManager: NewMockDockerManager()}
+	h.DockerManager = fake
+	h.SetManaged(true)
+	return orchestrator, fake
+}
+
+// TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_CollectsBeforeStopping
+// covers the canonical end-of-run sequence: diagnostics must be collected
+// (which itself stops the container first, see gracefulStopForDiagnostics)
+// before the container is fully removed and staging cleaned up.
+func TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_CollectsBeforeStopping(t *testing.T) {
+	orchestrator, fake := newFinalizeTestOrchestrator(t)
+
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("FinalizeDiagnosticsAndCleanup() error = %v", err)
+	}
+
+	got := strings.Join(fake.eventList(), ",")
+	if got != "stop,collect,cleanup" {
+		t.Fatalf("finalize order = %q, want stop,collect,cleanup", got)
+	}
+}
+
+// TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_RunsOnceConcurrently
+// guards the concurrency hazard this method exists to prevent: the
+// auto-results pre-summary hook and a caller-side timeout fallback could
+// both try to finalize the same run at once (e.g. a slow diagnostics copy
+// still running when the outer wait expires). Only one of them must
+// actually do the work.
+func TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_RunsOnceConcurrently(t *testing.T) {
+	orchestrator, fake := newFinalizeTestOrchestrator(t)
+
+	const callers = 5
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = orchestrator.FinalizeDiagnosticsAndCleanup(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("call %d error = %v, want nil", i, err)
+		}
+	}
+
+	cleanupCount := 0
+	for _, event := range fake.eventList() {
+		if event == "cleanup" {
+			cleanupCount++
+		}
+	}
+	if cleanupCount != 1 {
+		t.Fatalf("cleanup ran %d times across %d concurrent callers, want exactly 1 (events: %v)",
+			cleanupCount, callers, fake.eventList())
+	}
+}
+
 func TestMultiHostOrchestrator_GetHostsInfo_CompleteInfo(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},

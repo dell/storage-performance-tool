@@ -98,6 +98,12 @@ type MultiHostOrchestrator struct {
 	// Optional notifier for user-facing progress messages (TUI-safe).
 	// If nil, messages are printed to stdout as before.
 	notifier func(string)
+
+	// Guards FinalizeDiagnosticsAndCleanup so it only runs once regardless of
+	// which trigger reaches it first (the auto-results pre-summary hook, or
+	// a caller-side timeout fallback) — see FinalizeDiagnosticsAndCleanup.
+	finalizeOnce sync.Once
+	finalizeErr  error
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -828,6 +834,29 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// FinalizeDiagnosticsAndCleanup collects diagnostics from every managed host
+// and then fully stops/removes their containers (and cleans up remote
+// staging). It is the single, canonical end-of-run action for delegated
+// auto-results shutdown: without it, containers were only ever stopped as a
+// side effect of collecting diagnostics (never removed, staging never
+// cleaned up) on the normal-completion path, and a slow diagnostics copy
+// could otherwise race a caller-side timeout fallback trying to do the same
+// cleanup concurrently.
+//
+// Safe to call more than once, including concurrently, from different
+// triggers (e.g. once from the auto-results pre-summary hook, once from a
+// timeout fallback if the hook is still running when the wait expires): only
+// the first call does the work; every call — first or not — blocks until
+// that single execution finishes and observes the same result.
+func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Context) error {
+	o.finalizeOnce.Do(func() {
+		diagErr := o.CollectDiagnostics(ctx)
+		stopErr := o.StopAllContainers(ctx)
+		o.finalizeErr = errors.Join(diagErr, stopErr)
+	})
+	return o.finalizeErr
 }
 
 // GetHostCount returns the total number of hosts
