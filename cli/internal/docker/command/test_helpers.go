@@ -117,7 +117,7 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 // CopyFile simulates copying a local file to a host.
 func (m *MockCommandExecutor) CopyFile(_ context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
 	copied := CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath}
-	if data, err := os.ReadFile(localPath); err == nil {
+	if data, err := os.ReadFile(localPath); err == nil { // #nosec G304 -- test mock; localPath is caller-controlled in tests
 		copied.Content = string(data)
 	}
 	m.CopiedFiles = append(m.CopiedFiles, copied)
