@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
@@ -60,8 +61,15 @@ type resultsOptionsSnapshot struct {
 }
 
 type runCLIInfo struct {
-	Command      []string          `json:"command"`
-	ChangedFlags map[string]string `json:"changedFlags,omitempty"`
+	Command []string `json:"command"`
+	// ChangedFlags holds only flags the user explicitly passed on the
+	// command line. EnvAppliedFlags holds flags applyEnvDefaultsToRunFlags
+	// injected from .env/OS env because the user did not — pflag's
+	// FlagSet.Set() marks a flag Changed=true regardless of caller, so
+	// these must be tracked separately to keep this distinction (see
+	// markEnvApplied/captureChangedFlags).
+	ChangedFlags    map[string]string `json:"changedFlags,omitempty"`
+	EnvAppliedFlags map[string]string `json:"envAppliedFlags,omitempty"`
 }
 
 type runMultiHostMetadata struct {
@@ -113,8 +121,9 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	expected := append([]string(nil), in.ExpectedStepIDs...)
 
 	cliInfo := runCLIInfo{
-		Command:      sanitizeCommandArgs(os.Args),
-		ChangedFlags: captureChangedFlags(in.Command),
+		Command:         sanitizeCommandArgs(os.Args),
+		ChangedFlags:    captureChangedFlags(in.Command),
+		EnvAppliedFlags: captureEnvAppliedFlags(in.Command),
 	}
 
 	meta := &runMetadata{
@@ -177,6 +186,11 @@ func maskSecret(v string) string {
 	return v[:3] + maskedPlaceholder
 }
 
+// captureChangedFlags returns only flags the user explicitly passed on the
+// command line. pflag's FlagSet.Set() marks a flag Changed=true regardless
+// of who called it, so flags applyEnvDefaultsToRunFlags injected from
+// .env/OS env (recorded via markEnvApplied) are excluded here — see
+// captureEnvAppliedFlags for those.
 func captureChangedFlags(cmd *cobra.Command) map[string]string {
 	if cmd == nil {
 		return nil
@@ -184,6 +198,9 @@ func captureChangedFlags(cmd *cobra.Command) map[string]string {
 	changed := map[string]string{}
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		if !f.Changed {
+			return
+		}
+		if _, envApplied := cmd.Annotations[envAppliedAnnotationPrefix+f.Name]; envApplied {
 			return
 		}
 		val := f.Value.String()
@@ -196,6 +213,29 @@ func captureChangedFlags(cmd *cobra.Command) map[string]string {
 		return nil
 	}
 	return changed
+}
+
+// captureEnvAppliedFlags returns flags applyEnvDefaultsToRunFlags injected
+// from .env/OS env because the user did not pass them explicitly.
+func captureEnvAppliedFlags(cmd *cobra.Command) map[string]string {
+	if cmd == nil || len(cmd.Annotations) == 0 {
+		return nil
+	}
+	applied := map[string]string{}
+	for key, val := range cmd.Annotations {
+		name, ok := strings.CutPrefix(key, envAppliedAnnotationPrefix)
+		if !ok {
+			continue
+		}
+		if isSensitiveFlag(name) {
+			val = maskSecret(val)
+		}
+		applied[name] = val
+	}
+	if len(applied) == 0 {
+		return nil
+	}
+	return applied
 }
 
 func isSensitiveFlag(name string) bool {

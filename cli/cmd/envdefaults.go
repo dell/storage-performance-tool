@@ -11,6 +11,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// envAppliedAnnotationPrefix marks cmd.Annotations entries recording which
+// flags applyEnvDefaultsToRunFlags set from .env/OS env rather than an
+// explicit CLI argument. pflag's FlagSet.Set() marks a flag Changed=true
+// regardless of who called it, so without this, spt_run_params.json's
+// captured "changed flags" can't distinguish what the user actually typed
+// from what env defaults silently injected (see captureChangedFlags).
+const envAppliedAnnotationPrefix = "envApplied."
+
+// markEnvApplied records that flag's value came from an env default, not an
+// explicit CLI argument.
+func markEnvApplied(cmd *cobra.Command, flag, value string) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[envAppliedAnnotationPrefix+flag] = value
+}
+
 // applyEnvDefaultsToRunFlags injects environment-provided defaults into run flags
 // when the user did not explicitly set them. This allows .env/OS env to satisfy
 // required S3 settings and optional multi-host inputs.
@@ -21,13 +38,23 @@ import (
 //	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET
 //	HOSTS (equivalent to --test-hosts)
 func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
+	// setFromEnv sets a flag's value and records that it came from env, not
+	// an explicit CLI argument (see markEnvApplied).
+	setFromEnv := func(flag, value string) error {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			return err
+		}
+		markEnvApplied(cmd, flag, value)
+		return nil
+	}
+
 	// Helper to set simple string flags if not changed
 	setIf := func(flag, envKey string) error {
 		if cmd.Flags().Lookup(flag) == nil || cmd.Flags().Changed(flag) {
 			return nil
 		}
 		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
-			return cmd.Flags().Set(flag, v)
+			return setFromEnv(flag, v)
 		}
 		return nil
 	}
@@ -37,11 +64,11 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		if !cmd.Flags().Changed("endpoint") {
 			if v := strings.TrimSpace(os.Getenv("S3_ENDPOINTS")); v != "" {
 				// Cobra accepts CSV for StringSlice Set
-				if err := cmd.Flags().Set("endpoints", v); err != nil {
+				if err := setFromEnv("endpoints", v); err != nil {
 					return err
 				}
 			} else if v := strings.TrimSpace(os.Getenv("S3_ENDPOINT")); v != "" {
-				if err := cmd.Flags().Set("endpoints", v); err != nil {
+				if err := setFromEnv("endpoints", v); err != nil {
 					return err
 				}
 			}
@@ -58,7 +85,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := strconv.Atoi(v); err != nil {
 				return fmt.Errorf("invalid S3_AUTH_VERSION value %q: %w", v, err)
 			}
-			if err := cmd.Flags().Set("auth-version", v); err != nil {
+			if err := setFromEnv("auth-version", v); err != nil {
 				return err
 			}
 		}
@@ -71,7 +98,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	if f := cmd.Flags().Lookup(flagSkipImagePull); f != nil && !cmd.Flags().Changed(flagSkipImagePull) {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull)); v != "" {
 			if b, err := strconv.ParseBool(v); err == nil {
-				if err := cmd.Flags().Set(flagSkipImagePull, strconv.FormatBool(b)); err != nil {
+				if err := setFromEnv(flagSkipImagePull, strconv.FormatBool(b)); err != nil {
 					return err
 				}
 			}
@@ -84,7 +111,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := strconv.Atoi(v); err != nil {
 				return fmt.Errorf("invalid THREADS value %q: %w", v, err)
 			}
-			if err := cmd.Flags().Set("threads", v); err != nil {
+			if err := setFromEnv("threads", v); err != nil {
 				return err
 			}
 		}
@@ -94,7 +121,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	if f := cmd.Flags().Lookup("use-rdma"); f != nil && !cmd.Flags().Changed("use-rdma") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaEnabled)); v != "" {
 			if b, err := strconv.ParseBool(v); err == nil {
-				_ = cmd.Flags().Set("use-rdma", strconv.FormatBool(b))
+				_ = setFromEnv("use-rdma", strconv.FormatBool(b))
 			}
 		}
 	}
@@ -108,7 +135,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := sizeparse.Parse(v); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvPartSize, v, err)
 			}
-			_ = cmd.Flags().Set("part-size", v)
+			_ = setFromEnv("part-size", v)
 		}
 	}
 
@@ -118,7 +145,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := strconv.Atoi(v); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvServiceThreads, v, err)
 			}
-			if err := cmd.Flags().Set("service-threads", v); err != nil {
+			if err := setFromEnv("service-threads", v); err != nil {
 				return err
 			}
 		}
@@ -127,10 +154,14 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// Advanced engine config overrides. Multiple env values are separated by semicolons or newlines.
 	if f := cmd.Flags().Lookup(flagEngineOverride); f != nil && !cmd.Flags().Changed(flagEngineOverride) {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvEngineOverrides)); v != "" {
-			for _, override := range splitEngineOverridesEnv(v) {
+			overrides := splitEngineOverridesEnv(v)
+			for _, override := range overrides {
 				if err := cmd.Flags().Set(flagEngineOverride, override); err != nil {
 					return err
 				}
+			}
+			if len(overrides) > 0 {
+				markEnvApplied(cmd, flagEngineOverride, strings.Join(overrides, "; "))
 			}
 		}
 	}
@@ -146,7 +177,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := sizeparse.Parse(v); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaThreshold, v, err)
 			}
-			_ = cmd.Flags().Set("rdma-threshold", v)
+			_ = setFromEnv("rdma-threshold", v)
 		}
 	}
 	// RDMA timeout (milliseconds, integer only)
@@ -155,7 +186,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvRdmaTimeout, v, err)
 			}
-			_ = cmd.Flags().Set("rdma-timeout-ms", v)
+			_ = setFromEnv("rdma-timeout-ms", v)
 		}
 	}
 
@@ -163,7 +194,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	if f := cmd.Flags().Lookup("rdma-fallback"); f != nil && !cmd.Flags().Changed("rdma-fallback") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaFallback)); v != "" {
 			if b, err := strconv.ParseBool(v); err == nil {
-				_ = cmd.Flags().Set("rdma-fallback", strconv.FormatBool(b))
+				_ = setFromEnv("rdma-fallback", strconv.FormatBool(b))
 			}
 		}
 	}
@@ -177,7 +208,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			if _, err := strconv.ParseFloat(v, 64); err != nil {
 				return fmt.Errorf("invalid %s value %q: %w", constants.EnvObjectDataCompressibility, v, err)
 			}
-			if err := cmd.Flags().Set("object-data-compressibility", v); err != nil {
+			if err := setFromEnv("object-data-compressibility", v); err != nil {
 				return err
 			}
 		}
@@ -185,7 +216,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	if f := cmd.Flags().Lookup("object-data-dedupable"); f != nil && !cmd.Flags().Changed("object-data-dedupable") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvObjectDataDedupable)); v != "" {
 			if b, err := strconv.ParseBool(v); err == nil {
-				if err := cmd.Flags().Set("object-data-dedupable", strconv.FormatBool(b)); err != nil {
+				if err := setFromEnv("object-data-dedupable", strconv.FormatBool(b)); err != nil {
 					return err
 				}
 			}
