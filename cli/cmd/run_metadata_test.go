@@ -106,6 +106,86 @@ func TestCaptureChangedFlagsMasksSensitiveValues(t *testing.T) {
 	}
 }
 
+// TestCaptureChangedFlagsExcludesEnvApplied guards spt_run_params.json's
+// core purpose here: pflag's FlagSet.Set() marks a flag Changed=true
+// regardless of who called it, so without markEnvApplied/this exclusion,
+// an env-injected default would be indistinguishable from something the
+// user actually typed on the command line.
+func TestCaptureChangedFlagsExcludesEnvApplied(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Int("threads", 1, "")
+	cmd.Flags().String("bucket", "", "")
+
+	_ = cmd.Flags().Set("threads", "16") // explicit CLI flag
+	markEnvApplied(cmd, "bucket", "env-bucket")
+	_ = cmd.Flags().Set("bucket", "env-bucket") // env default, via setFromEnv in practice
+
+	changed := captureChangedFlags(cmd)
+	if changed["threads"] != "16" {
+		t.Fatalf("threads stored as %q, want 16", changed["threads"])
+	}
+	if _, ok := changed["bucket"]; ok {
+		t.Fatalf("env-applied bucket should not appear in changedFlags: %+v", changed)
+	}
+
+	applied := captureEnvAppliedFlags(cmd)
+	if applied["bucket"] != "env-bucket" {
+		t.Fatalf("envAppliedFlags[bucket] = %q, want env-bucket", applied["bucket"])
+	}
+	if _, ok := applied["threads"]; ok {
+		t.Fatalf("explicit threads flag should not appear in envAppliedFlags: %+v", applied)
+	}
+}
+
+func TestCaptureEnvAppliedFlagsMasksSensitiveValues(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("secret-key", "", "")
+	markEnvApplied(cmd, "secret-key", "supersecret")
+
+	applied := captureEnvAppliedFlags(cmd)
+	if applied["secret-key"] != "sup***" {
+		t.Fatalf("secret-key stored as %q, want sup***", applied["secret-key"])
+	}
+}
+
+// TestBuildRunMetadata_DistinguishesExplicitFromEnvAppliedFlags is an
+// end-to-end check through the real applyEnvDefaultsToRunFlags +
+// buildRunMetadata path, not just the two capture helpers in isolation.
+func TestBuildRunMetadata_DistinguishesExplicitFromEnvAppliedFlags(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	_ = cmd.Flags().Set("threads", "8") // explicit CLI flag
+
+	t.Setenv("S3_BUCKET", "env-bucket")
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: "write",
+		Params:       scenario.Params{},
+		ScenarioPath: "./tmp/scenario.js",
+		ResultsOptions: ResultsOptions{
+			ResultsDir: "./results",
+			Label:      "mt",
+		},
+		Command: cmd,
+	})
+
+	if meta.CLI.ChangedFlags["threads"] != "8" {
+		t.Fatalf("ChangedFlags[threads] = %q, want 8", meta.CLI.ChangedFlags["threads"])
+	}
+	if _, ok := meta.CLI.ChangedFlags["bucket"]; ok {
+		t.Fatalf("env-applied bucket leaked into ChangedFlags: %+v", meta.CLI.ChangedFlags)
+	}
+	if meta.CLI.EnvAppliedFlags["bucket"] != "env-bucket" {
+		t.Fatalf("EnvAppliedFlags[bucket] = %q, want env-bucket", meta.CLI.EnvAppliedFlags["bucket"])
+	}
+	if _, ok := meta.CLI.EnvAppliedFlags["threads"]; ok {
+		t.Fatalf("explicit threads flag leaked into EnvAppliedFlags: %+v", meta.CLI.EnvAppliedFlags)
+	}
+}
+
 func TestCopyScenarioForResults(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "scenario.js")

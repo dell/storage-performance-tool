@@ -48,6 +48,10 @@ func (m *miniExec) CopyFile(context.Context, *hostparse.HostInfo, string, string
 	return nil
 }
 
+func (m *miniExec) CopyFromHost(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
 func (m *miniExec) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (string, string, error) {
 	m.cmds = append(m.cmds, command)
 	key := strings.Join(command, " ")

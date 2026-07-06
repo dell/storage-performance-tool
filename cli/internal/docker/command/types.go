@@ -37,6 +37,7 @@ type ContainerConfig struct {
 	PortMappings []PortMapping     // Port mappings for bridge mode
 	Labels       map[string]string // Optional labels to tag the container
 	Environment  map[string]string // Environment variables
+	EnvFiles     []string          // Docker env-file paths
 	Command      []string          // Container command to run
 	ExposedPorts []int             // Ports to expose
 	Detached     bool              // Run in detached mode

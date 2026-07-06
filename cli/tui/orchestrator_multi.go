@@ -81,6 +81,7 @@ type MultiHostOrchestrator struct {
 	apiPort         string
 	attachWorkers   bool
 	itemFileMounts  []scenario.FileMount
+	resultsRoot     string
 
 	// RMI Configuration
 	networkMode  string
@@ -97,6 +98,12 @@ type MultiHostOrchestrator struct {
 	// Optional notifier for user-facing progress messages (TUI-safe).
 	// If nil, messages are printed to stdout as before.
 	notifier func(string)
+
+	// Guards FinalizeDiagnosticsAndCleanup so it only runs once regardless of
+	// which trigger reaches it first (the auto-results pre-summary hook, or
+	// a caller-side timeout fallback) — see FinalizeDiagnosticsAndCleanup.
+	finalizeOnce sync.Once
+	finalizeErr  error
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -178,6 +185,13 @@ func (o *MultiHostOrchestrator) SetImage(image string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.image = image
+}
+
+// SetResultsRoot configures the run results directory used for local diagnostics collection.
+func (o *MultiHostOrchestrator) SetResultsRoot(resultsRoot string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.resultsRoot = strings.TrimSpace(resultsRoot)
 }
 
 // SetAPIPort overrides the Spt API port used for node startup and polling.
@@ -306,6 +320,10 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					fmt.Errorf("host %s: %w", h.Info.Original, err))
 				return
 			}
+			o.mu.Lock()
+			resultsRoot := o.resultsRoot
+			o.mu.Unlock()
+			dm.setDiagnosticsResultsRoot(resultsRoot)
 
 			// Run preflight checks (docker availability, image presence, port readiness)
 			if o.preflight != nil {
@@ -682,6 +700,7 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 	o.notifyf("🛑 Stopping containers on %d host(s)...", len(runningHosts))
 
 	var wg sync.WaitGroup
+	recordsCh := make(chan diagnosticsRecord, len(runningHosts))
 	for _, host := range runningHosts {
 		wg.Add(1)
 		go func(h *HostConnection) {
@@ -723,6 +742,11 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 			}
 
 			err := h.DockerManager.Cleanup()
+			if collector, ok := h.DockerManager.(diagnosticsCollector); ok {
+				if record := collector.diagnosticsRecord(); record != nil {
+					recordsCh <- *record
+				}
+			}
 			if err != nil {
 				logging.LogError("docker-multi", "container stop failed",
 					fmt.Errorf("host %s container %s: %w", h.Info.Original, containerID, err),
@@ -741,7 +765,98 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 	}
 
 	wg.Wait()
+	close(recordsCh)
+	var records []diagnosticsRecord
+	for record := range recordsCh {
+		records = append(records, record)
+	}
+	if err := writeDiagnosticsAggregateManifest(o.resultsRoot, records); err != nil {
+		logging.LogWarn("docker-multi", "failed to write diagnostics manifest", "error", err.Error())
+	}
 	return nil
+}
+
+// CollectDiagnostics copies diagnostics from all managed hosts into the run results directory.
+func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
+	type diagnosticsResult struct {
+		host   string
+		record *diagnosticsRecord
+		err    error
+	}
+
+	var wg sync.WaitGroup
+	resultsCh := make(chan diagnosticsResult, len(o.hosts))
+	for _, host := range o.hosts {
+		if host == nil || !host.IsManaged() || host.DockerManager == nil {
+			continue
+		}
+		collector, ok := host.DockerManager.(diagnosticsCollector)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func(h *HostConnection, c diagnosticsCollector) {
+			defer wg.Done()
+			hostCtx, cancel := context.WithTimeout(ctx, constants.DiagnosticsCollectionTimeout)
+			defer cancel()
+			// JFR/GC artifacts use dumponexit, which only guarantees the file
+			// exists once the JVM has exited. Stop the container first so
+			// collection isn't racing a still-running process; this is a
+			// standalone collection pass (unlike Cleanup) so nothing else in
+			// this call path stops the container for us.
+			if err := c.gracefulStopForDiagnostics(hostCtx); err != nil {
+				logging.LogWarn("docker-multi", "diagnostics graceful stop failed",
+					"host", h.Info.Original,
+					"error", err.Error())
+			}
+			record, err := c.collectDiagnostics(hostCtx)
+			resultsCh <- diagnosticsResult{host: h.Info.Original, record: record, err: err}
+		}(host, collector)
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	var records []diagnosticsRecord
+	var errs []error
+	for result := range resultsCh {
+		if result.record != nil {
+			records = append(records, *result.record)
+		}
+		if result.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.host, result.err))
+			logging.LogWarn("docker-multi", "diagnostics collection failed",
+				"host", result.host,
+				"error", result.err.Error())
+		}
+	}
+	if err := writeDiagnosticsAggregateManifest(o.resultsRoot, records); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// FinalizeDiagnosticsAndCleanup collects diagnostics from every managed host
+// and then fully stops/removes their containers (and cleans up remote
+// staging). It is the single, canonical end-of-run action for delegated
+// auto-results shutdown: without it, containers were only ever stopped as a
+// side effect of collecting diagnostics (never removed, staging never
+// cleaned up) on the normal-completion path, and a slow diagnostics copy
+// could otherwise race a caller-side timeout fallback trying to do the same
+// cleanup concurrently.
+//
+// Safe to call more than once, including concurrently, from different
+// triggers (e.g. once from the auto-results pre-summary hook, once from a
+// timeout fallback if the hook is still running when the wait expires): only
+// the first call does the work; every call — first or not — blocks until
+// that single execution finishes and observes the same result.
+func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Context) error {
+	o.finalizeOnce.Do(func() {
+		diagErr := o.CollectDiagnostics(ctx)
+		stopErr := o.StopAllContainers(ctx)
+		o.finalizeErr = errors.Join(diagErr, stopErr)
+	})
+	return o.finalizeErr
 }
 
 // GetHostCount returns the total number of hosts

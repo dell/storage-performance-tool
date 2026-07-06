@@ -34,6 +34,7 @@ const (
 	flagAttachExistingWorkers = "attach-existing"
 	flagReadShuffle           = "shuffle"
 	flagReadShuffleBatchSize  = "shuffle-batch-size"
+	flagEngineOverride        = "engine-override"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -121,7 +122,9 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 
 // startAutoResults kicks off background completion tracking and artifact fetching.
 // After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
-func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string) chan struct{} {
+// preSummaryHook, if non-nil, runs after shutdown completes but before the run
+// summary is generated — see its call site below for why that ordering matters.
+func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func()) chan struct{} {
 	done := make(chan struct{}, 1)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -173,7 +176,10 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		seen := make(map[string]struct{})
 		fleetSeen := make(map[string]struct{})
 		stopCh := make(chan struct{})
+		var pollWG sync.WaitGroup
+		pollWG.Add(1)
 		go func() {
+			defer pollWG.Done()
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
 			for {
@@ -227,6 +233,12 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		}()
 		_, _ = tracker.WaitForCompletion(ctx, expectedStepIDs)
 		close(stopCh)
+		// Wait for the polling goroutine to actually observe stopCh and return
+		// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
+		// otherwise a still-in-flight tick could race a caller's test-time
+		// reassignment of those (package-level, test-injectable) function
+		// variables once this function's goroutine finishes.
+		pollWG.Wait()
 		// One final fleet discovery after completion (may not have been picked up during polling)
 		if fids, err := discoverFleetStepIDsFunc(baseURL); err == nil && len(fids) > 0 {
 			mu.Lock()
@@ -328,6 +340,16 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 				writeProgress("Shutdown completed with warnings; see logs for details.\n")
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
+			}
+
+			// Diagnostics collection and full container/staging cleanup must
+			// happen before the summary below, not after: a consumer that
+			// treats the summary (or its results_summary.txt file) as "the
+			// run is done" should not be able to observe it before
+			// diagnostics/diagnostics_manifest.json and copied GC/JFR files
+			// exist.
+			if preSummaryHook != nil {
+				preSummaryHook()
 			}
 		}
 
@@ -908,10 +930,39 @@ Available workload types:
 			setSummarySink = summaryWriter.SetSink
 		}
 
+		// Construct the multi-host orchestrator now (before starting the
+		// auto-results background tracker below) so FinalizeDiagnosticsAndCleanup
+		// can run as startAutoResults' pre-summary hook. Construction itself is
+		// cheap (no I/O) — ConnectHosts and everything else that actually talks
+		// to the hosts still happens later, in its original place.
+		var multiHostOrchestrator *tui.MultiHostOrchestrator
+		if len(hostInfos) > 1 {
+			rmiConfig := tui.RMIConfig{
+				NetworkMode: networkMode,
+				PortStart:   rmiPortStart,
+				PortCount:   rmiPortCount,
+			}
+			multiHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
+			// Provide image to orchestrator for preflight image checks
+			multiHostOrchestrator.SetImage(sptImage)
+			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
+			multiHostOrchestrator.SetResultsRoot(plannedResultsRoot)
+		}
+		finalizeMultiHost := func() {
+			if multiHostOrchestrator == nil || plannedResultsRoot == "" {
+				return
+			}
+			diagCtx, diagCancel := context.WithTimeout(context.Background(), constants.DiagnosticsCollectionTimeout)
+			defer diagCancel()
+			if err := multiHostOrchestrator.FinalizeDiagnosticsAndCleanup(diagCtx); err != nil {
+				logger.Warn("Diagnostics collection/cleanup completed with warnings", "error", err.Error())
+			}
+		}
+
 		// Start background auto-results tracker/fetcher if enabled
 		var autoResultsDone chan struct{}
 		if resultsOpts.AutoResults {
-			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path)
+			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost)
 		}
 		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
@@ -962,16 +1013,9 @@ Available workload types:
 				fmt.Println("Attach mode enabled: expecting worker nodes prestarted with --run-node; spt will launch the entry node.")
 			}
 
-			rmiConfig := tui.RMIConfig{
-				NetworkMode: networkMode,
-				PortStart:   rmiPortStart,
-				PortCount:   rmiPortCount,
-			}
-
-			orchestrator := tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
-			// Provide image to orchestrator for preflight image checks
-			orchestrator.SetImage(sptImage)
-			orchestrator.SetAttachExistingWorkers(attachExisting)
+			// Already constructed above (before startAutoResults) so its
+			// FinalizeDiagnosticsAndCleanup could be wired in as a pre-summary hook.
+			orchestrator := multiHostOrchestrator
 			ctx := context.Background()
 
 			// Respect force cleanup for preflight conflicts
@@ -1007,13 +1051,25 @@ Available workload types:
 					finalizeTraceArtifact()
 					return normalizedErr
 				}
-				if !waitForAutoResults(delegateShutdownToAutoResults) && delegateShutdownToAutoResults {
-					logger.Warn("Timed out waiting for auto-results; forcing container cleanup")
-					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-					if stopErr := orchestrator.StopAllContainers(cleanupCtx); stopErr != nil {
-						logger.Error("Failed to clean up containers after auto-results timeout", "error", stopErr.Error())
-					}
-					cleanupCancel()
+				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults)
+				// finalizeMultiHost normally already ran as startAutoResults'
+				// pre-summary hook by the time we get here; calling it again
+				// is a safe, near-instant no-op (FinalizeDiagnosticsAndCleanup
+				// runs at most once). This remains the fallback path for
+				// AutoResults-without-ShutdownOnComplete, and for auto-terminate
+				// (which bypasses startAutoResults' shutdown step below via the
+				// autoTerminated return above).
+				if autoResultsComplete && delegateShutdownToAutoResults {
+					finalizeMultiHost()
+				}
+				if !autoResultsComplete && delegateShutdownToAutoResults {
+					// The pre-summary hook may still be running (e.g. a slow
+					// diagnostics copy) — finalizeMultiHost/
+					// FinalizeDiagnosticsAndCleanup is safe to call concurrently
+					// with it and will simply wait for that single execution
+					// rather than duplicating it.
+					logger.Warn("Timed out waiting for auto-results; forcing diagnostics collection and container cleanup")
+					finalizeMultiHost()
 				}
 				finalizeTraceArtifact()
 				return normalizedErr
@@ -1023,12 +1079,18 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				waitForAutoResults(false)
+				autoResultsComplete := waitForAutoResults(false)
+				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
+					finalizeMultiHost()
+				}
 				finalizeTraceArtifact()
 				return err
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
-			waitForAutoResults(false)
+			autoResultsComplete := waitForAutoResults(false)
+			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
+				finalizeMultiHost()
+			}
 			finalizeTraceArtifact()
 			return err
 		}
@@ -1116,6 +1178,7 @@ func init() {
 	runCmd.Flags().String("read-items-file", "", "Items file for mixed workload READ pool (skips seed phase; --cleanup not allowed)")
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
+	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
 	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
@@ -1318,6 +1381,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
+
+	engineOverrides, _ := cmd.Flags().GetStringArray(flagEngineOverride)
+	if len(engineOverrides) > 0 {
+		params.EngineOverrides = engineOverrides
+	}
 
 	// S3 Tables parameters
 	if workloadType == WorkloadTypeTables {

@@ -46,6 +46,10 @@ func (b *DockerCommandBuilderImpl) BuildRunCommand(config ContainerConfig) []str
 		}
 	}
 
+	for _, envFile := range config.EnvFiles {
+		dockerArgs = append(dockerArgs, "--env-file", envFile)
+	}
+
 	// Labels (stable order for testability)
 	if len(config.Labels) > 0 {
 		labelKeys := make([]string, 0, len(config.Labels))

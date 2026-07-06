@@ -23,6 +23,9 @@ type Executor interface {
 
 	// CopyFile copies a local file to the given host path.
 	CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error
+
+	// CopyFromHost copies a file from the given host path to a local path.
+	CopyFromHost(ctx context.Context, host *hostparse.HostInfo, remotePath, localPath string) error
 }
 
 // RealCommandExecutor implements Executor using actual system commands
@@ -96,6 +99,28 @@ func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.Host
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("copy %s to %s:%s failed: %w: %s", localPath, host.Original, remotePath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// CopyFromHost copies a file from the target host to a local path.
+func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.HostInfo, remotePath, localPath string) error {
+	var cmd *exec.Cmd
+	if host.IsLocal {
+		cmd = exec.CommandContext(ctx, "cp", remotePath, localPath) // #nosec G204 -- paths are user-selected SPT artifacts.
+	} else {
+		sshSource := host.GetSSHTarget() + ":" + remotePath
+		scpArgs := []string{
+			"-o", constants.SSHConnectTimeout,
+			"-o", constants.SSHBatchMode,
+			sshSource,
+			localPath,
+		}
+		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP source is built from parsed host info.
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s:%s to %s failed: %w: %s", host.Original, remotePath, localPath, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

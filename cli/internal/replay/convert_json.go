@@ -53,7 +53,13 @@ const (
 	legacyKeyCount       = "count"
 	legacyKeyDriver      = "driver"
 	legacyKeyLimit       = "limit"
+	legacyKeyNet         = "net"
+	legacyKeyOutput      = "output"
+	legacyKeySSL         = "ssl"
+	legacyKeyEnabled     = "enabled"
+	legacyKeyStep        = "step"
 	legacyKeyStorage     = "storage"
+	legacyKeyTest        = "test"
 	legacyKeyType        = "type"
 
 	opTypeCreate = "create"
@@ -302,9 +308,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	)
 	concurrency := intValue(concurrencyRaw, vars)
 	itemSize := resolveString(getPath(step.Config, "item", "data", "size"), vars)
-	limitTimeRaw := getPath(step.Config, "test", "step", legacyKeyLimit, "time")
+	limitTimeRaw := getPath(step.Config, legacyKeyTest, legacyKeyStep, legacyKeyLimit, "time")
 	limitCountRaw := firstPath(step.Config,
-		[]string{"test", "step", legacyKeyLimit, legacyKeyCount},
+		[]string{legacyKeyTest, legacyKeyStep, legacyKeyLimit, legacyKeyCount},
 		[]string{legacyStepTypeLoad, "op", legacyKeyLimit, legacyKeyCount},
 		[]string{legacyStepTypeLoad, legacyKeyLimit, legacyKeyCount},
 	)
@@ -327,7 +333,7 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 			},
 		},
 		"item": map[string]any{
-			"output": map[string]any{
+			legacyKeyOutput: map[string]any{
 				"path": "/" + strings.TrimPrefix(bucket, "/"),
 			},
 		},
@@ -335,7 +341,7 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 			"op": map[string]any{
 				legacyKeyType: opType,
 			},
-			"step": map[string]any{
+			legacyKeyStep: map[string]any{
 				"id": stepID,
 			},
 		},
@@ -357,12 +363,12 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	}
 	if failCount := int64Value(firstPath(step.Config,
 		[]string{legacyStepTypeLoad, "op", legacyKeyLimit, "fail", legacyKeyCount},
-		[]string{"test", "step", legacyKeyLimit, "fail", legacyKeyCount},
+		[]string{legacyKeyTest, legacyKeyStep, legacyKeyLimit, "fail", legacyKeyCount},
 	), vars); failCount > 0 {
 		setPath(config, failCount, legacyStepTypeLoad, "op", legacyKeyLimit, "fail", legacyKeyCount)
 	}
 	if duration != "" {
-		setPath(config, duration, legacyStepTypeLoad, "step", legacyKeyLimit, "time")
+		setPath(config, duration, legacyStepTypeLoad, legacyKeyStep, legacyKeyLimit, "time")
 	}
 	if count > 0 {
 		setPath(config, count, legacyStepTypeLoad, "op", legacyKeyLimit, legacyKeyCount)
@@ -374,53 +380,53 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 		setPath(config, shuffle, legacyStepTypeLoad, "op", "shuffle")
 	}
 	if threshold, ok := floatValue(firstPath(step.Config,
-		[]string{"output", "metrics", "threshold"},
-		[]string{"test", "step", "metrics", "threshold"},
+		[]string{legacyKeyOutput, "metrics", "threshold"},
+		[]string{legacyKeyTest, legacyKeyStep, "metrics", "threshold"},
 	), vars); ok {
-		setPath(config, threshold, "output", "metrics", "threshold")
+		setPath(config, threshold, legacyKeyOutput, "metrics", "threshold")
 	}
 	if enabled, ok := boolValue(firstPath(step.Config,
-		[]string{legacyKeyStorage, "net", "ssl", "enabled"},
-		[]string{legacyKeyStorage, "net", "ssl"},
+		[]string{legacyKeyStorage, legacyKeyNet, legacyKeySSL, legacyKeyEnabled},
+		[]string{legacyKeyStorage, legacyKeyNet, legacyKeySSL},
 	), vars); ok {
-		setPath(config, enabled, legacyKeyStorage, "net", "ssl", "enabled")
+		setPath(config, enabled, legacyKeyStorage, legacyKeyNet, legacyKeySSL, legacyKeyEnabled)
 		if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, archiveID); mismatch {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
 		}
 	}
-	if ciphers, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "ciphers"), vars); ok {
-		setPath(config, ciphers, legacyKeyStorage, "net", "ssl", "ciphers")
+	if ciphers, ok := stringListValue(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "ciphers"), vars); ok {
+		setPath(config, ciphers, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "ciphers")
 	}
-	if protocols, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "protocols"), vars); ok {
-		setPath(config, protocols, legacyKeyStorage, "net", "ssl", "protocols")
+	if protocols, ok := stringListValue(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "protocols"), vars); ok {
+		setPath(config, protocols, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "protocols")
 	}
-	if namedGroups, ok := stringListValue(getPath(step.Config, legacyKeyStorage, "net", "ssl", "namedGroups"), vars); ok {
-		setPath(config, namedGroups, legacyKeyStorage, "net", "ssl", "namedGroups")
+	if namedGroups, ok := stringListValue(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "namedGroups"), vars); ok {
+		setPath(config, namedGroups, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "namedGroups")
 	}
-	if provider := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "provider"), vars); provider != "" {
-		setPath(config, provider, legacyKeyStorage, "net", "ssl", "provider")
+	if provider := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "provider"), vars); provider != "" {
+		setPath(config, provider, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "provider")
 	}
-	if jsseProvider := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "jsseProvider"), vars); jsseProvider != "" {
-		setPath(config, jsseProvider, legacyKeyStorage, "net", "ssl", "jsseProvider")
+	if jsseProvider := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "jsseProvider"), vars); jsseProvider != "" {
+		setPath(config, jsseProvider, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "jsseProvider")
 	}
-	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, "net", "ssl", "pqcMode"), vars); pqcMode != "" {
-		setPath(config, pqcMode, legacyKeyStorage, "net", "ssl", "pqcMode")
+	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
+		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
 
 	var rewrites []PathRewrite
-	if rawOutput := itemPathString(getPath(step.Config, "item", "output", "file"), vars); rawOutput != "" {
+	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
 		item := itemFileVariable(rawOutput, archiveToStepID, itemVars, itemVarOrder)
 		if item.VarName != "" {
-			setPath(config, exprPlaceholder(item.VarName), "item", "output", "file")
+			setPath(config, exprPlaceholder(item.VarName), "item", legacyKeyOutput, "file")
 			rewrites = append(rewrites, PathRewrite{ArchiveID: item.ArchiveID, StepID: item.StepID, From: item.From, To: item.To})
 		} else if pathLabel, _, ok := parseItemFile(rawOutput); ok {
 			return convertedStep{}, fmt.Errorf("step %s references unknown item-file path label %s", archiveID, pathLabel)
 		} else if item := mongoosePathVariable(rawOutput, itemVars, itemVarOrder); item.VarName != "" {
-			setPath(config, exprPlaceholder(item.VarName), "item", "output", "file")
+			setPath(config, exprPlaceholder(item.VarName), "item", legacyKeyOutput, "file")
 		} else if strings.Contains(rawOutput, "${") {
 			return convertedStep{}, fmt.Errorf("step %s has unresolved item output file path %q", archiveID, rawOutput)
 		} else {
-			setPath(config, rawOutput, "item", "output", "file")
+			setPath(config, rawOutput, "item", legacyKeyOutput, "file")
 		}
 	}
 	if rawInput := itemPathString(getPath(step.Config, "item", "input", "file"), vars); rawInput != "" {
@@ -487,7 +493,7 @@ func precomputeArchiveStepIDs(steps []legacyStep, baseConfig map[string]any, lab
 }
 
 func loadStepIdentity(step legacyStep, index int, vars map[string]string) (string, string, string, string, error) {
-	archiveID := resolveString(getPath(step.Config, "test", "step", "id"), vars)
+	archiveID := resolveString(getPath(step.Config, legacyKeyTest, legacyKeyStep, "id"), vars)
 	if archiveID == "" {
 		archiveID = fmt.Sprintf("archive-step-%03d", index+1)
 	}

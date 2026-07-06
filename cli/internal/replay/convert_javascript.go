@@ -29,29 +29,29 @@ var (
 	jsPathKeyRe               = regexp.MustCompile(`"path"\s*:`)
 	jsIdentifierRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	jsParentConfigAllowedKeys = map[string]struct{}{
-		"storage":      {},
-		"net":          {},
-		"node":         {},
-		"port":         {},
-		"driver":       {},
-		"type":         {},
-		"ssl":          {},
-		"enabled":      {},
-		"ciphers":      {},
-		"protocols":    {},
-		"provider":     {},
-		"jsseProvider": {},
-		"namedGroups":  {},
-		"pqcMode":      {},
+		"storage":        {},
+		legacyKeyNet:     {},
+		"node":           {},
+		"port":           {},
+		"driver":         {},
+		"type":           {},
+		legacyKeySSL:     {},
+		legacyKeyEnabled: {},
+		"ciphers":        {},
+		"protocols":      {},
+		"provider":       {},
+		"jsseProvider":   {},
+		"namedGroups":    {},
+		"pqcMode":        {},
 	}
 	jsParentSSLAllowedKeys = map[string]struct{}{
-		"enabled":      {},
-		"ciphers":      {},
-		"protocols":    {},
-		"provider":     {},
-		"jsseProvider": {},
-		"namedGroups":  {},
-		"pqcMode":      {},
+		legacyKeyEnabled: {},
+		"ciphers":        {},
+		"protocols":      {},
+		"provider":       {},
+		"jsseProvider":   {},
+		"namedGroups":    {},
+		"pqcMode":        {},
 	}
 )
 
@@ -497,7 +497,7 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
-		if enabled, ok := sslConfig["enabled"].(bool); ok {
+		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
 			}
@@ -545,7 +545,7 @@ func parentConfigHasExtraKeys(configText string) bool {
 func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any) string {
 	config := map[string]any{
 		"item": map[string]any{
-			"output": map[string]any{
+			legacyKeyOutput: map[string]any{
 				"path": jsBucketPath(bucket),
 			},
 		},
@@ -556,7 +556,7 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig
 		},
 	}
 	if len(sslConfig) > 0 {
-		setPath(config, sslConfig, "storage", "net", "ssl")
+		setPath(config, sslConfig, "storage", legacyKeyNet, legacyKeySSL)
 	}
 	configJS, err := marshalJSConfig(config)
 	if err != nil {
@@ -581,21 +581,21 @@ func extractJSParentSSLConfig(configText string, vars map[string]string) (map[st
 	if storageText == "" {
 		return nil, nil
 	}
-	netText := jsObjectForKey(storageText, "net")
+	netText := jsObjectForKey(storageText, legacyKeyNet)
 	if netText == "" {
 		return nil, nil
 	}
-	sslText := jsObjectForKey(netText, "ssl")
+	sslText := jsObjectForKey(netText, legacyKeySSL)
 	if sslText == "" {
-		if enabled, ok := boolValue(jsFieldValue(netText, "ssl", vars), vars); ok {
-			return map[string]any{"enabled": enabled}, nil
+		if enabled, ok := boolValue(jsFieldValue(netText, legacyKeySSL, vars), vars); ok {
+			return map[string]any{legacyKeyEnabled: enabled}, nil
 		}
 		return nil, nil
 	}
 
 	sslConfig := map[string]any{}
-	if enabled, ok := boolValue(jsFieldValue(sslText, "enabled", vars), vars); ok {
-		sslConfig["enabled"] = enabled
+	if enabled, ok := boolValue(jsFieldValue(sslText, legacyKeyEnabled, vars), vars); ok {
+		sslConfig[legacyKeyEnabled] = enabled
 	}
 	if ciphers, ok := jsStringListField(sslText, "ciphers", vars); ok {
 		sslConfig["ciphers"] = ciphers

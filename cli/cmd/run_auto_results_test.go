@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,7 +173,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
+	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -254,7 +255,7 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
+	done := startAutoResults("http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -341,7 +342,7 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -409,7 +410,7 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "")
+	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -496,7 +497,7 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile)
+	done := startAutoResults("http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile, nil)
 
 	select {
 	case <-done:
@@ -561,6 +562,11 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 	}
 
 	events := &eventWriter{}
+	var hookCalled int32
+	preSummaryHook := func() {
+		atomic.AddInt32(&hookCalled, 1)
+		_, _ = events.Write([]byte("PRE-SUMMARY HOOK RAN\n"))
+	}
 	done := startAutoResults(
 		"http://example",
 		"mt",
@@ -576,6 +582,7 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 		events,
 		events,
 		"",
+		preSummaryHook,
 	)
 
 	select {
@@ -584,16 +591,77 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 		t.Fatal("startAutoResults did not complete in time")
 	}
 
+	if atomic.LoadInt32(&hookCalled) != 1 {
+		t.Fatalf("preSummaryHook called %d times, want exactly 1", hookCalled)
+	}
+
 	got := events.snapshot()
 	summaryIndex := indexOfEventContaining(got, "FINAL SUMMARY")
 	shutdownIndex := indexOfEventContaining(got, "Shutdown completed successfully.")
+	hookIndex := indexOfEventContaining(got, "PRE-SUMMARY HOOK RAN")
 	if summaryIndex < 0 {
 		t.Fatalf("summary was not emitted; events=%v", got)
 	}
 	if shutdownIndex < 0 {
 		t.Fatalf("shutdown completion was not emitted; events=%v", got)
 	}
+	if hookIndex < 0 {
+		t.Fatalf("pre-summary hook was not run; events=%v", got)
+	}
 	if summaryIndex <= shutdownIndex {
 		t.Fatalf("summary should be emitted after shutdown completion; events=%v", got)
+	}
+	if hookIndex <= shutdownIndex {
+		t.Fatalf("pre-summary hook should run after shutdown completion; events=%v", got)
+	}
+	if summaryIndex <= hookIndex {
+		t.Fatalf("summary should be emitted after the pre-summary hook runs (this is the whole point of "+
+			"the hook: diagnostics/cleanup must be observable before the summary is); events=%v", got)
+	}
+}
+
+// TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled guards the
+// other half of the contract: the hook drives diagnostics collection and
+// full container/staging cleanup, which must only happen when the run
+// actually asked for delegated shutdown (shutdownOn/--shutdown-on-complete).
+// Running it unconditionally would tear down containers out from under a
+// user who explicitly asked to keep them running after completion.
+func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	stepID := "mt-001-20260604.195722.504-mixed"
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
+	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{output: outputDir}
+	}
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+
+	var hookCalled int32
+	preSummaryHook := func() { atomic.AddInt32(&hookCalled, 1) }
+
+	// shutdownOn = false
+	done := startAutoResults("http://example", "mt", t.TempDir(), []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", preSummaryHook)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+
+	if atomic.LoadInt32(&hookCalled) != 0 {
+		t.Fatalf("preSummaryHook called %d times with shutdown disabled, want 0", hookCalled)
 	}
 }
