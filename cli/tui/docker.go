@@ -64,21 +64,22 @@ type dockerClient interface {
 // dockerClient interface for easier testing and can delegate to a
 // RemoteDockerManager when managing remote hosts.
 type DockerManager struct {
-	client             dockerClient
-	containerID        string
-	ctx                context.Context
-	cancel             context.CancelFunc
-	hostInfo           *hostparse.HostInfo  // New field to track host information
-	remote             *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
-	nodeLogDir         string
-	nodeLogResultsRoot string
-	preserveNodeLogDir bool
-	diagnosticsRoot    string
-	diagnosticsDir     string
-	diagnosticsRole    string
-	diagnosticsDone    bool
-	diagnosticsRec     *diagnosticsRecord
-	fileMounts         []scenario.FileMount
+	client              dockerClient
+	containerID         string
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	hostInfo            *hostparse.HostInfo  // New field to track host information
+	remote              *RemoteDockerManager // When non-nil, delegate operations to remote CLI manager
+	nodeLogDir          string
+	nodeLogResultsRoot  string
+	preserveNodeLogDir  bool
+	diagnosticsRoot     string
+	diagnosticsDir      string
+	diagnosticsRole     string
+	diagnosticsDone     bool
+	diagnosticsRec      *diagnosticsRecord
+	diagnosticsStopDone bool
+	fileMounts          []scenario.FileMount
 }
 
 func skipImagePull(image string) bool {
@@ -295,6 +296,7 @@ func (dm *DockerManager) prepareDiagnosticsCapture(role string) []string {
 	dm.diagnosticsRole = role
 	dm.diagnosticsDone = false
 	dm.diagnosticsRec = nil
+	dm.diagnosticsStopDone = false
 	return []string{fmt.Sprintf("%s:%s", dir, dockerDiagnosticsMount)}
 }
 
@@ -313,6 +315,7 @@ func (dm *DockerManager) cleanupDiagnosticsDir() {
 	dm.diagnosticsRole = ""
 	dm.diagnosticsDone = false
 	dm.diagnosticsRec = nil
+	dm.diagnosticsStopDone = false
 }
 
 func (dm *DockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
@@ -359,6 +362,32 @@ func (dm *DockerManager) diagnosticsRecord() *diagnosticsRecord {
 		return dm.remote.diagnosticsRecord()
 	}
 	return dm.diagnosticsRec
+}
+
+// gracefulStopForDiagnostics stops the container (if still running) before
+// diagnostics are collected. JFR/GC artifacts (dumponexit) are only
+// guaranteed to exist once the JVM has exited, so this must run before
+// collectDiagnostics regardless of call site (Cleanup or a standalone
+// diagnostics-only collection pass, e.g. MultiHostOrchestrator.CollectDiagnostics).
+func (dm *DockerManager) gracefulStopForDiagnostics(ctx context.Context) error {
+	if dm.remote != nil {
+		return dm.remote.gracefulStopForDiagnostics(ctx)
+	}
+	if dm.diagnosticsDone || dm.diagnosticsStopDone {
+		return nil
+	}
+	if dm.containerID == "" || dm.diagnosticsDir == "" {
+		return nil
+	}
+	timeout := dockerDiagnosticsStopTimeoutSeconds
+	err := dm.client.ContainerStop(dm.ctx, dm.containerID, container.StopOptions{
+		Timeout: &timeout,
+	})
+	if err != nil && !isContainerAlreadyStoppedOrGone(err) {
+		return fmt.Errorf("failed to stop container for diagnostics: %w", err)
+	}
+	dm.diagnosticsStopDone = true
+	return nil
 }
 
 // ContainerDiagnosticTail returns recent container startup diagnostics from Docker logs
@@ -1079,6 +1108,7 @@ func (dm *DockerManager) Cleanup() error {
 		logging.LogError("docker", "failed to stop container", err, "container_id", dm.containerID)
 		return fmt.Errorf("failed to stop container: %w", err)
 	}
+	dm.diagnosticsStopDone = true
 
 	logging.LogContainerEvent("stopped", dm.containerID)
 

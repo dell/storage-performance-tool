@@ -793,6 +793,16 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 			defer wg.Done()
 			hostCtx, cancel := context.WithTimeout(ctx, constants.DiagnosticsCollectionTimeout)
 			defer cancel()
+			// JFR/GC artifacts use dumponexit, which only guarantees the file
+			// exists once the JVM has exited. Stop the container first so
+			// collection isn't racing a still-running process; this is a
+			// standalone collection pass (unlike Cleanup) so nothing else in
+			// this call path stops the container for us.
+			if err := c.gracefulStopForDiagnostics(hostCtx); err != nil {
+				logging.LogWarn("docker-multi", "diagnostics graceful stop failed",
+					"host", h.Info.Original,
+					"error", err.Error())
+			}
 			record, err := c.collectDiagnostics(hostCtx)
 			resultsCh <- diagnosticsResult{host: h.Info.Original, record: record, err: err}
 		}(host, collector)

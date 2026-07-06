@@ -44,6 +44,12 @@ type diagnosticsManifest struct {
 }
 
 type diagnosticsCollector interface {
+	// gracefulStopForDiagnostics stops the container (if still running) before
+	// diagnostics are collected. JFR/GC artifacts (dumponexit) are only
+	// guaranteed to exist once the JVM has actually exited, so this must run
+	// before collectDiagnostics regardless of call site (Cleanup or a
+	// standalone diagnostics-only collection pass).
+	gracefulStopForDiagnostics(context.Context) error
 	collectDiagnostics(context.Context) (*diagnosticsRecord, error)
 	diagnosticsRecord() *diagnosticsRecord
 }

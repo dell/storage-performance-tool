@@ -5,6 +5,7 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,5 +373,113 @@ func TestRemoteDocker_StartEntryNodeContainer_IncludesWorkerAddrsAndArgs(t *test
 	}
 	if !strings.Contains(cmd, "--name spt-entry-") {
 		t.Errorf("expected entry run command to include entry name prefix, got: %s", cmd)
+	}
+}
+
+// TestRemoteDocker_CollectDiagnosticsPreservesRemoteDirWhenStopNotConfirmed guards
+// against collecting (and then deleting) JFR/GC artifacts before the container's
+// JVM has had a chance to exit and flush dumponexit files. This exercises
+// collectDiagnostics directly, bypassing gracefulStopForDiagnostics/Cleanup, the
+// same way MultiHostOrchestrator.CollectDiagnostics used to before it was fixed
+// to stop first.
+func TestRemoteDocker_CollectDiagnosticsPreservesRemoteDirWhenStopNotConfirmed(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log")
+	mgr, mock, _ := newTestRemoteManager(t)
+	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
+	mgr.setDiagnosticsResultsRoot(resultsRoot)
+
+	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3); err != nil {
+		t.Fatalf("StartWorkerNodeContainer error = %v", err)
+	}
+	remoteDir := mgr.diagnosticsDir
+	mock.SetCommandSuccess(
+		"find "+remoteDir+" -maxdepth 1 -type f -print",
+		remoteDir+"/spt-gc-123.log\n",
+	)
+
+	record, err := mgr.collectDiagnostics(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when stop was never confirmed before collection")
+	}
+	if record == nil || !record.Collected {
+		t.Fatalf("expected best-effort collection despite unconfirmed stop, record = %+v", record)
+	}
+	if !record.PreservedRemoteDir {
+		t.Fatal("expected remote dir to be preserved when stop was not confirmed")
+	}
+	if idx := commandIndex(mock, "rm -rf "+remoteDir); idx >= 0 {
+		t.Fatalf("remote diagnostics dir should not be removed when stop was not confirmed; commands = %+v", mock.GetExecutedCommands())
+	}
+}
+
+// TestRemoteDocker_CleanupCollectsEntryNodeDiagnostics covers the entry-node
+// diagnostics path specifically: prior coverage exercised worker-role Cleanup
+// only, but the plan requires diagnostics on both worker and entry containers.
+func TestRemoteDocker_CleanupCollectsEntryNodeDiagnostics(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log")
+	mgr, mock, _ := newTestRemoteManager(t)
+	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
+	mgr.setDiagnosticsResultsRoot(resultsRoot)
+
+	if _, err := mgr.StartEntryNodeContainer(constants.DefaultSptImage, []string{"w1:1099"}, nil, constants.DefaultNetworkMode); err != nil {
+		t.Fatalf("StartEntryNodeContainer error = %v", err)
+	}
+	remoteDir := mgr.diagnosticsDir
+	mock.SetCommandSuccess(
+		"find "+remoteDir+" -maxdepth 1 -type f -print",
+		remoteDir+"/spt-gc-123.log\n",
+	)
+
+	if err := mgr.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	record := mgr.diagnosticsRecord()
+	if record == nil {
+		t.Fatal("expected diagnostics record")
+	}
+	if record.Role != constants.DockerRoleEntry {
+		t.Fatalf("record role = %q, want %q", record.Role, constants.DockerRoleEntry)
+	}
+	if !record.Collected || !record.RemoteDirRemoved {
+		t.Fatalf("expected entry diagnostics to be collected and remote dir removed, record = %+v", record)
+	}
+	localDir := diagnosticsLocalDir(resultsRoot, mgr.host.Host, constants.DockerRoleEntry)
+	if _, err := os.Stat(filepath.Join(localDir, "spt-gc-123.log")); err != nil {
+		t.Fatalf("expected local entry diagnostics file: %v", err)
+	}
+}
+
+// TestRemoteDocker_CleanupCollectsNodeModeDiagnostics covers the standalone
+// node-mode diagnostics path (StartContainerInNodeMode), the third of the
+// three container roles diagnostics must be wired for.
+func TestRemoteDocker_CleanupCollectsNodeModeDiagnostics(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc*:file=/spt-diagnostics/spt-gc-%p.log")
+	mgr, mock, _ := newTestRemoteManager(t)
+	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
+	mgr.setDiagnosticsResultsRoot(resultsRoot)
+
+	if _, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode); err != nil {
+		t.Fatalf("StartContainerInNodeMode error = %v", err)
+	}
+	remoteDir := mgr.diagnosticsDir
+	mock.SetCommandSuccess(
+		"find "+remoteDir+" -maxdepth 1 -type f -print",
+		remoteDir+"/spt-gc-123.log\n",
+	)
+
+	if err := mgr.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	record := mgr.diagnosticsRecord()
+	if record == nil {
+		t.Fatal("expected diagnostics record")
+	}
+	if record.Role != constants.DockerRoleNode {
+		t.Fatalf("record role = %q, want %q", record.Role, constants.DockerRoleNode)
+	}
+	if !record.Collected || !record.RemoteDirRemoved {
+		t.Fatalf("expected node-mode diagnostics to be collected and remote dir removed, record = %+v", record)
 	}
 }

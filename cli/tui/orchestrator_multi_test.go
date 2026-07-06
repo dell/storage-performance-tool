@@ -243,6 +243,11 @@ func (m *orderedDiagnosticsDockerManager) Cleanup() error {
 	return m.MockDockerManager.Cleanup()
 }
 
+func (m *orderedDiagnosticsDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	m.appendEvent("stop")
+	return nil
+}
+
 func (m *orderedDiagnosticsDockerManager) collectDiagnostics(context.Context) (*diagnosticsRecord, error) {
 	m.appendEvent("collect")
 	return m.record, nil
@@ -290,6 +295,10 @@ type blockingDiagnosticsDockerManager struct {
 	host    string
 	started chan<- string
 	release <-chan struct{}
+}
+
+func (m *blockingDiagnosticsDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	return nil
 }
 
 func (m *blockingDiagnosticsDockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
@@ -359,6 +368,86 @@ func TestMultiHostOrchestrator_CollectDiagnosticsRunsHostsConcurrently(t *testin
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("CollectDiagnostics did not complete after host collectors were released")
+	}
+}
+
+type collectDiagnosticsOrderDockerManager struct {
+	*MockDockerManager
+
+	mu      sync.Mutex
+	events  []string
+	stopErr error
+}
+
+func (m *collectDiagnosticsOrderDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	m.mu.Lock()
+	m.events = append(m.events, "stop")
+	m.mu.Unlock()
+	return m.stopErr
+}
+
+func (m *collectDiagnosticsOrderDockerManager) collectDiagnostics(context.Context) (*diagnosticsRecord, error) {
+	m.mu.Lock()
+	m.events = append(m.events, "collect")
+	m.mu.Unlock()
+	return &diagnosticsRecord{Host: "host1", Collected: true}, nil
+}
+
+func (m *collectDiagnosticsOrderDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	return nil
+}
+
+func (m *collectDiagnosticsOrderDockerManager) eventList() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.events...)
+}
+
+// TestMultiHostOrchestrator_CollectDiagnosticsStopsBeforeCollecting guards against
+// regressing to collecting JFR/GC artifacts (dumponexit) while the container
+// (and therefore the JVM) may still be running: unlike StopAllContainers/Cleanup,
+// this standalone diagnostics-only pass has nothing else in its call path that
+// stops the container first, so CollectDiagnostics must do it itself.
+func TestMultiHostOrchestrator_CollectDiagnosticsStopsBeforeCollecting(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "host1", Original: "host1"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.SetResultsRoot(t.TempDir())
+	fake := &collectDiagnosticsOrderDockerManager{MockDockerManager: NewMockDockerManager()}
+	orchestrator.hosts[0].SetManaged(true)
+	orchestrator.hosts[0].DockerManager = fake
+
+	if err := orchestrator.CollectDiagnostics(context.Background()); err != nil {
+		t.Fatalf("CollectDiagnostics() error = %v", err)
+	}
+
+	got := strings.Join(fake.eventList(), ",")
+	if got != "stop,collect" {
+		t.Fatalf("diagnostics order = %q, want stop,collect", got)
+	}
+}
+
+// TestMultiHostOrchestrator_CollectDiagnosticsStillCollectsWhenStopFails covers
+// the best-effort path: a stop failure (e.g. a transient SSH error) must not
+// abandon collection outright, since the remote/local diagnostics files may
+// still be readable even if we can't confirm the container fully stopped.
+func TestMultiHostOrchestrator_CollectDiagnosticsStillCollectsWhenStopFails(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "host1", Original: "host1"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.SetResultsRoot(t.TempDir())
+	fake := &collectDiagnosticsOrderDockerManager{
+		MockDockerManager: NewMockDockerManager(),
+		stopErr:           fmt.Errorf("ssh timeout"),
+	}
+	orchestrator.hosts[0].SetManaged(true)
+	orchestrator.hosts[0].DockerManager = fake
+
+	if err := orchestrator.CollectDiagnostics(context.Background()); err != nil {
+		t.Fatalf("CollectDiagnostics() error = %v", err)
+	}
+
+	got := strings.Join(fake.eventList(), ",")
+	if got != "stop,collect" {
+		t.Fatalf("diagnostics order = %q, want stop,collect even when stop failed (best-effort collection)", got)
 	}
 }
 

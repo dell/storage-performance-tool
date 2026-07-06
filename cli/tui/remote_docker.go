@@ -32,18 +32,19 @@ const (
 // using the shared command layer (internal/docker/command).
 // It is used for remote hosts where the Docker SDK ssh:// transport is unavailable.
 type RemoteDockerManager struct {
-	host             *hostparse.HostInfo
-	exec             command.CommandExecutor
-	ops              command.DockerOperations
-	containerID      string
-	proberRun        func(ctx context.Context, baseURL string, pollInterval time.Duration) error
-	stagedBindMounts []string
-	stagingDir       string
-	diagnosticsRoot  string
-	diagnosticsDir   string
-	diagnosticsRole  string
-	diagnosticsDone  bool
-	diagnosticsRec   *diagnosticsRecord
+	host                *hostparse.HostInfo
+	exec                command.CommandExecutor
+	ops                 command.DockerOperations
+	containerID         string
+	proberRun           func(ctx context.Context, baseURL string, pollInterval time.Duration) error
+	stagedBindMounts    []string
+	stagingDir          string
+	diagnosticsRoot     string
+	diagnosticsDir      string
+	diagnosticsRole     string
+	diagnosticsDone     bool
+	diagnosticsRec      *diagnosticsRecord
+	diagnosticsStopDone bool
 }
 
 func sanitizeHostComponent(host string) string {
@@ -213,6 +214,7 @@ func (m *RemoteDockerManager) prepareDiagnostics(ctx context.Context, role strin
 	m.diagnosticsRole = role
 	m.diagnosticsDone = false
 	m.diagnosticsRec = nil
+	m.diagnosticsStopDone = false
 	return []string{fmt.Sprintf("%s:%s", remoteDir, dockerDiagnosticsMount)}, []string{remoteEnvFile}, nil
 }
 
@@ -225,6 +227,7 @@ func (m *RemoteDockerManager) cleanupRemoteDiagnostics(ctx context.Context) {
 	m.diagnosticsRole = ""
 	m.diagnosticsDone = false
 	m.diagnosticsRec = nil
+	m.diagnosticsStopDone = false
 }
 
 // StartContainer is not used for remote multi-host mode; return a clear error
@@ -504,6 +507,18 @@ func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnost
 	record.Files = files
 	record.Collected = true
 
+	if !m.diagnosticsStopDone {
+		// The container was never confirmed stopped (graceful stop failed, or
+		// was never attempted), so dumponexit JFR/GC artifacts may not have
+		// been flushed yet. Preserve the remote directory for manual recovery
+		// instead of deleting a source that might still be mid-write.
+		record.Error = "graceful stop was not confirmed before collection; remote directory preserved"
+		record.PreservedRemoteDir = true
+		_ = writeDiagnosticsRecordManifest(localDir, record)
+		m.diagnosticsRec = &record
+		return &record, errors.New(record.Error)
+	}
+
 	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"rm", remoteRemoveRecursiveFlag, m.diagnosticsDir}); err != nil {
 		record.Error = fmt.Sprintf("remove remote diagnostics directory: %v (stderr: %s)", err, stderr)
 		record.PreservedRemoteDir = true
@@ -527,6 +542,9 @@ func (m *RemoteDockerManager) diagnosticsRecord() *diagnosticsRecord {
 }
 
 func (m *RemoteDockerManager) gracefulStopForDiagnostics(ctx context.Context) error {
+	if m.diagnosticsDone || m.diagnosticsStopDone {
+		return nil
+	}
 	if m.containerID == "" || m.diagnosticsDir == "" {
 		return nil
 	}
@@ -540,6 +558,7 @@ func (m *RemoteDockerManager) gracefulStopForDiagnostics(ctx context.Context) er
 	if err != nil {
 		return fmt.Errorf("graceful docker stop for diagnostics: %w (stderr: %s)", err, stderr)
 	}
+	m.diagnosticsStopDone = true
 	return nil
 }
 
