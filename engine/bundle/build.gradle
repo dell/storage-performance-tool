@@ -145,8 +145,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
 # - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
 #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
+# - sun.rmi.transport.tcp.responseTimeout: bounds how long the entry node's socket read
+#   waits for a reply to a distributed-coordination RMI call. Defaults to 0 (wait forever)
+#   in the JDK; without this, a transient network stall on the RMI connection hangs the
+#   whole run indefinitely instead of failing fast into the existing retry path.
 # Override: SPT_JAVA_OPTS="-Xmx8g" ./run.sh ...
-SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions}"
+SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -Dsun.rmi.transport.tcp.responseTimeout=10000}"
 
 # Run Spt with all arguments passed to this script
 java $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"

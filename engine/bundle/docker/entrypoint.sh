@@ -26,7 +26,13 @@ set -eu
 #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # - UseCompactObjectHeaders (JEP 519): 64-bit object headers instead of 128-bit;
 #   reduces heap footprint and GC pressure for high-rate short-lived objects
-DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders"
+# - sun.rmi.transport.tcp.responseTimeout: bounds how long the entry node's socket read
+#   waits for a reply to a distributed-coordination RMI call (e.g. worker start/stop/await
+#   polling). Defaults to 0 (wait forever) in the JDK; a transient network stall on the RMI
+#   connection would otherwise hang the whole test/run indefinitely instead of failing fast
+#   into the existing retry/backoff path. 10s is generous relative to normal sub-10ms RMI
+#   round-trips for these small control-plane calls.
+DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000"
 
 # Append any user-provided JAVA_OPTS (like RMI hostname) to the defaults.
 # If a user provides conflicting flags (like -Xmx8g), Java will use the last one specified.

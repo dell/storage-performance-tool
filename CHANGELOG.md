@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unbounded distributed-coordination RMI waits** — the production JVM defaults (Docker entrypoint and `run.sh`) now set `-Dsun.rmi.transport.tcp.responseTimeout=10000`. Previously a transient network stall on the RMI connection used for entry-worker coordination (start/stop/await polling) could block a test indefinitely instead of failing fast into the existing retry/backoff path, inflating run duration and deflating measured throughput with no corresponding failure recorded.
+- **Netty idle timeout too long to ever catch a stuck operation in a short run** — `storage-net-timeoutMilliSec` default lowered from 300000ms (5 minutes) to 30000ms (matches the sibling S3-AWS driver's own `socketTimeoutMs` default). This is an idle timeout (fires only on zero read/write activity), so it does not penalize large-but-progressing transfers. A stuck S3 operation previously had to survive 5 minutes before Netty's own `IdleStateHandler` would fail it — far longer than most test runs — so it would silently vanish uncounted rather than being recorded as a failure. Workloads that legitimately need more idle headroom (e.g. LIST against large buckets, per `engine/tools/listtest.local.sh`'s existing `LIST_HTTP_TIMEOUT_MS` override) should set `--storage-net-timeoutMilliSec` explicitly.
+
 ## [5.11.2] - 2026-06-29
 
 ### Changed
