@@ -11,8 +11,18 @@ storage:
     rcvBuf: 0
     sndBuf: 0
     tcpNoDelay: true
-    # Default HTTP socket/idle timeout: 300 seconds (5 minutes)
-    timeoutMilliSec: 300000
+    # Default HTTP socket/idle timeout: 30 seconds. Matches the sibling S3-AWS driver's own
+    # socketTimeoutMs default (see s3-aws/README.md). This is an idle timeout (Netty
+    # IdleStateHandler: fires only when a channel has zero read/write activity for this
+    # long), not a total-request-duration cap, so it does not penalize large-but-progressing
+    # transfers. A stuck connection that never completes and is never detected within this
+    # window would otherwise silently vanish rather than being counted as a failure -- 5
+    # minutes was long enough that this could never fire within a typical short test run.
+    # List-heavy workloads against large buckets can legitimately need more idle headroom
+    # (slow delimiter seeding/pagination); override with --storage-net-timeoutMilliSec=<ms>
+    # for those cases (see engine/tools/listtest.local.sh's LIST_HTTP_TIMEOUT_MS for an
+    # existing example of exactly this override).
+    timeoutMilliSec: 30000
     ioRatio: 80
     transport: epoll
     ssl:

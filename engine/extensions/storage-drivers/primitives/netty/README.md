@@ -21,7 +21,7 @@ count of the open connections may be limited by `storage-driver-limit-concurrenc
 | storage-net-sndBuf                             | Fixed size >= 0 | 0 | The network connection output buffer size. Estimated automatically if 0 (default)
 | storage-net-selectInterval                     | Integer > 0 | 100 |
 | storage-net-tcpNoDelay                         | Flag | true |
-| storage-net-timeoutMilliSec                    | Integer >= 0 | 300000 | The socket/response idle timeout (milliseconds)
+| storage-net-timeoutMilliSec                    | Integer >= 0 | 30000 | The socket/response idle timeout (milliseconds). This is an idle timeout (fires only when a connection has zero read/write activity for this long), not a total-request cap, so it does not penalize large-but-progressing transfers. List-heavy workloads against large buckets may need more idle headroom (slow delimiter seeding/pagination) -- see the Connection Timeout section below.
 | storage-net-ioRatio                            | 0 < Integer < 100 | 50 | Internal [Netty's I/O ratio parameter](https://github.com/netty/netty/issues/1154#issuecomment-14870909). It's recommended to make it higher for large request/response payload (>1MB)
 | storage-net-transport                          | Enum | nio | The I/O transport to use (see the [details](http://netty.io/wiki/native-transports.html)). By default tries to use "nio" (the most compatible). For Linux try to use "epoll" or "iouring", for MacOS/BSD use "kqueue" (requires rebuilding).
 | storage-net-ssl-ciphers                        | List of strings | null | The list of ciphers to use if SSL is enabled. First cipher in the list that matches is applied. Make sure to match used ciphers and protocols. 
@@ -72,6 +72,13 @@ java -jar spt-<VERSION>.jar \
 See [`cli/docs/PQC_TLS.md`](../../../cli/docs/PQC_TLS.md) for the full guide including verification, troubleshooting, and driver coverage.
 
 ## 4. Connection Timeout
+
+Default is 30 seconds (see the Configuration Reference above). Raise it for workloads where
+a channel can legitimately go idle for a while without being stuck -- LIST against large
+buckets is the main example (slow delimiter seeding/pagination can look idle from the
+client's perspective even though the server is still working); `engine/tools/listtest.local.sh`
+already does this via its own `LIST_HTTP_TIMEOUT_MS` (defaults to 5 minutes for exactly that
+reason):
 
 ```bash
 java -jar spt-<VERSION>.jar \
