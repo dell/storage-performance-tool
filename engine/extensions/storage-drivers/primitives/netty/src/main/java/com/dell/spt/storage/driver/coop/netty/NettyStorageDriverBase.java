@@ -673,6 +673,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			if (!channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 				connPool.release(channel);
 			}
+			// isFastRecycleEligible() requires status == SUCC, so this is always a
+			// successful completion: clear load-op-retry's counter on the *original* op
+			// here too, same as LoadStepContextImpl.put() does for the result copy it
+			// sees - handleCompleted() below only hands that copy a snapshot, it never
+			// touches this live object, which is what actually gets reused below.
+			op.resetOpRetryCount();
 			// Mark BEFORE handleCompleted so the result copy carries the flag
 			op.driverRecycled(true);
 			handleCompleted(op);

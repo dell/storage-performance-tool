@@ -22,6 +22,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.shard.ListShard;
+import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
@@ -46,6 +47,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -58,9 +60,14 @@ import org.junit.jupiter.api.Test;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /* Alot of the functionality from ItemInputFactoryTest is used here since need an ItemInputFactory */
@@ -167,6 +174,765 @@ public class LoadStepContextImplTest {
 		assertEquals(omit, resultsOut.received.get(0));
 	}
 
+	/** Builds a mock {@link LoadGenerator} pre-stubbed to satisfy the constructor's retry validation. */
+	@SuppressWarnings("unchecked")
+	private static LoadGenerator<DataItem, Operation<DataItem>> mockRetryCapableGenerator() {
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mock(LoadGenerator.class);
+		when(mockGenerator.supportsRetry()).thenReturn(true);
+		doNothing().when(mockGenerator).recycle(any());
+		doNothing().when(mockGenerator).retry(any());
+		// Mockito does not honor LoadGenerator#isNothingPendingRetry's own (true) default
+		// interface method for a plain mock - an unstubbed boolean-returning method
+		// returns false, which would make every test that reaches doShutdown()/doStop()
+		// pay awaitRetryQueueDrained()'s full bounded wait for no reason. Tests
+		// specifically about that wait behavior override this stub themselves.
+		when(mockGenerator.isNothingPendingRetry()).thenReturn(true);
+		return mockGenerator;
+	}
+
+	/**
+	 * A scheduler that runs the retry task synchronously, ignoring the requested delay, so
+	 * tests don't wait on real backoff timers and aren't subject to timing flakiness under
+	 * CI load. {@link LoadStepContextImpl#retryBackoffMillis(int)} is covered separately
+	 * (see {@link #retryBackoffMillisStaysWithinConfiguredBounds()}).
+	 */
+	private static LoadStepContextImpl.RetryScheduler synchronousRetryScheduler() {
+		return (delayMillis, task) -> {
+			task.run();
+			return java.util.concurrent.CompletableFuture.completedFuture(null);
+		};
+	}
+
+	@Test
+	public void putSuccessfulOperationClearsOpRetryCountThroughLoadStepContextPutNotJustDirectly() {
+		// Test gap: OperationResultCopyTest proves OperationImpl.resetOpRetryCount() itself
+		// zeroes the field, but not that LoadStepContextImpl.put() actually calls it on the
+		// SUCC path. Uses a real op (not a mock) that already has a nonzero count, exactly
+		// as it would after failing at least once before eventually succeeding.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-recycle-mode", false);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("succ-clears-retry-count");
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"succ-clears-retry-count-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		final DataOperation<DataItem> op = newSuccDataOp("item-succ-after-retry", 64);
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		assertEquals(2, op.opRetryCount());
+
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		assertEquals(0, op.opRetryCount(), "LoadStepContextImpl.put() must clear opRetryCount on a SUCC result");
+	}
+
+	@Test
+	public void batchPutSuccessfulOperationClearsOpRetryCount() {
+		// Test gap: the single-op SUCC path's opRetryCount reset (test above) is not
+		// automatically proof the batch put(List, from, to) path does the same - it's a
+		// separate branch in production code (see put(List, int, int)'s own SUCC handling).
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-recycle-mode", false);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("batch-succ-clears-retry-count");
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"batch-succ-clears-retry-count-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		final DataOperation<DataItem> op = newSuccDataOp("item-batch-succ-after-retry", 64);
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		assertEquals(2, op.opRetryCount());
+		final List<Operation<DataItem>> batch = new ArrayList<>();
+		batch.add((Operation<DataItem>) op);
+
+		assertEquals(1, stepCtx.put(batch, 0, 1));
+		assertEquals(0, op.opRetryCount(), "batch put() must clear opRetryCount on a SUCC result");
+	}
+
+	@Test
+	public void pendingResultRoutesThroughRetryForNonRecycleModeRetryEnabledWorkload() {
+		// P2b (round 4): LoadGeneratorImpl only drains recycleQueue when *its own*
+		// recycleFlag is set (true recycle-mode) - for a non-recycle-mode workload, a
+		// PENDING result recycled via generator.recycle() would be silently stranded
+		// forever while counterResults advances as if it had actually resolved. With
+		// load-op-retry enabled, PENDING routes through the dedicated, always-drained
+		// retry path instead, and does not count as resolved until it actually is.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-recycle-mode", false);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("pending-routes-to-retry");
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"pending-routes-to-retry-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		final DataOperation<DataItem> op = baseDataOp("item-pending-retry-route", 64);
+		op.status(Operation.Status.PENDING);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+
+		verify(mockGenerator, times(1)).retry(any());
+		verify(mockGenerator, never()).recycle(any());
+	}
+
+	@Test
+	public void pendingResultStillUsesRecycleForTrueRecycleModeWorkloadEvenWithRetryEnabled() {
+		// Contrast with the test above: a true recycle-mode workload's recycle queue *is*
+		// drained by the generator regardless of load-op-retry, so there's no stranding
+		// risk there - existing recycle() + immediate counterResults behavior (duration-
+		// based read-loop workloads rely on PENDING cycling back around) is unchanged.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-recycle-mode", true);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("pending-recycle-mode-unchanged");
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"pending-recycle-mode-unchanged-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		final DataOperation<DataItem> op = baseDataOp("item-pending-recycle-mode", 64);
+		op.status(Operation.Status.PENDING);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+
+		verify(mockGenerator, times(1)).recycle(any());
+		verify(mockGenerator, never()).retry(any());
+	}
+
+	@Test
+	public void putFailedOperationWithRetryEnabledRecyclesUntilLimitThenCountsAsFailed() {
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 2);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"retry-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		final DataOperation<DataItem> op = baseDataOp("item-retry", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+
+		// Attempt 1: 0 < retryLimit(2) -> retried synchronously, not yet counted as failed.
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, times(1)).retry(any());
+		verify(metrics, never()).markFail();
+		assertEquals(1, op.opRetryCount());
+
+		// Attempt 2: 1 < retryLimit(2) -> retried again, still not failed.
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, times(2)).retry(any());
+		verify(metrics, never()).markFail();
+		assertEquals(2, op.opRetryCount());
+
+		// Attempt 3: 2 >= retryLimit(2) -> limit reached, counted as failed, not retried again.
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, times(2)).retry(any());
+		verify(metrics, times(1)).markFail();
+		assertEquals(2, op.opRetryCount());
+	}
+
+	@org.junit.jupiter.params.ParameterizedTest
+	@org.junit.jupiter.params.provider.EnumSource(value = Operation.Status.class, names = {"FAIL_IO", "FAIL_TIMEOUT", "FAIL_UNKNOWN", "RESP_FAIL_UNKNOWN", "RESP_FAIL_SVC"
+	})
+	public void everyRetryableStatusIsActuallyRetriedWithinLimit(final Operation.Status status) {
+		// Test gap: the positive retry-path test only exercised RESP_FAIL_SVC. Parameterize
+		// over the full retryable set isRetryableStatus() defines, so a future edit to that
+		// set can't silently narrow it without a test noticing.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"retryable-status-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		final DataOperation<DataItem> op = baseDataOp("item-" + status, 64);
+		op.status(status);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, times(1)).retry(any());
+		verify(metrics, never()).markFail();
+		assertEquals(1, op.opRetryCount(), status + " should have been retried");
+	}
+
+	@Test
+	public void isDoneStaysFalseWhileARetryIsStillInBackoff() throws Exception {
+		// Test gap: nothing directly proved isDone() waits for a scheduled-but-not-yet-fired
+		// retry, as opposed to happening to work only because the synchronous test scheduler
+		// resolves everything immediately. Uses a real generator + a controllable scheduler
+		// that captures the task without running it, so the retry is genuinely still
+		// "in backoff" from isDone()'s perspective when checked.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var flakyDriver = new FlakyThenSucceedsDriver(1, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(1, flakyDriver, "isdone-during-backoff");
+		final java.util.concurrent.atomic.AtomicReference<Runnable> capturedTask = new java.util.concurrent.atomic.AtomicReference<>();
+		stepCtx.setRetryScheduler((delayMillis, task) -> {
+			capturedTask.set(task);
+			return new CompletableFuture<Void>();
+		});
+
+		stepCtx.start();
+		try {
+			final long deadline = System.currentTimeMillis() + 5_000;
+			while (capturedTask.get() == null && System.currentTimeMillis() < deadline) {
+				Thread.sleep(5);
+			}
+			assertTrue(capturedTask.get() != null, "the one op should have failed and scheduled a retry by now");
+			// The retry is scheduled but deliberately not yet run - isDone() must not
+			// consider the workload complete while it's still sitting in backoff.
+			assertFalse(stepCtx.isDone(), "isDone() must stay false while a retry is still in its backoff delay");
+
+			// Running the captured task only enqueues the redispatch into the generator's
+			// own retry queue (LoadGenerator#retry) - draining it to the (real, if
+			// synchronous here) driver and having that driver's result flow back through
+			// put() all still happens asynchronously on the generator's own work loop, so
+			// isDone() must be polled rather than asserted immediately afterward.
+			capturedTask.get().run();
+			final long resolvedDeadline = System.currentTimeMillis() + 5_000;
+			while (!stepCtx.isDone() && System.currentTimeMillis() < resolvedDeadline) {
+				Thread.sleep(5);
+			}
+			assertTrue(stepCtx.isDone(), "isDone() should become true once the (successful) retry resolves");
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void putFailedOperationWithNonRetryableStatusCountsAsFailedImmediatelyEvenWithinLimit() {
+		// Finding: retry should not apply to permanent failures (auth, not-found, client
+		// error, corruption, out-of-space) even when load-op-retry is on and the retry
+		// budget hasn't been exhausted - matches minio-go/aws-sdk-cpp's own retry policies.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"non-retryable-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		for (final var status : new Operation.Status[]{
+				Operation.Status.RESP_FAIL_AUTH, Operation.Status.RESP_FAIL_NOT_FOUND,
+				Operation.Status.RESP_FAIL_CLIENT, Operation.Status.RESP_FAIL_CORRUPT,
+				Operation.Status.RESP_FAIL_SPACE
+		}) {
+			final DataOperation<DataItem> op = baseDataOp("item-" + status, 64);
+			op.status(status);
+			assertTrue(stepCtx.put((Operation<DataItem>) op), status.toString());
+			assertEquals(0, op.opRetryCount(), status + ": should never have been retried");
+		}
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(5)).markFail();
+	}
+
+	@Test
+	public void putFailedOperationWhenOperationDoesNotSupportRetryTrackingFailsImmediately() {
+		// Finding: an Operation implementation that doesn't override opRetryCount()/
+		// incrementOpRetryCount() (supportsOpRetryTracking() == false) must not be retried
+		// forever by accident - it should fail fast, with a clear log, same as retry=false.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"untracked-op-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		@SuppressWarnings("unchecked")
+		final DataOperation<DataItem> op = mock(DataOperation.class);
+		when(op.status()).thenReturn(Operation.Status.RESP_FAIL_SVC);
+		when(op.type()).thenReturn(OpType.CREATE);
+		when(op.supportsOpRetryTracking()).thenReturn(false);
+		// opRetryCount()/incrementOpRetryCount() left unstubbed -> default no-op behavior
+
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(1)).markFail();
+	}
+
+	@Test
+	public void putFailedOperationWithRetryDisabledCountsAsFailedImmediately() {
+		testConfig.val("load-op-retry", false);
+
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mock(LoadGenerator.class);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"no-retry-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+
+		final DataOperation<DataItem> op = baseDataOp("item-no-retry", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(1)).markFail();
+		assertEquals(0, op.opRetryCount());
+	}
+
+	@Test
+	public void constructorRejectsRetryAgainstAGeneratorThatDoesNotSupportIt() {
+		// Finding: MixedLoadGenerator.recycle() is a deliberate no-op (mixed mode handles
+		// its own per-op-type recycling), so enabling load-op-retry against it would
+		// silently drop failed operations - neither retried nor counted as failed. Fail
+		// fast at construction instead.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mock(LoadGenerator.class);
+		when(mockGenerator.supportsRetry()).thenReturn(false);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+
+		Assertions.assertThrows(
+						IllegalConfigurationException.class,
+						() -> new LoadStepContextImpl<>(
+										"unsupported-retry-step", mockGenerator, mockStorageDriver, metrics,
+										testConfig.configVal("load"), false));
+	}
+
+	@Test
+	public void constructorRejectsNegativeRetryLimit() {
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", -1);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+
+		Assertions.assertThrows(
+						IllegalConfigurationException.class,
+						() -> new LoadStepContextImpl<>(
+										"negative-retry-limit-step", mockGenerator, mockStorageDriver, metrics,
+										testConfig.configVal("load"), false));
+	}
+
+	@Test
+	public void constructorAcceptsZeroRetryLimitAsRetryDisabledInPractice() {
+		// 0 is documented as "disables retry even though load-op-retry is true", not an
+		// error - only negative values are rejected.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 0);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = assertDoesNotThrow(
+						() -> new LoadStepContextImpl<>(
+										"zero-retry-limit-step", mockGenerator, mockStorageDriver, metrics,
+										testConfig.configVal("load"), false));
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		final DataOperation<DataItem> op = baseDataOp("item-zero-limit", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(1)).markFail();
+	}
+
+	@Test
+	public void scheduledRetryFallsBackToFailureWhenGeneratorAlreadyStopped() throws Exception {
+		// Finding #2/#6: the generator can self-stop on its own (e.g. it hit its configured
+		// load-op-limit-count by dispatching every op at least once, even though several
+		// then failed and are still awaiting retry) while a retry is sitting in its backoff
+		// delay. Recycling into a generator that will never poll its queue again would
+		// leave the operation stuck forever instead of resolving; the scheduled task must
+		// notice and fail it immediately instead.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"gen-stopped-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.start();
+
+		// Capture the scheduled task instead of running it immediately, so the generator's
+		// self-stop can be simulated *after* scheduling but *before* the task actually runs
+		// - exactly the race window findings #2/#6 describe.
+		final java.util.concurrent.atomic.AtomicReference<Runnable> capturedTask = new java.util.concurrent.atomic.AtomicReference<>();
+		stepCtx.setRetryScheduler((delayMillis, task) -> {
+			capturedTask.set(task);
+			return new CompletableFuture<Void>(); // never-completing handle; not run yet
+		});
+
+		final DataOperation<DataItem> op = baseDataOp("item-gen-stopped", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		assertEquals(1, op.opRetryCount());
+		verify(mockGenerator, never()).retry(any()); // not yet - task hasn't run
+
+		// Simulate the generator having stopped on its own in the meantime, then let the
+		// (previously scheduled, still-pending) retry task actually run.
+		when(mockGenerator.isStopped()).thenReturn(true);
+		capturedTask.get().run();
+
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(1)).markFail();
+	}
+
+	@Test
+	public void cancelledPendingRetryOnStopResolvesToFailureNotSilentlyLost() throws Exception {
+		// Finding #6: a step stopping/shutting down (e.g. duration expired) while a retry
+		// is sitting in its backoff delay must resolve that operation to a definite outcome
+		// immediately - not leave a stray timer that fires later into a torn-down driver, and
+		// not silently drop it uncounted either.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+		testConfig.val("load-op-wait-finish", false);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"cancel-pending-retry-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+		stepCtx.start();
+
+		// A scheduler whose "future" is a real, never-completing CompletableFuture - matching
+		// what the real delayed executor would return for a retry still in its backoff. It
+		// is deliberately never run and never completed by this test: the only way it can
+		// resolve is via doStop()'s cancelPendingRetries() cancelling it, so if that logic is
+		// missing or broken, markFail() below would never be invoked and the test fails clean
+		// (no recycle() call is possible either, since a successful cancel() guarantees, per
+		// the Future contract, that the task body - the only thing that would call it - never runs).
+		stepCtx.setRetryScheduler((delayMillis, task) -> new CompletableFuture<Void>());
+
+		final DataOperation<DataItem> op = baseDataOp("item-cancel-me", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		assertEquals(1, op.opRetryCount());
+		verify(metrics, never()).markFail();
+
+		stepCtx.doStop();
+
+		verify(mockGenerator, never()).retry(any());
+		verify(metrics, times(1)).markFail();
+	}
+
+	@Test
+	public void cancelledRetryTaskDoesNotDoubleResolveIfItRunsAnyway() throws Exception {
+		// P1b (round 4): CompletableFuture#cancel does not reliably mean "the task body
+		// will never run" - for a future produced by runAsync(), a successful cancel(false)
+		// can still race with a task that has already started running on its own executor
+		// thread (cancelling the future does not interrupt or otherwise stop that thread).
+		// The old cancelPendingRetries() treated a successful cancel() as sufficient proof
+		// it was safe to resolve the operation itself; if the task then ran anyway, it
+		// would resolve the *same* operation a second time (e.g. markFail() twice, or a
+		// markFail() racing a retry() that could go on to succeed). Verifies the CAS-based
+		// RetryHandle actually prevents this: even if the task runs after
+		// cancelPendingRetries() already resolved it, the task's own tryClaim() must lose
+		// and it must do nothing further.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+		testConfig.val("load-op-wait-finish", false);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"cas-double-resolve-step", mockGenerator, mockStorageDriver, metrics,
+						testConfig.configVal("load"), false);
+		stepCtx.start();
+
+		final java.util.concurrent.atomic.AtomicReference<Runnable> capturedTask = new java.util.concurrent.atomic.AtomicReference<>();
+		stepCtx.setRetryScheduler((delayMillis, task) -> {
+			capturedTask.set(task);
+			// A never-completing future, same as the sibling test above: cancel(false)'s
+			// return value doesn't drive the outcome here anymore (the CAS does), but it
+			// still matters that this is a realistic "still pending" future.
+			return new CompletableFuture<Void>();
+		});
+
+		final DataOperation<DataItem> op = baseDataOp("item-cas-double-resolve", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+		assertEquals(1, op.opRetryCount());
+
+		// Resolve it via the cancellation path first.
+		stepCtx.doStop();
+		verify(metrics, times(1)).markFail();
+		verify(mockGenerator, never()).retry(any());
+
+		// Now simulate the race this finding describes: the task runs anyway, despite
+		// having already been "cancelled".
+		capturedTask.get().run();
+
+		// Must not have been resolved a second time.
+		verify(metrics, times(1)).markFail();
+		verify(mockGenerator, never()).retry(any());
+	}
+
+	@Test
+	public void publicStopWaitsForInFlightRetryTaskBeforeStoppingGenerator() throws Exception {
+		// Reviewer-requested test forcing the exact ordering race: the public stop()
+		// lifecycle is stop() -> shutdown() (which is what actually stops the generator,
+		// via doShutdown()) -> doStop(), i.e. doShutdown() runs *before* doStop(). A retry
+		// task that has already removed itself from pendingRetries (committed to calling
+		// generator.retry()) right as stop() is invoked must not be able to enqueue into a
+		// generator that doShutdown() then immediately stops out from under it -
+		// awaitRetryTasksSettled(), called from doShutdown() *before* generator.stop(),
+		// must actually block until that task finishes.
+		//
+		// Necessary but not sufficient on its own: this only proves generator.retry() gets
+		// *called* before stop() proceeds - it does not prove the (here, mocked, so
+		// inherently uncheckable) generator actually drains what that call enqueues before
+		// being stopped. shutdownDuringRetryDrainDoesNotStrandTheOperation() below proves
+		// that stronger, complete property against a *real* LoadGeneratorImpl.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"public-stop-race-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.start();
+
+		// The retry task's first act (per scheduleRetry()) is to remove itself from
+		// pendingRetries, then check generator.isStopped() before deciding to call
+		// retry(). Hooking isStopped() lets this test pin the task exactly at "already
+		// past cancellation, about to call retry()" for as long as needed, deterministically
+		// simulating the race instead of hoping real thread timing lines up.
+		final java.util.concurrent.CountDownLatch taskReachedIsStoppedCheck = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.CountDownLatch releaseTask = new java.util.concurrent.CountDownLatch(1);
+		when(mockGenerator.isStopped()).thenAnswer(invocation -> {
+			taskReachedIsStoppedCheck.countDown();
+			releaseTask.await(5, java.util.concurrent.TimeUnit.SECONDS);
+			return false; // generator not stopped yet, from the task's point of view
+		});
+
+		// Run the scheduled task on a real background thread so it can genuinely race
+		// against the test thread's call to stop() below, rather than running inline.
+		stepCtx.setRetryScheduler((delayMillis, task) -> {
+			final Thread taskThread = new Thread(task, "retry-task");
+			taskThread.setDaemon(true);
+			taskThread.start();
+			return new CompletableFuture<Void>();
+		});
+
+		final DataOperation<DataItem> op = baseDataOp("item-public-stop-race", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<DataItem>) op));
+
+		assertTrue(
+						taskReachedIsStoppedCheck.await(5, java.util.concurrent.TimeUnit.SECONDS),
+						"retry task should have started and reached its isStopped() check by now");
+
+		// Call the *public* stop() on its own thread: it must block in
+		// awaitRetryTasksSettled() (called from doShutdown(), before generator.stop())
+		// until the in-flight task above finishes, so the generator must not be stopped
+		// while that's still pending.
+		final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
+		stopperThread.start();
+		verify(mockGenerator, after(200).never()).stop();
+
+		// Release the task: it proceeds to call generator.retry() (generator not stopped
+		// yet, from its point of view), then stop() must complete and finally stop the
+		// generator - in that order.
+		releaseTask.countDown();
+		stopperThread.join(5_000);
+		assertFalse(stopperThread.isAlive(), "public stop() should have completed");
+		verify(mockGenerator, timeout(1_000).times(1)).retry(any());
+		verify(mockGenerator, timeout(1_000)).stop();
+	}
+
+	@Test
+	public void batchAndSingleOpRetryPathsBothCallOnRetryNotOnRequeue() throws Exception {
+		// Finding #11: the single-op and batch put() retry branches used different list-
+		// shard callbacks (onRetry(shard, status) vs the less-informative onRequeue(shard))
+		// for what represents the exact same "this op failed and is being retried" event.
+		// Both now go through the shared handleFailedOp(), so both must call onRetry().
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 5);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("batch-retry-shard-callback");
+		final ListShardMetricsRecorder mockRecorder = mock(ListShardMetricsRecorder.class);
+
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"batch-retry-shard-step",
+						(LoadGenerator<Item, Operation<Item>>) (LoadGenerator<?, ?>) mockGenerator,
+						(StorageDriver<Item, Operation<Item>>) (StorageDriver<?, ?>) mockStorageDriver,
+						metrics,
+						testConfig.configVal("load"),
+						false,
+						mockRecorder);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		final ListShard shardSingle = new ListShard("single/", null, null, null);
+		final ListOperationImpl<PathItemImpl> singleOp = new ListOperationImpl<>(0, OpType.LIST, new PathItemImpl("single/"), null);
+		singleOp.shard(shardSingle);
+		singleOp.status(Operation.Status.RESP_FAIL_SVC);
+		assertTrue(stepCtx.put((Operation<Item>) (Operation<?>) singleOp));
+		verify(mockRecorder, times(1)).onRetry(shardSingle, Operation.Status.RESP_FAIL_SVC);
+		verify(mockRecorder, never()).onRequeue(shardSingle);
+
+		final ListShard shardBatch = new ListShard("batch/", null, null, null);
+		final ListOperationImpl<PathItemImpl> batchOp = new ListOperationImpl<>(0, OpType.LIST, new PathItemImpl("batch/"), null);
+		batchOp.shard(shardBatch);
+		batchOp.status(Operation.Status.RESP_FAIL_SVC);
+		final List<Operation<Item>> batch = new ArrayList<>();
+		batch.add((Operation<Item>) (Operation<?>) batchOp);
+		assertEquals(1, stepCtx.put(batch, 0, 1));
+		verify(mockRecorder, times(1)).onRetry(shardBatch, Operation.Status.RESP_FAIL_SVC);
+		verify(mockRecorder, never()).onRequeue(shardBatch);
+	}
+
+	@Test
+	public void batchPutRetriesUntilLimitThenCountsAsFailedSameAsSingleOp() throws Exception {
+		// Finding #11: the batch retry branch itself was untested (only success/omit/pending
+		// were covered). Mirrors putFailedOperationWithRetryEnabledRecyclesUntilLimitThenCountsAsFailed
+		// but through put(List, from, to).
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 2);
+
+		final LoadGenerator<DataItem, Operation<DataItem>> mockGenerator = mockRetryCapableGenerator();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> mockStorageDriver = mock(StorageDriver.class);
+		doNothing().when(mockStorageDriver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		doNothing().when(metrics).markFail();
+
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"batch-retry-step", mockGenerator, mockStorageDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		final DataOperation<DataItem> op = baseDataOp("item-batch-retry", 64);
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		final List<Operation<DataItem>> batch = new ArrayList<>();
+		batch.add((Operation<DataItem>) op);
+
+		assertEquals(1, stepCtx.put(batch, 0, 1));
+		verify(mockGenerator, times(1)).retry(any());
+		verify(metrics, never()).markFail();
+		assertEquals(1, op.opRetryCount());
+
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertEquals(1, stepCtx.put(batch, 0, 1));
+		verify(mockGenerator, times(2)).retry(any());
+		verify(metrics, never()).markFail();
+		assertEquals(2, op.opRetryCount());
+
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertEquals(1, stepCtx.put(batch, 0, 1));
+		verify(mockGenerator, times(2)).retry(any());
+		verify(metrics, times(1)).markFail();
+		assertEquals(2, op.opRetryCount());
+	}
+
+	@Test
+	public void retryBackoffMillisStaysWithinConfiguredBounds() {
+		// Attempt 1 (base, unshifted): bounded by the 200ms base itself.
+		for (int i = 0; i < 50; i++) {
+			final long delay = LoadStepContextImpl.retryBackoffMillis(1);
+			assertTrue(delay >= 0 && delay <= 200, "attempt 1 delay out of bounds: " + delay);
+		}
+		// A later attempt whose uncapped exponential value would exceed the 1s cap must still
+		// be bounded by it (200ms * 2^4 = 3200ms > 1000ms cap).
+		for (int i = 0; i < 50; i++) {
+			final long delay = LoadStepContextImpl.retryBackoffMillis(5);
+			assertTrue(delay >= 0 && delay <= 1000, "attempt 5 delay exceeded the cap: " + delay);
+		}
+		// A large attempt number must not overflow or go negative -- still capped at 1s.
+		final long farDelay = LoadStepContextImpl.retryBackoffMillis(1000);
+		assertTrue(farDelay >= 0 && farDelay <= 1000, "large attempt delay out of bounds: " + farDelay);
+	}
+
 	@Test
 	public void doStopFlushesLatestResultsHandlesBackpressureAndPoisons() throws Exception {
 		// configure recycle so that successful ops are retained for final flush
@@ -201,6 +967,9 @@ public class LoadStepContextImplTest {
 
 	@Test
 	public void doStartFailsFastOnDriverRemoteException() throws Exception {
+		// unrelated to retry; avoid the constructor's generator.supportsRetry() validation
+		// tripping on this bare (unstubbed) mock
+		testConfig.val("load-op-retry", false);
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
 		doNothing().when(driverMock).operationResultOutput(any());
@@ -219,7 +988,14 @@ public class LoadStepContextImplTest {
 
 	@Test
 	public void doShutdownLogsAndContinuesOnDriverRemoteException() throws Exception {
+		// unrelated to retry; avoid the constructor's generator.supportsRetry() validation
+		// tripping on this bare (unstubbed) mock
+		testConfig.val("load-op-retry", false);
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		// doShutdown() calls awaitRetryQueueDrained(), which polls this - an unstubbed
+		// mock returns false (Mockito doesn't honor the interface's own true default),
+		// which would otherwise make this pay that method's full bounded wait for nothing.
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
 		doNothing().when(driverMock).operationResultOutput(any());
 		doThrow(new RemoteException("shutdown")).when(driverMock).shutdown();
@@ -397,6 +1173,11 @@ public class LoadStepContextImplTest {
 		when(listGenerator.generatedOpCount()).thenReturn(0L);
 		doNothing().when(listGenerator).recycle(any());
 		doNothing().when(listGenerator).close();
+		// The try-with-resources block below closes stepCtx, which reaches doShutdown()'s
+		// awaitRetryQueueDrained() - an unstubbed mock returns false (Mockito doesn't honor
+		// the interface's own true default), which would otherwise make this pay that
+		// method's full bounded wait for nothing.
+		when(listGenerator.isNothingPendingRetry()).thenReturn(true);
 
 		@SuppressWarnings("unchecked")
 		final StorageDriver<Item, Operation<Item>> listDriver = (StorageDriver<Item, Operation<Item>>) (StorageDriver<?, ?>) DummyStorageDriverMock.create();
@@ -683,6 +1464,899 @@ public class LoadStepContextImplTest {
 		@Override
 		public int compareTo(final MetricsContext<AllMetricsSnapshot> o) {
 			return delegate.compareTo(o);
+		}
+	}
+
+	/**
+	 * A finite {@link Input} of {@link DataItem}s, signaling exhaustion the same way
+	 * {@code CsvItemInput} does (throwing {@link EOFException} via the sneaky-throw
+	 * {@code Exceptions.throwUnchecked}, since {@code Input.get(List, int)} declares no
+	 * checked exception of its own).
+	 */
+	private static final class FixedCountItemInput implements Input<DataItem> {
+		private final int total;
+		private int produced;
+
+		FixedCountItemInput(final int total) {
+			this.total = total;
+		}
+
+		@Override
+		public DataItem get() {
+			if (produced >= total) {
+				return null;
+			}
+			produced++;
+			return new DataItemImpl("retry-it-item-" + produced, 0, 64);
+		}
+
+		@Override
+		public int get(final List<DataItem> buffer, final int limit) {
+			if (produced >= total) {
+				com.github.akurilov.commons.lang.Exceptions.throwUnchecked(new java.io.EOFException());
+				return 0; // unreachable
+			}
+			int i = 0;
+			while (i < limit && produced < total) {
+				produced++;
+				buffer.add(new DataItemImpl("retry-it-item-" + produced, 0, 64));
+				i++;
+			}
+			return i;
+		}
+
+		@Override
+		public long skip(final long itemsCount) {
+			return 0;
+		}
+
+		@Override
+		public void reset() {
+			produced = 0;
+		}
+
+		@Override
+		public void close() {}
+	}
+
+	/**
+	 * Minimal real {@link StorageDriver} that fails an item's first {@code
+	 * failuresBeforeSuccess} attempts (tracked per item name) with the given status, then
+	 * succeeds - just enough real driver behavior to drive a genuine
+	 * fail-then-retry-then-succeed cycle through the real {@code LoadGeneratorImpl}, without
+	 * needing a full protocol implementation. Modeled on {@code DummyStorageDriverMock}.
+	 */
+	private static final class FlakyThenSucceedsDriver
+					extends com.dell.spt.base.concurrent.AsyncRunnableBase
+					implements StorageDriver<DataItem, Operation<DataItem>> {
+		private final int failuresBeforeSuccess;
+		private final Operation.Status failureStatus;
+		// Keyed by item *identity*, not name: result() (see OperationImpl#result / its
+		// buildItemPath() call) can rewrite an item's name in place - e.g. prepending a
+		// path prefix - the first time it's copied, so the same logical item's name is not
+		// stable across a retry's original attempt vs. its later copies. The item object
+		// reference itself, however, is shared (copy-constructed, not cloned) all the way
+		// through every result() copy in the chain, so identity is the stable key.
+		private final Map<DataItem, Integer> attemptsByItem = new java.util.IdentityHashMap<>();
+		private final Object attemptsByItemLock = new Object();
+		private final AtomicInteger totalPutCalls = new AtomicInteger();
+		private final AtomicInteger successCount = new AtomicInteger();
+		private volatile Output<Operation<DataItem>> opResultOut;
+
+		FlakyThenSucceedsDriver(final int failuresBeforeSuccess, final Operation.Status failureStatus) {
+			this.failuresBeforeSuccess = failuresBeforeSuccess;
+			this.failureStatus = failureStatus;
+		}
+
+		@Override
+		@SuppressWarnings("unchecked")
+		public boolean put(final Operation<DataItem> op) {
+			totalPutCalls.incrementAndGet();
+			op.reset();
+			op.startRequest();
+			op.finishRequest();
+			op.startResponse();
+			final int attempt;
+			synchronized (attemptsByItemLock) {
+				attempt = attemptsByItem.merge(op.item(), 1, Integer::sum);
+			}
+			if (attempt <= failuresBeforeSuccess) {
+				op.status(failureStatus);
+			} else {
+				if (op instanceof DataOperation<?>) {
+					final DataOperation<DataItem> dataOp = (DataOperation<DataItem>) op;
+					try {
+						dataOp.countBytesDone(dataOp.item().size());
+					} catch (final IOException ignored) {
+						// test data always has a fixed size; not expected
+					}
+				}
+				op.status(Operation.Status.SUCC);
+				successCount.incrementAndGet();
+			}
+			op.finishResponse();
+			// Mirror the real driver contract (e.g. StorageDriverBase.handleCompleted()):
+			// send a result *copy* downstream, not the live op - LoadStepContextImpl only
+			// ever sees copies in production, and retry/reset/recycle correctness (opRetryCount
+			// surviving the copy, resetOpRetryCount() on success, etc.) depends on that.
+			return opResultOut.put(op.result());
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops, final int from, final int to) {
+			int i = from;
+			while (i < to && put(ops.get(i))) {
+				i++;
+			}
+			return i - from;
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops) {
+			return put(ops, 0, ops.size());
+		}
+
+		@Override
+		public void operationResultOutput(final Output<Operation<DataItem>> opResultOut) {
+			this.opResultOut = opResultOut;
+		}
+
+		@Override
+		public List<DataItem> list(
+						final ItemFactory<DataItem> itemFactory, final String path, final String prefix,
+						final int idRadix, final DataItem lastPrevItem, final int count) {
+			return List.of();
+		}
+
+		@Override
+		public Input<Operation<DataItem>> getInput() {
+			throw new AssertionError();
+		}
+
+		@Override
+		public int concurrencyLimit() {
+			return 16;
+		}
+
+		@Override
+		public int activeOpCount() {
+			return 0; // every put() call above resolves synchronously - never "active"
+		}
+
+		@Override
+		public long scheduledOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public long completedOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public boolean isIdle() {
+			return true;
+		}
+
+		@Override
+		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+
+		int totalPutCalls() {
+			return totalPutCalls.get();
+		}
+
+		int successCount() {
+			return successCount.get();
+		}
+	}
+
+	/**
+	 * Like {@link FlakyThenSucceedsDriver}, but genuinely asynchronous: {@code put()}
+	 * returns immediately (as a real cooperative/Netty driver's {@code put()} does - it
+	 * just enqueues, the actual request happens later on a different thread), and the
+	 * result (success or the configured failure) is delivered on a separate thread after a
+	 * short delay. That delay only needs to be long enough for the real {@code
+	 * LoadGeneratorImpl} driving this to have already reached its "dispatched everything,
+	 * item input exhausted" state before the completion arrives - a fully synchronous
+	 * driver's completion (as {@link FlakyThenSucceedsDriver} above provides) can never
+	 * arrive later than that point, so it can't exercise this timing at all.
+	 */
+	private static final class AsyncFlakyThenSucceedsDriver
+					extends com.dell.spt.base.concurrent.AsyncRunnableBase
+					implements StorageDriver<DataItem, Operation<DataItem>> {
+		private final int failuresBeforeSuccess;
+		private final Operation.Status failureStatus;
+		private final long completionDelayMillis;
+		private final Map<DataItem, Integer> attemptsByItem = new java.util.IdentityHashMap<>();
+		private final Object attemptsByItemLock = new Object();
+		private final AtomicInteger totalPutCalls = new AtomicInteger();
+		private final AtomicInteger successCount = new AtomicInteger();
+		private volatile Output<Operation<DataItem>> opResultOut;
+
+		AsyncFlakyThenSucceedsDriver(
+						final int failuresBeforeSuccess, final Operation.Status failureStatus, final long completionDelayMillis) {
+			this.failuresBeforeSuccess = failuresBeforeSuccess;
+			this.failureStatus = failureStatus;
+			this.completionDelayMillis = completionDelayMillis;
+		}
+
+		@Override
+		public boolean put(final Operation<DataItem> op) {
+			totalPutCalls.incrementAndGet();
+			final Thread completionThread = new Thread(
+							() -> {
+								try {
+									Thread.sleep(completionDelayMillis);
+								} catch (final InterruptedException e) {
+									Thread.currentThread().interrupt();
+									return;
+								}
+								completeOp(op);
+							},
+							"async-driver-completion-" + totalPutCalls.get());
+			completionThread.setDaemon(true);
+			completionThread.start();
+			return true;
+		}
+
+		@SuppressWarnings("unchecked")
+		private void completeOp(final Operation<DataItem> op) {
+			op.reset();
+			op.startRequest();
+			op.finishRequest();
+			op.startResponse();
+			final int attempt;
+			synchronized (attemptsByItemLock) {
+				attempt = attemptsByItem.merge(op.item(), 1, Integer::sum);
+			}
+			if (attempt <= failuresBeforeSuccess) {
+				op.status(failureStatus);
+			} else {
+				if (op instanceof DataOperation<?>) {
+					final DataOperation<DataItem> dataOp = (DataOperation<DataItem>) op;
+					try {
+						dataOp.countBytesDone(dataOp.item().size());
+					} catch (final IOException ignored) {
+						// test data always has a fixed size; not expected
+					}
+				}
+				op.status(Operation.Status.SUCC);
+				successCount.incrementAndGet();
+			}
+			op.finishResponse();
+			opResultOut.put(op.result());
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops, final int from, final int to) {
+			int i = from;
+			while (i < to && put(ops.get(i))) {
+				i++;
+			}
+			return i - from;
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops) {
+			return put(ops, 0, ops.size());
+		}
+
+		@Override
+		public void operationResultOutput(final Output<Operation<DataItem>> opResultOut) {
+			this.opResultOut = opResultOut;
+		}
+
+		@Override
+		public List<DataItem> list(
+						final ItemFactory<DataItem> itemFactory, final String path, final String prefix,
+						final int idRadix, final DataItem lastPrevItem, final int count) {
+			return List.of();
+		}
+
+		@Override
+		public Input<Operation<DataItem>> getInput() {
+			throw new AssertionError();
+		}
+
+		@Override
+		public int concurrencyLimit() {
+			return 16;
+		}
+
+		@Override
+		public int activeOpCount() {
+			return 0;
+		}
+
+		@Override
+		public long scheduledOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public long completedOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public boolean isIdle() {
+			return true;
+		}
+
+		@Override
+		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+
+		int totalPutCalls() {
+			return totalPutCalls.get();
+		}
+
+		int successCount() {
+			return successCount.get();
+		}
+	}
+
+	/**
+	 * A driver whose very first {@code put()} call blocks until the test releases a latch,
+	 * then every call (including that first one, once released) succeeds normally. Used to
+	 * deterministically hold the real generator's own work-loop thread inside a single
+	 * {@code doWork()} call (specifically inside that first dispatch) for as long as the
+	 * test needs - long enough to inject something into {@link LoadGenerator#retry} and
+	 * prove it cannot be drained (the generator's thread is provably still stuck elsewhere)
+	 * while a concurrent {@code stop()} is made to wait for it anyway.
+	 */
+	private static final class BlockingFirstDispatchDriver
+					extends com.dell.spt.base.concurrent.AsyncRunnableBase
+					implements StorageDriver<DataItem, Operation<DataItem>> {
+		private final java.util.concurrent.CountDownLatch releaseFirstDispatch;
+		private final AtomicInteger totalPutCalls = new AtomicInteger();
+		private volatile Output<Operation<DataItem>> opResultOut;
+
+		BlockingFirstDispatchDriver(final java.util.concurrent.CountDownLatch releaseFirstDispatch) {
+			this.releaseFirstDispatch = releaseFirstDispatch;
+		}
+
+		@Override
+		@SuppressWarnings("unchecked")
+		public boolean put(final Operation<DataItem> op) {
+			final int callNumber = totalPutCalls.incrementAndGet();
+			if (callNumber == 1) {
+				try {
+					releaseFirstDispatch.await(10, java.util.concurrent.TimeUnit.SECONDS);
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return false;
+				}
+			}
+			op.reset();
+			op.startRequest();
+			op.finishRequest();
+			op.startResponse();
+			if (op instanceof DataOperation<?>) {
+				final DataOperation<DataItem> dataOp = (DataOperation<DataItem>) op;
+				try {
+					dataOp.countBytesDone(dataOp.item().size());
+				} catch (final IOException ignored) {}
+			}
+			op.status(Operation.Status.SUCC);
+			op.finishResponse();
+			return opResultOut.put(op.result());
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops, final int from, final int to) {
+			int i = from;
+			while (i < to && put(ops.get(i))) {
+				i++;
+			}
+			return i - from;
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> ops) {
+			return put(ops, 0, ops.size());
+		}
+
+		@Override
+		public void operationResultOutput(final Output<Operation<DataItem>> opResultOut) {
+			this.opResultOut = opResultOut;
+		}
+
+		@Override
+		public List<DataItem> list(
+						final ItemFactory<DataItem> itemFactory, final String path, final String prefix,
+						final int idRadix, final DataItem lastPrevItem, final int count) {
+			return List.of();
+		}
+
+		@Override
+		public Input<Operation<DataItem>> getInput() {
+			throw new AssertionError();
+		}
+
+		@Override
+		public int concurrencyLimit() {
+			return 16;
+		}
+
+		@Override
+		public int activeOpCount() {
+			return 0;
+		}
+
+		@Override
+		public long scheduledOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public long completedOpCount() {
+			return totalPutCalls.get();
+		}
+
+		@Override
+		public boolean isIdle() {
+			return true;
+		}
+
+		@Override
+		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+
+		int totalPutCalls() {
+			return totalPutCalls.get();
+		}
+	}
+
+	@Test
+	public void shutdownDuringRetryDrainDoesNotStrandTheOperation() throws Exception {
+		// Reviewer-requested regression, real generator: awaitRetryTasksSettled() alone
+		// only proves a retry-scheduling task's own body - up to and including a
+		// LoadGenerator#retry call actually *returning* - has finished; it does not prove
+		// the generator's own work loop has since had a chance to run again and drain what
+		// that call just enqueued (LoadGenerator#retry only enqueues). This deterministically
+		// creates that exact window with a *real* LoadGeneratorImpl: the driver's first
+		// dispatch blocks, provably holding the generator's own thread inside a single
+		// doWork() call and unable to loop back to drain anything, while this test injects
+		// directly into the generator's retry queue and starts public stop() concurrently -
+		// proving stop() waits for the drain (awaitRetryQueueDrained()) rather than
+		// abandoning the operation in LoadGeneratorImpl's retryQueue forever.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var itemInput = new FixedCountItemInput(1);
+		final var releaseFirstDispatch = new java.util.concurrent.CountDownLatch(1);
+		final var blockingDriver = new BlockingFirstDispatchDriver(releaseFirstDispatch);
+
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(blockingDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("shutdown-drain-regression");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"shutdown-drain-regression-step", realGenerator, blockingDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		stepCtx.start();
+		try {
+			// Wait for the generator to actually be stuck inside its first (blocking)
+			// dispatch - i.e. it has dispatched the one item and is now provably unable to
+			// loop back to doWork() to drain anything.
+			final long dispatchDeadline = System.currentTimeMillis() + 5_000;
+			while (blockingDriver.totalPutCalls() < 1 && System.currentTimeMillis() < dispatchDeadline) {
+				Thread.sleep(5);
+			}
+			assertEquals(1, blockingDriver.totalPutCalls(), "the one op should have reached the (now-blocked) driver");
+
+			// Inject directly into the generator's retry queue - simulating a retry that a
+			// scheduling task has already (successfully, per awaitRetryTasksSettled())
+			// enqueued - while the generator's thread is provably stuck above.
+			final DataOperation<DataItem> injectedRetry = new DataOperationImpl<>(
+							0, OpType.CREATE, new DataItemImpl("injected-retry-item", 0, 1024), null, "test-bucket", null, List.of(), 0);
+			realGenerator.retry(injectedRetry);
+			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry should be sitting in the generator's retry queue");
+
+			// Start the public stop() lifecycle concurrently. With the fix, it must block
+			// in awaitRetryQueueDrained() rather than stopping the generator out from under
+			// the still-undrained retry queue.
+			final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
+			stopperThread.start();
+			Thread.sleep(200);
+			assertTrue(stopperThread.isAlive(), "stop() must still be waiting for the retry queue to drain");
+			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry must still be undrained (the generator's thread is still stuck)");
+
+			// Release the blocked first dispatch: the generator's thread can now return
+			// from doWork(), loop back, and drain the injected retry on its next iteration.
+			releaseFirstDispatch.countDown();
+
+			stopperThread.join(5_000);
+			assertFalse(stopperThread.isAlive(), "stop() should have completed once the retry queue drained");
+			assertEquals(
+							2, blockingDriver.totalPutCalls(),
+							"the injected retry must have actually reached the driver, not been stranded in retryQueue");
+		} finally {
+			releaseFirstDispatch.countDown(); // in case an assertion failed before this ran
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void retryQueueDrainTimeoutTerminalFailsStrandedRetriesInsteadOfAbandoningThem() throws Exception {
+		// Reviewer-requested regression, real generator: awaitRetryQueueDrained()'s wait
+		// (above) is bounded, not indefinite - if the generator genuinely never gets to
+		// drain (stuck, backpressured output, a throttle permanently denying permits, or
+		// (as simulated here) the driver simply never accepting the redispatch), giving up
+		// and stopping the generator anyway would silently strand the still-queued
+		// operation forever: LoadGeneratorImpl#doClose() unconditionally clears
+		// retryQueue, with no terminal outcome ever recorded - neither retried, nor
+		// redispatch attempted, nor counted as failed. This never releases the blocked
+		// first dispatch at all, forcing the drain wait to genuinely time out, and proves
+		// the timeout path drains and terminal-fails the stranded operation instead.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var itemInput = new FixedCountItemInput(1);
+		final var releaseFirstDispatch = new java.util.concurrent.CountDownLatch(1);
+		final var blockingDriver = new BlockingFirstDispatchDriver(releaseFirstDispatch);
+
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(blockingDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("shutdown-drain-timeout-regression");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"shutdown-drain-timeout-regression-step", realGenerator, blockingDriver, metrics,
+						testConfig.configVal("load"), false);
+
+		stepCtx.start();
+		try {
+			// Wait for the generator to actually be stuck inside its first (blocking, and
+			// in this test, *never released*) dispatch.
+			final long dispatchDeadline = System.currentTimeMillis() + 5_000;
+			while (blockingDriver.totalPutCalls() < 1 && System.currentTimeMillis() < dispatchDeadline) {
+				Thread.sleep(5);
+			}
+			assertEquals(1, blockingDriver.totalPutCalls(), "the one op should have reached the (now-blocked) driver");
+
+			// Inject directly into the generator's retry queue, exactly as the sibling
+			// test above does - except this time nothing will ever unblock the generator's
+			// thread to drain it.
+			final DataOperation<DataItem> injectedRetry = new DataOperationImpl<>(
+							0, OpType.CREATE, new DataItemImpl("injected-retry-item-timeout", 0, 1024), null, "test-bucket", null, List.of(), 0);
+			realGenerator.retry(injectedRetry);
+			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry should be sitting in the generator's retry queue");
+
+			// Start the public stop() lifecycle concurrently. The generator can never
+			// drain the injected retry (its thread is permanently stuck in the blocked
+			// first dispatch), so awaitRetryQueueDrained()'s bounded wait must time out -
+			// but stop() must still complete boundedly rather than hanging forever, and
+			// the stranded retry must end up terminal-failed rather than silently dropped.
+			final long stopStartedAt = System.currentTimeMillis();
+			final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
+			stopperThread.start();
+
+			stopperThread.join(10_000);
+			final long stopDurationMillis = System.currentTimeMillis() - stopStartedAt;
+			assertFalse(stopperThread.isAlive(), "stop() must complete boundedly even though the retry queue can never drain");
+			assertTrue(
+							stopDurationMillis < 10_000,
+							"stop() took " + stopDurationMillis + "ms - should be bounded by the ~1s drain timeout, not hang");
+
+			// The injected retry must never have reached the driver: only the original
+			// (permanently blocked) dispatch counts.
+			assertEquals(1, blockingDriver.totalPutCalls(), "the stranded retry must not have been dispatched to the driver");
+
+			// It must not still be sitting in the generator's retry queue either - the
+			// timeout path must have actively drained it, not just given up and left it
+			// there for doClose() to silently discard.
+			assertTrue(realGenerator.isNothingPendingRetry(), "the retry queue must be empty (drained) before close(), not just abandoned");
+
+			// And it must have been given a definite terminal outcome: exactly one
+			// failure recorded, not zero (lost) and not left permanently uncounted.
+			metrics.refreshLastSnapshot(true);
+			final AllMetricsSnapshot snapshot = metrics.lastSnapshot();
+			assertEquals(
+							1, snapshot.failsSnapshot().count(),
+							"the stranded retry must be recorded as exactly one terminal failure");
+		} finally {
+			releaseFirstDispatch.countDown();
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void realGeneratorRetryOnlyFiniteWorkloadTerminatesWithoutHanging() throws Exception {
+		// Integration test for finding #1/#9: a mocked LoadGenerator only proves put()
+		// eventually calls recycle() - it can't catch the real liveness bug, where
+		// LoadGeneratorImpl itself never signals item-input-finished once retry is enabled
+		// (LoadGeneratorBuilderImpl passes recycleFlag || retryFlag into it, so the
+		// generator must keep polling its recycle queue for late retries even after item
+		// input is exhausted). A finite, retry-only (recycle-mode off), no-count-limit
+		// workload could hang forever waiting for a generator that's waiting for recycled
+		// work that will never arrive. This drives the *real* LoadGeneratorImpl together
+		// with the real LoadStepContextImpl to prove the isDone() fix actually terminates.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final int totalItems = 2;
+		final int failuresBeforeSuccess = 1;
+		final var itemInput = new FixedCountItemInput(totalItems);
+		final var flakyDriver = new FlakyThenSucceedsDriver(failuresBeforeSuccess, Operation.Status.RESP_FAIL_SVC);
+
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(flakyDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("retry-integration");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"retry-integration-step", realGenerator, flakyDriver, metrics,
+						testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+
+		// Use the real public lifecycle (start()/stop()/shutdown()/close()), not the
+		// protected doStart()/doStop() template hooks directly: those hooks don't transition
+		// the AsyncRunnable state, and isDone()'s very first check requires STARTED/SHUTDOWN
+		// state, so calling the hooks directly would make isDone() true immediately for the
+		// wrong reason without ever exercising the retry-only completion logic below it.
+		stepCtx.start();
+		try {
+			final long deadline = System.currentTimeMillis() + 10_000;
+			while (!stepCtx.isDone() && System.currentTimeMillis() < deadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(stepCtx.isDone(), "retry-only finite workload should complete, not hang");
+			// Each item: 1 failed attempt (retried) + 1 successful attempt = 2 dispatches.
+			assertEquals(totalItems * (failuresBeforeSuccess + 1), flakyDriver.totalPutCalls());
+			assertEquals(totalItems, flakyDriver.successCount());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	/** Builds a real (not mocked) generator + step context wired to the given item count/driver. */
+	@SuppressWarnings("unchecked")
+	private LoadStepContextImpl<DataItem, Operation<DataItem>> buildRealRetryStepCtx(
+					final int totalItems, final FlakyThenSucceedsDriver flakyDriver, final String metricsId)
+					throws IOException {
+		final var itemInput = new FixedCountItemInput(totalItems);
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(flakyDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx(metricsId);
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						metricsId + "-step", realGenerator, flakyDriver, metrics, testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+		return stepCtx;
+	}
+
+	private void runUntilDoneOrTimeout(final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx, final String failureMessage) {
+		stepCtx.start();
+		final long deadline = System.currentTimeMillis() + 10_000;
+		while (!stepCtx.isDone() && System.currentTimeMillis() < deadline) {
+			try {
+				Thread.sleep(10);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		assertTrue(stepCtx.isDone(), failureMessage);
+	}
+
+	@Test
+	public void retryGetsItsFullConfiguredAttemptEvenWhenCountLimitReachedByOriginalDispatch() throws Exception {
+		// Finding #1 (round 2): with load-op-limit-count=1, LoadGeneratorImpl used to reach
+		// its dispatch-count limit and self-stop right after the *original* (pre-retry)
+		// dispatch of the one op it's allowed - potentially before that op has even
+		// completed, let alone before a retry decision could be made - so a retryable
+		// failure would be counted failed with zero retry attempts used, despite a
+		// configured retryLimit > 0. LoadGeneratorImpl now only self-stops on count-limit
+		// when load-op-retry is off; with it on, the operation must actually get to use its
+		// retry budget and succeed via its retry.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 1);
+
+		final var flakyDriver = new FlakyThenSucceedsDriver(1, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(1, flakyDriver, "count-limit-retry");
+		try {
+			runUntilDoneOrTimeout(stepCtx, "count-limited retry-enabled workload should complete, not hang");
+			// 1 failed attempt + 1 successful retry attempt = 2 dispatches total, and the
+			// operation must have actually succeeded via that retry, not been force-failed.
+			assertEquals(2, flakyDriver.totalPutCalls());
+			assertEquals(1, flakyDriver.successCount());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void realLifecycleRetryExhaustionWithCountLimitEndsInExactlyOneTerminalFailure() throws Exception {
+		// Test gap: retry exhaustion was only exercised through direct put() calls against
+		// a mocked generator. Drives a real generator + real (public) lifecycle, combined
+		// with load-op-limit-count=1 (the exact configuration finding #1/round-2 was about)
+		// and a driver that never succeeds, to prove the operation gets its full
+		// retryLimit worth of attempts (not zero, not unbounded) before being counted as
+		// exactly one terminal failure - not lost, not double-counted.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 2);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 1);
+
+		// Never succeeds within the 3 total attempts (1 original + 2 retries) this test expects.
+		final var alwaysFailsDriver = new FlakyThenSucceedsDriver(100, Operation.Status.RESP_FAIL_SVC);
+		final var itemInput = new FixedCountItemInput(1);
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(alwaysFailsDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("exhaustion-count-limit");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"exhaustion-count-limit-step", realGenerator, alwaysFailsDriver, metrics,
+						testConfig.configVal("load"), false);
+		stepCtx.setRetryScheduler(synchronousRetryScheduler());
+		try {
+			runUntilDoneOrTimeout(stepCtx, "count-limited retry-exhausted workload should complete, not hang");
+			// 1 original attempt + 2 retries (retryLimit) = 3 total dispatches, none of
+			// which succeed.
+			assertEquals(3, alwaysFailsDriver.totalPutCalls());
+			assertEquals(0, alwaysFailsDriver.successCount());
+			// Pin terminal accounting precisely: exactly one failure recorded in the
+			// reported metrics (not zero - lost - and not more than one - double-counted
+			// across the exhausted retry attempts).
+			// lastSnapshot() alone would return a stale (possibly pre-failure, cached)
+			// snapshot if anything already triggered one earlier - force a fresh one.
+			metrics.refreshLastSnapshot(true);
+			final AllMetricsSnapshot snapshot = metrics.lastSnapshot();
+			assertEquals(1, snapshot.failsSnapshot().count(), "exactly one terminal failure should be recorded");
+			assertEquals(0, snapshot.successSnapshot().count(), "no success should be recorded");
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void emptyFiniteRetryOnlyWorkloadCompletesWithoutHanging() throws Exception {
+		// Finding #3 (round 2): the retry-only isDone() completion check used to require
+		// counterResults.sum() > 0 (guarding against a startup race, mirroring the existing
+		// recycle-mode isNothingToRecycle() check) - but for a genuinely *empty* finite item
+		// input, counterResults never leaves 0 since no operation is ever generated at all,
+		// so that guard made this case indistinguishable from "nothing has happened *yet*"
+		// and the step could never complete. The simplified check (counterResults >=
+		// generatedOpCount(), both legitimately 0 here) handles this correctly instead.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var flakyDriver = new FlakyThenSucceedsDriver(1, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(0, flakyDriver, "empty-retry-only");
+		try {
+			runUntilDoneOrTimeout(stepCtx, "empty retry-only workload should complete immediately, not hang");
+			assertEquals(0, flakyDriver.totalPutCalls());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void asyncDriverCompletionAfterGeneratorExhaustionStillGetsRetried() throws Exception {
+		// P0 (round 4 review): every other integration test in this class uses a
+		// *synchronous* driver, whose completion is delivered within the very same put()
+		// call the generator makes - it can never arrive later than the moment the
+		// generator reaches its own "dispatched everything, item input exhausted" state,
+		// so it can't exercise this timing at all. A real (especially cooperative/Netty)
+		// driver is asynchronous: put() returns as soon as the request is *accepted*, and
+		// the actual result can arrive well after the generator has already moved on. If
+		// the generator used that "dispatched == generated, item input exhausted" signal
+		// to self-stop (rather than deferring entirely to isDone()'s terminal-results-vs-
+		// generated comparison while load-op-retry is enabled), a retryable failure
+		// arriving after that point would find the generator already stopped and be
+		// forced to a terminal failure having used none of its configured retry budget.
+		// Deliberately uses the real (not synchronous-test-stub) retry scheduler too, for
+		// full end-to-end authenticity including a genuine backoff delay.
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var itemInput = new FixedCountItemInput(1);
+		// Comfortably longer than the microseconds it takes the real generator to reach
+		// itemInputFinishFlag for a 1-item input once dispatched.
+		final var asyncDriver = new AsyncFlakyThenSucceedsDriver(1, Operation.Status.RESP_FAIL_SVC, 150L);
+
+		final LoadGeneratorBuilder realGeneratorBuilder = new LoadGeneratorBuilderImpl<>()
+						.itemConfig(testConfig.configVal("item"))
+						.loadConfig(testConfig.configVal("load"))
+						.itemType(itemType)
+						.itemFactory((ItemFactory) itemFactory)
+						.itemInput(itemInput)
+						.loadOperationsOutput(asyncDriver)
+						.authConfig(testConfig.configVal("storage").configVal("auth"))
+						.originIndex(0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> realGenerator = (LoadGenerator<DataItem, Operation<DataItem>>) realGeneratorBuilder.build();
+
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("async-p0-regression");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"async-p0-regression-step", realGenerator, asyncDriver, metrics,
+						testConfig.configVal("load"), false);
+		// Deliberately not overriding the retry scheduler: this test wants the full,
+		// authentic async path end to end, not just an async driver completion feeding
+		// into an otherwise-synchronous retry.
+
+		stepCtx.start();
+		try {
+			final long deadline = System.currentTimeMillis() + 10_000;
+			while (!stepCtx.isDone() && System.currentTimeMillis() < deadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(stepCtx.isDone(), "async finite-input retry-only workload should complete, not hang");
+			// 1 failed attempt + 1 successful retry attempt = 2 dispatches total, and the
+			// operation must have actually succeeded via that retry, not been forced to a
+			// terminal failure because the generator had already stopped by the time the
+			// async completion (and then the retry) arrived.
+			assertEquals(2, asyncDriver.totalPutCalls());
+			assertEquals(1, asyncDriver.successCount());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
 		}
 	}
 

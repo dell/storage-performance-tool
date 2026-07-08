@@ -49,4 +49,29 @@ class ListOperationImplTest {
 		assertEquals("foo", op.shard().startAfter());
 		assertEquals("token-1", op.shard().continuationToken());
 	}
+
+	@Test
+	void resultCopyPreservesOpRetryCount() {
+		// load-op-retry's bounded check reads whatever concrete Operation subclass a
+		// driver actually produces, not just base OperationImpl - ListOperationImpl's own
+		// copy constructor/result() must still correctly delegate to the base class's
+		// opRetryCount handling rather than, say, forgetting to call super(other). LIST
+		// workloads use load-op-retry too (e.g. a transient failure mid-listing).
+		final var op = new ListOperationImpl<PathItem>(0, OpType.LIST, new PathItemImpl("retry-list-obj"), null);
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		op.startRequest();
+		op.finishRequest();
+		op.startResponse();
+		op.finishResponse();
+
+		final var copy = op.result();
+
+		assertEquals(2, copy.opRetryCount(), "ListOperationImpl's result() copy must preserve opRetryCount");
+		op.incrementOpRetryCount();
+		assertEquals(2, copy.opRetryCount(), "copy opRetryCount must not change when original is mutated afterward");
+
+		op.reset();
+		assertEquals(3, op.opRetryCount(), "opRetryCount must survive reset() on the original");
+	}
 }

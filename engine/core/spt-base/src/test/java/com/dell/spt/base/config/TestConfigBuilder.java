@@ -221,6 +221,7 @@ public class TestConfigBuilder {
 		op.put("recycle", opRecycle);
 
 		op.put("retry", false);
+		op.put("retryLimit", 10);
 		op.put("shuffle", false);
 		op.put("type", "create");
 

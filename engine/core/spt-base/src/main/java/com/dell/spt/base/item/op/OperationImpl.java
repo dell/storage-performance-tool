@@ -22,6 +22,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile long respTimeStart;
 	protected volatile long respTimeDone;
 	protected volatile boolean driverRecycled;
+	protected volatile int opRetryCount;
 
 	public OperationImpl() {}
 
@@ -79,6 +80,10 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.respTimeStart = other.respTimeStart;
 		this.respTimeDone = other.respTimeDone;
 		this.driverRecycled = other.driverRecycled;
+		// Deliberately propagated (not reset in reset() below): this must survive across
+		// the reset()+redispatch cycle a retried operation goes through, or the retry
+		// counter added for load-op-retry could never reach its limit.
+		this.opRetryCount = other.opRetryCount;
 	}
 
 	@Override
@@ -109,6 +114,26 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	@Override
 	public final void driverRecycled(final boolean flag) {
 		this.driverRecycled = flag;
+	}
+
+	@Override
+	public final int opRetryCount() {
+		return opRetryCount;
+	}
+
+	@Override
+	public final void incrementOpRetryCount() {
+		opRetryCount++;
+	}
+
+	@Override
+	public final void resetOpRetryCount() {
+		opRetryCount = 0;
+	}
+
+	@Override
+	public final boolean supportsOpRetryTracking() {
+		return true;
 	}
 
 	@Override

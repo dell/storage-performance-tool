@@ -170,6 +170,80 @@ class OperationResultCopyTest {
 	}
 
 	@Test
+	void resultCopy_opRetryCountPreserved() {
+		// Finding: load-op-retry's bounded check (opRetryCount() < retryLimit) reads the
+		// *result copy* that flows through LoadStepContextImpl.put(), not the live op - it
+		// must see the same count the live op had at snapshot time.
+		final var op = newTimedOp();
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		op.finishResponse();
+
+		final var copy = op.result();
+
+		assertEquals(2, copy.opRetryCount(), "copy must preserve opRetryCount at snapshot time");
+
+		// Mutate the original after copying
+		op.incrementOpRetryCount();
+		assertEquals(2, copy.opRetryCount(), "copy opRetryCount must not change when original is mutated");
+	}
+
+	@Test
+	void resetAfterIncrementOpRetryCount_survivesReset() {
+		// Finding: reset() is called before every redispatch, including a load-op-retry
+		// re-dispatch of a failed attempt - it must deliberately *not* clear opRetryCount,
+		// or the bounded-retry limit could never actually be reached.
+		final var op = newTimedOp();
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		op.finishResponse();
+
+		op.reset();
+
+		assertEquals(2, op.opRetryCount(), "opRetryCount must survive reset() for retry re-dispatch");
+		assertEquals(Operation.Status.PENDING, op.status(), "reset should still clear status as normal");
+	}
+
+	@Test
+	void resetOpRetryCount_zeroesTheCounter() {
+		// Finding: without an explicit reset hook, a recycled (read-loop or Netty
+		// fast-recycle) operation that failed and retried once before eventually succeeding
+		// would keep an elevated opRetryCount forever across every future successful cycle,
+		// eventually exhausting its retry budget from unrelated, non-consecutive failures.
+		final var op = newTimedOp();
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		assertEquals(2, op.opRetryCount());
+
+		op.resetOpRetryCount();
+
+		assertEquals(0, op.opRetryCount(), "resetOpRetryCount() must zero the counter");
+	}
+
+	@Test
+	void resetOpRetryCount_doesNotSurviveViaResultCopyUnlessCalledBeforeSnapshot() {
+		// resetOpRetryCount() must actually mutate the counter the same way
+		// incrementOpRetryCount() does - i.e. result() must snapshot whatever the count was
+		// *at snapshot time*, matching the general result()-is-a-snapshot contract already
+		// covered by the other tests in this class.
+		final var op = newTimedOp();
+		op.incrementOpRetryCount();
+		op.resetOpRetryCount();
+		op.finishResponse();
+
+		final var copy = op.result();
+
+		assertEquals(0, copy.opRetryCount(), "copy must reflect a reset that happened before the snapshot");
+	}
+
+	@Test
+	void supportsOpRetryTracking_trueForRealImplementation() {
+		final var op = newTimedOp();
+		assertTrue(op.supportsOpRetryTracking(),
+						"OperationImpl must report real retry tracking support");
+	}
+
+	@Test
 	void resultCopy_nodeAddrPreserved() {
 		final var op = newTimedOp();
 		op.nodeAddr("10.0.0.1:9020");

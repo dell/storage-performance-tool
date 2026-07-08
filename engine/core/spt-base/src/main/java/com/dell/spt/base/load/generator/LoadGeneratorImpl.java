@@ -56,7 +56,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Queue<O> recycleQueue;
 	private final int recycleQueueCapacity;
 	private final AtomicInteger recycleQueueSize = new AtomicInteger();
+	// load-op-retry redispatches: deliberately a *separate* queue from recycleQueue above,
+	// drained unconditionally on every doWork() iteration regardless of countLimit/
+	// itemInputFinishFlag state. See LoadGenerator#retry's javadoc for why a retry must not
+	// be gated by (or count against) load-op-limit-count the way recycleQueue's true
+	// recycle-mode contents deliberately are.
+	private final Queue<O> retryQueue = new ConcurrentLinkedQueue<>();
 	private final boolean recycleFlag;
+	// See the retryFlag constructor javadoc: only controls the countLimit self-stop below.
+	private final boolean retryFlag;
 	private final boolean shuffleFlag;
 	private final Random rnd;
 	private final String name;
@@ -81,6 +89,31 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final int recycleQueueSize,
 					final boolean recycleFlag,
 					final boolean shuffleFlag) {
+		this(itemInput, opsBuilder, throttles, opOutput, batchSize, countLimit, recycleQueueSize, recycleFlag, shuffleFlag, false);
+	}
+
+	/**
+	 * @param retryFlag whether {@code load-op-retry} is enabled. Unrelated to {@code
+	 *                  recycleFlag} (see {@link LoadGenerator#retry}'s javadoc for the
+	 *                  dedicated retry path) - this only controls whether reaching {@code
+	 *                  countLimit} self-stops the generator outright. A dispatch that just
+	 *                  exhausted the count limit may still turn into a retry once it
+	 *                  completes (that decision is made later, by whoever is watching this
+	 *                  generator's output - the generator itself has no visibility into it),
+	 *                  so it must not shut itself down before that can happen.
+	 */
+	@SuppressWarnings("unchecked")
+	public LoadGeneratorImpl(
+					final Input<I> itemInput,
+					final OperationsBuilder<I, O> opsBuilder,
+					final List<Object> throttles,
+					final Output<O> opOutput,
+					final int batchSize,
+					final long countLimit,
+					final int recycleQueueSize,
+					final boolean recycleFlag,
+					final boolean shuffleFlag,
+					final boolean retryFlag) {
 		super(ServiceTaskExecutor.VT_EXECUTOR);
 		this.itemInput = itemInput;
 		this.opsBuilder = opsBuilder;
@@ -92,6 +125,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		this.recycleQueue = new ConcurrentLinkedQueue<>();
 		this.recycleQueueCapacity = recycleQueueSize;
 		this.recycleFlag = recycleFlag;
+		this.retryFlag = retryFlag;
 		this.shuffleFlag = shuffleFlag;
 		this.rnd = shuffleFlag ? new Random() : null;
 		final var ioStr = opsBuilder.opType().toString();
@@ -111,6 +145,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	protected final void doWork() throws Exception {
+
+		drainRetryQueue();
 
 		final var opBuff = threadLocalOpBuff.get();
 		var pendingOpCount = opBuff.size();
@@ -294,9 +330,31 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					if (!outputProgress) {
 						yieldThread();
 					}
+				} else if (retryFlag) {
+					// Nothing pending to dispatch (e.g. item input just exhausted). With
+					// load-op-retry enabled, isFinished() deliberately won't self-stop on
+					// that alone (see its own comment) - it may sit in exactly this state
+					// for as long as the slowest still-in-flight operation takes to
+					// resolve (potentially real network I/O plus backoff delay), so this
+					// must yield rather than busy-spin. Without load-op-retry, isFinished()
+					// will pick this up and stop the generator on the very next check
+					// below, so a yield here would rarely even execute - only bothering
+					// for the retry case keeps the common path branch-free.
+					yieldThread();
 				}
-			} else { // operations count limit is reached
+			} else if (!retryFlag) { // operations count limit is reached
 				outputFinishFlag = true;
+			} else {
+				// Count limit reached, but load-op-retry is enabled: a dispatch that just
+				// consumed the last slot in the count budget may still turn into a retry
+				// once it completes - that decision happens later (by whoever is watching
+				// this generator's output), so self-stopping here could abandon it before
+				// it ever gets a configured retry attempt. Keep the VT alive (yielding, not
+				// busy-spinning) so drainRetryQueue() above keeps running; whoever is
+				// watching completion externally (comparing terminal results against how
+				// many operations were actually generated, which correctly accounts for
+				// in-flight retries not yet resolved) will call stop() once truly done.
+				yieldThread();
 			}
 
 		} catch (final EOFException eof) {
@@ -377,8 +435,95 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	@Override
+	public final void retry(final O op) {
+		retryQueue.add(op);
+		if (fastRecycleQuiesce && generatorParked) {
+			LockSupport.unpark(generatorThread);
+		}
+	}
+
+	/**
+	 * Dispatches every operation currently sitting in {@link #retryQueue}, bypassing
+	 * countLimit entirely (see {@link LoadGenerator#retry}'s javadoc for why) but still
+	 * subject to the same rate/index throttles as normal dispatch - unlike {@code
+	 * load-op-limit-count} (a unit-count budget a retry must not consume), throttles pace
+	 * the actual request rate against the target, and letting a burst of retries bypass
+	 * them too could exceed the user's configured rate by roughly the original traffic
+	 * plus retry traffic during a failure storm. Called unconditionally at the very start
+	 * of every {@link #doWork()} iteration, regardless of {@code itemInputFinishFlag}/
+	 * count-limit state, so a retry always gets its configured attempt even if the
+	 * generator's normal fresh-dispatch budget is already exhausted. Bounded to one pass
+	 * over however many are queued *right now* (retries are inherently rare relative to
+	 * the main workload; this avoids a pathological retry storm starving the rest of this
+	 * method indefinitely).
+	 */
+	private void drainRetryQueue() {
+		var remaining = retryQueue.size();
+		O retryOp;
+		while (remaining-- > 0 && (retryOp = retryQueue.poll()) != null) {
+			var permitted = 1;
+			for (final Object throttle : throttles) {
+				if (throttle instanceof Throttle) {
+					permitted = ((Throttle) throttle).tryAcquire(permitted);
+				} else if (throttle instanceof IndexThrottle) {
+					permitted = ((IndexThrottle) throttle).tryAcquire(originIndex, permitted);
+				} else {
+					throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
+				}
+			}
+			if (permitted <= 0) {
+				// Throttled - preserve it for a later iteration rather than dropping it or
+				// busy-spinning retrying the same op immediately.
+				retryQueue.add(retryOp);
+				break;
+			}
+			try {
+				if (!opOutput.put(retryOp)) {
+					// Driver backpressure - preserve it for the next iteration rather than
+					// dropping it, same as the normal dispatch path does for its own buffer.
+					retryQueue.add(retryOp);
+					break;
+				}
+			} catch (final Exception e) {
+				throwUncheckedIfInterrupted(e);
+				if (e instanceof EOFException) {
+					// The output itself is done and will never accept anything again
+					// (including a re-enqueue) - matches how the normal dispatch path
+					// below also abandons its own buffered op on output EOF rather than
+					// looping forever trying to redeliver it.
+					Loggers.MSG.debug("{}: retry redispatch finished due to output's EOF, {}", name, e);
+					outputFinishFlag = true;
+					break;
+				} else {
+					LogUtil.exception(Level.ERROR, e, "{}: retry redispatch failure, will retry next iteration", name);
+					retryQueue.add(retryOp);
+					break;
+				}
+			}
+		}
+	}
+
+	@Override
 	public final boolean isNothingToRecycle() {
 		return recycleQueue.isEmpty();
+	}
+
+	@Override
+	public final boolean isNothingPendingRetry() {
+		return retryQueue.isEmpty();
+	}
+
+	@Override
+	public final List<O> drainPendingRetries() {
+		if (retryQueue.isEmpty()) {
+			return List.of();
+		}
+		final List<O> drained = new ArrayList<>();
+		O op;
+		while ((op = retryQueue.poll()) != null) {
+			drained.add(op);
+		}
+		return drained;
 	}
 
 	@Override
@@ -388,6 +533,27 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	private boolean isFinished() {
+		// Never actually finish while a load-op-retry redispatch is still waiting to be
+		// drained - otherwise stop() below would tear this generator down before
+		// drainRetryQueue() ever got to run it, abandoning it unresolved forever (it isn't
+		// in recycleQueue/opBuff at that point, so nothing else would ever pick it up).
+		if (!retryQueue.isEmpty()) {
+			return false;
+		}
+		if (retryFlag) {
+			// With load-op-retry enabled, "every generated operation has been handed to
+			// the output" (the formula below) is not the same thing as "every generated
+			// operation has been resolved" - a real (especially async/cooperative) driver
+			// can report completion long after accepting a dispatch, and that completion
+			// might still turn into a retry once it arrives. This generator has no
+			// visibility into that decision (it's made later, by whoever is watching this
+			// generator's output), so it must not self-stop on this signal alone - only a
+			// hard stop (outputFinishFlag, e.g. output EOF) or an explicit external stop()
+			// call should end it. LoadStepContextImpl's own completion check (comparing
+			// terminal results against operations generated, which correctly accounts for
+			// operations still in flight or retrying) decides when to make that call.
+			return outputFinishFlag;
+		}
 		return outputFinishFlag
 						|| (itemInputFinishFlag && opInputFinishFlag && generatedOpCount() == outputOpCounter.sum());
 	}
@@ -405,6 +571,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	protected final void doClose() {
 		recycleQueue.clear();
+		retryQueue.clear();
 		// the item input may be instantiated by the load generator builder which has no reference to it
 		// so the load
 		// generator builder should close it

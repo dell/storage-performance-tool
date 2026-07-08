@@ -130,6 +130,29 @@ class CompositeDataOperationImplTest {
 	}
 
 	@Test
+	void resultCopy_preservesOpRetryCount() throws Exception {
+		// load-op-retry's bounded check reads whatever concrete Operation subclass a
+		// driver actually produces, not just base OperationImpl - CompositeDataOperationImpl's
+		// own copy constructor/result() must still correctly delegate to the base class's
+		// opRetryCount handling rather than, say, forgetting to call super(other). A
+		// multipart upload's own top-level op (not its individual parts, which track a
+		// separate, unrelated retryCount() for MAX_PART_RETRIES) can itself be retried via
+		// load-op-retry same as any other operation.
+		var op = newCompositeOp(OpType.CREATE, 4096, 1024);
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+
+		var copy = op.result();
+
+		assertEquals(2, copy.opRetryCount(), "CompositeDataOperationImpl's result() copy must preserve opRetryCount");
+		op.incrementOpRetryCount();
+		assertEquals(2, copy.opRetryCount(), "copy opRetryCount must not change when original is mutated afterward");
+
+		op.reset();
+		assertEquals(3, op.opRetryCount(), "opRetryCount must survive reset() on the original");
+	}
+
+	@Test
 	void resultCopy_hasEmptySubTasks_regeneratedOnAccess() throws Exception {
 		var op = newCompositeOp(OpType.READ, 4096, 1024);
 		op.subOperations(); // generates 4 sub-tasks
