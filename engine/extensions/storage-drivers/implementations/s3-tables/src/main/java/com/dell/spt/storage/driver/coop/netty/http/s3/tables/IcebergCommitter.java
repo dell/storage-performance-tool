@@ -118,11 +118,25 @@ final class IcebergCommitter {
 	private final AtomicReference<String> versionToken;
 	private final AtomicLong snapshotIdCounter;
 	private final AtomicLong rowIdCounter = new AtomicLong(0);
+	private final Sleeper sleeper;
+
+	@FunctionalInterface
+	interface Sleeper {
+		void sleep(long millis) throws Exception;
+	}
 
 	IcebergCommitter(
 					final S3TablesStorageDriver<?, ?> driver,
 					final String warehouseLocation,
 					final String versionToken) {
+		this(driver, warehouseLocation, versionToken, Thread::sleep);
+	}
+
+	IcebergCommitter(
+					final S3TablesStorageDriver<?, ?> driver,
+					final String warehouseLocation,
+					final String versionToken,
+					final Sleeper sleeper) {
 		this.driver = driver;
 		this.warehouseLocation = warehouseLocation.endsWith("/")
 						? warehouseLocation.substring(0, warehouseLocation.length() - 1)
@@ -130,6 +144,7 @@ final class IcebergCommitter {
 		this.warehouseS3Path = warehouseUriToPath(this.warehouseLocation);
 		this.versionToken = new AtomicReference<>(versionToken);
 		this.snapshotIdCounter = new AtomicLong(System.currentTimeMillis());
+		this.sleeper = sleeper;
 	}
 
 	/**
@@ -232,7 +247,7 @@ final class IcebergCommitter {
 				// Jitter backoff then re-fetch token
 				final int jitterMs = JITTER_MIN_MS +
 								ThreadLocalRandom.current().nextInt(JITTER_MAX_MS - JITTER_MIN_MS);
-				Thread.sleep(jitterMs);
+				sleeper.sleep(jitterMs);
 
 				final String freshToken = driver.getControlPlane().getTableMetadataLocation().versionToken;
 				versionToken.set(freshToken);

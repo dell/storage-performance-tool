@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
@@ -91,19 +92,20 @@ public class CompactionPollerTest {
 
 	@Test
 	void poll_timesOutWhenFilesNeverConverge() throws Exception {
-		// file count stays at 50 (> target=10) — 5 ms timeout expires quickly
 		final TestDriver drv = makeDriver("tableCompactionPoll");
+		final AtomicLong clock = new AtomicLong();
 
 		enqueueMaintenanceOk(drv);
-		// Provide many responses so the loop can spin until timeout
-		for (int i = 0; i < 20; i++) {
+		for (int i = 0; i < 5; i++) {
 			enqueueMetaPoll(drv, "s3://bucket/metadata/v1.json", 50);
 		}
 
 		final CompactionPoller poller = new CompactionPoller(
-						drv, 10L * 1024, 1024, 1.0, 2, 1L, 5L /* 5 ms timeout */);
+						drv, 10L * 1024, 1024, 1.0, 2, 1L, 5L, clock::get, clock::addAndGet);
 		assertFalse(poller.poll());
 
+		assertEquals(50, drv.compactionFilesBefore);
+		assertEquals(50, drv.compactionFilesAfter);
 		assertEquals(0, drv.compactionCompleteMs); // timeout sets completeMs=0
 	}
 

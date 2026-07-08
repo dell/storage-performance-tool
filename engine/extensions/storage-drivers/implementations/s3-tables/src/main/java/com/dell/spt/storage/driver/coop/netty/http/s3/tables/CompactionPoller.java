@@ -5,6 +5,8 @@ import com.dell.spt.base.logging.Loggers;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.function.LongSupplier;
+
 /**
  * Implements the {@code tableCompactionPoll} opMode:
  *
@@ -31,6 +33,13 @@ final class CompactionPoller {
 	private final int stabilizationPolls;
 	private final long pollIntervalMs;
 	private final long timeoutMs;
+	private final LongSupplier clockMillis;
+	private final Sleeper sleeper;
+
+	@FunctionalInterface
+	interface Sleeper {
+		void sleep(long millis) throws Exception;
+	}
 
 	CompactionPoller(
 					final S3TablesStorageDriver<?, ?> driver,
@@ -40,11 +49,27 @@ final class CompactionPoller {
 					final int stabilizationPolls,
 					final long pollIntervalMs,
 					final long timeoutMs) {
+		this(driver, totalIngestBytes, targetFileSizeBytes, toleranceFactor, stabilizationPolls,
+						pollIntervalMs, timeoutMs, System::currentTimeMillis, Thread::sleep);
+	}
+
+	CompactionPoller(
+					final S3TablesStorageDriver<?, ?> driver,
+					final long totalIngestBytes,
+					final long targetFileSizeBytes,
+					final double toleranceFactor,
+					final int stabilizationPolls,
+					final long pollIntervalMs,
+					final long timeoutMs,
+					final LongSupplier clockMillis,
+					final Sleeper sleeper) {
 		this.driver = driver;
 		this.targetFileCount = (long) Math.ceil((double) totalIngestBytes / targetFileSizeBytes * toleranceFactor);
 		this.stabilizationPolls = stabilizationPolls;
 		this.pollIntervalMs = pollIntervalMs;
 		this.timeoutMs = timeoutMs;
+		this.clockMillis = clockMillis;
+		this.sleeper = sleeper;
 	}
 
 	/**
@@ -52,7 +77,7 @@ final class CompactionPoller {
 	 * Returns {@code true} on convergence, {@code false} on timeout.
 	 */
 	boolean poll() throws Exception {
-		final long startMs = System.currentTimeMillis();
+		final long startMs = clockMillis.getAsLong();
 
 		driver.getControlPlane().putTableMaintenanceConfiguration();
 		Loggers.MSG.info("{}: compaction triggered, polling for convergence (targetFileCount={}, stabilizationPolls={})",
@@ -63,7 +88,7 @@ final class CompactionPoller {
 		long lastFileCount = Long.MAX_VALUE;
 
 		while (true) {
-			final long elapsed = System.currentTimeMillis() - startMs;
+			final long elapsed = clockMillis.getAsLong() - startMs;
 			if (elapsed >= timeoutMs) {
 				Loggers.MSG.warn("{}: compaction poll timed out after {}ms, last fileCount={}",
 								driver.getStepId(), elapsed, lastFileCount);
@@ -71,7 +96,7 @@ final class CompactionPoller {
 				return false;
 			}
 
-			Thread.sleep(pollIntervalMs);
+			sleeper.sleep(pollIntervalMs);
 
 			final long fileCount;
 			try {
@@ -92,7 +117,7 @@ final class CompactionPoller {
 				Loggers.MSG.debug("{}: compaction converging: fileCount={} ≤ target={}, stable={}/{}",
 								driver.getStepId(), fileCount, targetFileCount, stableCount, stabilizationPolls);
 				if (stableCount >= stabilizationPolls) {
-					final long completeMs = System.currentTimeMillis();
+					final long completeMs = clockMillis.getAsLong();
 					Loggers.MSG.info("{}: compaction converged in {}ms, fileCount={} (was {})",
 									driver.getStepId(), completeMs - startMs, fileCount, filesBefore);
 					driver.recordCompactionStats(startMs, completeMs, filesBefore, fileCount);
