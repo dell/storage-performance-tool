@@ -14,6 +14,8 @@ import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.timeout.IdleStateEvent;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -123,23 +125,35 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
-	void complete_clearsOperationAttributeBeforeReleasingChannel() throws Exception {
-		final var channel = newChannelWithReleasedFlag();
+	void releasedChannelIdleEventDoesNotCompleteThePriorOperationAgain() throws Exception {
+		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
+			@Override
+			protected void handle(
+							final io.netty.channel.Channel channel, final Operation<Item> op, final Object msg) {
+				// No response body is needed for this lifecycle test.
+			}
+		};
+		final var channel = new EmbeddedChannel(handler);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
 		final Operation<Item> op = mock(Operation.class);
 		when(op.status()).thenReturn(Operation.Status.SUCC);
 		when(op.result()).thenReturn(mock(Operation.class));
 		channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
 
-		doAnswer(inv -> {
-			assertNull(channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get(),
-							"a released channel must not retain its completed operation");
-			return null;
-		}).when(connPool).release(channel);
-
 		driver.complete(channel, op);
 
-		assertNull(channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
-		channel.close();
+		final var handlerContext = channel.pipeline().context(handler);
+		final var timeout = assertThrows(SocketTimeoutException.class,
+						() -> handler.userEventTriggered(handlerContext, IdleStateEvent.ALL_IDLE_STATE_EVENT));
+
+		// Deliver the timeout through the response handler's real pipeline context.
+		// Before this fix, exceptionCaught found the released channel's stale operation.
+		channel.pipeline().fireExceptionCaught(timeout);
+
+		verify(driver, times(1)).complete(channel, op);
+		verify(op, never()).status(Operation.Status.FAIL_IO);
+		verify(connPool, times(1)).release(channel);
+		channel.finishAndReleaseAll();
 	}
 
 	@Test
@@ -356,6 +370,38 @@ class NettyCompletionPathTest {
 		// Also verify the op was re-submitted (startRequest called on the re-prepared op)
 		verify(op, atLeast(1)).startRequest();
 		channel.close();
+		resubmitChannel.close();
+	}
+
+	@Test
+	void fastRecycleClearsReleasedChannelAndRebindsOperationToResubmissionChannel() throws Exception {
+		enableFastRecycle(4);
+		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 4);
+		final var sem = new Semaphore(4, true);
+		sem.acquire(1);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+
+		final var releasedChannel = newChannelWithReleasedFlag();
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+		releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
+
+		final var resubmitChannel = newResubmitChannel();
+		when(connPool.lease()).thenReturn(resubmitChannel);
+		doAnswer(inv -> {
+			assertNull(releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
+			return null;
+		}).when(connPool).release(releasedChannel);
+
+		driver.complete(releasedChannel, op);
+
+		assertSame(op, resubmitChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
+		releasedChannel.close();
 		resubmitChannel.close();
 	}
 
