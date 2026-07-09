@@ -9,6 +9,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
@@ -42,9 +43,15 @@ import java.rmi.RemoteException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.SplittableRandom;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -66,6 +73,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean recycleFlag;
 	private final boolean listPathWorkload;
 	private final boolean retryFlag;
+	private final int retryLimit;
 	private final MetricsContext metricsCtx;
 	private final Map<OpType, MetricsContext> metricsCtxByOpType;
 	private final LongAdder counterResults = new LongAdder();
@@ -87,6 +95,85 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	private final ThreadLocal<SplittableRandom> rand = ThreadLocal.withInitial(SplittableRandom::new);
+
+	// Full-jitter exponential backoff before a load-op-retry re-dispatch, mirroring the
+	// shape of common S3-client retry defaults (e.g. minio-go's own 200ms/1s retry timer)
+	// rather than immediately re-hitting a target that just failed the operation.
+	private static final long RETRY_BACKOFF_BASE_MILLIS = 200L;
+	private static final long RETRY_BACKOFF_CAP_MILLIS = 1000L;
+
+	// Tracks load-op-retry redispatches currently sitting in their backoff delay, keyed by
+	// the operation awaiting redispatch, so a stop/shutdown can cancel them and resolve
+	// them to a definite terminal outcome immediately instead of leaving them to fire later
+	// into a driver/generator that's already gone. Value is a handle (not the Future
+	// directly) inserted *before* scheduling: see scheduleRetry()'s javadoc for why.
+	private final ConcurrentMap<O, RetryHandle> pendingRetries = new ConcurrentHashMap<>();
+	// Counts retry tasks that have started running (i.e. already past cancellation via
+	// pendingRetries) but haven't yet finished deciding retry() vs markOpFailed(). See
+	// awaitRetryTasksSettled()'s javadoc for the shutdown-ordering race this closes.
+	private final AtomicInteger activeRetryTasks = new AtomicInteger();
+	// Set as the very first thing doShutdown() does, before anything else (including
+	// cancelPendingRetries()): an authoritative, immediately-visible "the step has begun
+	// shutting down" signal that a scheduled retry task checks before calling generator.
+	// retry() - so it terminal-fails instead of enqueueing into a generator that's about
+	// to be stopped, possibly before that generator gets a chance to drain the enqueue
+	// (awaitRetryTasksSettled() only proves the task's own body finished, not that the
+	// generator's work loop got to run again afterward - see its own javadoc).
+	private final AtomicBoolean stepShuttingDown = new AtomicBoolean(false);
+	private final AtomicBoolean retryTrackingWarningLogged = new AtomicBoolean(false);
+
+	/**
+	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
+	 * own body} or {@code LoadStepContextImpl#cancelPendingRetries()} ever resolves a
+	 * given retry - never both, and never neither. This is needed because {@link
+	 * CompletableFuture#cancel} does not reliably mean "the task body never ran": for a
+	 * future produced by {@code runAsync()}, a successful {@code cancel(false)} can still
+	 * race with a task that has already started running on its own executor thread
+	 * (cancelling the future does not interrupt or otherwise stop that thread), so
+	 * treating a successful {@code cancel()} as proof the task body will never execute -
+	 * and therefore that it's safe to terminal-fail the operation ourselves - is not safe
+	 * on its own.
+	 */
+	private static final class RetryHandle {
+		private enum State {
+			SCHEDULED, CLAIMED, CANCELLED
+		}
+
+		private final AtomicReference<State> state = new AtomicReference<>(State.SCHEDULED);
+		private volatile Future<?> future;
+
+		/** Called from {@link #cancelPendingRetries()}; wins iff the task hasn't already claimed this retry. */
+		boolean tryCancel() {
+			return state.compareAndSet(State.SCHEDULED, State.CANCELLED);
+		}
+
+		/** Called from the scheduled task's own body; wins iff not already cancelled. */
+		boolean tryClaim() {
+			return state.compareAndSet(State.SCHEDULED, State.CLAIMED);
+		}
+	}
+
+	/** Schedules a retry redispatch after a backoff delay; overridable for tests so they don't have to wait on real timers. */
+	@FunctionalInterface
+	interface RetryScheduler {
+		Future<?> schedule(long delayMillis, Runnable task);
+	}
+
+	// Not final: package-private test seam (see setRetryScheduler) swaps this for a
+	// synchronous stand-in so retry tests run fast and deterministically. Production always
+	// uses this real, delayed default.
+	private RetryScheduler retryScheduler = (delayMillis, task) -> {
+		if (delayMillis <= 0) {
+			task.run();
+			return CompletableFuture.completedFuture(null);
+		}
+		return CompletableFuture.runAsync(task, CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS));
+	};
+
+	/** Test-only seam: replace the real delayed scheduler with e.g. a synchronous one. */
+	void setRetryScheduler(final RetryScheduler retryScheduler) {
+		this.retryScheduler = retryScheduler;
+	}
 
 	/** @param id test step id */
 	public LoadStepContextImpl(
@@ -147,6 +234,20 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.recycleFlag = listPathWorkload || recycleConfig.boolVal("mode");
 		this.updateContents = recycleConfig.boolVal("content-update");
 		this.retryFlag = opConfig.boolVal("retry");
+		this.retryLimit = opConfig.intVal("retryLimit");
+		if (this.retryFlag) {
+			if (this.retryLimit < 0) {
+				throw new IllegalConfigurationException(
+								"load-op-retryLimit must be >= 0 (0 disables retry even though load-op-retry "
+												+ "is true), got " + this.retryLimit);
+			}
+			if (!generator.supportsRetry()) {
+				throw new IllegalConfigurationException(
+								"load-op-retry is enabled, but the configured load generator ("
+												+ generator.getClass().getSimpleName()
+												+ ") does not support requeueing failed operations for retry");
+			}
+		}
 		final Config opLimitConfig = opConfig.configVal("limit");
 		final int recycleLimit = opLimitConfig.intVal("recycle");
 		if (recycleFlag || retryFlag) {
@@ -241,6 +342,30 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		// issue SLTM-938 fix: only bail out when we've actually produced work
 		if (recycleFlag && counterResults.sum() > 0 && isNothingToRecycle()) {
 			Loggers.ERR.warn("{}: no load operations to recycle (all failed?)", id);
+			return true;
+		}
+		// retry-only (not true recycle-mode) finite workloads: allOperationsCompleted()
+		// above needs generator.isStopped(), but a generator with load-op-retry enabled
+		// deliberately keeps running past item-input exhaustion (and even past its own
+		// countLimit) for as long as a dispatch already in flight could still turn into a
+		// retry - see LoadGenerator#retry's javadoc. So it may never self-stop here even
+		// once every operation has genuinely resolved. Detect completion directly instead:
+		// every operation ever generated (fresh + true-recycle; retries are deliberately
+		// *not* separately counted here, see LoadGenerator#retry) has reached a terminal
+		// outcome in counterResults, and item generation itself is finished. This
+		// deliberately doesn't check activeOpCount()/pendingRetries/isNothingToRecycle():
+		// none of those can be trusted to reflect "no outstanding work" on their own (a
+		// cooperative driver can hold a queued-but-not-yet-active op invisible to
+		// activeOpCount(), for example) the way this direct comparison can, since
+		// counterResults is only ever incremented once an operation has truly reached SUCC
+		// or a terminal (retries-exhausted-or-not-retryable) failure.
+		if (!recycleFlag && retryFlag
+						&& generator.isItemInputFinished()
+						&& counterResults.longValue() >= generator.generatedOpCount()) {
+			Loggers.MSG.debug(
+							"{}: done, retry-only workload drained (all {} generated operations resolved)",
+							id,
+							generator.generatedOpCount());
 			return true;
 		}
 		return false;
@@ -384,6 +509,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		final Status status = opResult.status();
 		if (Status.SUCC.equals(status)) {
+			// A terminal success ends this operation's current retry episode - clear the
+			// counter now so a recycled/fast-recycled reuse of this object (read-recycle
+			// mode, or Netty's fast-recycle short-circuit) starts its next attempt with a
+			// clean budget instead of accumulating retry counts across unrelated cycles.
+			opResult.resetOpRetryCount();
 			final long reqDuration = opResult.duration();
 			final long respLatency = opResult.latency();
 			final long timeToFirstByte = timeToFirstByte(opResult);
@@ -453,8 +583,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					listShardMetricsRecorder.onRetry(shardRef, status);
 				}
 			}
-			generator.recycle(opResult);
-			counterResults.increment();
+			recyclePendingOp(opResult);
 		} else if (Status.OMIT.equals(status)) {
 			// operation status is set to Omit in case we want an operation to complete, but not to register
 			// in the metrics in any way
@@ -464,19 +593,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				latestSuccOpResultByItem.remove(opResult.item());
 			}
 			if (!Status.INTERRUPTED.equals(status)) {
-				if (retryFlag) {
-					if (opResult instanceof ListOperation<?> listOp) {
-						final ListShard shardRef = listOp.shard();
-						if (shardRef != null) {
-							listShardMetricsRecorder.onRetry(shardRef, status);
-						}
-					}
-					generator.recycle(opResult);
-				} else {
-					Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
-					resolveMetrics(opResult.type()).markFail();
-					counterResults.increment();
-				}
+				handleFailedOp(opResult, status);
 			}
 		}
 		return true;
@@ -525,6 +642,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				recycleEligible = recycleFlag;
 			}
 			if (Status.SUCC.equals(status)) {
+				// see the single-op put(O) above for why this is reset unconditionally on
+				// every terminal success, not just recycle-eligible ones
+				opResult.resetOpRetryCount();
 				if (opResult instanceof PartialOperation) {
 					resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				} else {
@@ -578,8 +698,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						listShardMetricsRecorder.onRequeue(shardRef);
 					}
 				}
-				generator.recycle(opResult);
-				counterResults.increment();
+				recyclePendingOp(opResult);
 			} else if (Status.OMIT.equals(status)) {
 				// operation status is set to Omit in case we want an operation to complete, but not to register
 				// in the metrics in any way
@@ -589,19 +708,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					latestSuccOpResultByItem.remove(opResult.item());
 				}
 				if (!Status.INTERRUPTED.equals(status)) {
-					if (retryFlag) {
-						if (opResult instanceof ListOperation) {
-							final var shardRef = ((ListOperation<?>) opResult).shard();
-							if (shardRef != null) {
-								listShardMetricsRecorder.onRequeue(shardRef);
-							}
-						}
-						generator.recycle(opResult);
-					} else {
-						Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
-						resolveMetrics(opResult.type()).markFail();
-						counterResults.increment();
-					}
+					handleFailedOp(opResult, status);
 				}
 			}
 		}
@@ -611,6 +718,327 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final int put(final List<O> opsResults) {
 		return put(opsResults, 0, opsResults.size());
+	}
+
+	/**
+	 * Handles a {@code Status.PENDING} result: the driver couldn't finish the operation (a
+	 * storage API issue or similar) and wants it attempted again, without counting it as a
+	 * success or failure in the reported metrics. For a true recycle-mode workload, "try
+	 * again" naturally happens via the same recycle queue duration-based recycling already
+	 * drains, so it's safe to advance {@link #counterResults} immediately, same as before -
+	 * a future cycle supersedes it either way. For a non-recycle-mode workload with {@code
+	 * load-op-retry} enabled, recycling it would enqueue into a queue {@code
+	 * LoadGeneratorImpl} only drains when *its own* {@code recycleFlag} is set (i.e. never,
+	 * for this case) - silently stranding the operation forever while {@link
+	 * #counterResults} advances as though it had actually resolved. Route through the
+	 * dedicated, always-drained {@link LoadGenerator#retry} path instead in that case, and
+	 * don't count it until it actually reaches a terminal outcome, mirroring how a
+	 * retryable failure is handled. (A non-recycle, non-retry workload's PENDING handling
+	 * is intentionally unchanged here - actually retrying it ourselves in that case would
+	 * be a separately-scoped behavior change for a longstanding gap that predates {@code
+	 * load-op-retry} entirely.)
+	 *
+	 * <p><strong>Note this deliberately differs from {@link #handleFailedOp}'s retry
+	 * behavior</strong>: a {@code PENDING} redispatch here is immediate (no {@link
+	 * #retryBackoffMillis} backoff) and unbounded (not counted against {@code
+	 * opRetryCount()}/{@code load-op-retryLimit} at all - {@code incrementOpRetryCount()}
+	 * is never called for it). {@code PENDING} represents the driver's own signal that the
+	 * operation isn't actually finished yet (as opposed to a definite failure worth
+	 * backing off from and eventually giving up on), so it's treated the same way true
+	 * recycle-mode already treats it: an unlimited, immediate retry loop is the existing,
+	 * intentional contract for this status, unrelated to {@code load-op-retry}'s own
+	 * bounded-attempts-at-a-genuine-failure semantics.
+	 */
+	private void recyclePendingOp(final O opResult) {
+		if (!recycleFlag && retryFlag) {
+			generator.retry(opResult);
+		} else {
+			generator.recycle(opResult);
+			counterResults.increment();
+		}
+	}
+
+	/**
+	 * Whether a failed operation's status is worth retrying at all when {@code
+	 * load-op-retry} is on. Matches common S3-client SDK retry policy (minio-go/aws-sdk-cpp
+	 * both retry transient I/O/timeout/server-side failures but not auth, not-found, client
+	 * request errors, corruption, or out-of-space - see SPT_PERFORMANCE_INVESTIGATION_PLAN_
+	 * 202607.md H8 for the comparison this was modeled on). Retrying a permanent failure
+	 * only delays an actionable result and wastes the retry budget on something that will
+	 * never succeed.
+	 */
+	private static boolean isRetryableStatus(final Status status) {
+		return switch (status) {
+		case FAIL_IO, FAIL_TIMEOUT, FAIL_UNKNOWN, RESP_FAIL_UNKNOWN, RESP_FAIL_SVC -> true;
+		default -> false;
+		};
+	}
+
+	/**
+	 * Handles a failed (non-{@code INTERRUPTED}, non-{@code PENDING}, non-{@code OMIT})
+	 * operation result: either schedules it for retry, or marks it as a terminal failure -
+	 * always exactly one of the two. Shared by the single-op and batch {@code put()} paths
+	 * so their retry semantics (including the list-shard retry callback) can't drift apart.
+	 */
+	private void handleFailedOp(final O opResult, final Status status) {
+		if (retryFlag && isRetryableStatus(status) && opResult.opRetryCount() < retryLimit) {
+			if (!opResult.supportsOpRetryTracking()) {
+				warnRetryTrackingUnsupportedOnce(opResult);
+			} else {
+				if (opResult instanceof ListOperation<?> listOp) {
+					final ListShard shardRef = listOp.shard();
+					if (shardRef != null) {
+						listShardMetricsRecorder.onRetry(shardRef, status);
+					}
+				}
+				opResult.incrementOpRetryCount();
+				scheduleRetry(opResult);
+				return;
+			}
+		}
+		final String reason;
+		if (!retryFlag) {
+			reason = null; // preserve the exact original (pre-retry-feature) log format
+		} else if (!isRetryableStatus(status)) {
+			reason = "status is not retryable";
+		} else if (!opResult.supportsOpRetryTracking()) {
+			reason = "operation does not support retry tracking";
+		} else {
+			reason = "retry limit (" + retryLimit + ") reached";
+		}
+		markOpFailed(opResult, status, reason);
+	}
+
+	private void markOpFailed(final O opResult, final Status status, final String reason) {
+		if (reason != null) {
+			Loggers.ERR.debug("{}: {}, {}", opResult.toString(), status.toString(), reason);
+		} else {
+			Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
+		}
+		resolveMetrics(opResult.type()).markFail();
+		counterResults.increment();
+	}
+
+	private void warnRetryTrackingUnsupportedOnce(final O opResult) {
+		if (retryTrackingWarningLogged.compareAndSet(false, true)) {
+			Loggers.ERR.warn(
+							"{}: load-op-retry is enabled but {} does not override Operation's retry-tracking "
+											+ "methods (supportsOpRetryTracking() returned false) - failed "
+											+ "operations of this type will be counted as failures immediately "
+											+ "instead of retried",
+							id,
+							opResult.getClass().getName());
+		}
+	}
+
+	/**
+	 * Recycles a load-op-retry-eligible failed operation for another attempt after a
+	 * full-jitter exponential backoff (see {@link #retryBackoffMillis(int)}), rather than
+	 * immediately. The delay is scheduled off the calling thread rather than blocking it:
+	 * {@code put()} is invoked from an I/O-completion callback (e.g. a Netty event-loop
+	 * thread), and blocking that thread to sleep would stall every other in-flight
+	 * operation sharing it, not just the retried one.
+	 *
+	 * <p>The scheduled task itself re-checks whether the step is shutting down or the
+	 * generator has otherwise already stopped right before redispatching: calling {@link
+	 * LoadGenerator#retry} on a generator that's stopped, or about to be stopped as part
+	 * of the same shutdown this task is racing against, would leave the operation stuck
+	 * forever instead of resolving to a definite outcome. ({@code load-op-limit-count}
+	 * reached is deliberately *not* one of the reasons the generator would already be
+	 * stopped here - see {@code LoadGeneratorImpl}'s own {@code retryFlag} constructor
+	 * javadoc.)
+	 *
+	 * <p>The handle is inserted into {@link #pendingRetries} <em>before</em> scheduling,
+	 * and the task removes it by identity (not just by key) once it starts running: this
+	 * closes a race where a very-short (possibly zero-jitter) delay lets the task run and
+	 * try to remove itself before this method would otherwise have inserted it, which
+	 * could otherwise leave a stale, already-resolved entry permanently stuck in the map.
+	 * {@link RetryHandle#tryClaim()} - not the removal, and not {@link Future#cancel} - is
+	 * what actually guarantees this task and a concurrent {@link #cancelPendingRetries()}
+	 * can't both resolve the same operation; see that class's own javadoc for why.
+	 */
+	private void scheduleRetry(final O opResult) {
+		final long delayMillis = retryBackoffMillis(opResult.opRetryCount());
+		final RetryHandle handle = new RetryHandle();
+		pendingRetries.put(opResult, handle);
+		handle.future = retryScheduler.schedule(delayMillis, () -> {
+			// Incremented as the very first thing the task body does (not at schedule
+			// time): a task successfully cancelled by cancelPendingRetries() before it ever
+			// starts running must never have touched this counter, or it would stay
+			// elevated forever - awaitRetryTasksSettled() would then wait out its full
+			// bound and warn on every stop for no reason.
+			activeRetryTasks.incrementAndGet();
+			try {
+				pendingRetries.remove(opResult, handle);
+				if (!handle.tryClaim()) {
+					// cancelPendingRetries() already won the race on this exact operation
+					// and has resolved (or is about to resolve) it itself - touching it
+					// again here would double-resolve it (e.g. markFail() twice, or a
+					// markFail() racing a retry that goes on to succeed).
+					return;
+				}
+				if (stepShuttingDown.get() || generator.isStopped()) {
+					markOpFailed(opResult, opResult.status(), "step stopping or generator already stopped, cannot retry");
+				} else {
+					generator.retry(opResult);
+				}
+			} finally {
+				activeRetryTasks.decrementAndGet();
+			}
+		});
+	}
+
+	/**
+	 * Cancels every load-op-retry redispatch still sitting in its backoff delay, resolving
+	 * each to a definite terminal failure immediately rather than leaving it to fire (or
+	 * not) on its own timer after the step has already moved on to shutdown. Called at the
+	 * start of {@link #doShutdown()}, <em>before</em> it stops the generator - the public
+	 * {@code stop()} lifecycle runs {@code shutdown()} (i.e. {@code doShutdown()}) before
+	 * {@link #doStop()}, so this has to happen here to actually run before the generator is
+	 * torn down; a previous version of this code ran it from {@link #doStop()} instead,
+	 * which is too late (see that method's own comment).
+	 *
+	 * <p>This alone cannot close every race with a concurrent stop: a task can already be
+	 * past the point of no return (removed itself from {@link #pendingRetries}, about to
+	 * call {@link LoadGenerator#retry}) at the exact moment this runs. {@link
+	 * #awaitRetryTasksSettled()}, called right after this, closes that remaining window,
+	 * together with the {@code stepShuttingDown} check the task itself performs.
+	 */
+	private void cancelPendingRetries() {
+		if (pendingRetries.isEmpty()) {
+			return;
+		}
+		for (final var entry : List.copyOf(pendingRetries.entrySet())) {
+			final O op = entry.getKey();
+			final RetryHandle handle = entry.getValue();
+			if (handle.tryCancel()) {
+				// Won the race against the task's own tryClaim() (see RetryHandle's
+				// javadoc for why this - not Future#cancel's return value - is what
+				// actually guarantees exclusivity): the task, whenever it runs (including
+				// if it's already running but hasn't reached tryClaim() yet), is now
+				// guaranteed to see CANCELLED there and return without touching this
+				// operation, so it's safe to give it its definite terminal outcome here.
+				pendingRetries.remove(op, handle);
+				final Future<?> future = handle.future;
+				if (future != null) {
+					// Best-effort only, to free the underlying scheduled timer/thread
+					// promptly - correctness no longer depends on what this returns.
+					future.cancel(false);
+				}
+				markOpFailed(op, op.status(), "step stopping, cancelled pending retry");
+			}
+			// else: the task already claimed this one first - its own body resolves it
+			// (or already has); nothing more to do here.
+		}
+	}
+
+	/**
+	 * Waits (briefly, boundedly) for any load-op-retry task that's already past
+	 * cancellation (i.e. had already removed itself from {@link #pendingRetries} - and so
+	 * committed to either failing the operation or calling {@link LoadGenerator#retry} -
+	 * before {@link #cancelPendingRetries()} could intercept it) to actually finish. Called
+	 * from {@link #doShutdown()}, before it explicitly stops the generator.
+	 *
+	 * <p>This alone is still not sufficient to guarantee nothing is abandoned: it only
+	 * proves the task's own body - up to and including a {@link LoadGenerator#retry} call
+	 * actually <em>returning</em> - has finished, not that the generator's own work loop
+	 * has since had a chance to run again and drain what that call just enqueued.
+	 * {@link #awaitRetryQueueDrained()}, called right after this, closes that remaining
+	 * window.
+	 */
+	private void awaitRetryTasksSettled() {
+		// These tasks run near-instantaneously once started (a single generator.isStopped()
+		// check plus either markOpFailed() or an enqueue) - this closes a narrow scheduling
+		// race, it is not a real drain wait, so a short bound is enough.
+		final long deadline = System.currentTimeMillis() + 1000L;
+		while (activeRetryTasks.get() > 0 && System.currentTimeMillis() < deadline) {
+			try {
+				Thread.sleep(1);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+		if (activeRetryTasks.get() > 0) {
+			Loggers.ERR.warn(
+							"{}: {} retry task(s) still in flight after the settle wait; proceeding with shutdown anyway",
+							id,
+							activeRetryTasks.get());
+		}
+	}
+
+	/**
+	 * Waits (briefly, boundedly) for {@link LoadGenerator#isNothingPendingRetry} to become
+	 * true. Called from {@link #doShutdown()}, after {@link #cancelPendingRetries()} and
+	 * {@link #awaitRetryTasksSettled()} (in that order: by the time this runs, nothing new
+	 * can still be enqueued - every not-yet-started retry has been cancelled, and every
+	 * already-started one has finished calling either {@code markOpFailed} or {@link
+	 * LoadGenerator#retry}), but immediately before the generator is actually stopped.
+	 *
+	 * <p>{@link LoadGenerator#retry} only enqueues - it does not wait for the generator's
+	 * own work loop to hand the operation off to the storage driver. Stopping the
+	 * generator while an already-enqueued retry is still sitting there would abandon it
+	 * forever (it isn't in the recycle queue or anywhere else anything would ever look for
+	 * it again). Once this returns true, though, the operation has been handed to {@code
+	 * opOutput.put()} and is the storage driver's concern from here - exactly like any
+	 * other in-flight operation at the moment a step stops, which {@link #doStop}'s own
+	 * {@code waitOpFinishBeforeStop} logic (a separate, pre-existing concern) already
+	 * covers if configured to.
+	 *
+	 * <p>If the bounded wait times out (the generator is stuck, output is backpressured, a
+	 * throttle keeps denying permits, or the driver simply cannot accept the redispatch),
+	 * waiting longer isn't guaranteed to be productive, but simply giving up and stopping
+	 * the generator anyway would silently strand whatever is still queued - {@link
+	 * #doClose} eventually clears that queue with no terminal outcome ever recorded for it
+	 * (neither retried, nor redispatch attempted, nor counted as failed). So on timeout,
+	 * this drains whatever remains via {@link LoadGenerator#drainPendingRetries} and
+	 * terminal-fails each directly instead, preserving the "exactly one terminal outcome
+	 * per operation" invariant the rest of the retry machinery maintains.
+	 */
+	private void awaitRetryQueueDrained() {
+		// The generator's work loop drains its retry queue on every doWork() iteration
+		// (LoadGeneratorImpl#drainRetryQueue), which run continuously and fast - this is
+		// not a real drain-to-completion wait (nothing here waits for the driver to finish
+		// processing it), just long enough for that loop to actually pick it up. A
+		// generator that's already stopped itself for some unrelated reason (e.g. output
+		// EOF) while something was still enqueued will never drain it either, so this is
+		// bounded rather than indefinite.
+		final long deadline = System.currentTimeMillis() + 1000L;
+		while (!generator.isNothingPendingRetry() && System.currentTimeMillis() < deadline) {
+			try {
+				Thread.sleep(1);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+		if (!generator.isNothingPendingRetry()) {
+			final List<O> strandedRetries = generator.drainPendingRetries();
+			if (!strandedRetries.isEmpty()) {
+				Loggers.ERR.warn(
+								"{}: generator still had {} pending retry redispatch(es) after the drain "
+												+ "wait; terminal-failing them instead of leaving them stranded",
+								id,
+								strandedRetries.size());
+				for (final O op : strandedRetries) {
+					markOpFailed(op, op.status(), "step stopping, retry queue drain timed out");
+				}
+			}
+		}
+	}
+
+	/**
+	 * Full-jitter exponential backoff delay (milliseconds) before the {@code attempt}-th
+	 * load-op-retry re-dispatch (1-based: {@code attempt == opResult.opRetryCount()} right
+	 * after it was incremented for this try). Mirrors the shape of common S3-client retry
+	 * defaults (e.g. minio-go's own retry timer: 200ms base, 1s cap, full jitter) rather than
+	 * inventing a new backoff policy from scratch. Package-private for direct unit testing.
+	 */
+	static long retryBackoffMillis(final int attempt) {
+		final int shift = Math.min(Math.max(attempt - 1, 0), 16); // guard against overflow
+		final long exp = RETRY_BACKOFF_BASE_MILLIS << shift;
+		final long capped = Math.min(exp, RETRY_BACKOFF_CAP_MILLIS);
+		return capped <= 0 ? 0 : ThreadLocalRandom.current().nextLong(capped + 1);
 	}
 
 	@Override
@@ -676,6 +1104,32 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected final void doShutdown() {
+		// Set before anything else runs here (including cancelPendingRetries()): the
+		// earliest, most authoritative signal available that a scheduled retry task can
+		// check to terminal-fail instead of calling generator.retry() - see that flag's
+		// own field comment and scheduleRetry()'s javadoc. Cheaper and more direct than
+		// relying solely on generator.isStopped(), which only becomes true a few lines
+		// below and doesn't by itself prove the generator will get to drain a
+		// just-enqueued retry (see awaitRetryTasksSettled()'s javadoc).
+		stepShuttingDown.set(true);
+		// Order matters, and all three of these must run *before* generator.stop() below,
+		// not in doStop(): the public stop() lifecycle is stop() -> shutdown() (->
+		// doShutdown(), which is what stops the generator) -> doStop(), i.e. doShutdown()
+		// runs first. A retry task that fires right around here can already have removed
+		// itself from pendingRetries and be about to call generator.retry() -
+		// cancelPendingRetries() alone (a doStop()-only fix in an earlier version of this
+		// code) runs too late to catch that: it would find nothing left to cancel, and the
+		// generator would already be stopped by the time doStop() got a chance to look,
+		// silently abandoning the redispatch in LoadGeneratorImpl's retryQueue forever.
+		// Doing this here, before generator.stop(), ensures any such in-flight task is
+		// either intercepted before it starts (cancelPendingRetries()), or given the
+		// chance to finish calling generator.retry() (awaitRetryTasksSettled()), or - since
+		// that alone only proves the *call* returned, not that the generator's own work
+		// loop has since drained what it just enqueued - given the chance to actually do
+		// that draining too (awaitRetryQueueDrained()).
+		cancelPendingRetries();
+		awaitRetryTasksSettled();
+		awaitRetryQueueDrained();
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			generator.stop();
@@ -692,6 +1146,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
+		// Defensive backstop, not the primary fix: doShutdown() above already does this
+		// before generator.stop(), which is the ordering that actually matters for the
+		// public stop() lifecycle (stop() -> shutdown() -> doStop(), so doShutdown() runs
+		// *first*). Kept here too in case something calls doStop() directly without a
+		// preceding doShutdown() (as some unit tests do, exercising doStop()'s own
+		// behavior in isolation) - harmless to call twice, since both are no-ops once
+		// pendingRetries/activeRetryTasks/the generator's retry queue are already empty.
+		cancelPendingRetries();
+		awaitRetryTasksSettled();
+		awaitRetryQueueDrained();
 		if (waitOpFinishBeforeStop) {
 			var i = 0;
 			var sleep = 1000;

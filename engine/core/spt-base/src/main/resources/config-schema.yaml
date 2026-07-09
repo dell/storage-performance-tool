@@ -61,6 +61,7 @@ load:
       content:
         update: boolean
     retry: boolean
+    retryLimit: int
     shuffle: boolean
     type: string
     list:

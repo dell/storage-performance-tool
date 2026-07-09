@@ -51,6 +51,10 @@ load:
       content:
         update: false
     retry: false
+    # Max retry attempts per operation when retry is enabled, before it's counted as a
+    # failure. Matches common S3-client SDK retry defaults (e.g. minio-go's MaxRetry=10) --
+    # see LoadStepContextImpl's retryBackoffMillis for the accompanying backoff.
+    retryLimit: 10
     shuffle: false
     type: create
     list:

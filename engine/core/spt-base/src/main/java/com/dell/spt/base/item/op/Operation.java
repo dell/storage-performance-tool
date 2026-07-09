@@ -113,4 +113,36 @@ public interface Operation<I extends Item> {
 	boolean driverRecycled();
 
 	void driverRecycled(boolean flag);
+
+	/**
+	 * Number of times this operation has been retried after a failure via {@code
+	 * load-op-retry} (unrelated to {@link com.dell.spt.base.item.op.partial.PartialOperation
+	 * #retryCount()}, which counts per-part MPU retries — deliberately a different method
+	 * name so implementations of both don't collide). Defaults to 0 for implementations that
+	 * don't track it.
+	 */
+	default int opRetryCount() {
+		return 0;
+	}
+
+	/** Increment the whole-operation retry counter. */
+	default void incrementOpRetryCount() {}
+
+	/**
+	 * Reset the whole-operation retry counter, e.g. after a terminal success, so a
+	 * recycled/fast-recycled operation starts its next logical attempt with a clean budget
+	 * instead of accumulating retry counts across unrelated cycles.
+	 */
+	default void resetOpRetryCount() {}
+
+	/**
+	 * Returns {@code true} if this implementation actually tracks {@link #opRetryCount()} /
+	 * {@link #incrementOpRetryCount()} (i.e. the default no-op methods above have been
+	 * overridden with real state). {@code load-op-retry}'s bound depends on this being
+	 * accurate: an implementation that reports {@code true} here but doesn't really track the
+	 * count would retry forever, silently defeating the configured limit.
+	 */
+	default boolean supportsOpRetryTracking() {
+		return false;
+	}
 }

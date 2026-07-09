@@ -246,8 +246,21 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	public void retry(final O op) {
+		// Deliberate no-op, unreachable in practice: supportsRetry() below reports false,
+		// which LoadStepContextImpl validates against at construction time (load-op-retry
+		// against a generator that can't actually requeue a failed operation would silently
+		// drop it - neither retried nor counted as failed).
+	}
+
+	@Override
 	public boolean isNothingToRecycle() {
 		return true; // Mixed mode doesn't use standard recycling
+	}
+
+	@Override
+	public boolean supportsRetry() {
+		return false;
 	}
 
 	/**

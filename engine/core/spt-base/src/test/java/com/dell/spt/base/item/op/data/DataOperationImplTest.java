@@ -173,4 +173,29 @@ class DataOperationImplTest {
 		assertTrue(op.dataLatency() < MAX_SANE_LATENCY_MICROS,
 						"dataLatency must not be epoch-scale in normal lifecycle");
 	}
+
+	@Test
+	void resultCopyPreservesOpRetryCount() {
+		// load-op-retry's bounded check reads whatever concrete Operation subclass a
+		// driver actually produces, not just base OperationImpl - DataOperationImpl's own
+		// copy constructor/result() must still correctly delegate to the base class's
+		// opRetryCount handling rather than, say, forgetting to call super(other).
+		final var item = newItem("retry-copy-obj", 1024);
+		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/dst", null, null, 0);
+		op.incrementOpRetryCount();
+		op.incrementOpRetryCount();
+		op.startRequest();
+		op.finishRequest();
+		op.startResponse();
+		op.finishResponse();
+
+		final var copy = op.result();
+
+		assertEquals(2, copy.opRetryCount(), "DataOperationImpl's result() copy must preserve opRetryCount");
+		op.incrementOpRetryCount();
+		assertEquals(2, copy.opRetryCount(), "copy opRetryCount must not change when original is mutated afterward");
+
+		op.reset();
+		assertEquals(3, op.opRetryCount(), "opRetryCount must survive reset() on the original");
+	}
 }

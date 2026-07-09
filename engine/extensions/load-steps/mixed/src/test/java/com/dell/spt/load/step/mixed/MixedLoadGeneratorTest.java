@@ -7,6 +7,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.ThreadContext;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -44,6 +46,7 @@ class MixedLoadGeneratorTest {
 		// Without this, the generator's doInit() triggers lazy Log4j init in a virtual thread,
 		// and gen.stop() can interrupt that thread mid-init, permanently corrupting Log4j.
 		ThreadContext.put("test", "init");
+		Loggers.MSG.isInfoEnabled();
 		ThreadContext.remove("test");
 	}
 
@@ -82,24 +85,15 @@ class MixedLoadGeneratorTest {
 
 		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, mockDriver);
 
-		gen.start();
-		// Let it run briefly
-		Thread.sleep(200);
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
+		dispatch(gen, schedule.size());
 
-		// Should have dispatched a mix of CREATE and READ
 		final int total = dispatched.size();
-		assertTrue(total > 0, "Should have dispatched some operations");
+		assertEquals(schedule.size(), total, "Should dispatch one full schedule cycle");
 
 		long createCount = dispatched.stream().filter(t -> t == OpType.CREATE).count();
 		long readCount = dispatched.stream().filter(t -> t == OpType.READ).count();
-		assertTrue(createCount > 0, "Should have dispatched CREATE ops");
-		assertTrue(readCount > 0, "Should have dispatched READ ops");
-
-		// Distribution should be approximately 60/40 (within tolerance for short run)
-		double createRatio = (double) createCount / total;
-		assertEquals(0.6, createRatio, 0.15, "CREATE ratio should be ~60%");
+		assertEquals(600, createCount, "CREATE ops should match configured 60% weight");
+		assertEquals(400, readCount, "READ ops should match configured 40% weight");
 	}
 
 	// ── DELETE re-roll ────────────────────────────────────────────────────
@@ -126,14 +120,11 @@ class MixedLoadGeneratorTest {
 
 		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, mockDriver);
 
-		gen.start();
-		Thread.sleep(200);
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
+		dispatch(gen, schedule.size());
 
 		// With empty DELETE queue, all DELETE schedules should re-roll to CREATE
 		final int total = dispatched.size();
-		assertTrue(total > 0, "Should have dispatched some operations");
+		assertEquals(schedule.size(), total, "Should dispatch one full schedule cycle");
 
 		long deleteCount = dispatched.stream().filter(t -> t == OpType.DELETE).count();
 		assertEquals(0, deleteCount, "DELETE ops should be 0 when queue is empty");
@@ -192,29 +183,20 @@ class MixedLoadGeneratorTest {
 
 		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, mockDriver);
 
-		gen.start();
-		Thread.sleep(300);
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
+		dispatch(gen, schedule.size());
 
 		final int total = dispatched.size();
-		assertTrue(total > 100, "Should have dispatched many operations");
+		assertEquals(schedule.size(), total, "Should dispatch one full schedule cycle");
 
 		long readCount = dispatched.stream().filter(t -> t == OpType.READ).count();
 		long createCount = dispatched.stream().filter(t -> t == OpType.CREATE).count();
 		long deleteCount = dispatched.stream().filter(t -> t == OpType.DELETE).count();
 		long statCount = dispatched.stream().filter(t -> t == OpType.STAT).count();
 
-		assertTrue(readCount > 0, "Should have READ ops");
-		assertTrue(createCount > 0, "Should have CREATE ops");
-		assertTrue(deleteCount > 0, "Should have DELETE ops");
-		assertTrue(statCount > 0, "Should have STAT ops");
-
-		// Verify approximate distribution
-		double readRatio = (double) readCount / total;
-		double createRatio = (double) createCount / total;
-		assertEquals(0.4, readRatio, 0.1, "READ ratio should be ~40%");
-		assertEquals(0.3, createRatio, 0.1, "CREATE ratio should be ~30%");
+		assertEquals(400, readCount, "READ ops should match configured 40% weight");
+		assertEquals(300, createCount, "CREATE ops should match configured 30% weight");
+		assertEquals(100, deleteCount, "DELETE ops should match configured 10% weight");
+		assertEquals(200, statCount, "STAT ops should match configured 20% weight");
 	}
 
 	// ── Generator lifecycle ───────────────────────────────────────────────
@@ -232,15 +214,19 @@ class MixedLoadGeneratorTest {
 		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
 		builders.put(OpType.READ, testBuilder(OpType.READ, null));
 
-		final Output<Operation> mockDriver = noopOutput();
+		final CountDownLatch putEntered = new CountDownLatch(1);
+		final CountDownLatch releasePut = new CountDownLatch(1);
+		final Output<Operation> blockingDriver = blockingOutput(putEntered, releasePut);
 
-		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, mockDriver);
+		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, blockingDriver);
 
 		gen.start();
+		assertTrue(putEntered.await(5, TimeUnit.SECONDS), "Generator should enter driver put() before stop");
 		assertTrue(gen.isStarted());
 		assertFalse(gen.isStopped());
 
 		gen.stop();
+		releasePut.countDown();
 		assertTrue(gen.await(5, TimeUnit.SECONDS), "Generator should stop within 5 seconds");
 		assertTrue(gen.isStopped());
 	}
@@ -262,12 +248,9 @@ class MixedLoadGeneratorTest {
 
 		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, mockDriver);
 
-		gen.start();
-		Thread.sleep(200);
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
+		dispatch(gen, 10);
 
-		assertTrue(gen.generatedOpCount() > 0, "Should have generated some operations");
+		assertEquals(10, gen.generatedOpCount(), "Should count directly dispatched operations");
 	}
 
 	@Test
@@ -290,13 +273,13 @@ class MixedLoadGeneratorTest {
 		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, schedule, pool, builders,
 						mockDriver, 2, mockNewItemSupplier());
 
-		gen.start();
-		Thread.sleep(200);
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
+		gen.doWork();
+		gen.doWork();
+		assertEquals(2, gen.generatedOpCount(), "precondition: both permits should be consumed");
+		assertEquals(0, availablePermits(gen), "precondition: no permits should remain");
 
 		assertEquals(2, gen.generatedOpCount(),
-						"Only 2 ops should be generated when concurrency limit is 2 and no permits released");
+						"No additional op can be generated until a permit is released");
 	}
 
 	@Test
@@ -317,17 +300,14 @@ class MixedLoadGeneratorTest {
 		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, schedule, pool, builders,
 						mockDriver, 1, mockNewItemSupplier());
 
-		gen.start();
-		Thread.sleep(50);
+		gen.doWork();
 		assertEquals(1, gen.generatedOpCount(), "Initial: 1 op dispatched with limit 1");
+		assertEquals(0, availablePermits(gen), "Initial dispatch should consume the only permit");
 
 		// Release a permit — should allow one more op
 		gen.releasePermit();
-		Thread.sleep(50);
+		gen.doWork();
 		assertEquals(2, gen.generatedOpCount(), "After releasePermit: 2 ops total");
-
-		gen.stop();
-		gen.await(5, TimeUnit.SECONDS);
 	}
 
 	@Test
@@ -471,6 +451,46 @@ class MixedLoadGeneratorTest {
 					final Output driver) {
 		return new MixedLoadGenerator(executor, schedule, pool, builders, driver,
 						Integer.MAX_VALUE, mockNewItemSupplier());
+	}
+
+	private static void dispatch(final MixedLoadGenerator gen, final int count) throws Exception {
+		for (int i = 0; i < count; i++) {
+			gen.doWork();
+		}
+	}
+
+	private static Output<Operation> blockingOutput(final CountDownLatch entered, final CountDownLatch release) {
+		return new Output<>() {
+			@Override
+			public boolean put(final Operation op) {
+				entered.countDown();
+				try {
+					release.await();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return false;
+				}
+				return true;
+			}
+
+			@Override
+			public int put(final List<Operation> ops, final int from, final int to) {
+				return to - from;
+			}
+
+			@Override
+			public int put(final List<Operation> ops) {
+				return ops.size();
+			}
+
+			@Override
+			public Input<Operation> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		};
 	}
 
 	/** Creates a simple Output that accepts all put() calls (avoids Mockito raw-type issues). */

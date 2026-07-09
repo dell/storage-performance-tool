@@ -93,8 +93,7 @@ public class IcebergCommitterTest {
 						.thenReturn(409)
 						.thenReturn(200);
 
-		final IcebergCommitter committer = new IcebergCommitter(
-						mockDriver, "s3://b/w", "token-v1");
+		final IcebergCommitter committer = newTestCommitter("s3://b/w", "token-v1");
 
 		final long snapshotId = committer.commit(new byte[256], 256);
 
@@ -112,8 +111,7 @@ public class IcebergCommitterTest {
 		when(mockControlPlane.updateTableMetadataLocation(anyString(), anyString()))
 						.thenReturn(409);
 
-		final IcebergCommitter committer = new IcebergCommitter(
-						mockDriver, "s3://b/w", "token-v1");
+		final IcebergCommitter committer = newTestCommitter("s3://b/w", "token-v1");
 
 		assertThrows(Exception.class, () -> committer.commit(new byte[64], 64),
 						"Should throw after exhausting retries");
@@ -136,8 +134,7 @@ public class IcebergCommitterTest {
 		doThrow(new Exception("PUT failed"))
 						.when(mockDriver).executeDataPlaneRequest(anyString(), any(), anyString());
 
-		final IcebergCommitter committer = new IcebergCommitter(
-						mockDriver, "s3://b/w", "token-v1");
+		final IcebergCommitter committer = newTestCommitter("s3://b/w", "token-v1");
 
 		assertThrows(Exception.class, () -> committer.commit(new byte[64], 64),
 						"Should propagate data-plane PUT failure");
@@ -158,12 +155,15 @@ public class IcebergCommitterTest {
 		when(mockControlPlane.updateTableMetadataLocation(anyString(), anyString()))
 						.thenAnswer(inv -> callCount.incrementAndGet() == 1 ? 409 : 200);
 
-		final IcebergCommitter committer = new IcebergCommitter(
-						mockDriver, "s3://b/w", "old-token");
+		final IcebergCommitter committer = newTestCommitter("s3://b/w", "old-token");
 
 		committer.commit(new byte[128], 128);
 
 		// Second UpdateTableMetadataLocation call should use the refreshed token "new-token"
 		verify(mockControlPlane, atLeast(1)).updateTableMetadataLocation(eq("new-token"), anyString());
+	}
+
+	private IcebergCommitter newTestCommitter(final String warehouseLocation, final String versionToken) {
+		return new IcebergCommitter(mockDriver, warehouseLocation, versionToken, millis -> {});
 	}
 }

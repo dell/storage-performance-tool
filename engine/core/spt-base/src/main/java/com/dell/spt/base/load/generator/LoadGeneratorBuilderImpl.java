@@ -419,6 +419,15 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		if (recycleLimit < 1) {
 			throw new IllegalConfigurationException("Recycle limit should be > 0");
 		}
+		// Note: load-op-retry is deliberately *not* OR'd into recycleFlag here (it used to
+		// be, to make the generator keep polling for late-arriving retries after item input
+		// exhaustion) - LoadGeneratorImpl now has its own dedicated, always-drained retry
+		// queue via LoadGenerator#retry that doesn't depend on recycle-mode at all, so a
+		// retry-only (non-recycle) workload's generator can correctly signal
+		// itemInputFinished once its (genuinely finite) input is exhausted. retryFlag is
+		// still passed through separately, though: see LoadGeneratorImpl's own retryFlag
+		// constructor javadoc for the different (countLimit-self-stop-related) reason it
+		// still needs to know.
 		return (T) new LoadGeneratorImpl<>(
 						itemInput,
 						opsBuilder,
@@ -427,8 +436,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 						batchSize,
 						countLimit,
 						recycleLimit,
-						(recycleFlag || retryFlag),
-						shuffleFlag);
+						recycleFlag,
+						shuffleFlag,
+						retryFlag);
 	}
 
 	@Override

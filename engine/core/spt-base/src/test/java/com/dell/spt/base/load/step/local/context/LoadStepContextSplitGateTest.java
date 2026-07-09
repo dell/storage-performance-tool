@@ -411,6 +411,7 @@ public class LoadStepContextSplitGateTest {
 		opSchema.put("limit", limitSchema);
 		opSchema.put("recycle", recycleSchema);
 		opSchema.put("retry", Boolean.class);
+		opSchema.put("retryLimit", Integer.class);
 		opSchema.put("shuffle", Boolean.class);
 		opSchema.put("wait", waitSchema);
 		opSchema.put("output", outputSchema);
@@ -428,6 +429,7 @@ public class LoadStepContextSplitGateTest {
 		opVals.put("limit", limitVals);
 		opVals.put("recycle", java.util.Map.of("mode", false, "content", java.util.Map.of("update", false)));
 		opVals.put("retry", false);
+		opVals.put("retryLimit", 10);
 		opVals.put("shuffle", false);
 		opVals.put("wait", java.util.Map.of("finish", false, "limit", 0));
 		opVals.put("output", java.util.Map.of("duplicates", false));
