@@ -200,7 +200,8 @@ jobs:
           file cli/build/spt-linux-arm64 | tee /tmp/spt-linux-arm64.file
           grep -q 'statically linked' /tmp/spt-linux-amd64.file
           grep -q 'statically linked' /tmp/spt-linux-arm64.file
-          ldd cli/build/spt-linux-amd64 2>&1 | grep -q 'not a dynamic executable'
+          ldd cli/build/spt-linux-amd64 > /tmp/spt-linux-amd64.ldd 2>&1 || true
+          grep -q 'not a dynamic executable' /tmp/spt-linux-amd64.ldd
 
       - name: Package binaries
         run: |
