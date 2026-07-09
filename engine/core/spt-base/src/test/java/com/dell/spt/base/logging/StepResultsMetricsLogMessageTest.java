@@ -98,5 +98,8 @@ public class StepResultsMetricsLogMessageTest extends StepResultsMetricsLogMessa
 		assertEquals(STEP_ID, parsed.get("Load Step Id"));
 		assertEquals(OP_TYPE.name(), parsed.get("Operation Type"));
 		assertEquals(COUNT, ((Map<String, Object>) parsed.get("Operations Count")).get("Successful"));
+		assertEquals(true, parsed.containsKey("Bandwidth [MiB/s]"));
+		assertEquals(true, parsed.containsKey("Transfer Size"));
+		assertEquals(false, parsed.containsKey("Bandwidth [MB/s]"));
 	}
 }

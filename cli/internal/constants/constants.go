@@ -118,6 +118,21 @@ const (
 	EnginePlainLogArtifactMaxBytes = EngineLogArtifactPageSize - 1
 )
 
+// Binary byte-unit constants.
+const (
+	BytesPerKiB int64 = 1024
+	BytesPerMiB       = BytesPerKiB * 1024
+	BytesPerGiB       = BytesPerMiB * 1024
+	BytesPerTiB       = BytesPerGiB * 1024
+
+	UnitByte         = "B"
+	UnitKiB          = "KiB"
+	UnitMiB          = "MiB"
+	UnitGiB          = "GiB"
+	UnitTiB          = "TiB"
+	UnitMiBPerSecond = "MiB/s"
+)
+
 // Read shuffle tuning constants
 const (
 	// ReadShuffleDefaultBatchSize is the implicit read-phase batch size when --shuffle is enabled without an explicit override.

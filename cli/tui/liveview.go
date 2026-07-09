@@ -13,6 +13,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
 
@@ -128,7 +129,7 @@ func (l *LiveViewRenderer) formatEmptyHeader() string {
 func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggregatedMetric *PerformanceMetric, width int) string {
 	// Calculate derived values for aggregated total
 	progressValue := l.calculateDoneMiB(aggregatedMetric.SuccessCount)
-	rateValue := aggregatedMetric.MBPerSec
+	rateValue := aggregatedMetric.MiBPerSec
 	colSixValue := aggregatedMetric.SuccessCount
 	if l.isListWorkload() {
 		rateValue = aggregatedMetric.OpsPerSec
@@ -176,7 +177,7 @@ func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggre
 			// Use the latest sample for this node
 			latestNodeSample := nodeSamples[len(nodeSamples)-1]
 			nodeProgress := l.calculateDoneMiB(latestNodeSample.SuccessCount)
-			rate := latestNodeSample.MBPerSec
+			rate := latestNodeSample.MiBPerSec
 			colSix := latestNodeSample.SuccessCount
 			if l.isListWorkload() {
 				rate = latestNodeSample.OpsPerSec
@@ -392,7 +393,7 @@ func (l *LiveViewRenderer) isListWorkload() bool {
 func (l *LiveViewRenderer) tableLabels() tableLabels {
 	labels := tableLabels{
 		progress: "DoneMiB",
-		rate:     "MiB/s",
+		rate:     constants.UnitMiBPerSecond,
 		ops:      "IOPs",
 		colSix:   "Files",
 	}
@@ -406,35 +407,19 @@ func (l *LiveViewRenderer) tableLabels() tableLabels {
 
 // parseObjectSize converts object size string to bytes
 func (l *LiveViewRenderer) parseObjectSize(sizeStr string) int64 {
-	if sizeStr == "" {
+	trimmed := strings.TrimSpace(sizeStr)
+	sign := int64(1)
+	if strings.HasPrefix(trimmed, "-") {
+		sign = -1
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+	}
+
+	sizeBytes, err := sizeparse.Parse(trimmed)
+	if err != nil {
+		if strings.TrimSpace(sizeStr) != "" {
+			logging.LogError("liveview", "Failed to parse object size", err, "size", sizeStr)
+		}
 		return 0
 	}
-
-	// Handle common size suffixes
-	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
-
-	var multiplier int64 = 1
-	var numStr string
-
-	if strings.HasSuffix(sizeStr, "KB") {
-		multiplier = 1024
-		numStr = strings.TrimSuffix(sizeStr, "KB")
-	} else if strings.HasSuffix(sizeStr, "MB") {
-		multiplier = 1024 * 1024
-		numStr = strings.TrimSuffix(sizeStr, "MB")
-	} else if strings.HasSuffix(sizeStr, "GB") {
-		multiplier = 1024 * 1024 * 1024
-		numStr = strings.TrimSuffix(sizeStr, "GB")
-	} else {
-		numStr = sizeStr
-	}
-
-	// Try to parse the numeric part
-	var size int64
-	if _, err := fmt.Sscanf(numStr, "%d", &size); err != nil {
-		logging.LogError("liveview", "Failed to parse object size", err, "size", sizeStr)
-		return 0
-	}
-
-	return size * multiplier
+	return sign * sizeBytes
 }

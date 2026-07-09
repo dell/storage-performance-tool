@@ -86,6 +86,8 @@ class MetricsManagerImplCsvTotalTest {
 							.parse(new StringReader(csvContent))) {
 				final var records = parser.getRecords();
 				final int headerSize = parser.getHeaderMap().size();
+				assertNotEquals(null, parser.getHeaderMap().get("BWAvg[MiB/s]"));
+				assertNotEquals(null, parser.getHeaderMap().get("BWLast[MiB/s]"));
 				assertEquals(contexts.size(), records.size(), records.toString());
 				assertEquals(List.of("READ", "STAT", "CREATE", "DELETE"), records.stream().map(record -> record.get("OpType")).toList());
 				for (final var record : records) {

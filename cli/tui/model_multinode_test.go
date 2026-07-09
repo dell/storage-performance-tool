@@ -19,7 +19,7 @@ func TestModel_Update_MultiNodeMetricsMsg(t *testing.T) {
 	update := MultiNodeMetricsUpdate{
 		Aggregated: &PerformanceMetric{
 			OpsPerSec:    5000,
-			MBPerSec:     500,
+			MiBPerSec:    500,
 			MeanLatency:  30,
 			SuccessCount: 2500,
 			FailedCount:  10,
@@ -29,14 +29,14 @@ func TestModel_Update_MultiNodeMetricsMsg(t *testing.T) {
 		PerNode: map[string]*PerformanceMetric{
 			"node1": {
 				OpsPerSec:    2000,
-				MBPerSec:     200,
+				MiBPerSec:    200,
 				SuccessCount: 1000,
 				FailedCount:  4,
 				Timestamp:    now,
 			},
 			"node2": {
 				OpsPerSec:    3000,
-				MBPerSec:     300,
+				MiBPerSec:    300,
 				SuccessCount: 1500,
 				FailedCount:  6,
 				Timestamp:    now,
@@ -227,7 +227,7 @@ func TestModel_Update_LegacyApiMetricsMsg_StillWorks(t *testing.T) {
 	// Test that legacy apiMetricsMsg still works for backward compatibility
 	metric := PerformanceMetric{
 		OpsPerSec:    1500,
-		MBPerSec:     150,
+		MiBPerSec:    150,
 		SuccessCount: 750,
 		Timestamp:    time.Now(),
 		OpType:       "read",

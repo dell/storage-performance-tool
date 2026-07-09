@@ -97,7 +97,7 @@ func (d *DebugLayoutRenderer) createSampleModel(withData bool) Model {
 			SuccessCount:       1000,
 			FailedCount:        5,
 			OpsPerSec:          200,
-			MBPerSec:           200,
+			MiBPerSec:          200,
 			StepTime:           30.5,
 		}
 		model.metricsCollector.AddSample(metric)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
 
@@ -231,7 +232,7 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			formatNumber(m.ThroughputAvgOps, "ops/s"),
 			mixedLatencyCell(step, m),
 			mixedTTFBCell(step, m),
-			formatNumber(m.BandwidthAvgMBps, "MB/s"),
+			formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond),
 		}
 		rows = append(rows, row)
 	}
@@ -305,7 +306,7 @@ func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary
 				formatInt(op.Metrics.FailureCount),
 				formatBytesHuman(op.Metrics.DataBytes),
 				formatNumber(op.Metrics.ThroughputAvgOps, "ops/s"),
-				formatNumber(op.Metrics.BandwidthAvgMBps, "MB/s"),
+				formatNumber(op.Metrics.BandwidthAvgMiBps, constants.UnitMiBPerSecond),
 				formatNumber(op.Metrics.LatencyMedianMs, "ms"),
 				formatTTFBNumber(op.Metrics.TTFBMedianMs),
 			})

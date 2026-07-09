@@ -21,7 +21,7 @@ func newNodeMetric(ops, mb, success, failed int64, latency, duration int64, curr
 		SuccessCount:       success,
 		FailedCount:        failed,
 		OpsPerSec:          ops,
-		MBPerSec:           mb,
+		MiBPerSec:          mb,
 		MeanLatency:        latency,
 		MeanDuration:       duration,
 		ConcurrencyCurrent: int64(current),
@@ -53,7 +53,7 @@ func TestMetricsAggregatorAggregatesSingleNode(t *testing.T) {
 	if result.Scope != "aggregate" {
 		t.Errorf("expected aggregate scope, got %q", result.Scope)
 	}
-	if result.OpsPerSec != node.OpsPerSec || result.MBPerSec != node.MBPerSec {
+	if result.OpsPerSec != node.OpsPerSec || result.MiBPerSec != node.MiBPerSec {
 		t.Errorf("expected totals to match node values, got %+v", result)
 	}
 	if result.NodesCount != 1 {
@@ -74,8 +74,8 @@ func TestMetricsAggregatorAggregatesMultipleNodes(t *testing.T) {
 	if aggregated.OpsPerSec != 2500 {
 		t.Errorf("expected ops/sec=2500, got %d", aggregated.OpsPerSec)
 	}
-	if aggregated.MBPerSec != 250 {
-		t.Errorf("expected MB/s=250, got %d", aggregated.MBPerSec)
+	if aggregated.MiBPerSec != 250 {
+		t.Errorf("expected MiB/s=250, got %d", aggregated.MiBPerSec)
 	}
 	if aggregated.SuccessCount != 1400 || aggregated.FailedCount != 7 {
 		t.Errorf("unexpected totals success=%d failed=%d", aggregated.SuccessCount, aggregated.FailedCount)

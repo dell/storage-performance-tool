@@ -34,7 +34,7 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 				"test_state": 1,
 				"sample_ts": "` + sample + `",
 				"operations": {"success_rate_last": 1234.0},
-				"bandwidth": {"bytes_rate_last": 5000000}
+				"bandwidth": {"bytes_rate_last": 5242880}
 			}]`
 			w.Write([]byte(payload))
 		default:
@@ -65,6 +65,9 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 	}
 	if !strings.Contains(output, "completion=42%") {
 		t.Fatalf("expected completion percentage in output, got: %s", output)
+	}
+	if !strings.Contains(output, "throughput=5.0MiB/s") {
+		t.Fatalf("expected binary throughput label in output, got: %s", output)
 	}
 }
 

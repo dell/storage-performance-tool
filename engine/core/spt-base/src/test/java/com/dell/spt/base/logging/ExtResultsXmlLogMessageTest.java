@@ -45,9 +45,10 @@ class ExtResultsXmlLogMessageTest {
 		assertContainsAttr(xml, "RequestThreads", "16");
 		assertContainsAttr(xml, "error", "3");
 		assertContainsAttr(xml, "tps_unit", "Fileps");
-		assertContainsAttr(xml, "bw_unit", "MBps");
+		assertContainsAttr(xml, "bw_unit", "MiBps");
 		assertContainsAttr(xml, "latency_unit", "us");
 		assertContainsAttr(xml, "duration_unit", "us");
+		assertContainsAttr(xml, "filesize", "64KiB");
 
 		assertTrue(xml.contains("StartDate=\""), "Should contain StartDate");
 		assertTrue(xml.contains("StartTimestamp=\""), "Should contain StartTimestamp");
@@ -94,6 +95,16 @@ class ExtResultsXmlLogMessageTest {
 		String xml = format(new ExtResultsXmlLogMessage(ctx, snap));
 
 		assertTrue(xml.contains("bw=\"2.0\""), "Bandwidth should be bytes/s divided by MIB");
+	}
+
+	@Test
+	void verifyRangeFileSizeUsesIecLabels() {
+		MetricsContext ctx = mockContext("range-test", OpType.CREATE, 1, 0L, new SizeInBytes("1KB-2KB"));
+		AllMetricsSnapshot snap = mockSnapshot(1000L, 100L, 10.0, 0L, 1024.0, 100.0, 50L, 200L, 150.0, 80L, 300L);
+
+		String xml = format(new ExtResultsXmlLogMessage(ctx, snap));
+
+		assertContainsAttr(xml, "filesize", "1KiB-2KiB");
 	}
 
 	@Test
@@ -147,12 +158,18 @@ class ExtResultsXmlLogMessageTest {
 	@SuppressWarnings("unchecked")
 	private static MetricsContext mockContext(
 					String stepId, OpType opType, int concurrency, long startTimeMillis, long itemSizeBytes) {
+		return mockContext(stepId, opType, concurrency, startTimeMillis, new SizeInBytes(itemSizeBytes));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static MetricsContext mockContext(
+					String stepId, OpType opType, int concurrency, long startTimeMillis, SizeInBytes itemDataSize) {
 		MetricsContext ctx = mock(MetricsContext.class);
 		when(ctx.loadStepId()).thenReturn(stepId);
 		when(ctx.opType()).thenReturn(opType);
 		when(ctx.concurrencyLimit()).thenReturn(concurrency);
 		when(ctx.startTimeStamp()).thenReturn(startTimeMillis);
-		when(ctx.itemDataSize()).thenReturn(new SizeInBytes(itemSizeBytes));
+		when(ctx.itemDataSize()).thenReturn(itemDataSize);
 		return ctx;
 	}
 

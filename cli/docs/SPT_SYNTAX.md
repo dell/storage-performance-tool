@@ -920,7 +920,7 @@ $ spt status --test-hosts entry,worker1,worker2
 Node status (port 9999)
 - [entry] entry: READY (http 200, status=ready, node=entry-0)
   run: state=RUNNING, run=run-123, progress=78.5%, message="Active test"
-  metrics: state=RUNNING, completion=78%, ops=1540/s, throughput=7.3MB/s
+  metrics: state=RUNNING, completion=78%, ops=1540/s, throughput=7.3MiB/s
 - [worker] worker1: READY (http 200, status=ready, node=worker-01)
   metrics: state=RUNNING, completion=76%, ops=1520/s
 - [worker] worker2: NOT READY (http 503, status=starting, node=worker-02)

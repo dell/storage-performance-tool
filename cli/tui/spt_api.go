@@ -568,8 +568,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		FailedCount:              step.Operations.FailedCount,
 		StepTime:                 step.ElapsedTimeSeconds,
 		OpsPerSec:                int64(math.Round(step.Operations.SuccessRateLast)),
-		MBPerSec:                 int64(step.Bandwidth.BytesRateLast / 1_000_000), // Convert bytes to MB
-		MeanLatency:              int64(math.Round(latencyUs)),                    // Schema 3 prefers p50.
+		MiBPerSec:                int64(step.Bandwidth.BytesRateLast / float64(constants.BytesPerMiB)),
+		MeanLatency:              int64(math.Round(latencyUs)), // Schema 3 prefers p50.
 		MeanDuration:             int64(math.Round(durationUs)),
 		MeanTTFB:                 int64(math.Round(ttfbUs)),
 		HasTTFB:                  hasTTFB,

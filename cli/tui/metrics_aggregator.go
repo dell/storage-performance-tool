@@ -123,7 +123,7 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 			allSameTTFBOpType = false
 		}
 		result.OpsPerSec += metric.OpsPerSec
-		result.MBPerSec += metric.MBPerSec
+		result.MiBPerSec += metric.MiBPerSec
 		result.SuccessCount += metric.SuccessCount
 		result.FailedCount += metric.FailedCount
 		result.ConcurrencyCurrent += metric.ConcurrencyCurrent
@@ -312,7 +312,7 @@ func isTTFBEligibleOpType(opType string) bool {
 // AggregateByOpType groups a slice of metrics by OpType and produces a combined
 // aggregate plus a per-op-type map. For non-mixed workloads (single metric) the
 // aggregate is the metric itself and the map has one entry. For mixed workloads
-// the aggregate sums additive fields (ops/s, MB/s, counts) across op types and
+// the aggregate sums additive fields (ops/s, MiB/s, counts) across op types and
 // uses ops-weighted averages for latency/duration. Combined TTFB is populated only
 // when every contributor has TTFB for the same READ or LIST operation type.
 func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetric, perOp map[string]*PerformanceMetric) {
@@ -357,7 +357,7 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 			allSameTTFBOpType = false
 		}
 		agg.OpsPerSec += m.OpsPerSec
-		agg.MBPerSec += m.MBPerSec
+		agg.MiBPerSec += m.MiBPerSec
 		agg.SuccessCount += m.SuccessCount
 		agg.FailedCount += m.FailedCount
 		agg.ConcurrencyCurrent += m.ConcurrencyCurrent

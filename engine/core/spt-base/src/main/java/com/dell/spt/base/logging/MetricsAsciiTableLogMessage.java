@@ -1,6 +1,7 @@
 package com.dell.spt.base.logging;
 
 import static com.dell.spt.base.Constants.MIB;
+import static com.dell.spt.base.Constants.UNIT_MIB_PER_SECOND;
 import static com.dell.spt.base.logging.LogUtil.RESET;
 import static com.dell.spt.base.logging.LogUtil.getFailureRatioAnsiColorCode;
 
@@ -27,7 +28,9 @@ public class MetricsAsciiTableLogMessage extends LogMessageBase {
 					+ LINE_SEPARATOR
 					+ " (last 10 |            | type |---------------------|-------------------| Time  |----------------| Latency  | Duration  "
 					+ LINE_SEPARATOR
-					+ " symbols) |yyMMddHHmmss|      | Current  |   Mean   |   Success  |Failed|  [s]  | [op/s] |[MB/s] |  [us]    |   [us]    "
+					+ " symbols) |yyMMddHHmmss|      | Current  |   Mean   |   Success  |Failed|  [s]  | [op/s] |["
+					+ UNIT_MIB_PER_SECOND
+					+ "]|  [us]    |   [us]    "
 					+ LINE_SEPARATOR
 					+ "----------|------------|------|----------|----------|------------|------|-------|--------|-------|----------|-----------"
 					+ LINE_SEPARATOR;

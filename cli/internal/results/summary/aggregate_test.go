@@ -4,7 +4,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
+
+func TestFormatBytesUsesIecLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		bytes int64
+		want  string
+	}{
+		{name: "bytes", bytes: 512, want: "512 B"},
+		{name: "kib", bytes: constants.BytesPerKiB, want: "1.00 KiB"},
+		{name: "mib", bytes: constants.BytesPerMiB, want: "1.00 MiB"},
+		{name: "gib", bytes: constants.BytesPerGiB, want: "1.00 GiB"},
+		{name: "tib", bytes: constants.BytesPerTiB, want: "1.00 TiB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatBytes(tt.bytes); got != tt.want {
+				t.Fatalf("formatBytes(%d) = %q, want %q", tt.bytes, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAggregateBuildsSummary(t *testing.T) {
 	t.Parallel()
@@ -70,8 +97,8 @@ func TestAggregateBuildsSummary(t *testing.T) {
 					StepDurationSeconds: 7.554,
 					ThroughputAvgOps:    334.6964285714,
 					ThroughputLastOps:   320.2810720618962,
-					BandwidthAvgMBps:    334.6964285714,
-					BandwidthLastMBps:   320.2810720618962,
+					BandwidthAvgMiBps:   334.6964285714,
+					BandwidthLastMiBps:  320.2810720618962,
 					LatencyAvgMicros:    79900,
 					LatencyP50Micros:    79876,
 					Concurrency:         8,
@@ -97,8 +124,8 @@ func TestAggregateBuildsSummary(t *testing.T) {
 					StepDurationSeconds: 2.18,
 					ThroughputAvgOps:    1227.0,
 					ThroughputLastOps:   1144.0,
-					BandwidthAvgMBps:    0,
-					BandwidthLastMBps:   0,
+					BandwidthAvgMiBps:   0,
+					BandwidthLastMiBps:  0,
 					LatencyAvgMicros:    23400,
 					LatencyP50Micros:    23000,
 					Concurrency:         8,
@@ -322,10 +349,10 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 		Metrics: &MetricsTotals{
 			StepID: stepID,
 			Rows: []MetricsTotalsRow{
-				{Operation: "READ", SuccessCount: 445, FailureCount: 5, SizeBytes: 1866465280, StepDurationSeconds: 30, ThroughputAvgOps: 14.8, ThroughputLastOps: 13.9, BandwidthAvgMBps: 59.3, BandwidthLastMBps: 55.6, LatencyAvgMicros: 8100, LatencyP50Micros: 6200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
-				{Operation: "STAT", SuccessCount: 301, FailureCount: 1, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 10.0, ThroughputLastOps: 9.5, BandwidthAvgMBps: 0, BandwidthLastMBps: 0, LatencyAvgMicros: 4200, LatencyP50Micros: 3100, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
-				{Operation: "CREATE", SuccessCount: 151, FailureCount: 2, SizeBytes: 633339904, StepDurationSeconds: 30, ThroughputAvgOps: 5.1, ThroughputLastOps: 4.8, BandwidthAvgMBps: 21.1, BandwidthLastMBps: 20.0, LatencyAvgMicros: 11200, LatencyP50Micros: 8700, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
-				{Operation: "DELETE", SuccessCount: 103, FailureCount: 4, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 3.6, ThroughputLastOps: 3.1, BandwidthAvgMBps: 0, BandwidthLastMBps: 0, LatencyAvgMicros: 7300, LatencyP50Micros: 5200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "READ", SuccessCount: 445, FailureCount: 5, SizeBytes: 1866465280, StepDurationSeconds: 30, ThroughputAvgOps: 14.8, ThroughputLastOps: 13.9, BandwidthAvgMiBps: 59.3, BandwidthLastMiBps: 55.6, LatencyAvgMicros: 8100, LatencyP50Micros: 6200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "STAT", SuccessCount: 301, FailureCount: 1, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 10.0, ThroughputLastOps: 9.5, BandwidthAvgMiBps: 0, BandwidthLastMiBps: 0, LatencyAvgMicros: 4200, LatencyP50Micros: 3100, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "CREATE", SuccessCount: 151, FailureCount: 2, SizeBytes: 633339904, StepDurationSeconds: 30, ThroughputAvgOps: 5.1, ThroughputLastOps: 4.8, BandwidthAvgMiBps: 21.1, BandwidthLastMiBps: 20.0, LatencyAvgMicros: 11200, LatencyP50Micros: 8700, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
+				{Operation: "DELETE", SuccessCount: 103, FailureCount: 4, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 3.6, ThroughputLastOps: 3.1, BandwidthAvgMiBps: 0, BandwidthLastMiBps: 0, LatencyAvgMicros: 7300, LatencyP50Micros: 5200, Concurrency: 8, ConcurrencyMean: 8, NodeCount: 4, SampleTimestamp: "2026-06-04T18:00:10Z"},
 			},
 		},
 	}
@@ -371,11 +398,11 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 	if !approxEqual(mixed.Metrics.ThroughputLastOps, 31.3, 0.001) {
 		t.Fatalf("mixed last throughput = %.3f", mixed.Metrics.ThroughputLastOps)
 	}
-	if !approxEqual(mixed.Metrics.BandwidthAvgMBps, 80.4, 0.001) {
-		t.Fatalf("mixed avg bandwidth = %.3f", mixed.Metrics.BandwidthAvgMBps)
+	if !approxEqual(mixed.Metrics.BandwidthAvgMiBps, 80.4, 0.001) {
+		t.Fatalf("mixed avg bandwidth = %.3f", mixed.Metrics.BandwidthAvgMiBps)
 	}
-	if !approxEqual(mixed.Metrics.BandwidthLastMBps, 75.6, 0.001) {
-		t.Fatalf("mixed last bandwidth = %.3f", mixed.Metrics.BandwidthLastMBps)
+	if !approxEqual(mixed.Metrics.BandwidthLastMiBps, 75.6, 0.001) {
+		t.Fatalf("mixed last bandwidth = %.3f", mixed.Metrics.BandwidthLastMiBps)
 	}
 	if !approxEqual(summary.Totals.DurationSeconds, 30, 0.001) {
 		t.Fatalf("totals duration seconds = %.3f, want 30", summary.Totals.DurationSeconds)
@@ -460,8 +487,8 @@ func TestAggregateBuildsMixedSummaryFromScenarioWorkloadType(t *testing.T) {
 		Metrics: &MetricsTotals{
 			StepID: stepID,
 			Rows: []MetricsTotalsRow{
-				{Operation: "READ", SuccessCount: 10, SizeBytes: 40960, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
-				{Operation: "CREATE", SuccessCount: 5, SizeBytes: 20480, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
+				{Operation: "READ", SuccessCount: 10, SizeBytes: 40960, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMiBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
+				{Operation: "CREATE", SuccessCount: 5, SizeBytes: 20480, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMiBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
 			},
 		},
 	}
@@ -502,8 +529,8 @@ func TestAggregateMixedSummaryHidesZeroConfiguredDistribution(t *testing.T) {
 		Metrics: &MetricsTotals{
 			StepID: stepID,
 			Rows: []MetricsTotalsRow{
-				{Operation: "READ", SuccessCount: 12, SizeBytes: 49152, StepDurationSeconds: 30, ThroughputAvgOps: 0.4, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4200, LatencyP50Micros: 3100},
-				{Operation: "STAT", SuccessCount: 8, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0, LatencyAvgMicros: 2800, LatencyP50Micros: 2000},
+				{Operation: "READ", SuccessCount: 12, SizeBytes: 49152, StepDurationSeconds: 30, ThroughputAvgOps: 0.4, BandwidthAvgMiBps: 0.2, LatencyAvgMicros: 4200, LatencyP50Micros: 3100},
+				{Operation: "STAT", SuccessCount: 8, SizeBytes: 0, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMiBps: 0, LatencyAvgMicros: 2800, LatencyP50Micros: 2000},
 			},
 		},
 	}
@@ -548,8 +575,8 @@ func TestAggregateBuildsMixedSummaryOrdersKnownOpsBeforeUnknowns(t *testing.T) {
 			Rows: []MetricsTotalsRow{
 				{Operation: "DELETE", SuccessCount: 5, StepDurationSeconds: 30, ThroughputAvgOps: 0.1, LatencyAvgMicros: 3000, LatencyP50Micros: 2000},
 				{Operation: "LIST", SuccessCount: 3, StepDurationSeconds: 30, ThroughputAvgOps: 0.1, LatencyAvgMicros: 2000, LatencyP50Micros: 1500},
-				{Operation: "CREATE", SuccessCount: 7, SizeBytes: 28672, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
-				{Operation: "READ", SuccessCount: 11, SizeBytes: 45056, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
+				{Operation: "CREATE", SuccessCount: 7, SizeBytes: 28672, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, BandwidthAvgMiBps: 0.1, LatencyAvgMicros: 5000, LatencyP50Micros: 3500},
+				{Operation: "READ", SuccessCount: 11, SizeBytes: 45056, StepDurationSeconds: 30, ThroughputAvgOps: 0.3, BandwidthAvgMiBps: 0.2, LatencyAvgMicros: 4000, LatencyP50Micros: 3000},
 				{Operation: "STAT", SuccessCount: 9, StepDurationSeconds: 30, ThroughputAvgOps: 0.2, LatencyAvgMicros: 2500, LatencyP50Micros: 1800},
 			},
 		},

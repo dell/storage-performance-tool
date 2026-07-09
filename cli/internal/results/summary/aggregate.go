@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 // RunSummary represents the aggregated data set used when rendering result summaries.
@@ -56,7 +58,7 @@ type HostSummary struct {
 type WorkloadSummary struct {
 	Type              string
 	ObjectSizeBytes   int64
-	ObjectSizeMB      float64
+	ObjectSizeMiB     float64
 	ObjectSizeGiB     float64
 	ObjectSizeHuman   string
 	ObjectCount       int64
@@ -107,35 +109,35 @@ type OperationBreakdown struct {
 
 // PhaseMetrics holds derived statistics for a single run phase.
 type PhaseMetrics struct {
-	SuccessCount      int64
-	FailureCount      int64
-	DataBytes         int64
-	DataMB            float64
-	DataGiB           float64
-	HasDataTransfer   bool
-	DurationSeconds   float64
-	DurationHuman     string
-	ThroughputAvgOps  float64
-	ThroughputLastOps float64
-	BandwidthAvgMBps  float64
-	BandwidthLastMBps float64
-	LatencyHeadlineMs float64
-	LatencyMedianMs   float64
-	LatencyP90Ms      float64
-	LatencyP99Ms      float64
-	LatencyP999Ms     float64
-	TTFBMedianMs      float64
-	TTFBP90Ms         float64
-	TTFBP99Ms         float64
-	TTFBP999Ms        float64
-	ObjectSizeBytes   int64
-	ObjectSizeMB      float64
-	ObjectSizeGiB     float64
-	ObjectSizeHuman   string
-	Concurrency       float64
-	ConcurrencyMean   float64
-	NodeCount         int64
-	SampleTimestamp   string
+	SuccessCount       int64
+	FailureCount       int64
+	DataBytes          int64
+	DataMiB            float64
+	DataGiB            float64
+	HasDataTransfer    bool
+	DurationSeconds    float64
+	DurationHuman      string
+	ThroughputAvgOps   float64
+	ThroughputLastOps  float64
+	BandwidthAvgMiBps  float64
+	BandwidthLastMiBps float64
+	LatencyHeadlineMs  float64
+	LatencyMedianMs    float64
+	LatencyP90Ms       float64
+	LatencyP99Ms       float64
+	LatencyP999Ms      float64
+	TTFBMedianMs       float64
+	TTFBP90Ms          float64
+	TTFBP99Ms          float64
+	TTFBP999Ms         float64
+	ObjectSizeBytes    int64
+	ObjectSizeMiB      float64
+	ObjectSizeGiB      float64
+	ObjectSizeHuman    string
+	Concurrency        float64
+	ConcurrencyMean    float64
+	NodeCount          int64
+	SampleTimestamp    string
 }
 
 // RunTotals aggregates run-wide duration and data transfer metrics.
@@ -143,14 +145,14 @@ type RunTotals struct {
 	DurationSeconds float64
 	DurationHuman   string
 	DataBytes       int64
-	DataMB          float64
+	DataMiB         float64
 	DataGiB         float64
 }
 
 const (
-	bytesInKB             = 1024
-	bytesInMB             = bytesInKB * 1024
-	bytesInGB             = bytesInMB * 1024
+	bytesInKiB            = constants.BytesPerKiB
+	bytesInMiB            = constants.BytesPerMiB
+	bytesInGiB            = constants.BytesPerGiB
 	reportOperationRead   = "READ"
 	reportOperationStat   = "STAT"
 	reportOperationCreate = "CREATE"
@@ -245,7 +247,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	summary := WorkloadSummary{
 		Type:              workloadType,
 		ObjectSizeBytes:   sizeBytes,
-		ObjectSizeMB:      bytesToMB(sizeBytes),
+		ObjectSizeMiB:     bytesToMiB(sizeBytes),
 		ObjectSizeGiB:     bytesToGiB(sizeBytes),
 		ObjectSizeHuman:   formatBytes(sizeBytes),
 		ObjectCount:       params.ObjectCount,
@@ -319,7 +321,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 	}
 
 	totals.DurationHuman = formatSeconds(totals.DurationSeconds)
-	totals.DataMB = bytesToMB(totals.DataBytes)
+	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
 }
@@ -400,8 +402,8 @@ func deriveMixedMetrics(stepData *StepData, workload WorkloadSummary, objectSize
 		metrics.DataBytes += opMetrics.DataBytes
 		metrics.ThroughputAvgOps += opMetrics.ThroughputAvgOps
 		metrics.ThroughputLastOps += opMetrics.ThroughputLastOps
-		metrics.BandwidthAvgMBps += opMetrics.BandwidthAvgMBps
-		metrics.BandwidthLastMBps += opMetrics.BandwidthLastMBps
+		metrics.BandwidthAvgMiBps += opMetrics.BandwidthAvgMiBps
+		metrics.BandwidthLastMiBps += opMetrics.BandwidthLastMiBps
 		if opMetrics.DurationSeconds > metrics.DurationSeconds {
 			metrics.DurationSeconds = opMetrics.DurationSeconds
 		}
@@ -419,12 +421,12 @@ func deriveMixedMetrics(stepData *StepData, workload WorkloadSummary, objectSize
 		}
 	}
 	metrics.DurationHuman = formatSeconds(metrics.DurationSeconds)
-	metrics.DataMB = bytesToMB(metrics.DataBytes)
+	metrics.DataMiB = bytesToMiB(metrics.DataBytes)
 	metrics.DataGiB = bytesToGiB(metrics.DataBytes)
 	metrics.HasDataTransfer = metrics.DataBytes > 0
 	if objectSizeBytes > 0 {
 		metrics.ObjectSizeBytes = objectSizeBytes
-		metrics.ObjectSizeMB = bytesToMB(objectSizeBytes)
+		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
 	}
@@ -449,8 +451,8 @@ func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) Phas
 		metrics.DataBytes += row.SizeBytes
 		metrics.ThroughputAvgOps += row.ThroughputAvgOps
 		metrics.ThroughputLastOps += row.ThroughputLastOps
-		metrics.BandwidthAvgMBps += row.BandwidthAvgMBps
-		metrics.BandwidthLastMBps += row.BandwidthLastMBps
+		metrics.BandwidthAvgMiBps += row.BandwidthAvgMiBps
+		metrics.BandwidthLastMiBps += row.BandwidthLastMiBps
 		if row.StepDurationSeconds > metrics.DurationSeconds {
 			metrics.DurationSeconds = row.StepDurationSeconds
 		}
@@ -470,7 +472,7 @@ func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) Phas
 			best = row
 		}
 	}
-	metrics.DataMB = bytesToMB(metrics.DataBytes)
+	metrics.DataMiB = bytesToMiB(metrics.DataBytes)
 	metrics.DataGiB = bytesToGiB(metrics.DataBytes)
 	metrics.HasDataTransfer = metrics.DataBytes > 0
 	metrics.DurationHuman = formatSeconds(metrics.DurationSeconds)
@@ -485,7 +487,7 @@ func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) Phas
 	metrics.TTFBP999Ms = best.TTFBP999Micros / 1000.0
 	if objectSizeBytes > 0 {
 		metrics.ObjectSizeBytes = objectSizeBytes
-		metrics.ObjectSizeMB = bytesToMB(objectSizeBytes)
+		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
 	}
@@ -579,36 +581,36 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 	row := selectMetricsRow(stepData.Metrics, operationHint)
 
 	metrics := &PhaseMetrics{
-		SuccessCount:      row.SuccessCount,
-		FailureCount:      row.FailureCount,
-		DataBytes:         row.SizeBytes,
-		DataMB:            bytesToMB(row.SizeBytes),
-		DataGiB:           bytesToGiB(row.SizeBytes),
-		HasDataTransfer:   row.SizeBytes > 0,
-		DurationSeconds:   row.StepDurationSeconds,
-		DurationHuman:     formatSeconds(row.StepDurationSeconds),
-		ThroughputAvgOps:  row.ThroughputAvgOps,
-		ThroughputLastOps: row.ThroughputLastOps,
-		BandwidthAvgMBps:  row.BandwidthAvgMBps,
-		BandwidthLastMBps: row.BandwidthLastMBps,
-		LatencyHeadlineMs: preferredLatencyMicros(row) / 1000.0,
-		LatencyMedianMs:   row.LatencyP50Micros / 1000.0,
-		LatencyP90Ms:      row.LatencyP90Micros / 1000.0,
-		LatencyP99Ms:      row.LatencyP99Micros / 1000.0,
-		LatencyP999Ms:     row.LatencyP999Micros / 1000.0,
-		TTFBMedianMs:      row.TTFBP50Micros / 1000.0,
-		TTFBP90Ms:         row.TTFBP90Micros / 1000.0,
-		TTFBP99Ms:         row.TTFBP99Micros / 1000.0,
-		TTFBP999Ms:        row.TTFBP999Micros / 1000.0,
-		Concurrency:       row.Concurrency,
-		ConcurrencyMean:   row.ConcurrencyMean,
-		NodeCount:         row.NodeCount,
-		SampleTimestamp:   row.SampleTimestamp,
+		SuccessCount:       row.SuccessCount,
+		FailureCount:       row.FailureCount,
+		DataBytes:          row.SizeBytes,
+		DataMiB:            bytesToMiB(row.SizeBytes),
+		DataGiB:            bytesToGiB(row.SizeBytes),
+		HasDataTransfer:    row.SizeBytes > 0,
+		DurationSeconds:    row.StepDurationSeconds,
+		DurationHuman:      formatSeconds(row.StepDurationSeconds),
+		ThroughputAvgOps:   row.ThroughputAvgOps,
+		ThroughputLastOps:  row.ThroughputLastOps,
+		BandwidthAvgMiBps:  row.BandwidthAvgMiBps,
+		BandwidthLastMiBps: row.BandwidthLastMiBps,
+		LatencyHeadlineMs:  preferredLatencyMicros(row) / 1000.0,
+		LatencyMedianMs:    row.LatencyP50Micros / 1000.0,
+		LatencyP90Ms:       row.LatencyP90Micros / 1000.0,
+		LatencyP99Ms:       row.LatencyP99Micros / 1000.0,
+		LatencyP999Ms:      row.LatencyP999Micros / 1000.0,
+		TTFBMedianMs:       row.TTFBP50Micros / 1000.0,
+		TTFBP90Ms:          row.TTFBP90Micros / 1000.0,
+		TTFBP99Ms:          row.TTFBP99Micros / 1000.0,
+		TTFBP999Ms:         row.TTFBP999Micros / 1000.0,
+		Concurrency:        row.Concurrency,
+		ConcurrencyMean:    row.ConcurrencyMean,
+		NodeCount:          row.NodeCount,
+		SampleTimestamp:    row.SampleTimestamp,
 	}
 
 	if objectSizeBytes > 0 {
 		metrics.ObjectSizeBytes = objectSizeBytes
-		metrics.ObjectSizeMB = bytesToMB(objectSizeBytes)
+		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
 	}
@@ -732,30 +734,30 @@ func sizeUnitMultiplier(unit string) float64 {
 	case "", "B":
 		return 1
 	case "K", "KB", "KIB":
-		return bytesInKB
+		return float64(bytesInKiB)
 	case "M", "MB", "MIB":
-		return bytesInMB
+		return float64(bytesInMiB)
 	case "G", "GB", "GIB":
-		return bytesInGB
+		return float64(bytesInGiB)
 	case "T", "TB", "TIB":
-		return bytesInGB * 1024
+		return float64(constants.BytesPerTiB)
 	default:
 		return 0
 	}
 }
 
-func bytesToMB(bytes int64) float64 {
+func bytesToMiB(bytes int64) float64 {
 	if bytes == 0 {
 		return 0
 	}
-	return float64(bytes) / float64(bytesInMB)
+	return float64(bytes) / float64(bytesInMiB)
 }
 
 func bytesToGiB(bytes int64) float64 {
 	if bytes == 0 {
 		return 0
 	}
-	return float64(bytes) / float64(bytesInGB)
+	return float64(bytes) / float64(bytesInGiB)
 }
 
 func formatBytes(bytes int64) string {
@@ -764,14 +766,16 @@ func formatBytes(bytes int64) string {
 	}
 	abs := math.Abs(float64(bytes))
 	switch {
-	case abs >= float64(bytesInGB):
-		return fmt.Sprintf("%.2f GiB", float64(bytes)/float64(bytesInGB))
-	case abs >= float64(bytesInMB):
-		return fmt.Sprintf("%.2f MiB", float64(bytes)/float64(bytesInMB))
-	case abs >= float64(bytesInKB):
-		return fmt.Sprintf("%.2f KiB", float64(bytes)/float64(bytesInKB))
+	case abs >= float64(constants.BytesPerTiB):
+		return fmt.Sprintf("%.2f %s", float64(bytes)/float64(constants.BytesPerTiB), constants.UnitTiB)
+	case abs >= float64(bytesInGiB):
+		return fmt.Sprintf("%.2f %s", float64(bytes)/float64(bytesInGiB), constants.UnitGiB)
+	case abs >= float64(bytesInMiB):
+		return fmt.Sprintf("%.2f %s", float64(bytes)/float64(bytesInMiB), constants.UnitMiB)
+	case abs >= float64(bytesInKiB):
+		return fmt.Sprintf("%.2f %s", float64(bytes)/float64(bytesInKiB), constants.UnitKiB)
 	default:
-		return fmt.Sprintf("%d B", bytes)
+		return fmt.Sprintf("%d %s", bytes, constants.UnitByte)
 	}
 }
 

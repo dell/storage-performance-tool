@@ -13,7 +13,7 @@ import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.system.SizeInBytes;
+import com.dell.spt.base.util.BinarySizeFormat;
 import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
@@ -107,7 +107,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 						() -> Loggers.MSG.info(
 										"\"{}\": transferred {} I/O trace data...",
 										loadStepId,
-										SizeInBytes.formatFixedSize(byteCounter.longValue())),
+										BinarySizeFormat.formatFixedSize(byteCounter.longValue())),
 						0,
 						OUTPUT_PROGRESS_PERIOD_MILLIS,
 						TimeUnit.MILLISECONDS);
@@ -126,7 +126,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 			Loggers.MSG.info(
 							"\"{}\": transferred {} of the operation traces data",
 							loadStepId,
-							SizeInBytes.formatFixedSize(byteCounter.longValue()));
+							BinarySizeFormat.formatFixedSize(byteCounter.longValue()));
 		}
 	}
 
@@ -148,7 +148,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 							"Reached end of remote operation trace file '{}' @ '{}' after {}",
 							remoteIoTraceLogFileName,
 							fileMgr,
-							SizeInBytes.formatFixedSize(transferredByteCount));
+							BinarySizeFormat.formatFixedSize(transferredByteCount));
 		} catch (final RemoteException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to read the data from the remote file");
 		} catch (final IOException e) {
@@ -156,7 +156,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 		} finally {
 			Loggers.MSG.debug(
 							"Transferred {} of the remote operation traces data from the remote file \"{}\" @ \"{}\"",
-							SizeInBytes.formatFixedSize(transferredByteCount),
+							BinarySizeFormat.formatFixedSize(transferredByteCount),
 							remoteIoTraceLogFileName,
 							fileMgr);
 		}

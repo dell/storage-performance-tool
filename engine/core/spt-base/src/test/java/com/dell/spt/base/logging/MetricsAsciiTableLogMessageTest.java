@@ -82,6 +82,10 @@ class MetricsAsciiTableLogMessageTest {
 
 		assertTrue(out1.startsWith(MetricsAsciiTableLogMessage.TABLE_HEADER),
 						"Table header must precede the first data row");
+		assertTrue(MetricsAsciiTableLogMessage.TABLE_HEADER.contains("[MiB/s]"),
+						"Bandwidth header should use binary units");
+		assertFalse(MetricsAsciiTableLogMessage.TABLE_HEADER.contains("[MB/s]"),
+						"Bandwidth header should not use decimal labels");
 
 		assertTrue(out1.contains("stepA"), "Step id should be present in the row");
 		assertTrue(out1.contains("|READ  |") || out1.contains("|READ |"),

@@ -12,7 +12,7 @@ import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
-import com.github.akurilov.commons.system.SizeInBytes;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
@@ -140,7 +140,7 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 						() -> Loggers.MSG.info(
 										"\"{}\" <- transferred {} of the output items data...",
 										itemOutputFile,
-										SizeInBytes.formatFixedSize(byteCounter.longValue())),
+										BinarySizeFormat.formatFixedSize(byteCounter.longValue())),
 						0,
 						OUTPUT_PROGRESS_PERIOD_MILLIS,
 						TimeUnit.MILLISECONDS);
@@ -159,7 +159,7 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 			Loggers.MSG.info(
 							"\"{}\" <- transferred {} of the output items data",
 							itemOutputFile,
-							SizeInBytes.formatFixedSize(byteCounter.longValue()));
+							BinarySizeFormat.formatFixedSize(byteCounter.longValue()));
 		}
 	}
 
@@ -188,13 +188,13 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 							"Reached end of remote item output file '{}' @ '{}' after {}",
 							remoteItemOutputFileName,
 							fileMgr,
-							SizeInBytes.formatFixedSize(transferredByteCount));
+							BinarySizeFormat.formatFixedSize(transferredByteCount));
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "Remote items output file transfer failure");
 		} finally {
 			Loggers.MSG.debug(
 							"{} of items output data transferred from \"{}\" @ \"{}\" to \"{}\"",
-							SizeInBytes.formatFixedSize(transferredByteCount),
+							BinarySizeFormat.formatFixedSize(transferredByteCount),
 							remoteItemOutputFileName,
 							fileMgr,
 							localItemOutput);

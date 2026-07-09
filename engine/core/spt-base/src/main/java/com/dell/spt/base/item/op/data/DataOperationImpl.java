@@ -1,6 +1,6 @@
 package com.dell.spt.base.item.op.data;
 
-import static com.github.akurilov.commons.system.SizeInBytes.formatFixedSize;
+import static com.dell.spt.base.util.BinarySizeFormat.formatFixedSize;
 import static java.lang.System.nanoTime;
 
 import com.dell.spt.base.item.DataItem;

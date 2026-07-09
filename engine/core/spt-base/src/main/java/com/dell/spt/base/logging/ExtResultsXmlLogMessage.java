@@ -2,12 +2,14 @@ package com.dell.spt.base.logging;
 
 import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.MIB;
+import static com.dell.spt.base.Constants.UNIT_MIB_PER_SECOND_XML;
 
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.util.BinarySizeFormat;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
 import java.time.ZoneOffset;
@@ -96,7 +98,7 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append('"');
 
 		strb.append(" filesize=\"")
-						.append(metricsCtx.itemDataSize())
+						.append(BinarySizeFormat.formatSize(metricsCtx.itemDataSize()))
 						.append('"');
 
 		strb.append(" tps=\"")
@@ -105,7 +107,9 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 
 		strb.append(" bw=\"")
 						.append(byteSnapshot.mean() / MIB)
-						.append("\" bw_unit=\"MBps\"");
+						.append("\" bw_unit=\"")
+						.append(UNIT_MIB_PER_SECOND_XML)
+						.append('"');
 
 		strb.append(" latency=\"")
 						.append(latencySnapshot.mean())

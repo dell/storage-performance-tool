@@ -1412,7 +1412,7 @@ collectLoop:
 					Phase:       result.phase,
 				}
 				logging.LogMetricsParsing("polled node metrics", "node", result.nodeID,
-					"ops_per_sec", result.metrics.OpsPerSec, "mb_per_sec", result.metrics.MBPerSec,
+					"ops_per_sec", result.metrics.OpsPerSec, "mib_per_sec", result.metrics.MiBPerSec,
 					"success", result.metrics.SuccessCount)
 			} else {
 				results.Status[result.nodeID] = NodeConnectionStatus{

@@ -19,7 +19,7 @@ func TestLiveView_HostColumn_WithIconsAndPlaceholders(t *testing.T) {
 	mc.AddSample(agg)
 
 	// Node A: has metrics and connected
-	nodeA := &PerformanceMetric{Timestamp: now, OpsPerSec: 1000, MBPerSec: 100, SuccessCount: 500}
+	nodeA := &PerformanceMetric{Timestamp: now, OpsPerSec: 1000, MiBPerSec: 100, SuccessCount: 500}
 	// Node B: no metrics, disconnected
 	update := &MultiNodeMetricsUpdate{
 		Aggregated: &agg,

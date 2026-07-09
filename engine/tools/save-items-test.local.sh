@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # save-items-test.local.sh – exercise the save-items / read-from-file feature
 #
-# Runs a small write-then-read scenario (1000 × 1 KB) via the engine JAR
+# Runs a small write-then-read scenario (1000 × 1 KiB) via the engine JAR
 # to verify items.csv round-tripping:
 #   Phase 1  – create 1000 objects, saving items.csv
 #   Phase 2  – read back every object using items.csv

@@ -59,7 +59,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
+          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
           pattern: "%m%n"
       - name: metricsThresholdFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.threshold.csv"
@@ -67,7 +67,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
+          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
           pattern: "%m%n"
       - name: metricsFileTotal
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.total.csv"
@@ -83,7 +83,7 @@ Configuration:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
         PatternLayout:
-          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
+          header: "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],LatencyMed[us],LatencyHiQ[us],LatencyMax[us]\n"
           pattern: "%m%n"
       - name: opTraceFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}op.trace.csv"

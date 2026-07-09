@@ -171,7 +171,7 @@ Table output example:
 ------------------------------------------------------------------------------------------------------------------------
  Step Id  | Timestamp  |  Op  |     Concurrency     |       Count       | Step  |   Last Rate    |  Mean    |   Mean
  (last 10 |            | type |---------------------|-------------------| Time  |----------------| Latency  | Duration
- symbols) |yyMMddHHmmss|      | Current  |   Mean   |   Success  |Failed|  [s]  | [op/s] |[MB/s] |  [us]    |   [us]
+ symbols) |yyMMddHHmmss|      | Current  |   Mean   |   Success  |Failed|  [s]  | [op/s] |[MiB/s]|  [us]    |   [us]
 ----------|------------|------|----------|----------|------------|------|-------|--------|-------|----------|-----------
 1881901842|170824183431|CREATE|         0|0.0       |           0|     0|0.011  |0.0     |0.0    |         0|          0
 1881901842|170824183441|CREATE|        29|0.7765    |          23|     0|10.033 |1.060711|106.071|    571575|    2437084
@@ -207,11 +207,11 @@ Count / Success       | The count of the items processed sucessfully.
 Count / Failed        | The count of the items processed with a failure.
 Step Time [s]         | The test step elapsed time in seconds. Note that the step elapsing more than 115 days will cause the cell overflow as far as only 7 characters are available for the output.
 Last Rate / [op/s]    | The moving average operations per second rate for the last period (10 seconds by default).
-Last Rate / [MB/s]    | The moving average megabytes per second rate for the last period (10 seconds by default).
+Last Rate / [MiB/s]   | The moving average mebibytes per second rate for the last period (10 seconds by default).
 Mean Latency [us]     | The last mean latency measured in the microseconds.
 Mean Duration [us]    | The last mean operation duration measured in the microseconds.
 
-Spt only uses 2^10 (1024) multiplier. So 1MB is 1_048_576 bytes.
+Spt uses 2^10 (1024) multipliers for byte-size calculations. Legacy input suffixes such as `MB` are accepted as binary aliases, and displayed output uses IEC labels such as `MiB`.
 
 ### 2.1.2. Files
 
@@ -235,8 +235,8 @@ StepDuration[s] | Total step duration
 DurationSum[s]  | Total sum of the operations durations
 TPAvg[op/s]     | Total average throughput
 TPLast[op/s]    | Last final moving average throughput
-BWAvg[MB/s]     | Total average bandwidth
-BWLast[MB/s]    | Last final moving average bandwidth
+BWAvg[MiB/s]    | Total average bandwidth
+BWLast[MiB/s]   | Last final moving average bandwidth
 DurationAvg[us] | Total average operations duration
 DurationMin[us] | Minimum operation duration
 DurationLoQ[us] | Low quartile of the operations duration distribution
@@ -279,14 +279,14 @@ Console summary metrics output has YAML format for the better readability:
   Operations Count:
     Successful:                4096
     Failed:                    0
-  Transfer Size:               40MB
+  Transfer Size:               40MiB
   Duration [s]:
     Elapsed:                   6
     Sum:                       2.471925
   Throughput [op/s]:
     Last:                      554.2261935730298
     Mean:                      601.8219218336761
-  Bandwidth [MB/s]:
+  Bandwidth [MiB/s]:
     Last:                      5.4123651716116195
     Mean:                      5.877167205406994
   Operations Duration [us]:

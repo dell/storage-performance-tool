@@ -465,7 +465,7 @@ Each metric contains also the following labels/tags:
 |`load_op_type`|load-op-type|string, [takes one of these values](../../../usage/load/operations/types#load-operation-types)|
 |`storage_driver_limit_concurrency`|storage-driver-limit-concurrency|integer|
 |`node_count`|the count of the Spt nodes involved into the given load step|integer|
-|`item_data_size`|item-data-size|string with the unit suffix (KB, MB, ...)|
+|`item_data_size`|item-data-size|string with the unit suffix (KiB, MiB, ...; legacy KB/MB aliases are accepted)|
 |`user_comment`|run-comment|string|
 |`run_id`|run-id|string|
 

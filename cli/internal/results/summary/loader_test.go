@@ -98,7 +98,7 @@ func TestLoaderLoadSuccess(t *testing.T) {
 	if got := create.Metrics.Rows[0].SuccessCount; got != 2499 {
 		t.Fatalf("create success count = %d", got)
 	}
-	if got := create.Metrics.Rows[0].BandwidthAvgMBps; got <= 0 {
+	if got := create.Metrics.Rows[0].BandwidthAvgMiBps; got <= 0 {
 		t.Fatalf("create bandwidth avg not parsed: %f", got)
 	}
 	if len(data.MissingExpectedSteps) != 0 {
@@ -186,6 +186,26 @@ func TestLoaderLoadMixedDistributionAndMultiRowMetrics(t *testing.T) {
 	}
 	if got := step.Metrics.Rows[3].FailureCount; got != 4 {
 		t.Fatalf("delete failure count = %d", got)
+	}
+}
+
+func TestParseMetricsTotalsAcceptsLegacyMBpsHeaders(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "metrics.total.csv")
+	content := legacySampleMetricsCSV([]string{
+		`"2026-06-04T18:00:10Z",READ,8,4,8,8,445,5,1866465280,30.0,20.0,14.8,13.9,59.3,55.6,8100,2200,4300,6200,9100,18000,8100,2200,4300,6200,9100,18000`,
+	})
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write metrics: %v", err)
+	}
+
+	metrics, err := parseMetricsTotals("legacy-step", path)
+	if err != nil {
+		t.Fatalf("parseMetricsTotals returned error: %v", err)
+	}
+	if got := metrics.Rows[0].BandwidthAvgMiBps; got != 59.3 {
+		t.Fatalf("legacy bandwidth avg = %f, want 59.3", got)
 	}
 }
 
@@ -375,7 +395,15 @@ func statusForContent(content string) string {
 }
 
 func sampleMetricsCSV(rows []string) string {
-	header := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]"
+	return sampleMetricsCSVWithHeader(rows, "BWAvg[MiB/s]", "BWLast[MiB/s]")
+}
+
+func legacySampleMetricsCSV(rows []string) string {
+	return sampleMetricsCSVWithHeader(rows, "BWAvg[MB/s]", "BWLast[MB/s]")
+}
+
+func sampleMetricsCSVWithHeader(rows []string, bandwidthAvgColumn string, bandwidthLastColumn string) string {
+	header := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s]," + bandwidthAvgColumn + "," + bandwidthLastColumn + ",DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]"
 	builder := strings.Builder{}
 	builder.WriteString(header)
 	builder.WriteString("\n")

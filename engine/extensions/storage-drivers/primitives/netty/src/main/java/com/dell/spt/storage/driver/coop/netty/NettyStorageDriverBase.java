@@ -19,12 +19,12 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.netty.data.DataItemFileRegion;
 import com.dell.spt.storage.driver.coop.netty.data.SeekableByteChannelChunkedNioStream;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.concurrent.ThreadUtil;
-import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import com.github.akurilov.netty.connection.pool.MultiNodeConnPoolImpl;
@@ -279,15 +279,15 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				size = (int) avgTransferSize;
 			}
 			if (OpType.CREATE.equals(opType)) {
-				Loggers.MSG.info("Adjust output buffer size: {}", SizeInBytes.formatFixedSize(size));
+				Loggers.MSG.info("Adjust output buffer size: {}", BinarySizeFormat.formatFixedSize(size));
 				bootstrap.option(ChannelOption.SO_RCVBUF, BUFF_SIZE_MIN);
 				bootstrap.option(ChannelOption.SO_SNDBUF, size);
 			} else if (OpType.READ.equals(opType)) {
-				Loggers.MSG.info("Adjust input buffer size: {}", SizeInBytes.formatFixedSize(size));
+				Loggers.MSG.info("Adjust input buffer size: {}", BinarySizeFormat.formatFixedSize(size));
 				bootstrap.option(ChannelOption.SO_RCVBUF, size);
 				bootstrap.option(ChannelOption.SO_SNDBUF, BUFF_SIZE_MIN);
 			} else if (OpType.NOOP.equals(opType)) {
-				Loggers.MSG.info("Adjust I/O buffer sizes: {}", SizeInBytes.formatFixedSize(size));
+				Loggers.MSG.info("Adjust I/O buffer sizes: {}", BinarySizeFormat.formatFixedSize(size));
 				bootstrap.option(ChannelOption.SO_RCVBUF, size);
 				bootstrap.option(ChannelOption.SO_SNDBUF, size);
 			} else {

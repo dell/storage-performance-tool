@@ -12,6 +12,8 @@ import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 import java.util.Map;
 import java.time.Instant;
 
+import static com.dell.spt.base.Constants.COLUMN_BW_AVG_MIB_PER_SECOND;
+import static com.dell.spt.base.Constants.COLUMN_BW_LAST_MIB_PER_SECOND;
 import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.M;
 import static com.dell.spt.base.Constants.MIB;
@@ -61,8 +63,11 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 
 	private void appendHeader(final StringBuilder strb) {
 		strb.append("DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,")
-						.append("CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],")
-						.append("BWLast[MB/s],DurationAvg[us],DurationMin[us],");
+						.append("CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],")
+						.append(COLUMN_BW_AVG_MIB_PER_SECOND)
+						.append(',')
+						.append(COLUMN_BW_LAST_MIB_PER_SECOND)
+						.append(",DurationAvg[us],DurationMin[us],");
 
 		for (Double quantile : durations.keySet()) {
 			strb.append("DurationQ_")

@@ -396,7 +396,7 @@ addr:size:rkey:lid:dctn:g:gid
 | `g`    | 1  | Global addressing flag (1 for RoCE) |
 | `gid`  | 32 | Global ID for RoCE routing |
 
-Example token for a 1 MB buffer:
+Example token for a 1 MiB buffer:
 ```
 00007fffc3200000:00100000:00004d16:0000:00133f:1:fe80000000000000000000000012ab34
 ```
@@ -473,4 +473,3 @@ See the [LICENSE](core/spt-base/LICENSE) file for license rights and limitations
 ## Support
 
 - [Documentation](core/spt-base/doc/README.md) - Comprehensive documentation
-

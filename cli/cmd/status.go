@@ -76,7 +76,7 @@ type nodeSummary struct {
 	RunProgress      float64
 	MetricsState     string
 	OpsPerSec        int64
-	MBPerSec         float64
+	MiBPerSec        float64
 	CompletionPct    *int
 	OverallPct       *int
 	SampleTimestamp  time.Time
@@ -129,7 +129,7 @@ type metricsSnapshot struct {
 	Unbounded         bool
 	TestState         int
 	OpsPerSec         int64
-	MBPerSec          float64
+	MiBPerSec         float64
 	SampleTimestamp   time.Time
 }
 
@@ -234,7 +234,7 @@ func inspectNode(ctx context.Context, httpClient *http.Client, host *hostparse.H
 	} else if metrics != nil {
 		summary.MetricsState = describeTestState(metrics.TestState)
 		summary.OpsPerSec = metrics.OpsPerSec
-		summary.MBPerSec = metrics.MBPerSec
+		summary.MiBPerSec = metrics.MiBPerSec
 		summary.SampleTimestamp = metrics.SampleTimestamp
 		if !metrics.SampleTimestamp.IsZero() {
 			summary.SampleAge = time.Since(metrics.SampleTimestamp)
@@ -361,7 +361,7 @@ func fetchMetrics(ctx context.Context, client *http.Client, baseURL string) (*me
 		Unbounded:         step.Unbounded,
 		TestState:         step.TestState,
 		OpsPerSec:         int64(math.Round(step.Operations.SuccessRateLast)),
-		MBPerSec:          step.Bandwidth.BytesRateLast / 1_000_000,
+		MiBPerSec:         step.Bandwidth.BytesRateLast / float64(constants.BytesPerMiB),
 	}
 	if ts, err := parseMetricTimestamp(step.SampleTimestamp); err == nil {
 		snapshot.SampleTimestamp = ts
@@ -441,8 +441,8 @@ func buildMetricSummary(summary nodeSummary) []string {
 	if summary.OpsPerSec > 0 {
 		parts = append(parts, fmt.Sprintf("ops=%d/s", summary.OpsPerSec))
 	}
-	if summary.MBPerSec > 0 {
-		parts = append(parts, fmt.Sprintf("throughput=%.1fMB/s", summary.MBPerSec))
+	if summary.MiBPerSec > 0 {
+		parts = append(parts, fmt.Sprintf("throughput=%.1f%s", summary.MiBPerSec, constants.UnitMiBPerSecond))
 	}
 	if !summary.SampleTimestamp.IsZero() {
 		age := summary.SampleAge

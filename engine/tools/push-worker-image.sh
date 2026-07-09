@@ -81,7 +81,7 @@ if ! docker image inspect "${FULL_IMAGE}" >/dev/null 2>&1; then
 fi
 
 # Get image size for progress reporting
-IMAGE_SIZE=$(docker image inspect "${FULL_IMAGE}" --format='{{.Size}}' | awk '{print $1/1024/1024 " MB"}')
+IMAGE_SIZE=$(docker image inspect "${FULL_IMAGE}" --format='{{.Size}}' | awk '{print $1/1024/1024 " MiB"}')
 echo "Image size: ${IMAGE_SIZE}"
 echo ""
 
