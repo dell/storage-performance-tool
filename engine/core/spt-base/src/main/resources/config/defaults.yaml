@@ -121,7 +121,7 @@ run:
   node: false
   port: 9999
   scenario: null
-  version: 5.11.2
+  version: 5.12.0
 
 log:
   level: info
