@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.12.0] - 2026-07-09
+
 ### Added
 
 - **`load-op-retryLimit`** — bounds `load-op-retry` (previously unlimited) to a configurable maximum attempts per operation (default 10, matching common S3-client SDK retry defaults such as minio-go's `MaxRetry`; must be `>= 0`, and `0` disables retry even if `load-op-retry` is `true`). A retried operation is redispatched after a full-jitter exponential backoff (200ms base, 1s cap) instead of immediately. Once an operation exceeds its retry limit it is counted as a failure (`CountFail`) as before. Previously, `load-op-retry` had no attempt cap or backoff at all: an operation that kept failing (e.g. from a recurring transient network stall) would retry indefinitely, which could compound with the socket/idle timeouts above into a longer effective stall than not retrying at all, and made the `load-op-limit-fail-count`/`load-op-limit-fail-rate` circuit breaker unable to ever fire (it only counts operations that reach `CountFail`, which a permanently-retrying operation never does).
