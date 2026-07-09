@@ -123,6 +123,26 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
+	void complete_clearsOperationAttributeBeforeReleasingChannel() throws Exception {
+		final var channel = newChannelWithReleasedFlag();
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+		channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
+
+		doAnswer(inv -> {
+			assertNull(channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get(),
+							"a released channel must not retain its completed operation");
+			return null;
+		}).when(connPool).release(channel);
+
+		driver.complete(channel, op);
+
+		assertNull(channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
+		channel.close();
+	}
+
+	@Test
 	void complete_releasesPermitBeforeHandleCompleted() throws Exception {
 		// Verify the ordering guarantee: permit is freed before handleCompleted runs,
 		// so child ops submitted by handleCompleted can re-acquire a permit.

@@ -661,6 +661,15 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}
 
+			// An idle channel remains in the pipeline after it is returned to the pool.
+			// Do not let a later IdleStateEvent complete this already-finished operation again.
+			if (channel != null) {
+				final var operationAttr = channel.attr(ATTR_KEY_OPERATION);
+				if (operationAttr != null) {
+					operationAttr.compareAndSet(op, null);
+				}
+			}
+
 		if (op.status() != Operation.Status.SUCC && channel != null) {
 			channel.close();
 		}
