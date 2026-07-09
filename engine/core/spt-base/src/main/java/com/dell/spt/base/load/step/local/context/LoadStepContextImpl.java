@@ -33,6 +33,7 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -404,8 +405,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				Loggers.MSG.debug(
 								"{}: size limit reached, done {} >= {} limit",
 								id,
-								SizeInBytes.formatFixedSize(sizeSum),
-								sizeLimit);
+								BinarySizeFormat.formatFixedSize(sizeSum),
+								BinarySizeFormat.formatFixedSize(sizeLimit));
 				return true;
 			}
 		}

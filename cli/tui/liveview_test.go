@@ -113,7 +113,7 @@ func TestLiveViewRenderer_RenderWithMetrics(t *testing.T) {
 		SuccessCount:       100,
 		FailedCount:        5,
 		OpsPerSec:          50,
-		MBPerSec:           50,
+		MiBPerSec:          50,
 		StepTime:           10.5,
 	}
 	metrics.AddSample(sampleMetric)
@@ -231,7 +231,7 @@ func TestLiveViewRenderer_formatTable(t *testing.T) {
 		SuccessCount: 1000,
 		FailedCount:  10,
 		OpsPerSec:    100,
-		MBPerSec:     100,
+		MiBPerSec:    100,
 		TestState:    1,
 	}
 
@@ -350,13 +350,13 @@ func TestLiveViewRenderer_ListTableUsesListLabels(t *testing.T) {
 	agg := &PerformanceMetric{
 		SuccessCount:       250,
 		OpsPerSec:          125,
-		MBPerSec:           0,
+		MiBPerSec:          0,
 		ConcurrencyCurrent: 1,
 	}
 	nodeMetric := &PerformanceMetric{
 		SuccessCount:       250,
 		OpsPerSec:          125,
-		MBPerSec:           0,
+		MiBPerSec:          0,
 		ConcurrencyCurrent: 1,
 	}
 	collector.AddMultiNodeSample(&MultiNodeMetricsUpdate{
@@ -525,7 +525,7 @@ func TestLiveViewRenderer_Integration(t *testing.T) {
 			SuccessCount:       int64(50 * (i + 1)),
 			FailedCount:        int64(i),
 			OpsPerSec:          int64(45 + i),
-			MBPerSec:           int64(22 + i/2),
+			MiBPerSec:          int64(22 + i/2),
 			StepTime:           float64(i + 1),
 		}
 		metrics.AddSample(sample)

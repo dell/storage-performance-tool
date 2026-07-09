@@ -17,8 +17,8 @@ import org.junit.jupiter.api.Test;
 class MetricsCsvLogMessageTest {
 
 	private static final String INTERVAL_CSV_HEADER = "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,"
-					+ "Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],"
-					+ "BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],"
+					+ "Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],"
+					+ "BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationLoQ[us],DurationMed[us],"
 					+ "DurationHiQ[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyLoQ[us],"
 					+ "LatencyMed[us],LatencyHiQ[us],LatencyMax[us]";
 

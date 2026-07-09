@@ -28,7 +28,7 @@ func TestGenerateRunSummaryCreatesFileAndSnippet(t *testing.T) {
 	// Write metrics CSV
 	stepID := "mt-001-20250926.172621.307-create"
 	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
-	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
 		"\"2025-09-26T17:27:00Z\",CREATE,8,4,8,8,2499,0,2620391424,7.554,244.988254,334.69642857142856,320.2810720618962,334.69642857142856,320.2810720618962,79900,28000,59000,79876,108000,623000,79900,28000,59000,79876,108000,623000\n"
 	if err := os.WriteFile(filepath.Join(runDir, metricsName), []byte(metricsCSV), 0o644); err != nil {
 		t.Fatalf("write metrics csv: %v", err)
@@ -122,7 +122,7 @@ func TestGenerateRunSummaryHandlesListWorkload(t *testing.T) {
 
 	stepID := "mt-001-20250930.120000.000-list"
 	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
-	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
 		"\"2025-09-30T12:00:05Z\",LIST,1,1,1,1,1200,0,0,12.5,12.5,96.0,94.0,0.0,0.0,4500,3000,3800,4200,4700,6000,4500,3000,3800,4200,4700,6000\n"
 	if err := os.WriteFile(filepath.Join(runDir, metricsName), []byte(metricsCSV), 0o644); err != nil {
 		t.Fatalf("write metrics csv: %v", err)
@@ -205,7 +205,7 @@ func TestGenerateRunSummaryMixedWorkloadIncludesBreakdown(t *testing.T) {
 
 	stepID := "mt-002-20260604.180001.000-mixed"
 	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
-	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
 		"\"2026-06-04T18:00:10Z\",READ,8,4,8,8,445,5,1866465280,30,20,14.8,13.9,59.3,55.6,8100,2200,4300,6200,9100,18000,8100,2200,4300,6200,9100,18000\n" +
 		"\"2026-06-04T18:00:10Z\",STAT,8,4,8,8,301,1,0,30,8,10.0,9.5,0,0,4200,1000,2100,3100,5000,9000,4200,1000,2100,3100,5000,9000\n" +
 		"\"2026-06-04T18:00:10Z\",CREATE,8,4,8,8,151,2,633339904,30,11,5.1,4.8,21.1,20.0,11200,3000,6200,8700,13000,25000,11200,3000,6200,8700,13000,25000\n" +
@@ -305,7 +305,7 @@ func TestGenerateRunSummaryMixedWorkloadPropagatesDistributionWarning(t *testing
 
 	stepID := "mt-002-20260604.190001.000-mixed"
 	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
-	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MB/s],BWLast[MB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
 		"\"2026-06-04T19:00:10Z\",READ,8,4,8,8,445,5,1866465280,30,20,14.8,13.9,59.3,55.6,8100,2200,4300,6200,9100,18000,8100,2200,4300,6200,9100,18000\n" +
 		"\"2026-06-04T19:00:10Z\",STAT,8,4,8,8,301,1,0,30,8,10.0,9.5,0,0,4200,1000,2100,3100,5000,9000,4200,1000,2100,3100,5000,9000\n" +
 		"\"2026-06-04T19:00:10Z\",CREATE,8,4,8,8,151,2,633339904,30,11,5.1,4.8,21.1,20.0,11200,3000,6200,8700,13000,25000,11200,3000,6200,8700,13000,25000\n" +

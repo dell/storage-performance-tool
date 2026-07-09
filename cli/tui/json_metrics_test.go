@@ -306,8 +306,8 @@ func TestSptAPIClient_ParseJSONMetrics(t *testing.T) {
 				if metric.TestState != 0 {
 					t.Errorf("expected test_state 0 for idle sample, got %d", metric.TestState)
 				}
-				if metric.OpsPerSec != 0 || metric.MBPerSec != 0 {
-					t.Errorf("expected zero rates for idle sample, got ops=%d mb=%d", metric.OpsPerSec, metric.MBPerSec)
+				if metric.OpsPerSec != 0 || metric.MiBPerSec != 0 {
+					t.Errorf("expected zero rates for idle sample, got ops=%d mb=%d", metric.OpsPerSec, metric.MiBPerSec)
 				}
 			},
 		},
@@ -551,16 +551,16 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 	tests := []struct {
 		name              string
 		bytesRateLast     float64
-		expectedMBPerSec  int64
+		expectedMiBPerSec int64
 		opsRateLast       float64
 		expectedOpsPerSec int64
 		latencyMeanUs     float64
 		expectedLatencyUs int64
 	}{
 		{
-			name:              "bytes to MB conversion",
-			bytesRateLast:     52428800.0, // 50MB/s in bytes
-			expectedMBPerSec:  52,         // int64(52428800.0 / 1_000_000)
+			name:              "bytes to MiB conversion",
+			bytesRateLast:     52428800.0, // 50 MiB/s in bytes
+			expectedMiBPerSec: 50,
 			opsRateLast:       150.5,
 			expectedOpsPerSec: 151, // math.Round(150.5) = 151
 			latencyMeanUs:     2500.0,
@@ -569,7 +569,7 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 		{
 			name:              "zero values",
 			bytesRateLast:     0.0,
-			expectedMBPerSec:  0,
+			expectedMiBPerSec: 0,
 			opsRateLast:       0.0,
 			expectedOpsPerSec: 0,
 			latencyMeanUs:     0.0,
@@ -577,8 +577,8 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 		},
 		{
 			name:              "fractional values rounded",
-			bytesRateLast:     1500000.9, // 1.5MB/s + fraction
-			expectedMBPerSec:  1,         // int64(1500000.9 / 1_000_000) = 1 (MB truncation unchanged)
+			bytesRateLast:     1500000.9,
+			expectedMiBPerSec: 1,
 			opsRateLast:       99.9,
 			expectedOpsPerSec: 100, // math.Round(99.9) = 100
 			latencyMeanUs:     1234.7,
@@ -586,8 +586,8 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 		},
 		{
 			name:              "large values",
-			bytesRateLast:     1073741824.0, // 1GB/s in bytes
-			expectedMBPerSec:  1073,         // int64(1073741824.0 / 1_000_000)
+			bytesRateLast:     1073741824.0, // 1 GiB/s in bytes
+			expectedMiBPerSec: 1024,
 			opsRateLast:       1000000.0,
 			expectedOpsPerSec: 1000000,
 			latencyMeanUs:     999999.0,
@@ -621,8 +621,8 @@ func TestJSONMetricsUnitConversions(t *testing.T) {
 			}
 			metric := metrics[0]
 
-			if metric.MBPerSec != tt.expectedMBPerSec {
-				t.Errorf("Expected MBPerSec %d, got %d", tt.expectedMBPerSec, metric.MBPerSec)
+			if metric.MiBPerSec != tt.expectedMiBPerSec {
+				t.Errorf("Expected MiBPerSec %d, got %d", tt.expectedMiBPerSec, metric.MiBPerSec)
 			}
 			if metric.OpsPerSec != tt.expectedOpsPerSec {
 				t.Errorf("Expected OpsPerSec %d, got %d", tt.expectedOpsPerSec, metric.OpsPerSec)
@@ -684,7 +684,7 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 		"FailedCount":              int64(10),
 		"StepTime":                 45.2,
 		"OpsPerSec":                int64(251), // math.Round(250.7) = 251
-		"MBPerSec":                 int64(104), // Converted from 104857600.0 / 1_000_000
+		"MiBPerSec":                int64(100),
 		"MeanLatency":              int64(1850),
 		"MeanDuration":             int64(2250),
 		"MeanTTFB":                 int64(950),
@@ -762,9 +762,9 @@ func TestJSONMetricsPerformanceMetricStructure(t *testing.T) {
 			if metricValue.OpsPerSec != expectedValue.(int64) {
 				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.OpsPerSec)
 			}
-		case "MBPerSec":
-			if metricValue.MBPerSec != expectedValue.(int64) {
-				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.MBPerSec)
+		case "MiBPerSec":
+			if metricValue.MiBPerSec != expectedValue.(int64) {
+				t.Errorf("Field %s: expected %v, got %v", fieldName, expectedValue, metricValue.MiBPerSec)
 			}
 		case "MeanLatency":
 			if metricValue.MeanLatency != expectedValue.(int64) {
@@ -960,28 +960,28 @@ func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 func TestAggregateByOpType_FourOps(t *testing.T) {
 	metrics := []*PerformanceMetric{
 		{
-			OpType: "READ", OpsPerSec: 4000, MBPerSec: 4,
+			OpType: "READ", OpsPerSec: 4000, MiBPerSec: 4,
 			MeanLatency: 900, MeanDuration: 950, MeanTTFB: 300, HasTTFB: true,
 			SuccessCount: 240000, FailedCount: 2,
 			ConcurrencyCurrent: 5, ConcurrencyMean: 4.5,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
-			OpType: "CREATE", OpsPerSec: 20, MBPerSec: 1,
+			OpType: "CREATE", OpsPerSec: 20, MiBPerSec: 1,
 			MeanLatency: 2500, MeanDuration: 2800, MeanTTFB: 700,
 			SuccessCount: 1200, FailedCount: 0,
 			ConcurrencyCurrent: 1, ConcurrencyMean: 0.1,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
-			OpType: "DELETE", OpsPerSec: 18, MBPerSec: 0,
+			OpType: "DELETE", OpsPerSec: 18, MiBPerSec: 0,
 			MeanLatency: 1300, MeanDuration: 1500, MeanTTFB: 450,
 			SuccessCount: 1080, FailedCount: 0,
 			ConcurrencyCurrent: 1, ConcurrencyMean: 0.04,
 			StepID: "mixed-1", TestState: 2, StepTime: 60.0,
 		},
 		{
-			OpType: "STAT", OpsPerSec: 1400, MBPerSec: 0,
+			OpType: "STAT", OpsPerSec: 1400, MiBPerSec: 0,
 			MeanLatency: 1500, MeanDuration: 1650, MeanTTFB: 500,
 			SuccessCount: 84000, FailedCount: 5,
 			ConcurrencyCurrent: 2, ConcurrencyMean: 1.4,
@@ -1010,9 +1010,9 @@ func TestAggregateByOpType_FourOps(t *testing.T) {
 	if combined.FailedCount != wantFailed {
 		t.Errorf("FailedCount: want %d, got %d", wantFailed, combined.FailedCount)
 	}
-	wantMB := int64(4 + 1 + 0 + 0)
-	if combined.MBPerSec != wantMB {
-		t.Errorf("MBPerSec: want %d, got %d", wantMB, combined.MBPerSec)
+	wantMiB := int64(4 + 1 + 0 + 0)
+	if combined.MiBPerSec != wantMiB {
+		t.Errorf("MiBPerSec: want %d, got %d", wantMiB, combined.MiBPerSec)
 	}
 
 	// Per-op map must contain all 4 types

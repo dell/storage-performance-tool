@@ -5,7 +5,7 @@ import "fmt"
 // formatTable is a legacy single-node table renderer used by tests only.
 func (l *LiveViewRenderer) formatTable(metric *PerformanceMetric, _ int) string {
 	progressValue := l.calculateDoneMiB(metric.SuccessCount)
-	rateValue := metric.MBPerSec
+	rateValue := metric.MiBPerSec
 	colSixValue := metric.SuccessCount
 	if l.isListWorkload() {
 		rateValue = metric.OpsPerSec

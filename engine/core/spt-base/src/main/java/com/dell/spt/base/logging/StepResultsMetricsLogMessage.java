@@ -3,10 +3,11 @@ package com.dell.spt.base.logging;
 import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.M;
 import static com.dell.spt.base.Constants.MIB;
+import static com.dell.spt.base.Constants.UNIT_MIB_PER_SECOND;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
-import com.github.akurilov.commons.system.SizeInBytes;
+import com.dell.spt.base.util.BinarySizeFormat;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
 import java.util.Map;
@@ -92,7 +93,7 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 						.append(snapshot.failsSnapshot().count())
 						.append(lineSep)
 						.append("  Transfer Size:               ")
-						.append(SizeInBytes.formatFixedSize(snapshot.byteSnapshot().count()))
+						.append(BinarySizeFormat.formatFixedSize(snapshot.byteSnapshot().count()))
 						.append(lineSep)
 						.append("  Duration [s]:                ")
 						.append(lineSep)
@@ -110,7 +111,9 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 						.append("    Mean:                      ")
 						.append(snapshot.successSnapshot().mean())
 						.append(lineSep)
-						.append("  Bandwidth [MB/s]:            ")
+						.append("  Bandwidth [")
+						.append(UNIT_MIB_PER_SECOND)
+						.append("]:           ")
 						.append(lineSep)
 						.append("    Last:                      ")
 						.append(snapshot.byteSnapshot().last() / MIB)

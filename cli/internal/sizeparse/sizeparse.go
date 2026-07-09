@@ -8,15 +8,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
-// Binary size unit multipliers (IEC: 1 KB = 1024 bytes).
+// Binary size unit multipliers. The decimal-style names are retained for API
+// compatibility; display code should use IEC labels such as KiB and MiB.
 const (
 	Byte     int64 = 1
-	Kilobyte       = 1024
-	Megabyte       = 1024 * Kilobyte
-	Gigabyte       = 1024 * Megabyte
-	Terabyte       = 1024 * Gigabyte
+	Kilobyte       = constants.BytesPerKiB
+	Megabyte       = constants.BytesPerMiB
+	Gigabyte       = constants.BytesPerGiB
+	Terabyte       = constants.BytesPerTiB
 )
 
 // suffixMultipliers maps recognised upper-cased suffixes to their multiplier.

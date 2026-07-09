@@ -34,7 +34,7 @@ Copy mode is enabled if:
 ### 2.2. Filesystem Storage Case
 
 In case of copying the filesystem directories there's a size may be
-calculated, so there's a size and bandwidth (MB/sec) metrics
+calculated, so there's a size and bandwidth (MiB/sec) metrics
 are available.
 
 ### 2.3. HTTP Storage Case

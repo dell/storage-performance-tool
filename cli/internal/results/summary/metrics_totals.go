@@ -30,8 +30,8 @@ type MetricsTotalsRow struct {
 	DurationSumSeconds  float64
 	ThroughputAvgOps    float64
 	ThroughputLastOps   float64
-	BandwidthAvgMBps    float64
-	BandwidthLastMBps   float64
+	BandwidthAvgMiBps   float64
+	BandwidthLastMiBps  float64
 	DurationAvgMicros   float64
 	DurationP50Micros   float64
 	DurationP90Micros   float64
@@ -63,8 +63,10 @@ const (
 	columnDurationSum     = "DurationSum[s]"
 	columnTPAvg           = "TPAvg[op/s]"
 	columnTPLast          = "TPLast[op/s]"
-	columnBWAvg           = "BWAvg[MB/s]"
-	columnBWLast          = "BWLast[MB/s]"
+	columnBWAvg           = "BWAvg[MiB/s]"
+	columnBWAvgLegacy     = "BWAvg[MB/s]"
+	columnBWLast          = "BWLast[MiB/s]"
+	columnBWLastLegacy    = "BWLast[MB/s]"
 	columnDurationAvg     = "DurationAvg[us]"
 	columnDurationP50     = "DurationQ_0.5[us]"
 	columnDurationP90     = "DurationQ_0.9[us]"
@@ -89,10 +91,13 @@ var requiredColumns = []string{
 	columnSize,
 	columnTPAvg,
 	columnTPLast,
-	columnBWAvg,
-	columnBWLast,
 	columnDurationAvg,
 	columnLatencyAvg,
+}
+
+var requiredColumnGroups = [][]string{
+	{columnBWAvg, columnBWAvgLegacy},
+	{columnBWLast, columnBWLastLegacy},
 }
 
 func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
@@ -117,6 +122,7 @@ func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
 
 	index := mapColumnIndexes(header)
 	missing := missingColumns(requiredColumns, index)
+	missing = append(missing, missingColumnGroups(requiredColumnGroups, index)...)
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("metrics totals missing columns: %s", strings.Join(missing, ", "))
 	}
@@ -186,10 +192,10 @@ func parseMetricsTotalsRow(record []string, index map[string]int) (MetricsTotals
 	if row.ThroughputLastOps, err = parseFloat(record, index, columnTPLast); err != nil {
 		return row, err
 	}
-	if row.BandwidthAvgMBps, err = parseFloat(record, index, columnBWAvg); err != nil {
+	if row.BandwidthAvgMiBps, err = parseFloatAny(record, index, columnBWAvg, columnBWAvgLegacy); err != nil {
 		return row, err
 	}
-	if row.BandwidthLastMBps, err = parseFloat(record, index, columnBWLast); err != nil {
+	if row.BandwidthLastMiBps, err = parseFloatAny(record, index, columnBWLast, columnBWLastLegacy); err != nil {
 		return row, err
 	}
 	if row.DurationAvgMicros, err = parseFloat(record, index, columnDurationAvg); err != nil {
@@ -237,6 +243,23 @@ func missingColumns(required []string, index map[string]int) []string {
 	return missing
 }
 
+func missingColumnGroups(required [][]string, index map[string]int) []string {
+	var missing []string
+	for _, aliases := range required {
+		found := false
+		for _, col := range aliases {
+			if _, ok := index[col]; ok {
+				found = true
+				break
+			}
+		}
+		if !found && len(aliases) > 0 {
+			missing = append(missing, strings.Join(aliases, " or "))
+		}
+	}
+	return missing
+}
+
 func valueAt(record []string, index map[string]int, column string) string {
 	pos, ok := index[column]
 	if !ok || pos >= len(record) {
@@ -258,6 +281,15 @@ func parseFloat(record []string, index map[string]int, column string) (float64, 
 		return 0, fmt.Errorf("parse float %s: invalid value %q", column, val)
 	}
 	return parsed, nil
+}
+
+func parseFloatAny(record []string, index map[string]int, columns ...string) (float64, error) {
+	for _, column := range columns {
+		if _, ok := index[column]; ok {
+			return parseFloat(record, index, column)
+		}
+	}
+	return 0, fmt.Errorf("missing column %s", strings.Join(columns, " or "))
 }
 
 func parseInt(record []string, index map[string]int, column string) (int64, error) {

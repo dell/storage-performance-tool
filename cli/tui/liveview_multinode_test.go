@@ -27,7 +27,7 @@ func TestLiveViewRenderer_RenderLiveView_MultiNode(t *testing.T) {
 	// Add aggregated sample first
 	aggregatedMetric := PerformanceMetric{
 		OpsPerSec:          3000,
-		MBPerSec:           300,
+		MiBPerSec:          300,
 		MeanLatency:        45,
 		SuccessCount:       1500,
 		FailedCount:        10,
@@ -43,14 +43,14 @@ func TestLiveViewRenderer_RenderLiveView_MultiNode(t *testing.T) {
 		PerNode: map[string]*PerformanceMetric{
 			"node1": {
 				OpsPerSec:    1000,
-				MBPerSec:     100,
+				MiBPerSec:    100,
 				SuccessCount: 500,
 				FailedCount:  3,
 				Timestamp:    now,
 			},
 			"node2": {
 				OpsPerSec:    2000,
-				MBPerSec:     200,
+				MiBPerSec:    200,
 				SuccessCount: 1000,
 				FailedCount:  7,
 				Timestamp:    now,
@@ -151,7 +151,7 @@ func TestLiveViewRenderer_RecomputesTotalsFromPerNodeSamples(t *testing.T) {
 		OpType:          "CREATE",
 		SuccessCount:    600,
 		OpsPerSec:       120,
-		MBPerSec:        45,
+		MiBPerSec:       45,
 		Timestamp:       now,
 		SampleTimestamp: now,
 	}
@@ -163,7 +163,7 @@ func TestLiveViewRenderer_RecomputesTotalsFromPerNodeSamples(t *testing.T) {
 		OpType:          "CREATE",
 		SuccessCount:    400,
 		OpsPerSec:       180,
-		MBPerSec:        55,
+		MiBPerSec:       55,
 		Timestamp:       now,
 		SampleTimestamp: now,
 	}
@@ -275,7 +275,7 @@ func TestLiveViewRenderer_RenderLiveView_SingleNode(t *testing.T) {
 	// Add aggregated sample
 	metric := PerformanceMetric{
 		OpsPerSec:          1500,
-		MBPerSec:           150,
+		MiBPerSec:          150,
 		SuccessCount:       750,
 		FailedCount:        5,
 		Timestamp:          now,
@@ -339,7 +339,7 @@ func TestLiveViewRenderer_FormatMultiNodeTable_NoActiveNodes(t *testing.T) {
 	// Add aggregated metric but no active nodes
 	aggregated := &PerformanceMetric{
 		OpsPerSec:    0,
-		MBPerSec:     0,
+		MiBPerSec:    0,
 		SuccessCount: 0,
 		FailedCount:  0,
 	}
