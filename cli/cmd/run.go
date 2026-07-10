@@ -70,6 +70,12 @@ var (
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker {
 		return &runTrackerAdapter{portcheck.NewRunTracker(baseURL)}
 	}
+	// connectMultiHostOrchestratorFunc is a test seam for the command's host
+	// orchestration boundary. It keeps routing tests independent of Docker and
+	// SSH while production continues to use the concrete orchestrator.
+	connectMultiHostOrchestratorFunc = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
+		return orchestrator.ConnectHosts(ctx)
+	}
 	discoverStepIDsFunc      = results.DiscoverStepIDs
 	discoverFleetStepIDsFunc = results.DiscoverFleetStepIDs
 	newResultsFetcherFunc    = func(baseURL, outputDir string) autoResultsFetcher {
@@ -1046,7 +1052,7 @@ Available workload types:
 			orchestrator.SetForceCleanup(forceMode)
 
 			// Connect to all hosts
-			err := orchestrator.ConnectHosts(ctx)
+			err := connectMultiHostOrchestratorFunc(ctx, orchestrator)
 			if err != nil {
 				// Clean up scenario file on connection failure
 				if removeErr := os.Remove(scenarioPath); removeErr != nil {
