@@ -716,6 +716,26 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
+	void batchSubmit_releasesDrainedPermitsWhenDriverIsShuttingDown() throws Exception {
+		// A shutdown can race after drainPermits() but before any operation is
+		// dispatched. Those permits represent no in-flight I/O and must be returned.
+		final var sem = new Semaphore(4, true);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 4);
+		when(driver.isStarted()).thenReturn(false);
+
+		final List<Operation<Item>> ops = List.of(mock(Operation.class), mock(Operation.class));
+
+		assertEquals(0, driver.submit(ops, 0, ops.size()));
+		assertEquals(4, sem.availablePermits(),
+						"shutdown must not strand permits for operations that were never dispatched");
+	}
+
+	@Test
 	void batchSubmit_releasesPermitsOnConnectionFailure() throws Exception {
 		// When a connection lease fails mid-batch, all permits must be returned:
 		// the failed op's permit is explicitly released (conn==null path),
