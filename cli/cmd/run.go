@@ -110,12 +110,24 @@ func getAPIPort(cmd *cobra.Command) string {
 	return apiPort
 }
 
+// shouldUseMultiHostOrchestrator selects the path which manages Docker on the
+// configured hosts. A lone remote host must use this path too: the single-host
+// runner owns Docker on the CLI/controller host and would otherwise ignore the
+// remote HostInfo entirely.
+func shouldUseMultiHostOrchestrator(hosts []*hostparse.HostInfo) bool {
+	if len(hosts) > 1 {
+		return true
+	}
+	return len(hosts) == 1 && hosts[0] != nil && !hosts[0].IsLocal
+}
+
 // deriveBaseURL builds the Spt API base URL for results retrieval.
 func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
-	if len(hosts) <= 1 {
+	if len(hosts) == 0 || (len(hosts) == 1 && (hosts[0] == nil || hosts[0].IsLocal)) {
 		return fmt.Sprintf("http://localhost:%s", apiPort)
 	}
-	// First host is entry node in distributed runs
+	// The first host is the entry node for both remote single-host and
+	// distributed runs.
 	entry := hosts[0]
 	return fmt.Sprintf("http://%s:%s", entry.Host, apiPort)
 }
@@ -807,17 +819,6 @@ Available workload types:
 			fmt.Println("Using AWS SDK S3 driver (s3-aws).")
 		}
 
-		// Check for port conflicts before launching Spt
-		if err := checkPortConflicts(cmd); err != nil {
-			// Clean up scenario file on conflict resolution failure
-			if removeErr := os.Remove(scenarioPath); removeErr != nil {
-				logger.Debug("Failed to clean up scenario file after port conflict",
-					"file", scenarioPath,
-					"error", removeErr.Error())
-			}
-			return err
-		}
-
 		// Parse and validate test hosts
 		testHostsStr, _ := cmd.Flags().GetString("test-hosts")
 		minHosts, _ := cmd.Flags().GetInt("min-hosts")
@@ -864,6 +865,22 @@ Available workload types:
 			"min_hosts", minHosts,
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
+		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
+
+		// The local single-host runner owns Docker on the controller, so it
+		// needs the controller port check. Remote and multi-host runs perform
+		// port preflight on each configured Docker host instead.
+		if !useMultiHostOrchestrator {
+			if err := checkPortConflicts(cmd); err != nil {
+				// Clean up scenario file on conflict resolution failure
+				if removeErr := os.Remove(scenarioPath); removeErr != nil {
+					logger.Debug("Failed to clean up scenario file after port conflict",
+						"file", scenarioPath,
+						"error", removeErr.Error())
+				}
+				return err
+			}
+		}
 
 		sptImage := constants.EffectiveSptImage()
 		networkMode, _ := cmd.Flags().GetString("network-mode")
@@ -930,13 +947,13 @@ Available workload types:
 			setSummarySink = summaryWriter.SetSink
 		}
 
-		// Construct the multi-host orchestrator now (before starting the
+		// Construct the host orchestrator now (before starting the
 		// auto-results background tracker below) so FinalizeDiagnosticsAndCleanup
 		// can run as startAutoResults' pre-summary hook. Construction itself is
 		// cheap (no I/O) — ConnectHosts and everything else that actually talks
 		// to the hosts still happens later, in its original place.
 		var multiHostOrchestrator *tui.MultiHostOrchestrator
-		if len(hostInfos) > 1 {
+		if useMultiHostOrchestrator {
 			rmiConfig := tui.RMIConfig{
 				NetworkMode: networkMode,
 				PortStart:   rmiPortStart,
@@ -998,8 +1015,10 @@ Available workload types:
 		fmt.Printf("Launching %s workload against %s...\n", workloadType, endpoint)
 		fmt.Printf("Container: %s\n", sptImage)
 
-		// Create multi-host orchestrator if we have multiple hosts
-		if len(hostInfos) > 1 {
+		// The host orchestrator also handles a single remote host. The legacy
+		// single-host runner owns local Docker and is appropriate only when the
+		// one configured host is local.
+		if useMultiHostOrchestrator {
 			// Warn if using bridge mode with multiple hosts (distributed testing)
 			if networkMode == constants.BridgeNetworkMode {
 				fmt.Println("⚠️  WARNING: Bridge networking may not work for distributed testing.")
@@ -1008,7 +1027,11 @@ Available workload types:
 				fmt.Println()
 			}
 
-			fmt.Printf("Multi-host mode: %d hosts, minimum required: %d\n", len(hostInfos), minHosts)
+			if len(hostInfos) == 1 {
+				fmt.Printf("Remote-host mode: %s\n", hostInfos[0].Original)
+			} else {
+				fmt.Printf("Multi-host mode: %d hosts, minimum required: %d\n", len(hostInfos), minHosts)
+			}
 			if attachExisting {
 				fmt.Println("Attach mode enabled: expecting worker nodes prestarted with --run-node; spt will launch the entry node.")
 			}
