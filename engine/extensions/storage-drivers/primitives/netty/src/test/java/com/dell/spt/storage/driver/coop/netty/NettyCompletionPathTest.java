@@ -13,9 +13,10 @@ import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.timeout.IdleStateEvent;
-import java.net.SocketTimeoutException;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -125,7 +126,8 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
-	void releasedChannelIdleEventDoesNotCompleteThePriorOperationAgain() throws Exception {
+	void idleStateHandlerDoesNotCompleteThePriorOperationAfterChannelRelease() throws Exception {
+		final var idleEventCount = new AtomicInteger();
 		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
 			@Override
 			protected void handle(
@@ -133,7 +135,18 @@ class NettyCompletionPathTest {
 				// No response body is needed for this lifecycle test.
 			}
 		};
-		final var channel = new EmbeddedChannel(handler);
+		final var channel = new EmbeddedChannel(
+						new IdleStateHandler(0, 0, 1, TimeUnit.MILLISECONDS),
+						new ChannelInboundHandlerAdapter() {
+							@Override
+							public void userEventTriggered(final io.netty.channel.ChannelHandlerContext ctx, final Object evt) {
+								if (evt instanceof IdleStateEvent) {
+									idleEventCount.incrementAndGet();
+								}
+								ctx.fireUserEventTriggered(evt);
+							}
+						},
+						handler);
 		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
 		final Operation<Item> op = mock(Operation.class);
 		when(op.status()).thenReturn(Operation.Status.SUCC);
@@ -142,16 +155,16 @@ class NettyCompletionPathTest {
 
 		driver.complete(channel, op);
 
-		final var handlerContext = channel.pipeline().context(handler);
-		final var timeout = assertThrows(SocketTimeoutException.class,
-						() -> handler.userEventTriggered(handlerContext, IdleStateEvent.ALL_IDLE_STATE_EVENT));
+		// Exercise the actual scheduled IdleStateHandler path, not a manually-invoked
+		// userEventTriggered proxy. Before the attribute clear, this timed-out event
+		// completed the prior operation again after its channel had been released.
+		channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+		channel.runScheduledPendingTasks();
+		channel.runPendingTasks();
 
-		// Deliver the timeout through the response handler's real pipeline context.
-		// Before this fix, exceptionCaught found the released channel's stale operation.
-		channel.pipeline().fireExceptionCaught(timeout);
-
+		assertTrue(idleEventCount.get() > 0, "IdleStateHandler should emit an idle event");
 		verify(driver, times(1)).complete(channel, op);
-		verify(op, never()).status(Operation.Status.FAIL_IO);
+		verify(op, never()).status(any(Operation.Status.class));
 		verify(connPool, times(1)).release(channel);
 		channel.finishAndReleaseAll();
 	}
