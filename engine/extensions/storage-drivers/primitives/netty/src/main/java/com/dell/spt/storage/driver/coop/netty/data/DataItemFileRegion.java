@@ -13,18 +13,20 @@ public class DataItemFileRegion
 				implements FileRegion {
 
 	protected final DataItem dataItem;
-	protected final long baseItemSize;
+	protected final long baseItemPosition;
+	protected final long byteCount;
 	protected long doneByteCount = 0;
 
 	public DataItemFileRegion(final DataItem dataItem)
 					throws IOException {
 		this.dataItem = dataItem;
-		this.baseItemSize = dataItem.size();
+		this.baseItemPosition = dataItem.position();
+		this.byteCount = dataItem.size() - baseItemPosition;
 	}
 
 	@Override
 	public long position() {
-		return doneByteCount;
+		return baseItemPosition;
 	}
 
 	@Deprecated
@@ -40,15 +42,16 @@ public class DataItemFileRegion
 
 	@Override
 	public long count() {
-		return baseItemSize;
+		return byteCount;
 	}
 
 	@Override
 	public long transferTo(final WritableByteChannel target, final long position)
 					throws IOException {
-		dataItem.position(position);
-		doneByteCount += dataItem.writeToSocketChannel(target, baseItemSize - position);
-		return doneByteCount;
+		dataItem.position(baseItemPosition + position);
+		final long bytesWritten = dataItem.writeToSocketChannel(target, byteCount - position);
+		doneByteCount += bytesWritten;
+		return bytesWritten;
 	}
 
 	@Override
