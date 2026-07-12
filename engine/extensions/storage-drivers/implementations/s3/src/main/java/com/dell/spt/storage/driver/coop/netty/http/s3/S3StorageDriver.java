@@ -1419,9 +1419,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected int submit(final List<O> ops, final int from, final int to)
 					throws IllegalStateException {
+		final var availablePermits = concurrencyThrottle.availablePermits();
+		if (availablePermits == 0) {
+			return 0;
+		}
+		final var dispatchLimit = from + Math.min(availablePermits, to - from);
 		var submitted = 0;
 		var i = from;
-		while (i < to) {
+		while (i < dispatchLimit) {
 			final var op = ops.get(i);
 			if (isCompositeRead(op)) {
 				if (!submit(op)) {
@@ -1431,7 +1436,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				i++;
 			} else {
 				final var segmentStart = i;
-				while (i < to && !isCompositeRead(ops.get(i))) {
+				while (i < dispatchLimit && !isCompositeRead(ops.get(i))) {
 					i++;
 				}
 				final var segmentSubmitted = super.submit(ops, segmentStart, i);

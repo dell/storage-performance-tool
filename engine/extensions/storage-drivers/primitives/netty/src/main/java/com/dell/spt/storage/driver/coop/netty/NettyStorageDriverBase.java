@@ -466,6 +466,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				}
 				n++;
 			}
+			// shutdown may race after drainPermits() but before every leased permit
+			// becomes an in-flight request. Return only the permits that were never
+			// dispatched; completed NOOPs and asynchronous requests own their own permit.
+			if (n < permits) {
+				concurrencyThrottle.release(permits - n);
+			}
 		} catch (final ConnectException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
 			nextOp.status(Operation.Status.FAIL_IO);
@@ -659,6 +665,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			op.finishResponse();
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
+		}
+
+		// An idle channel remains in the pipeline after it is returned to the pool.
+		// Do not let a later IdleStateEvent complete this already-finished operation again.
+		if (channel != null && channel.hasAttr(ATTR_KEY_OPERATION)) {
+			channel.attr(ATTR_KEY_OPERATION).compareAndSet(op, null);
 		}
 
 		if (op.status() != Operation.Status.SUCC && channel != null) {

@@ -13,7 +13,10 @@ import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -120,6 +123,50 @@ class NettyCompletionPathTest {
 		assertEquals(1, concurrencyThrottle.availablePermits(), "permit should be released");
 		verify(connPool).release(channel);
 		channel.close();
+	}
+
+	@Test
+	void idleStateHandlerDoesNotCompleteThePriorOperationAfterChannelRelease() throws Exception {
+		final var idleEventCount = new AtomicInteger();
+		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
+			@Override
+			protected void handle(
+							final io.netty.channel.Channel channel, final Operation<Item> op, final Object msg) {
+				// No response body is needed for this lifecycle test.
+			}
+		};
+		final var channel = new EmbeddedChannel(
+						new IdleStateHandler(0, 0, 1, TimeUnit.MILLISECONDS),
+						new ChannelInboundHandlerAdapter() {
+							@Override
+							public void userEventTriggered(final io.netty.channel.ChannelHandlerContext ctx, final Object evt) {
+								if (evt instanceof IdleStateEvent) {
+									idleEventCount.incrementAndGet();
+								}
+								ctx.fireUserEventTriggered(evt);
+							}
+						},
+						handler);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+		channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
+
+		driver.complete(channel, op);
+
+		// Exercise the actual scheduled IdleStateHandler path, not a manually-invoked
+		// userEventTriggered proxy. Before the attribute clear, this timed-out event
+		// completed the prior operation again after its channel had been released.
+		channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+		channel.runScheduledPendingTasks();
+		channel.runPendingTasks();
+
+		assertTrue(idleEventCount.get() > 0, "IdleStateHandler should emit an idle event");
+		verify(driver, times(1)).complete(channel, op);
+		verify(op, never()).status(any(Operation.Status.class));
+		verify(connPool, times(1)).release(channel);
+		channel.finishAndReleaseAll();
 	}
 
 	@Test
@@ -336,6 +383,38 @@ class NettyCompletionPathTest {
 		// Also verify the op was re-submitted (startRequest called on the re-prepared op)
 		verify(op, atLeast(1)).startRequest();
 		channel.close();
+		resubmitChannel.close();
+	}
+
+	@Test
+	void fastRecycleClearsReleasedChannelAndRebindsOperationToResubmissionChannel() throws Exception {
+		enableFastRecycle(4);
+		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 4);
+		final var sem = new Semaphore(4, true);
+		sem.acquire(1);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+
+		final var releasedChannel = newChannelWithReleasedFlag();
+		final Operation<Item> op = mock(Operation.class);
+		when(op.status()).thenReturn(Operation.Status.SUCC);
+		when(op.result()).thenReturn(mock(Operation.class));
+		releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
+
+		final var resubmitChannel = newResubmitChannel();
+		when(connPool.lease()).thenReturn(resubmitChannel);
+		doAnswer(inv -> {
+			assertNull(releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
+			return null;
+		}).when(connPool).release(releasedChannel);
+
+		driver.complete(releasedChannel, op);
+
+		assertSame(op, resubmitChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
+		releasedChannel.close();
 		resubmitChannel.close();
 	}
 
@@ -634,6 +713,26 @@ class NettyCompletionPathTest {
 		// NOOP ops release their permit inline during submit, so all 8 back
 		assertEquals(8, sem.availablePermits(),
 						"all permits should be available (NOOP releases inline)");
+	}
+
+	@Test
+	void batchSubmit_releasesDrainedPermitsWhenDriverIsShuttingDown() throws Exception {
+		// A shutdown can race after drainPermits() but before any operation is
+		// dispatched. Those permits represent no in-flight I/O and must be returned.
+		final var sem = new Semaphore(4, true);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
+		limitField.setAccessible(true);
+		limitField.set(driver, 4);
+		when(driver.isStarted()).thenReturn(false);
+
+		final List<Operation<Item>> ops = List.of(mock(Operation.class), mock(Operation.class));
+
+		assertEquals(0, driver.submit(ops, 0, ops.size()));
+		assertEquals(4, sem.availablePermits(),
+						"shutdown must not strand permits for operations that were never dispatched");
 	}
 
 	@Test
