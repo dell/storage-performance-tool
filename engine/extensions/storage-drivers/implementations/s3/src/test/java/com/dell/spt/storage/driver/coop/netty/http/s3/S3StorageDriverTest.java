@@ -56,6 +56,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.ArrayDeque;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -297,6 +298,11 @@ public class S3StorageDriverTest {
 
 		int submitBatchForTest(List<Operation<Item>> ops, int from, int to) {
 			return submit(ops, from, to);
+		}
+
+		void limitAvailableDispatchPermitsForTest(int permits) {
+			concurrencyThrottle.drainPermits();
+			concurrencyThrottle.release(permits);
 		}
 
 		@Override
@@ -1449,6 +1455,36 @@ public class S3StorageDriverTest {
 		assertEquals(Operation.Status.SUCC, op.status(), "Composite READ parent should be marked SUCC");
 		var queue = childQueueOf(drv);
 		assertEquals(4, queue.size(), "Batch submit should dispatch 4 range-read sub-ops");
+	}
+
+	@Test
+	void submit_batchOrdinaryWrites_inspectionIsBoundedByAvailablePermits() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		drv.limitAvailableDispatchPermitsForTest(4);
+
+		@SuppressWarnings("unchecked")
+		final var writeOp = (Operation<Item>) Mockito.mock(Operation.class);
+		Mockito.when(writeOp.type()).thenReturn(OpType.CREATE);
+		final var inspected = new int[1];
+		final List<Operation<Item>> ops = new AbstractList<>() {
+			@Override
+			public Operation<Item> get(final int index) {
+				inspected[0]++;
+				return writeOp;
+			}
+
+			@Override
+			public int size() {
+				return 10_000;
+			}
+		};
+
+		drv.submitBatchForTest(ops, 0, ops.size());
+
+		assertTrue(inspected[0] <= 8,
+						"Batch dispatch inspected " + inspected[0]
+										+ " operations even though only 4 permits were available");
 	}
 
 	@Test
