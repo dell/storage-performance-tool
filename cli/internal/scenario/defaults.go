@@ -398,7 +398,8 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		}
 	}
 
-	// Engine tuning: VT carrier parallelism
+	// Keep this in /run defaults for effective-config attribution even though
+	// startup argument delivery is what activates VT parallelism for the node JVM.
 	if params.ServiceThreads > 0 {
 		if config.Load == nil {
 			config.Load = &LoadConfig{}
@@ -510,4 +511,56 @@ func parseEngineOverrideValue(raw string) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+const loadServiceThreadsStartupArg = "--load-service-threads="
+
+// BuildEngineStartupArgs resolves engine settings that must be present before
+// the node API starts. They cannot be activated by defaults posted later to /run.
+func BuildEngineStartupArgs(params Params) ([]string, error) {
+	if params.ServiceThreads < 0 {
+		return nil, fmt.Errorf("service threads must be non-negative, got %d", params.ServiceThreads)
+	}
+
+	effectiveThreads := params.ServiceThreads
+	overrideThreads := 0
+	overrideSeen := false
+	for _, override := range params.EngineOverrides {
+		rawPath, rawValue, hasValue := strings.Cut(override, "=")
+		parts := splitEngineOverridePath(rawPath)
+		if len(parts) != 3 || parts[0] != "load" || parts[1] != "service" || parts[2] != "threads" {
+			continue
+		}
+		if !hasValue {
+			return nil, fmt.Errorf("invalid engine override %q: expected path=value", override)
+		}
+
+		value, err := parseEngineOverrideValue(rawValue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid engine override %q: %w", override, err)
+		}
+		threads, ok := value.(int)
+		if !ok {
+			return nil, fmt.Errorf("invalid engine override %q: load.service.threads must be an integer", override)
+		}
+		if threads < 0 {
+			return nil, fmt.Errorf("invalid engine override %q: load.service.threads must be non-negative", override)
+		}
+		if overrideSeen && threads != overrideThreads {
+			return nil, fmt.Errorf("conflicting load.service.threads engine overrides: %d and %d", overrideThreads, threads)
+		}
+		overrideThreads = threads
+		overrideSeen = true
+	}
+
+	if overrideSeen {
+		if effectiveThreads > 0 && effectiveThreads != overrideThreads {
+			return nil, fmt.Errorf("conflicting service thread settings: --service-threads=%d and load.service.threads=%d", effectiveThreads, overrideThreads)
+		}
+		effectiveThreads = overrideThreads
+	}
+	if effectiveThreads == 0 {
+		return nil, nil
+	}
+	return []string{fmt.Sprintf("%s%d", loadServiceThreadsStartupArg, effectiveThreads)}, nil
 }

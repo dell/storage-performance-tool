@@ -43,10 +43,11 @@ type MockDockerManager struct {
 
 	// For testing worker node starts
 	workerNodeCalls []struct {
-		Image        string
-		RMIHostname  string
-		RMIPortStart int
-		RMIPortCount int
+		Image          string
+		RMIHostname    string
+		RMIPortStart   int
+		RMIPortCount   int
+		AdditionalArgs []string
 	}
 
 	// For testing entry node starts
@@ -134,7 +135,7 @@ func (m *MockDockerManager) StartContainerWithScenario(image string, scenarioPat
 }
 
 // StartContainerInNodeMode simulates starting a container in API server mode.
-func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
+func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -145,6 +146,7 @@ func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort strin
 	}
 
 	cmd := []string{dockerNodeModeArg, "--run-port=" + apiPort}
+	cmd = append(cmd, additionalArgs...)
 	if networkMode != "" {
 		cmd = append(cmd, "--network-mode="+networkMode)
 	}
@@ -162,7 +164,7 @@ func (m *MockDockerManager) StartContainerInNodeMode(image string, apiPort strin
 }
 
 // StartWorkerNodeContainer simulates starting a worker node container
-func (m *MockDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error) {
+func (m *MockDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -174,15 +176,17 @@ func (m *MockDockerManager) StartWorkerNodeContainer(image string, rmiHostname s
 
 	// Record the call for testing
 	m.workerNodeCalls = append(m.workerNodeCalls, struct {
-		Image        string
-		RMIHostname  string
-		RMIPortStart int
-		RMIPortCount int
+		Image          string
+		RMIHostname    string
+		RMIPortStart   int
+		RMIPortCount   int
+		AdditionalArgs []string
 	}{
-		Image:        image,
-		RMIHostname:  rmiHostname,
-		RMIPortStart: rmiPortStart,
-		RMIPortCount: rmiPortCount,
+		Image:          image,
+		RMIHostname:    rmiHostname,
+		RMIPortStart:   rmiPortStart,
+		RMIPortCount:   rmiPortCount,
+		AdditionalArgs: additionalArgs,
 	})
 
 	return m.containerID, nil
@@ -374,18 +378,20 @@ func (m *MockDockerManager) SetOnStreamOutput(callback func(containerID string))
 
 // GetWorkerNodeCalls returns all worker node container starts
 func (m *MockDockerManager) GetWorkerNodeCalls() []struct {
-	Image        string
-	RMIHostname  string
-	RMIPortStart int
-	RMIPortCount int
+	Image          string
+	RMIHostname    string
+	RMIPortStart   int
+	RMIPortCount   int
+	AdditionalArgs []string
 } {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := make([]struct {
-		Image        string
-		RMIHostname  string
-		RMIPortStart int
-		RMIPortCount int
+		Image          string
+		RMIHostname    string
+		RMIPortStart   int
+		RMIPortCount   int
+		AdditionalArgs []string
 	}, len(m.workerNodeCalls))
 	copy(result, m.workerNodeCalls)
 	return result

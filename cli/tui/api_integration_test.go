@@ -233,7 +233,7 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 	defer cancel()
 
 	// Start container
-	containerID, err := mockDM.StartContainerInNodeMode("test-image", constants.SptAPIPort, constants.DefaultNetworkMode)
+	containerID, err := mockDM.StartContainerInNodeMode("test-image", constants.SptAPIPort, constants.DefaultNetworkMode, nil)
 	if err != nil {
 		t.Fatalf("Failed to start container: %v", err)
 	}

@@ -151,7 +151,7 @@ func TestOrchestratorStartTest(t *testing.T) {
 	// For now, let's test the components separately
 
 	// Start container
-	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999", constants.DefaultNetworkMode)
+	containerID, err := mockDM.StartContainerInNodeMode("test-image", "9999", constants.DefaultNetworkMode, nil)
 	if err != nil {
 		t.Fatalf("Failed to start container: %v", err)
 	}
