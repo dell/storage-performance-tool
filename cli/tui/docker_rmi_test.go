@@ -20,6 +20,7 @@ func TestStartWorkerNodeContainer(t *testing.T) {
 		"192.168.1.100",
 		40000,
 		10,
+		nil,
 	)
 
 	if err != nil {
@@ -105,6 +106,7 @@ func TestStartWorkerNodeContainer_Failure(t *testing.T) {
 		"192.168.1.100",
 		40000,
 		10,
+		nil,
 	)
 
 	if err == nil {

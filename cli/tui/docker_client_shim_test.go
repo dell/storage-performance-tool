@@ -116,7 +116,7 @@ func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
 	if err := dm.SetFileMounts(mounts); err != nil {
 		t.Fatalf("SetFileMounts() error = %v", err)
 	}
-	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
 		t.Fatalf("StartContainerInNodeMode() error = %v", err)
 	}
 	if f.createHostConfig == nil {
@@ -331,7 +331,7 @@ func TestStartContainerInNodeModeUsesConfiguredNodeLogDir(t *testing.T) {
 	dm := &DockerManager{client: f, ctx: context.Background()}
 	dm.setNodeLogResultsRoot(resultsRoot)
 
-	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
 		t.Fatalf("StartContainerInNodeMode() error = %v", err)
 	}
 	wantDir := filepath.Join(resultsRoot, dockerNodeLogResultsDirName)
@@ -357,7 +357,7 @@ func TestStartContainerInNodeModeUsesDiagnosticsMountWhenJavaOptsSet(t *testing.
 	dm := &DockerManager{client: f, ctx: context.Background()}
 	dm.setDiagnosticsResultsRoot(resultsRoot)
 
-	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
 		t.Fatalf("StartContainerInNodeMode() error = %v", err)
 	}
 	wantDir := filepath.Join(resultsRoot, dockerDiagnosticsResultsDirName, "localhost", constants.DockerRoleNode)
@@ -377,7 +377,7 @@ func TestDockerManager_CleanupUsesDiagnosticsStopTimeoutAndManifest(t *testing.T
 	dm := &DockerManager{client: f, ctx: context.Background()}
 	dm.setDiagnosticsResultsRoot(resultsRoot)
 
-	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode); err != nil {
+	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
 		t.Fatalf("StartContainerInNodeMode() error = %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dm.diagnosticsDir, "spt-gc-123.log"), []byte("gc"), 0o600); err != nil {

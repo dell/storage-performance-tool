@@ -241,7 +241,7 @@ func (m *RemoteDockerManager) StartContainerWithScenario(_ string, _ string, _ [
 }
 
 // StartContainerInNodeMode starts a single Spt node exposing the provided API port.
-func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
+func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
 	port := command.ParsePortFromString(apiPort)
 	if port <= 0 {
 		return "", fmt.Errorf("invalid api port: %q", apiPort)
@@ -258,13 +258,16 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 
 	name := generateRemoteContainerName("node", m.host.Host)
 	mode := selectedNodeNetworkMode(networkMode)
+	cmd := make([]string, 0, 2+len(additionalArgs))
+	cmd = append(cmd, dockerNodeModeArg, "--run-port="+apiPort)
+	cmd = append(cmd, additionalArgs...)
 	cfg := command.ContainerConfig{
 		Image:       image,
 		Name:        name,
 		NetworkMode: mode,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleNode),
-		Command:     []string{dockerNodeModeArg, "--run-port=" + apiPort},
+		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,
 	}
@@ -290,7 +293,7 @@ func selectedNodeNetworkMode(networkMode string) command.NetworkMode {
 }
 
 // StartWorkerNodeContainer starts a worker in RMI mode on the remote host.
-func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, _ int, _ int) (string, error) {
+func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
 	// Detect advertised IP on the remote host if not explicitly provided
 	advIP := strings.TrimSpace(rmiHostname)
 	if advIP == "" {
@@ -313,6 +316,9 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 
 	// Host networking with explicit JVM RMI hostname and explicit ports
 	name := generateRemoteContainerName("worker", m.host.Host)
+	cmd := make([]string, 0, 3+len(additionalArgs))
+	cmd = append(cmd, dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099")
+	cmd = append(cmd, additionalArgs...)
 	cfg := command.ContainerConfig{
 		Image:       image,
 		Name:        name,
@@ -323,7 +329,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
 		},
-		Command:    []string{dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099"},
+		Command:    cmd,
 		BindMounts: append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:   envFiles,
 	}

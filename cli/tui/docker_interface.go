@@ -17,10 +17,10 @@ type DockerInterface interface {
 	StartContainerWithScenario(image string, scenarioPath string, additionalArgs []string) (string, error)
 
 	// StartContainerInNodeMode starts a container in API server mode.
-	StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error)
+	StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error)
 
 	// StartWorkerNodeContainer starts a container in RMI worker node mode
-	StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error)
+	StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error)
 
 	// StartEntryNodeContainer starts a container as RMI entry node with worker addresses
 	StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error)

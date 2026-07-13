@@ -63,7 +63,7 @@ func TestMultiHostOrchestrator_StartContainers_NoDockerManager(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := orchestrator.StartContainers(ctx, "test-image", "/test/scenario.js")
+	err := orchestrator.StartContainers(ctx, "test-image", nil)
 
 	// Should fail because hosts don't have Docker managers
 	if err == nil {
@@ -84,7 +84,7 @@ func TestMultiHostOrchestrator_StartContainers_PassesNetworkMode(t *testing.T) {
 	orchestrator.hosts[0].DockerManager = mockDocker
 	orchestrator.hosts[0].SetStatus(HostStatusReady)
 
-	if err := orchestrator.StartContainers(context.Background(), "test-image", ""); err != nil {
+	if err := orchestrator.StartContainers(context.Background(), "test-image", nil); err != nil {
 		t.Fatalf("StartContainers() error = %v", err)
 	}
 	calls := mockDocker.GetContainerCalls()
@@ -755,7 +755,7 @@ func TestStartEntryNode_UsesAdvertisedIPForWorkerAddresses(t *testing.T) {
 
 	// Call startEntryNode directly to avoid network waits
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB", ObjectCount: 1}
-	if err := o.startEntryNode(primary, []*HostConnection{worker}, params); err != nil {
+	if err := o.startEntryNode(primary, []*HostConnection{worker}, params, nil); err != nil {
 		t.Fatalf("startEntryNode error: %v", err)
 	}
 
@@ -1037,7 +1037,14 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 	replayScenario := []byte(`var step = "replay-001-max-w10kb"; Load.config({}).run();`)
 	replayDefaults := []byte("storage:\n  driver:\n    type: s3\n")
 	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
-	params := scenario.ScenarioParams{WorkloadType: "write", Threads: 1, ItemFileMounts: mounts}
+	params := scenario.ScenarioParams{
+		WorkloadType:   "write",
+		Threads:        1,
+		ItemFileMounts: mounts,
+		EngineOverrides: []string{
+			"load.service.threads=4",
+		},
+	}
 	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
 		t.Fatalf("StartTestWithContent() error = %v", err)
 	}
@@ -1057,10 +1064,16 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 	if workerCalls[0].RMIHostname != "127.0.0.1" {
 		t.Fatalf("worker RMI hostname = %q, want 127.0.0.1", workerCalls[0].RMIHostname)
 	}
+	if !containsStringSimple(strings.Join(workerCalls[0].AdditionalArgs, " "), "--load-service-threads=4") {
+		t.Fatalf("worker startup args = %v, want --load-service-threads=4", workerCalls[0].AdditionalArgs)
+	}
 
 	entryCalls := entryDM.GetEntryNodeCalls()
 	if len(entryCalls) != 1 {
 		t.Fatalf("expected one entry node start, got %d", len(entryCalls))
+	}
+	if !containsStringSimple(strings.Join(entryCalls[0].AdditionalArgs, " "), "--load-service-threads=4") {
+		t.Fatalf("entry startup args = %v, want --load-service-threads=4", entryCalls[0].AdditionalArgs)
 	}
 	wantWorkerAddr := "127.0.0.1:" + constants.RMIRegistryPort
 	if len(entryCalls[0].WorkerAddresses) != 1 || entryCalls[0].WorkerAddresses[0] != wantWorkerAddr {
@@ -1349,6 +1362,31 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 	}
 	if len(entryDM.GetEntryNodeCalls()) != 1 {
 		t.Fatalf("expected one entry node launch, got %d", len(entryDM.GetEntryNodeCalls()))
+	}
+}
+
+func TestMultiHostOrchestrator_StartDistributedTestRejectsStartupSettingsWithAttachedWorkers(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker1", Original: "worker1"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetAttachExistingWorkers(true)
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{
+			EngineOverrides: []string{"load.service.threads=4"},
+		},
+		[]byte(`Load.run({});`),
+	)
+	if err == nil {
+		t.Fatal("StartDistributedTestWithContent() error = nil, want attached-worker startup error")
+	}
+	if !strings.Contains(err.Error(), "cannot be applied with attached workers") ||
+		!strings.Contains(err.Error(), "--load-service-threads=4") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
 	}
 }
 

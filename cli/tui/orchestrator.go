@@ -176,6 +176,10 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
+	startupArgs, err := scenario.BuildEngineStartupArgs(params)
+	if err != nil {
+		return fmt.Errorf("resolve engine startup settings: %w", err)
+	}
 
 	// Save scenario to file if requested
 	if params.KeepScenario {
@@ -194,7 +198,7 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 
 	// Start container in node mode
 	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
-	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode)
+	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, startupArgs)
 	if err != nil {
 		return fmt.Errorf("failed to start container in node mode: %w", err)
 	}

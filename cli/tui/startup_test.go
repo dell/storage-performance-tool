@@ -355,7 +355,7 @@ func TestHybridDockerIntegration(t *testing.T) {
 
 			// Test Docker integration - in the new flow, we start container in node mode
 			// and send configuration via API, not CLI args
-			containerID, err := mockDM.StartContainerInNodeMode("spt-image", constants.SptAPIPort, constants.DefaultNetworkMode)
+			containerID, err := mockDM.StartContainerInNodeMode("spt-image", constants.SptAPIPort, constants.DefaultNetworkMode, nil)
 			if err != nil {
 				t.Errorf("Failed to start container in node mode: %v", err)
 				return

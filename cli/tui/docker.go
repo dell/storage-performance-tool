@@ -594,9 +594,9 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 }
 
 // StartContainerInNodeMode starts a Spt container in API server mode.
-func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string) (string, error) {
+func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
 	if dm.remote != nil {
-		return dm.remote.StartContainerInNodeMode(image, apiPort, networkMode)
+		return dm.remote.StartContainerInNodeMode(image, apiPort, networkMode, additionalArgs)
 	}
 
 	if err := dm.ensureImageAvailable(image); err != nil {
@@ -604,10 +604,12 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	}
 
 	// Build command for node mode
-	cmd := []string{
+	cmd := make([]string, 0, 2+len(additionalArgs))
+	cmd = append(cmd,
 		dockerNodeModeArg,
-		"--run-port=" + apiPort,
-	}
+		"--run-port="+apiPort,
+	)
+	cmd = append(cmd, additionalArgs...)
 
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "node", "port", apiPort, "cmd", cmd)
 
@@ -713,16 +715,18 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 }
 
 // StartWorkerNodeContainer starts a container in RMI worker node mode
-func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error) {
+func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
 	if dm.remote != nil {
-		return dm.remote.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount)
+		return dm.remote.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 	}
 
 	// Build command for worker node mode
-	cmd := []string{
+	cmd := make([]string, 0, 2+len(additionalArgs))
+	cmd = append(cmd,
 		dockerNodeModeArg,
-		"--run-port=" + constants.SptAPIPort, // REST API port
-	}
+		"--run-port="+constants.SptAPIPort, // REST API port
+	)
+	cmd = append(cmd, additionalArgs...)
 
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "worker_node", "rmi_hostname", rmiHostname, "cmd", cmd)
 

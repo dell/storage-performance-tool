@@ -502,7 +502,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(hosts []*HostConnection,
 }
 
 // StartContainers starts Spt containers on all ready hosts
-func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string, _ string) error {
+func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string, additionalArgs []string) error {
 	o.mu.Lock()
 	o.image = image
 	o.mu.Unlock()
@@ -543,7 +543,7 @@ func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string,
 				return
 			}
 
-			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode)
+			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, additionalArgs)
 			if err != nil {
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
@@ -1466,6 +1466,10 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		// Behavior: run the workload only on the PRIMARY (first) host; start API-only
 		// containers on remaining hosts so they appear in the live view as idle.
 		if strings.EqualFold(params.WorkloadType, scenario.WorkloadTypeList) {
+			startupArgs, err := scenario.BuildEngineStartupArgs(params)
+			if err != nil {
+				return fmt.Errorf("resolve engine startup settings: %w", err)
+			}
 			// Status/message hooks
 			if m.onStatusUpdate != nil {
 				m.onStatusUpdate(&TestStatus{
@@ -1489,7 +1493,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 					continue
 				}
 				w.SetPhase(NodePhaseContainerStarting)
-				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort, m.multiHost.networkMode)
+				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort, m.multiHost.networkMode, startupArgs)
 				if err != nil {
 					// Record but continue; non-critical for primary execution
 					w.SetError(err)
@@ -1527,6 +1531,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 			if err != nil {
 				return fmt.Errorf("failed to build endpoint args: %w", err)
 			}
+			additionalArgs = append(additionalArgs, startupArgs...)
 
 			primary := readyHosts[0]
 			if primary.DockerManager == nil {
@@ -1651,6 +1656,10 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
+	startupArgs, err := scenario.BuildEngineStartupArgs(params)
+	if err != nil {
+		return fmt.Errorf("resolve engine startup settings: %w", err)
+	}
 	m.multiHost.itemFileMounts = params.ItemFileMounts
 	if len(readyHosts) != 1 {
 		if m.onStatusUpdate != nil {
@@ -1690,7 +1699,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 
 	m.multiHost.scenarioContent = string(scenarioContent)
 
-	if err := m.multiHost.StartContainers(ctx, image, ""); err != nil {
+	if err := m.multiHost.StartContainers(ctx, image, startupArgs); err != nil {
 		return err
 	}
 	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
@@ -1878,7 +1887,7 @@ func (o *MultiHostOrchestrator) attachWorkerNode(host *HostConnection) error {
 }
 
 // startWorkerNode starts a worker node container with RMI configuration
-func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection) error {
+func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection, additionalArgs []string) error {
 	// Check if host has a Docker manager configured
 	if host.DockerManager == nil {
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
@@ -1904,6 +1913,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection) error {
 		advIP,
 		o.rmiPortStart,
 		o.rmiPortCount,
+		additionalArgs,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to start worker on %s: %w", host.Info.Host, err)
@@ -1930,6 +1940,7 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	primary *HostConnection,
 	workers []*HostConnection,
 	params scenario.ScenarioParams,
+	startupArgs []string,
 ) error {
 	// Build worker addresses for RMI using detected advertised IPs where available
 	workerAddresses := make([]string, 0, len(workers))
@@ -1953,6 +1964,7 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	if err != nil {
 		return fmt.Errorf("failed to build endpoint args: %w", err)
 	}
+	additionalArgs = append(additionalArgs, startupArgs...)
 
 	containerID, err := primary.DockerManager.StartEntryNodeContainer(
 		o.image,
@@ -1993,12 +2005,19 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Contex
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
+	startupArgs, err := scenario.BuildEngineStartupArgs(params)
+	if err != nil {
+		return fmt.Errorf("resolve engine startup settings: %w", err)
+	}
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	o.image = image
 	attachWorkers := o.attachWorkers
+	if attachWorkers && len(startupArgs) > 0 {
+		return fmt.Errorf("engine startup settings cannot be applied with attached workers; start every worker with %s", startupArgs[0])
+	}
 
 	// 1. Determine roles: first host is entry node, rest are workers
 	if len(o.hosts) == 0 {
@@ -2035,7 +2054,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Contex
 				if attachWorkers {
 					err = o.attachWorkerNode(w)
 				} else {
-					err = o.startWorkerNode(w)
+					err = o.startWorkerNode(w, startupArgs)
 				}
 
 				if err != nil {
@@ -2094,7 +2113,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Contex
 		}
 	}
 
-	if err := o.startEntryNode(entryNode, activeWorkers, params); err != nil {
+	if err := o.startEntryNode(entryNode, activeWorkers, params, startupArgs); err != nil {
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
 

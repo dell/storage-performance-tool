@@ -33,7 +33,7 @@ func newTestRemoteManager(t *testing.T) (*RemoteDockerManager, *command.MockComm
 func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 
-	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode)
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, []string{"--load-service-threads=4"})
 	if err != nil {
 		t.Fatalf("StartContainerInNodeMode error: %v", err)
 	}
@@ -54,6 +54,7 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 		constants.DefaultSptImage,
 		"--run-node=true",
 		"--run-port=10080",
+		"--load-service-threads=4",
 		"--label spt.host=worker1.example.com",
 		"--label spt.managed=true",
 		"--label spt.role=node",
@@ -76,7 +77,7 @@ func TestRemoteDocker_StartContainerInNodeMode_StagesAndMountsItemFiles(t *testi
 		t.Fatalf("SetFileMounts() error = %v", err)
 	}
 
-	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode)
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil)
 	if err != nil {
 		t.Fatalf("StartContainerInNodeMode error: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestRemoteDocker_StartContainerInNodeMode_StagesAndMountsItemFiles(t *testi
 func TestRemoteDocker_StartContainerInNodeMode_HostNetwork(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 
-	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.HostNetworkMode)
+	id, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.HostNetworkMode, nil)
 	if err != nil {
 		t.Fatalf("StartContainerInNodeMode error: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestRemoteDocker_StartContainerInNodeMode_HostNetwork(t *testing.T) {
 func TestRemoteDocker_StartWorkerNodeContainer_BuildsExpectedCommand(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 
-	id, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3)
+	id, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3, []string{"--load-service-threads=4"})
 	if err != nil {
 		t.Fatalf("StartWorkerNodeContainer error: %v", err)
 	}
@@ -160,6 +161,7 @@ func TestRemoteDocker_StartWorkerNodeContainer_BuildsExpectedCommand(t *testing.
 		"--run-node=true",
 		"--run-port=9999",
 		"--load-step-node-port=1099",
+		"--load-service-threads=4",
 		"--label spt.host=worker1.example.com",
 		"--label spt.managed=true",
 		"--label spt.role=worker",
@@ -181,7 +183,7 @@ func TestRemoteDocker_StartWorkerNodeContainer_DiagnosticsEnvFileAndMount(t *tes
 	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
 	mgr.setDiagnosticsResultsRoot(resultsRoot)
 
-	id, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3)
+	id, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil)
 	if err != nil {
 		t.Fatalf("StartWorkerNodeContainer error = %v", err)
 	}
@@ -230,7 +232,7 @@ func TestRemoteDocker_CleanupCollectsDiagnosticsBeforeStagingCleanup(t *testing.
 	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
 	mgr.setDiagnosticsResultsRoot(resultsRoot)
 
-	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3); err != nil {
+	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil); err != nil {
 		t.Fatalf("StartWorkerNodeContainer error = %v", err)
 	}
 	remoteDir := mgr.diagnosticsDir
@@ -278,7 +280,7 @@ func TestRemoteDocker_CleanupWithJavaOptsAndNoResultsRootRemovesRemoteDiagnostic
 	t.Setenv(constants.EnvSptJavaOpts, "-Xmx8g")
 	mgr, mock, _ := newTestRemoteManager(t)
 
-	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3); err != nil {
+	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil); err != nil {
 		t.Fatalf("StartWorkerNodeContainer error = %v", err)
 	}
 	remoteDir := mgr.diagnosticsDir
@@ -388,7 +390,7 @@ func TestRemoteDocker_CollectDiagnosticsPreservesRemoteDirWhenStopNotConfirmed(t
 	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
 	mgr.setDiagnosticsResultsRoot(resultsRoot)
 
-	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3); err != nil {
+	if _, err := mgr.StartWorkerNodeContainer(constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil); err != nil {
 		t.Fatalf("StartWorkerNodeContainer error = %v", err)
 	}
 	remoteDir := mgr.diagnosticsDir
@@ -459,7 +461,7 @@ func TestRemoteDocker_CleanupCollectsNodeModeDiagnostics(t *testing.T) {
 	resultsRoot := filepath.Join(t.TempDir(), "mt-20260705.120000.000")
 	mgr.setDiagnosticsResultsRoot(resultsRoot)
 
-	if _, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode); err != nil {
+	if _, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil); err != nil {
 		t.Fatalf("StartContainerInNodeMode error = %v", err)
 	}
 	remoteDir := mgr.diagnosticsDir

@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1342,5 +1343,103 @@ func TestGenerateDefaultsRejectsInvalidEngineOverrides(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "path=value") {
 		t.Fatalf("expected path=value error, got %v", err)
+	}
+}
+
+func TestBuildEngineStartupArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		params Params
+		want   []string
+	}{
+		{
+			name:   "service threads flag",
+			params: Params{ServiceThreads: 3},
+			want:   []string{"--load-service-threads=3"},
+		},
+		{
+			name: "dotted engine override",
+			params: Params{
+				EngineOverrides: []string{"load.service.threads=4"},
+			},
+			want: []string{"--load-service-threads=4"},
+		},
+		{
+			name: "dash separated engine override",
+			params: Params{
+				EngineOverrides: []string{"load-service-threads=6"},
+			},
+			want: []string{"--load-service-threads=6"},
+		},
+		{
+			name: "matching flag and override",
+			params: Params{
+				ServiceThreads:  4,
+				EngineOverrides: []string{"load.service.threads=4"},
+			},
+			want: []string{"--load-service-threads=4"},
+		},
+		{name: "automatic default", params: Params{}, want: nil},
+		{
+			name: "unrelated override",
+			params: Params{
+				EngineOverrides: []string{"storage.driver.threads=6"},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := BuildEngineStartupArgs(tt.params)
+			if err != nil {
+				t.Fatalf("BuildEngineStartupArgs() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("BuildEngineStartupArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildEngineStartupArgsRejectsInvalidServiceThreads(t *testing.T) {
+	tests := []struct {
+		name   string
+		params Params
+	}{
+		{
+			name: "conflicting flag and override",
+			params: Params{
+				ServiceThreads:  3,
+				EngineOverrides: []string{"load.service.threads=4"},
+			},
+		},
+		{
+			name: "conflicting overrides",
+			params: Params{
+				EngineOverrides: []string{"load.service.threads=3", "load-service-threads=4"},
+			},
+		},
+		{
+			name: "non integer override",
+			params: Params{
+				EngineOverrides: []string{"load.service.threads=four"},
+			},
+		},
+		{
+			name: "negative override",
+			params: Params{
+				EngineOverrides: []string{"load.service.threads=-1"},
+			},
+		},
+		{name: "negative flag", params: Params{ServiceThreads: -1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := BuildEngineStartupArgs(tt.params); err == nil {
+				t.Fatal("BuildEngineStartupArgs() error = nil, want validation error")
+			}
+		})
 	}
 }
