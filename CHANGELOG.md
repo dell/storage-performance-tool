@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.12.1] - 2026-07-14
+
+### Changed
+
+- **Dependency updates** — Updated `golang.org/x/tools`.
+
+### Fixed
+
+- **S3 write dispatch throughput** — Avoided repeated full-list scans during ordinary writes after composite-read batching.
+- **Netty completion cleanup** — Cleared completed channel operations before reuse and released undispatched batch permits during shutdown.
+- **Partial socket writes** — Corrected non-TLS file-region progress accounting for partial writes.
+- **Remote execution routing** — Routed single remote-host runs through remote orchestration instead of local Docker.
+- **Virtual-thread configuration** — Applied `load.service.threads` when engine containers start so workers use the requested scheduler parallelism.
+
 ## [5.12.0] - 2026-07-09
 
 ### Added
