@@ -75,10 +75,10 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	}
 
 	/**
-	 * Enable idle-VT quiescing for fast-recycle workloads.  When enabled, the
-	 * generator parks its VT (instead of spin-waiting/yielding) when the recycle
+	 * Enable idle-task quiescing for fast-recycle workloads. When enabled, the
+	 * generator parks its task thread (instead of spin-waiting/yielding) when the recycle
 	 * queue is empty, because the driver is handling recycling inline.  The
-	 * {@link #recycle} method will unpark the VT immediately if an op falls back
+	 * {@link #recycle} method will unpark the task immediately if an op falls back
 	 * to the normal path.
 	 */
 	default void enableFastRecycleQuiesce() {}

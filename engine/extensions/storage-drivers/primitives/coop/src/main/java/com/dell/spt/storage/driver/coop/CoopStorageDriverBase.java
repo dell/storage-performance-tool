@@ -88,7 +88,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		this.mpuObjectThrottle = configuredMpuObjectLimit > 0 ? new Semaphore(configuredMpuObjectLimit, true) : null;
 
 		this.opDispatchTask = new OperationDispatchTask<>(
-						ServiceTaskExecutor.VT_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
+						ServiceTaskExecutor.TASK_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
 						dispatchLock, dispatchReady, inQueueLimit);
 	}
 

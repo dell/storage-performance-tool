@@ -14,7 +14,7 @@ class AsyncExpressionInputImpl<T> extends TaskBase implements AsyncExpressionInp
 	private ExpressionInput<T> input;
 
 	AsyncExpressionInputImpl(final ExpressionInput<T> input) {
-		super(ServiceTaskExecutor.VT_EXECUTOR);
+		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		if (input instanceof SynchronousExpressionInput) {
 			throw new IllegalArgumentException("An expression input to wrap should not be synchronous");
 		}

@@ -9,7 +9,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.TaskBase;
-import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
@@ -68,7 +68,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
-	public MetricsManagerImpl(final VirtualThreadExecutor executor) {
+	public MetricsManagerImpl(final ThreadTaskExecutor executor) {
 		super(executor);
 		// Register a global collector that emits aggregated step completion percent per step id
 		try {

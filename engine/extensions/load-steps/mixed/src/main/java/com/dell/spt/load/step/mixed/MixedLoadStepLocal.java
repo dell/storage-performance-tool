@@ -299,7 +299,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 		// ── 12. Create MixedLoadGenerator ──────────────────────────────────
 		final MixedLoadGenerator generator = new MixedLoadGenerator(
-						ServiceTaskExecutor.VT_EXECUTOR, schedule, pool, builders,
+						ServiceTaskExecutor.TASK_EXECUTOR, schedule, pool, builders,
 						driver, concurrencyLimit, newItemInput);
 		this.mixedGenerator = generator;
 

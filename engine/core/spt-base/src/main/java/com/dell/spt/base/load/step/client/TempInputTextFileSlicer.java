@@ -173,7 +173,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 						final int sliceCount)
 						throws IOException {
 
-			super(ServiceTaskExecutor.VT_EXECUTOR);
+			super(ServiceTaskExecutor.TASK_EXECUTOR);
 
 			this.inputFinishFlag = inputFinishFlag;
 			this.lineQueues = lineQueues;
@@ -197,7 +197,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 			if (line == null) {
 				stop();
 			} else {
-				// With VTs, put() blocks (unmounting the VT) if the queue is full
+				// put() blocks the task thread if the queue is full
 				lineQueues.get((int) (lineCount % sliceCount)).put(line);
 				lineCount++;
 			}
@@ -243,7 +243,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 						final FileManager fileMgr,
 						final String dstFileName,
 						final int batchSize) {
-			super(ServiceTaskExecutor.VT_EXECUTOR);
+			super(ServiceTaskExecutor.TASK_EXECUTOR);
 
 			this.inputFinishFlag = inputFinishFlag;
 			this.writeFinishCountDown = writeFinishCountDown;
@@ -259,7 +259,7 @@ public final class TempInputTextFileSlicer implements AutoCloseable {
 
 		@Override
 		protected final void doWork() throws Exception {
-			// Block briefly waiting for lines; VT unmounts during poll timeout
+			// Block briefly waiting for lines during the poll timeout
 			final var first = lineQueue.poll(10, TimeUnit.MILLISECONDS);
 			if (first != null) {
 				lines.add(first);

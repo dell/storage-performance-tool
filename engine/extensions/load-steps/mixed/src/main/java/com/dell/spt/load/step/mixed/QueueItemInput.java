@@ -15,7 +15,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
  *
  * <p>Blocking semantics: {@link #get(List, int)} blocks (in 100ms polling intervals) until at
  * least one item is available, then non-blockingly drains the rest of the batch. The generator
- * virtual thread is safely parked by the blocking-queue poll; it will be interrupted when the load
+ * task thread is safely parked by the blocking-queue poll; it will be interrupted when the load
  * step's time limit expires, at which point the interrupt is re-thrown as unchecked so the engine
  * can clean up.
  */

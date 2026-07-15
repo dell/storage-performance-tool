@@ -4,7 +4,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Lifecycle contract for a recurring background task.
- * Implementations run on Virtual Threads via TaskExecutor.
+ * Implementations run on dedicated task threads via the configured executor.
  */
 public interface Task extends AutoCloseable {
 	void start();

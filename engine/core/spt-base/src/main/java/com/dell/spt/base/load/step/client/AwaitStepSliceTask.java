@@ -19,7 +19,7 @@ public class AwaitStepSliceTask extends TaskBase {
 	private final CountDownLatch awaitCountDown;
 
 	public AwaitStepSliceTask(final LoadStep stepSlice, final CountDownLatch awaitCountDown) {
-		super(ServiceTaskExecutor.VT_EXECUTOR);
+		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		this.stepSlice = stepSlice;
 		try {
 			this.loadStepId = stepSlice.loadStepId();
