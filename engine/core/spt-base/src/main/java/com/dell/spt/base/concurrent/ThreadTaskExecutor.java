@@ -17,12 +17,12 @@ public abstract class ThreadTaskExecutor implements AutoCloseable {
 	}
 
 	@SuppressWarnings("FutureReturnValueIgnored")
-	public final void submit(final Runnable task) {
+	public void submit(final Runnable task) {
 		executor.submit(task);
 	}
 
 	@Override
-	public final void close() {
+	public void close() {
 		executor.shutdown();
 		try {
 			if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -34,7 +34,7 @@ public abstract class ThreadTaskExecutor implements AutoCloseable {
 		}
 	}
 
-	public final boolean isShutdown() {
+	public boolean isShutdown() {
 		return executor.isShutdown();
 	}
 }

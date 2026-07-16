@@ -3,12 +3,11 @@ package com.dell.spt.base.concurrent;
 /**
  * Runs Task instances on Virtual Threads.
  * <p>
- * Tunes the VT carrier ForkJoinPool parallelism to avoid excessive work-stealing
- * overhead. SPT runs only a handful of active VTs (LoadGenerator,
- * OperationDispatchTask, MetricsManager, etc.) so the JVM default of
- * availableProcessors() carrier threads is wasteful on large machines.
+ * Tunes the VT carrier ForkJoinPool parallelism used by the remaining short-lived
+ * and blocking virtual-thread paths. Long-lived recurring service tasks use
+ * {@link PlatformThreadExecutor} instead.
  * Override with {@code -Djdk.virtualThreadScheduler.parallelism=N} or
- * set {@code load.service.threads} in the SPT config.
+ * set the legacy-named {@code load.service.threads} option in the SPT config.
  */
 public class VirtualThreadExecutor extends ThreadTaskExecutor {
 

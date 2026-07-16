@@ -2,6 +2,11 @@ package com.dell.spt.base.concurrent;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -10,6 +15,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class PlatformThreadExecutorTest {
+
+	private static final int SCALE_TASK_COUNT = 48;
+	private static final long MAX_SCALE_RSS_GROWTH_BYTES = 128L * 1024 * 1024;
 
 	@Test
 	void serviceTasksUsePlatformThreadExecutor() {
@@ -84,5 +92,93 @@ class PlatformThreadExecutorTest {
 		assertTrue(interrupted.get());
 		executor.close();
 		assertTrue(executor.isShutdown());
+	}
+
+	@Test
+	void scaledServiceTasksRestartWithoutThreadLeaksOrUnboundedRssGrowth() throws Exception {
+		final long rssBefore = linuxRssBytes();
+		final var firstEntered = new CountDownLatch(SCALE_TASK_COUNT);
+		final var secondEntered = new CountDownLatch(SCALE_TASK_COUNT);
+		final var firstRelease = new CountDownLatch(1);
+		final var secondRelease = new CountDownLatch(1);
+		final var release = new AtomicReference<>(firstRelease);
+		final List<Thread> taskThreads = new java.util.concurrent.CopyOnWriteArrayList<>();
+		final List<TaskBase> tasks = new ArrayList<>(SCALE_TASK_COUNT);
+
+		try (final var executor = new PlatformThreadExecutor()) {
+			for (int i = 0; i < SCALE_TASK_COUNT; i++) {
+				final var generation = new AtomicInteger();
+				tasks.add(new TaskBase(executor) {
+					@Override
+					protected void doInit() {
+						taskThreads.add(Thread.currentThread());
+						if (generation.incrementAndGet() == 1) {
+							firstEntered.countDown();
+						} else {
+							secondEntered.countDown();
+						}
+					}
+
+					@Override
+					protected void doWork() throws Exception {
+						release.get().await();
+						stop();
+					}
+				});
+			}
+
+			tasks.forEach(TaskBase::start);
+			assertTrue(firstEntered.await(10, TimeUnit.SECONDS));
+			assertServiceThreads(taskThreads, SCALE_TASK_COUNT);
+			assertRssGrowthIsBounded(rssBefore, linuxRssBytes());
+
+			firstRelease.countDown();
+			awaitAll(tasks);
+			release.set(secondRelease);
+			tasks.forEach(TaskBase::restart);
+			assertTrue(secondEntered.await(10, TimeUnit.SECONDS));
+			assertServiceThreads(taskThreads, SCALE_TASK_COUNT * 2);
+
+			secondRelease.countDown();
+			awaitAll(tasks);
+		}
+
+		assertTrue(taskThreads.stream().noneMatch(Thread::isAlive),
+						"all scaled service-task threads should terminate after close");
+	}
+
+	private static void awaitAll(final List<TaskBase> tasks) throws InterruptedException {
+		for (final var task : tasks) {
+			assertTrue(task.awaitStop(10, TimeUnit.SECONDS));
+		}
+	}
+
+	private static void assertServiceThreads(final List<Thread> threads, final int expectedCount) {
+		assertEquals(expectedCount, threads.size());
+		assertEquals(expectedCount, new HashSet<>(threads).size(),
+						"each task start should use a fresh thread");
+		assertTrue(threads.stream().allMatch(thread -> thread.getName().startsWith("spt-service-")));
+		assertTrue(threads.stream().allMatch(Thread::isDaemon));
+		assertTrue(threads.stream().noneMatch(Thread::isVirtual));
+	}
+
+	private static long linuxRssBytes() throws Exception {
+		final Path statusPath = Path.of("/proc/self/status");
+		if (!Files.isReadable(statusPath)) {
+			return -1;
+		}
+		for (final String line : Files.readAllLines(statusPath)) {
+			if (line.startsWith("VmRSS:")) {
+				return Long.parseLong(line.replaceAll("[^0-9]", "")) * 1024;
+			}
+		}
+		return -1;
+	}
+
+	private static void assertRssGrowthIsBounded(final long before, final long active) {
+		if (before >= 0 && active >= 0) {
+			assertTrue(active - before < MAX_SCALE_RSS_GROWTH_BYTES,
+							"scaled service tasks grew RSS by " + (active - before) + " bytes");
+		}
 	}
 }

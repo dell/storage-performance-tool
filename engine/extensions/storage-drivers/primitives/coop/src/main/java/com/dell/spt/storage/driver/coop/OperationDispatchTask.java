@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop;
 
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.LogUtil;
@@ -59,6 +60,15 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		this.dispatchReady = dispatchReady;
 		this.deferredQueueCapacity = deferredQueueCapacity;
 		this.deferredMpuQueue = new java.util.ArrayDeque<>(deferredQueueCapacity);
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	public OperationDispatchTask(
+					final VirtualThreadExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
+					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
+					final int batchSize, final Lock dispatchLock, final Condition dispatchReady, final int deferredQueueCapacity) {
+		this((ThreadTaskExecutor) executor, storageDriver, inOpQueue, childOpQueue, stepId,
+						batchSize, dispatchLock, dispatchReady, deferredQueueCapacity);
 	}
 
 	@Override

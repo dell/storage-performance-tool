@@ -16,6 +16,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,6 +35,20 @@ class OperationDispatchTaskTest {
 	private ReentrantLock dispatchLock;
 	private Condition dispatchReady;
 	private OperationDispatchTask<Item, Operation<Item>> task;
+
+	@Test
+	void legacyVirtualThreadConstructorDescriptorRemainsAvailable() throws Exception {
+		assertNotNull(OperationDispatchTask.class.getConstructor(
+						VirtualThreadExecutor.class,
+						CoopStorageDriverBase.class,
+						BlockingQueue.class,
+						BlockingQueue.class,
+						String.class,
+						int.class,
+						Lock.class,
+						Condition.class,
+						int.class));
+	}
 
 	@BeforeEach
 	void setUp() {

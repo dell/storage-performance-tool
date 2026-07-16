@@ -10,6 +10,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
@@ -79,6 +80,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to register CombinedCompletionCollector");
 		}
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	public MetricsManagerImpl(final VirtualThreadExecutor executor) {
+		this((ThreadTaskExecutor) executor);
 	}
 
 	@Override

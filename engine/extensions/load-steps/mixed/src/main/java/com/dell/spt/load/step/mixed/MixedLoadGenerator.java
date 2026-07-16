@@ -2,6 +2,7 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -108,6 +109,18 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			this.rerollCumulativeWeights[i] = cumulative;
 		}
 		this.rerollTotalWeight = cumulative;
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	public MixedLoadGenerator(
+					final VirtualThreadExecutor executor,
+					final OpSchedule schedule,
+					final PoolItemInput<I> pool,
+					final Map<OpType, OperationsBuilder<I, O>> builders,
+					final Output<O> opOutput,
+					final int concurrencyLimit,
+					final Input<I> newItemInput) {
+		this((ThreadTaskExecutor) executor, schedule, pool, builders, opOutput, concurrencyLimit, newItemInput);
 	}
 
 	@Override

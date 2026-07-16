@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client.metrics;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -30,6 +31,11 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 	public MetricsSnapshotsSupplierTaskImpl(final ThreadTaskExecutor executor, final LoadStep loadStep) {
 		super(executor);
 		this.loadStep = loadStep;
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	public MetricsSnapshotsSupplierTaskImpl(final VirtualThreadExecutor executor, final LoadStep loadStep) {
+		this((ThreadTaskExecutor) executor, loadStep);
 	}
 
 	@Override

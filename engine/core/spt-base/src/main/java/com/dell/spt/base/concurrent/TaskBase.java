@@ -21,6 +21,11 @@ public abstract class TaskBase implements Task, Runnable {
 		this.executor = executor;
 	}
 
+	/** Preserves the constructor descriptor used by existing extensions. */
+	protected TaskBase(final VirtualThreadExecutor executor) {
+		this((ThreadTaskExecutor) executor);
+	}
+
 	@Override
 	public void start() {
 		if (started) {
@@ -88,8 +93,8 @@ public abstract class TaskBase implements Task, Runnable {
 	}
 
 	/**
-	 * Restart a previously-stopped task. Resets internal state and submits a fresh Virtual
-	 * Thread so the doInit/doWork loop runs again. Throws if the task is still running.
+	 * Restart a previously-stopped task. Resets internal state and submits a fresh task
+	 * thread so the doInit/doWork loop runs again. Throws if the task is still running.
 	 */
 	public void restart() {
 		if (isStarted()) {
