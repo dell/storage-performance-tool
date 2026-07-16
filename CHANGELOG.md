@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.12.2] - 2026-07-16
+
 ### Fixed
 
 - **IEC byte-size input** — CLI and engine size settings such as `--object-size` and `--item-data-size` now accept IEC suffixes (`KiB`, `MiB`, `GiB`, `TiB`, `PiB`, and `EiB`) while preserving legacy binary aliases such as `KB` and `MB`.
