@@ -123,9 +123,12 @@ public final class Main {
 				}
 
 				applyVtParallelism(configWithArgs);
+				Loggers.MSG.info(
+								"Using {} for service tasks",
+								ServiceTaskExecutor.TASK_EXECUTOR.getClass().getSimpleName());
 
 				// init the metrics manager
-				final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+				final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.TASK_EXECUTOR);
 				// go on
 				if (configWithArgs.boolVal("run-node")) {
 					runNode(configWithArgs, extClsLoader, extensions, metricsMgr, appHomePath);

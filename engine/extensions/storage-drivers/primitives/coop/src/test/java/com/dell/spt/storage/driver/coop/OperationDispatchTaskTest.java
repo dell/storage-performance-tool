@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.concurrent.PlatformThreadExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
@@ -15,6 +16,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,6 +35,20 @@ class OperationDispatchTaskTest {
 	private ReentrantLock dispatchLock;
 	private Condition dispatchReady;
 	private OperationDispatchTask<Item, Operation<Item>> task;
+
+	@Test
+	void legacyVirtualThreadConstructorDescriptorRemainsAvailable() throws Exception {
+		assertNotNull(OperationDispatchTask.class.getConstructor(
+						VirtualThreadExecutor.class,
+						CoopStorageDriverBase.class,
+						BlockingQueue.class,
+						BlockingQueue.class,
+						String.class,
+						int.class,
+						Lock.class,
+						Condition.class,
+						int.class));
+	}
 
 	@BeforeEach
 	void setUp() {
@@ -89,6 +105,31 @@ class OperationDispatchTaskTest {
 		task.doWork();
 
 		verify(driverMock).submit(op);
+	}
+
+	@Test
+	void platformThreadDispatcherWakesForIncomingOperation() throws Exception {
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(op)).thenReturn(true);
+		try (final var platformExecutor = new PlatformThreadExecutor()) {
+			final var platformTask = new OperationDispatchTask<>(
+							platformExecutor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+							dispatchLock, dispatchReady, 16);
+			try {
+				platformTask.start();
+				inOpQueue.add(op);
+				dispatchLock.lock();
+				try {
+					dispatchReady.signal();
+				} finally {
+					dispatchLock.unlock();
+				}
+				verify(driverMock, timeout(5_000)).submit(op);
+			} finally {
+				platformTask.stop();
+				assertTrue(platformTask.awaitStop(5, TimeUnit.SECONDS));
+			}
+		}
 	}
 
 	@Test

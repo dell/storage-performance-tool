@@ -4,21 +4,26 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Base class for recurring tasks that run on a Virtual Thread.
+ * Base class for recurring tasks that run on a dedicated task thread.
  * <p>
- * Subclasses implement {@link #doWork()} with their work loop body. The VirtualThreadExecutor
- * submits this as a Runnable to a Virtual Thread, which calls doWork() in a loop until stopped.
+ * Subclasses implement {@link #doWork()} with their work loop body. The configured executor
+ * submits this as a Runnable, which calls doWork() in a loop until stopped.
  */
 public abstract class TaskBase implements Task, Runnable {
 
 	private volatile boolean started = false;
 	private volatile boolean stopped = false;
 	private volatile Thread taskThread;
-	private final VirtualThreadExecutor executor;
+	private final ThreadTaskExecutor executor;
 	private volatile CountDownLatch stopLatch = new CountDownLatch(1);
 
-	protected TaskBase(final VirtualThreadExecutor executor) {
+	protected TaskBase(final ThreadTaskExecutor executor) {
 		this.executor = executor;
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	protected TaskBase(final VirtualThreadExecutor executor) {
+		this((ThreadTaskExecutor) executor);
 	}
 
 	@Override
@@ -53,17 +58,16 @@ public abstract class TaskBase implements Task, Runnable {
 	}
 
 	/**
-	 * Called once on the Virtual Thread before the work loop begins. Override to set up
-	 * per-VT state such as Log4j ThreadContext (MDC) keys. With Virtual Threads, thread-local
-	 * state persists for the VT's entire lifetime, so initialization done here does not need
+	 * Called once on the task thread before the work loop begins. Override to set up
+	 * per-thread state such as Log4j ThreadContext (MDC) keys. Thread-local state persists
+	 * for the task thread's entire lifetime, so initialization done here does not need
 	 * to be repeated in each doWork() iteration.
 	 */
 	protected void doInit() {}
 
 	/**
 	 * Subclasses implement their work loop body here. Called repeatedly until the task is
-	 * stopped or interrupted. Blocking calls (queue.poll, Thread.sleep, lock.lock) will
-	 * automatically unmount the Virtual Thread from its carrier.
+	 * stopped or interrupted.
 	 */
 	protected abstract void doWork() throws Exception;
 
@@ -89,8 +93,8 @@ public abstract class TaskBase implements Task, Runnable {
 	}
 
 	/**
-	 * Restart a previously-stopped task. Resets internal state and submits a fresh Virtual
-	 * Thread so the doInit/doWork loop runs again. Throws if the task is still running.
+	 * Restart a previously-stopped task. Resets internal state and submits a fresh task
+	 * thread so the doInit/doWork loop runs again. Throws if the task is still running.
 	 */
 	public void restart() {
 		if (isStarted()) {

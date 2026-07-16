@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.client.metrics;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
+import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.logging.LogUtil;
@@ -23,13 +24,18 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 	private int AGGREGATION_PERIOD_MILLIS;
 
 	public MetricsSnapshotsSupplierTaskImpl(final LoadStep loadStep, Config metricsConfig) {
-		this(ServiceTaskExecutor.VT_EXECUTOR, loadStep);
+		this(ServiceTaskExecutor.TASK_EXECUTOR, loadStep);
 		AGGREGATION_PERIOD_MILLIS = metricsConfig.intVal("average-aggregation-period");
 	}
 
-	public MetricsSnapshotsSupplierTaskImpl(final VirtualThreadExecutor executor, final LoadStep loadStep) {
+	public MetricsSnapshotsSupplierTaskImpl(final ThreadTaskExecutor executor, final LoadStep loadStep) {
 		super(executor);
 		this.loadStep = loadStep;
+	}
+
+	/** Preserves the constructor descriptor used by existing extensions. */
+	public MetricsSnapshotsSupplierTaskImpl(final VirtualThreadExecutor executor, final LoadStep loadStep) {
+		this((ThreadTaskExecutor) executor, loadStep);
 	}
 
 	@Override

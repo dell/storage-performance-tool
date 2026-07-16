@@ -40,6 +40,18 @@ import static org.junit.jupiter.api.Assertions.*;
 })
 class MixedLoadGeneratorTest {
 
+	@Test
+	void legacyVirtualThreadConstructorDescriptorRemainsAvailable() throws Exception {
+		assertNotNull(MixedLoadGenerator.class.getConstructor(
+						VirtualThreadExecutor.class,
+						OpSchedule.class,
+						PoolItemInput.class,
+						Map.class,
+						Output.class,
+						int.class,
+						Input.class));
+	}
+
 	@BeforeAll
 	static void initLog4j() {
 		// Force Log4j initialization before any test starts a generator.

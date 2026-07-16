@@ -146,19 +146,18 @@ Spt uses fixed count of threads to execute its tasks.
 7. Load step context collects the completed operations results from the storage drivers
 8. Refresh the registered metrics and their snapshots
 
-The count of the tasks which are required to be executed concurrently may be large (for example in a case of distributed
-mode with many additional nodes). The traditional thread-per-task approach is inefficient if the count of the threads is
-much higher than the count of the available CPU cores. Virtual Threads are used in Spt to execute the required work
-efficiently.
-
-Spt tasks may be divided into two types: service tasks and load operations. So there are two different fixed thread
-pools for these types of tasks.
+SPT uses different execution strategies for long-lived recurring service tasks and shorter blocking paths. This keeps
+the service-task lifecycle predictable without giving up virtual threads where they remain useful.
 
 ## 3.1. Service Tasks
 
-Each Spt process shares the global service tasks executor (VirtualThreadExecutor instance). By default the count of
-the service tasks executor's threads is equal to the count of the available CPU cores. A user may set the different
-count of these threads using the configuration option load-service-threads.
+Each SPT process shares a `PlatformThreadExecutor` for long-lived recurring tasks such as load generation, operation
+dispatch, and metrics management. Every active service task owns one named daemon platform thread (`spt-service-*`),
+and stopping or restarting a task terminates or replaces that thread. Shorter blocking paths may still use the shared
+`VirtualThreadExecutor`.
+
+The legacy `load-service-threads` configuration option controls only virtual-thread scheduler carrier parallelism. It
+does not cap or size the platform service-task threads. The legacy name is retained for configuration compatibility.
 
 ## 3.2. Tuning
 

@@ -114,7 +114,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final boolean recycleFlag,
 					final boolean shuffleFlag,
 					final boolean retryFlag) {
-		super(ServiceTaskExecutor.VT_EXECUTOR);
+		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		this.itemInput = itemInput;
 		this.opsBuilder = opsBuilder;
 		this.originIndex = opsBuilder.originIndex();
@@ -188,18 +188,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							// No recycled ops available right now.
 							if (fastRecycleQuiesce) {
 								// Fast-recycle is handling ops inline in the driver;
-								// park this VT until recycle() unparks us or the
-								// timeout expires.  10ms keeps the VT off the carrier
+								// park this task thread until recycle() unparks us or the
+								// timeout expires. 10ms keeps it idle
 								// while still bounding wake-up latency for fallback ops.
 								generatorParked = true;
 								LockSupport.parkNanos(10_000_000);
 								generatorParked = false;
 							} else {
-								// Yield the virtual thread back to the ForkJoinPool so
-								// in-flight ops can complete. Thread.yield() is purely
-								// userspace on VTs — no futex/context-switch overhead
-								// unlike LockSupport.parkNanos() which triggers a full
-								// kernel round-trip even for parkNanos(1).
+								// Yield the task thread so in-flight ops can complete
+								// without a timed parking syscall.
 								yieldThread();
 							}
 						}
@@ -325,8 +322,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					}
 					// Backpressure relief: if we had ops to send but made no output progress
 					// (either throttle denied permits or output queue was full), briefly
-					// yield the VT to avoid a CPU-burning spin loop. Thread.yield() avoids
-					// the full kernel context-switch cost of LockSupport.parkNanos(1).
+					// yield the task thread to avoid a CPU-burning spin loop.
 					if (!outputProgress) {
 						yieldThread();
 					}
@@ -349,7 +345,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				// consumed the last slot in the count budget may still turn into a retry
 				// once it completes - that decision happens later (by whoever is watching
 				// this generator's output), so self-stopping here could abandon it before
-				// it ever gets a configured retry attempt. Keep the VT alive (yielding, not
+				// it ever gets a configured retry attempt. Keep the task alive (yielding, not
 				// busy-spinning) so drainRetryQueue() above keeps running; whoever is
 				// watching completion externally (comparing terminal results against how
 				// many operations were actually generated, which correctly accounts for
@@ -386,7 +382,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return items;
 	}
 
-	@SuppressWarnings("ThreadPriorityCheck") // intentional: VT yield is userspace-only, no kernel cost
+	@SuppressWarnings("ThreadPriorityCheck") // intentional cooperative scheduler hint
 	private static void yieldThread() {
 		Thread.yield();
 	}
@@ -425,7 +421,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			recycleQueueFullState = true;
 			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
 		}
-		// Wake the generator VT if it's actually parked in the quiesce state.
+		// Wake the generator task if it's actually parked in the quiesce state.
 		// Checking generatorParked avoids spurious unpark() calls when the
 		// generator is running (e.g. at higher concurrency where fast-recycle
 		// doesn't handle all ops).
@@ -529,7 +525,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public void enableFastRecycleQuiesce() {
 		fastRecycleQuiesce = true;
-		Loggers.MSG.info("{}: fast-recycle quiesce enabled (generator VT will park when idle)", name);
+		Loggers.MSG.info("{}: fast-recycle quiesce enabled (generator task will park when idle)", name);
 	}
 
 	private boolean isFinished() {
