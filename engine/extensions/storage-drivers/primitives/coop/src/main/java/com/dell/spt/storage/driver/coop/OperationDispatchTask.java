@@ -9,6 +9,8 @@ import com.dell.spt.base.logging.LogUtil;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.Queue;
 import java.util.concurrent.locks.Condition;
@@ -34,6 +36,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final BlockingQueue<O> inOpQueue;
 	private final CoopStorageDriverBase<I, O> storageDriver;
 	private final CircularBuffer<O> buff;
+	private final List<O> tempInOps;
 	private final Lock dispatchLock;
 	private final Condition dispatchReady;
 	private final int deferredQueueCapacity;
@@ -46,6 +49,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 					final int batchSize, final Lock dispatchLock, final Condition dispatchReady, final int deferredQueueCapacity) {
 		super(executor);
 		this.buff = new CircularArrayBuffer<>(batchSize);
+		this.tempInOps = new ArrayList<>(batchSize);
 		this.storageDriver = storageDriver;
 		this.inOpQueue = inOpQueue;
 		this.childOpQueue = childOpQueue;
@@ -77,7 +81,6 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			}
 
 			// Then drain incoming ops
-			final java.util.List<O> tempInOps = new java.util.ArrayList<>(batchSize);
 			if (buff.size() == 0) {
 				inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
 				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
@@ -186,6 +189,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 							Level.TRACE, e,
 							"{}: failed to submit some load operations due to the illegal storage driver state ({})",
 							storageDriver.toString(), storageDriver.state());
+		} finally {
+			tempInOps.clear();
 		}
 	}
 
@@ -196,5 +201,6 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		// completed operations, and attempting a draining flush here risks hangs if the
 		// downstream driver is in a failed or saturated state.
 		buff.clear();
+		tempInOps.clear();
 	}
 }

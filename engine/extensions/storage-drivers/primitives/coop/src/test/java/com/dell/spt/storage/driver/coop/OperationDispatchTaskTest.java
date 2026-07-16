@@ -8,6 +8,7 @@ import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -103,6 +104,37 @@ class OperationDispatchTaskTest {
 		task.doWork();
 
 		verify(driverMock).submit(anyList(), eq(0), eq(3));
+	}
+
+	@Test
+	void inputScratchIsReusedAndClearedAcrossIterations() throws Exception {
+		final BlockingQueue<Operation<Item>> scratchQueue = mock(BlockingQueue.class);
+		final Operation<Item> op1 = mock(Operation.class);
+		final Operation<Item> op2 = mock(Operation.class);
+		final List<Collection<Operation<Item>>> drainTargets = new ArrayList<>();
+		final AtomicInteger drainCalls = new AtomicInteger();
+		when(scratchQueue.drainTo(anyCollection(), anyInt())).thenAnswer(invocation -> {
+			final Collection<Operation<Item>> target = invocation.getArgument(0);
+			assertTrue(target.isEmpty(), "scratch must be empty before each input drain");
+			drainTargets.add(target);
+			target.add(drainCalls.getAndIncrement() == 0 ? op1 : op2);
+			return 1;
+		});
+		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+		task = new OperationDispatchTask<>(
+						executor, driverMock, scratchQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 16);
+
+		task.doWork();
+		task.doWork();
+
+		assertEquals(2, drainTargets.size());
+		assertSame(drainTargets.get(0), drainTargets.get(1),
+						"dispatcher should retain one task-owned input scratch collection");
+		assertTrue(drainTargets.get(0).isEmpty(),
+						"scratch should not retain operations between dispatch iterations");
+		verify(driverMock).submit(op1);
+		verify(driverMock).submit(op2);
 	}
 
 	@Test
