@@ -6,6 +6,7 @@ package sizeparse
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -20,11 +21,13 @@ const (
 	Megabyte       = constants.BytesPerMiB
 	Gigabyte       = constants.BytesPerGiB
 	Terabyte       = constants.BytesPerTiB
+	Petabyte       = constants.BytesPerPiB
+	Exabyte        = constants.BytesPerEiB
 )
 
 // suffixMultipliers maps recognised upper-cased suffixes to their multiplier.
-// Both SI-style (KB, MB) and IEC-style (KiB, MiB) suffixes are accepted as
-// synonyms since this package always uses binary (1024-based) multipliers.
+// Both legacy (KB, MB) and IEC (KiB, MiB) suffixes are accepted as synonyms
+// since this package always uses binary (1024-based) multipliers.
 var suffixMultipliers = map[string]int64{
 	"B":   Byte,
 	"K":   Kilobyte,
@@ -39,6 +42,12 @@ var suffixMultipliers = map[string]int64{
 	"T":   Terabyte,
 	"TB":  Terabyte,
 	"TIB": Terabyte,
+	"P":   Petabyte,
+	"PB":  Petabyte,
+	"PIB": Petabyte,
+	"E":   Exabyte,
+	"EB":  Exabyte,
+	"EIB": Exabyte,
 }
 
 // Parse converts a human-readable size string into a byte count.
@@ -48,7 +57,7 @@ var suffixMultipliers = map[string]int64{
 //	"0"          – plain integer (bytes)
 //	"1048576"    – plain integer (bytes)
 //	"256KB"      – number followed by unit suffix
-//	"1M"         – short suffix (K, M, G, T)
+//	"1M"         – short suffix (K, M, G, T, P, E)
 //	"4mb"        – case-insensitive
 //
 // The numeric portion may be a decimal integer only (no fractions).
@@ -85,7 +94,10 @@ func Parse(s string) (int64, error) {
 
 	mult, ok := suffixMultipliers[suffix]
 	if !ok {
-		return 0, fmt.Errorf("invalid size %q: unrecognised unit %q (valid: KB/KiB, MB/MiB, GB/GiB, TB/TiB)", s, s[i:])
+		return 0, fmt.Errorf("invalid size %q: unrecognised unit %q (valid: KB/KiB through EB/EiB)", s, s[i:])
+	}
+	if n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("invalid size %q: value overflows int64 bytes", s)
 	}
 
 	return n * mult, nil

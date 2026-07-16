@@ -22,6 +22,7 @@ import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.util.BinarySizeFormat;
 
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -90,7 +91,7 @@ public class PipelineLoadStepLocal
 			final SizeInBytes itemDataSize;
 			final Object itemDataSizeRaw = subConfig.val("item-data-size");
 			if (itemDataSizeRaw instanceof String) {
-				itemDataSize = new SizeInBytes((String) itemDataSizeRaw);
+				itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 			} else {
 				itemDataSize = new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 			}
@@ -110,7 +111,7 @@ public class PipelineLoadStepLocal
 				final Object dataLayerSizeRaw = dataLayerConfig.val("size");
 				final SizeInBytes dataLayerSize;
 				if (dataLayerSizeRaw instanceof String) {
-					dataLayerSize = new SizeInBytes((String) dataLayerSizeRaw);
+					dataLayerSize = BinarySizeFormat.parseSize((String) dataLayerSizeRaw);
 				} else {
 					dataLayerSize = new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
 				}

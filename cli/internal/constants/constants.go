@@ -124,12 +124,16 @@ const (
 	BytesPerMiB       = BytesPerKiB * 1024
 	BytesPerGiB       = BytesPerMiB * 1024
 	BytesPerTiB       = BytesPerGiB * 1024
+	BytesPerPiB       = BytesPerTiB * 1024
+	BytesPerEiB       = BytesPerPiB * 1024
 
 	UnitByte         = "B"
 	UnitKiB          = "KiB"
 	UnitMiB          = "MiB"
 	UnitGiB          = "GiB"
 	UnitTiB          = "TiB"
+	UnitPiB          = "PiB"
+	UnitEiB          = "EiB"
 	UnitMiBPerSecond = "MiB/s"
 )
 

@@ -214,7 +214,7 @@ class LoadStepClientBaseTest {
 		}
 
 		@Test
-		@DisplayName("Linear client start executes slice/aggregator init and await returns a boolean")
+		@DisplayName("Linear client accepts IEC item size and executes slice/aggregator init")
 		void testLinearClientStartAndAwait() throws Exception {
 			// Silence noisy INFO/ERROR logs produced during partial init in this integration smoke
 			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.WARN);
@@ -223,6 +223,7 @@ class LoadStepClientBaseTest {
 			List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
 			Config cfg = TestConfigBuilder.config();
 			cfg.val("load-step-id", "linear-client-test");
+			cfg.val("item-data-size", "10KiB");
 			cfg.val("item-output-file", ""); // avoid writing
 			// Ensure no remote nodes to avoid retries
 			cfg.val("load-step-node-addrs", java.util.Collections.emptyList());

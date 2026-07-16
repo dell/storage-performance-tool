@@ -27,6 +27,7 @@ import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -143,7 +144,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 		final Object itemDataSizeRaw = mergedConfig.val("item-data-size");
 		final SizeInBytes itemDataSize = itemDataSizeRaw instanceof String
-						? new SizeInBytes((String) itemDataSizeRaw)
+						? BinarySizeFormat.parseSize((String) itemDataSizeRaw)
 						: new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 
 		final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
@@ -198,7 +199,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		try {
 			final Object dataLayerSizeRaw = dataLayerConfig.val("size");
 			final SizeInBytes dataLayerSize = dataLayerSizeRaw instanceof String
-							? new SizeInBytes((String) dataLayerSizeRaw)
+							? BinarySizeFormat.parseSize((String) dataLayerSizeRaw)
 							: new SizeInBytes(TypeUtil.typeConvert(dataLayerSizeRaw, int.class));
 			dataInput = DataInput.instance(
 							dataInputConfig.stringVal("file"),
@@ -260,7 +261,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final long sizeThreshold;
 		final var sizeThresholdRaw = rangesConfig.val("threshold");
 		if (sizeThresholdRaw instanceof String) {
-			sizeThreshold = SizeInBytes.toFixedSize((String) sizeThresholdRaw);
+			sizeThreshold = BinarySizeFormat.parseFixedSize((String) sizeThresholdRaw);
 		} else {
 			sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
 		}
@@ -502,7 +503,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final Object itemDataSizeRaw = itemConfig.val("data-size");
 		final SizeInBytes dataSize;
 		if (itemDataSizeRaw instanceof String) {
-			dataSize = new SizeInBytes((String) itemDataSizeRaw);
+			dataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 		} else {
 			dataSize = new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 		}

@@ -28,6 +28,7 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.net.NetUtil;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -180,7 +181,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final var itemDataInputLayerSizeRaw = itemDataInputLayerConfig.val("size");
 		final SizeInBytes itemDataLayerSize;
 		if (itemDataInputLayerSizeRaw instanceof String) {
-			itemDataLayerSize = new SizeInBytes((String) itemDataInputLayerSizeRaw);
+			itemDataLayerSize = BinarySizeFormat.parseSize((String) itemDataInputLayerSizeRaw);
 		} else {
 			itemDataLayerSize = new SizeInBytes(TypeUtil.typeConvert(itemDataInputLayerSizeRaw, int.class));
 		}
@@ -349,7 +350,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final long sizeLimit;
 			final var sizeLimitRaw = config.val("load-step-limit-size");
 			if (sizeLimitRaw instanceof String) {
-				sizeLimit = SizeInBytes.toFixedSize((String) sizeLimitRaw);
+				sizeLimit = BinarySizeFormat.parseFixedSize((String) sizeLimitRaw);
 			} else {
 				sizeLimit = TypeUtil.typeConvert(sizeLimitRaw, long.class);
 			}

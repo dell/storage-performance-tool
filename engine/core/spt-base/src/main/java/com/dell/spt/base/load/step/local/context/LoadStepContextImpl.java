@@ -262,7 +262,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final Config stepLimitConfig = loadConfig.configVal("step-limit");
 		final Object configSizeLimitRaw = stepLimitConfig.val("size");
 		if (configSizeLimitRaw instanceof String) {
-			configSizeLimit = new SizeInBytes((String) configSizeLimitRaw);
+			configSizeLimit = BinarySizeFormat.parseSize((String) configSizeLimitRaw);
 		} else {
 			configSizeLimit = new SizeInBytes(TypeUtil.typeConvert(configSizeLimitRaw, long.class));
 		}

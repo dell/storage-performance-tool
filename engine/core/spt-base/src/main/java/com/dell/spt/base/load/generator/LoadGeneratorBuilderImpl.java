@@ -46,6 +46,7 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
@@ -197,7 +198,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			final long sizeThreshold;
 			final var sizeThresholdRaw = rangesConfig.val("threshold");
 			if (sizeThresholdRaw instanceof String) {
-				sizeThreshold = SizeInBytes.toFixedSize((String) sizeThresholdRaw);
+				sizeThreshold = BinarySizeFormat.parseFixedSize((String) sizeThresholdRaw);
 			} else {
 				sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
 			}
@@ -663,7 +664,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			final SizeInBytes itemDataSize;
 			final var itemDataSizeRaw = itemConfig.val("data-size");
 			if (itemDataSizeRaw instanceof String) {
-				itemDataSize = new SizeInBytes((String) itemDataSizeRaw);
+				itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 			} else {
 				itemDataSize = new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 			}
