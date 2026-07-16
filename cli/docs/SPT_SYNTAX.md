@@ -92,8 +92,8 @@ Required for S3 workloads, optional/ignored for `mock`.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
-| `--object-size` | `-o` | `""` | Size of each object (e.g., `1MB`, `256KB`, `4GB`). Ignored for `list` |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MB`, `64MB`, `256MB`). Applies to `write` workloads and `read` seed phases |
+| `--object-size` | `-o` | `""` | Size of each object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Ignored for `list` |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write` workloads and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |

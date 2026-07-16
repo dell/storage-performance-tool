@@ -29,8 +29,8 @@ reference.
 | item-data-ranges-concat                        | Range        | null             | The number/range of numbers of the source objects used to concatenate every destination objec
 | item-data-ranges-fixed                         | Byte Range<br/> **list** | null | The fixed byte ranges to update or read (depends on the specified load type) |
 | item-data-ranges-random                        | Integer >= 0 | 0                | The count of the random ranges to update or read |
-| item-data-ranges-threshold                     | Size | 0                        | The size threshold to enable multipart upload (also used as the part size). When set to a value like `"64MB"`, objects larger than this are split into parts of this size and uploaded via the S3 MPU API. Exposed by the CLI as `--part-size`. Accepts human-readable size strings (e.g., `"5MB"`, `"64MB"`) or raw byte counts. 0 disables MPU. |
-| item-data-size                                 | Size | 1MB                      | The size of the data items to process. Doesn't have any effect if item.type=container |
+| item-data-ranges-threshold                     | Size | 0                        | The size threshold to enable multipart upload (also used as the part size). When set to a value like `"64MiB"`, objects larger than this are split into parts of this size and uploaded via the S3 MPU API. Exposed by the CLI as `--part-size`. Accepts human-readable size strings (e.g., `"5MiB"`, `"64MiB"`) or raw byte counts. 0 disables MPU. |
+| item-data-size                                 | Size | 1MB                      | The size of the data items to process. IEC suffixes such as `KiB` and `MiB` are accepted; legacy `KB` and `MB` suffixes remain binary aliases. Doesn't have any effect if item.type=container. |
 | item-data-verify                               | Flag | false                    | Specifies whether to verify the content while reading the data items or not. Doesn't have any effect if load-op-type != read |
 | item-input-file                                | Path | null                     | The source file for the items to process. If null the behavior depends on the load type. |
 | item-input-path                                | String | null                   | The source path which may be used as items input if not "item-input-file" is specified. Also used for the copy mode as the path containing the items to be copied into the output path. |
@@ -119,7 +119,7 @@ The configuration parameters supporting the time type:
 
 ##### 1.2.2. Size
 
-The configuration parameters supporting the time type:
+The configuration parameters supporting the size type:
 
 * item-data-input-layer-size
 * item-data-size
@@ -133,15 +133,17 @@ The configuration parameters supporting the time type:
 | "-1"    | Invalid Value
 | "0"     | 0 bytes (Infinity in case of `load-step-limit-size`)
 | "1"     | 1 bytes
-| "1024"  | 1024 bytes or 1KB
+| "1024"  | 1024 bytes or 1KiB
 | "0B"    | 0 bytes (Infinity in case of `load-step-limit-size`)
-| "1024B" | 1024 bytes or 1KB
-| "1KB"   | 1024 bytes or 1KB
-| "2MB"   | 2MB
-| "6EB"   | 6EB (exobytes)
+| "1024B" | 1024 bytes or 1KiB
+| "1KiB"  | 1024 bytes
+| "2MiB"  | 2,097,152 bytes
+| "1KB"   | 1024 bytes (legacy binary alias)
+| "2MB"   | 2,097,152 bytes (legacy binary alias)
+| "6EiB"  | 6 EiB (exbibytes)
 | "7YB"   | Invalid Value
 
-All conversions between specified sizes are done using 2^10 (1024) multiplier. So 1MB is 1_048_576 bytes.
+All conversions between specified sizes use 2^10 (1024) multipliers. IEC suffixes (`KiB` through `EiB`) and legacy aliases (`KB` through `EB`) have the same binary values.
 
 ##### 1.2.3. Dictionary
 

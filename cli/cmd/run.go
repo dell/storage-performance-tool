@@ -1173,14 +1173,14 @@ func init() {
 
 	// Workload Definition Options
 	runCmd.Flags().IntP("threads", "t", 1, "Number of parallel client threads to run (e.g., 16)")
-	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MB, 256KB, 4GB)")
+	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 
 	// Multipart Upload Options
-	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MB, 64MB, 256MB)")
+	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MiB, 64MiB, 256MiB; legacy MB also accepted)")
 	runCmd.Flags().Int("mpu-concurrent-objects", 0, "Max concurrent multipart objects in flight (0 = unlimited)")
 	runCmd.Flags().Int("mpu-concurrent-parts", 0, "Max concurrent parts in flight per multipart object (0 = unlimited)")
 

@@ -36,13 +36,15 @@ func TestParse(t *testing.T) {
 		{"1T", Terabyte, false},
 		{"1TB", Terabyte, false},
 
-		// IEC suffixes (KiB, MiB, GiB, TiB)
+		// IEC suffixes (KiB through EiB)
 		{"1KiB", Kilobyte, false},
 		{"256KiB", 256 * Kilobyte, false},
 		{"1MiB", Megabyte, false},
 		{"4MiB", 4 * Megabyte, false},
 		{"1GiB", Gigabyte, false},
 		{"1TiB", Terabyte, false},
+		{"1PiB", Petabyte, false},
+		{"1EiB", Exabyte, false},
 		{"1kib", Kilobyte, false}, // case-insensitive
 
 		// Bytes suffix
@@ -58,6 +60,7 @@ func TestParse(t *testing.T) {
 		{"-1", 0, true},
 		{"1XB", 0, true},
 		{"1.5MB", 0, true}, // no fractions
+		{"8EiB", 0, true},  // overflows int64
 	}
 
 	for _, tt := range tests {
@@ -85,5 +88,11 @@ func TestConstants(t *testing.T) {
 	}
 	if Terabyte != 1024*1024*1024*1024 {
 		t.Errorf("Terabyte = %d, want %d", Terabyte, 1024*1024*1024*1024)
+	}
+	if Petabyte != 1024*1024*1024*1024*1024 {
+		t.Errorf("Petabyte = %d, want %d", Petabyte, int64(1024*1024*1024*1024*1024))
+	}
+	if Exabyte != 1024*1024*1024*1024*1024*1024 {
+		t.Errorf("Exabyte = %d, want %d", Exabyte, int64(1024*1024*1024*1024*1024*1024))
 	}
 }

@@ -40,7 +40,7 @@ func TestBuildSptCommand(t *testing.T) {
 			shouldError: false,
 		},
 		{
-			name:         "Write operation with all flags",
+			name:         "Write operation with all flags and IEC object size",
 			workloadType: "write",
 			args: []string{
 				"--endpoint", "https://s3.amazonaws.com",
@@ -48,7 +48,7 @@ func TestBuildSptCommand(t *testing.T) {
 				"--secret-key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"--bucket", "my-bucket",
 				"--threads", "16",
-				"--object-size", "1MB",
+				"--object-size", "10KiB",
 				"--object-count", "1000",
 			},
 			expectedArgs: []string{
@@ -61,7 +61,7 @@ func TestBuildSptCommand(t *testing.T) {
 				"--item-output-path=/my-bucket",
 				"--load-op-type=create",
 				"--storage-driver-limit-concurrency=16",
-				"--item-data-size=1MB",
+				"--item-data-size=10KiB",
 				"--load-op-limit-count=1000",
 			},
 			shouldError: false,

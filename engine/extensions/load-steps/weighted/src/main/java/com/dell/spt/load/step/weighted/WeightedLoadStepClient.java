@@ -5,6 +5,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -66,7 +67,7 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 			final SizeInBytes itemDataSize;
 			final Object itemDataSizeRaw = subConfig.val("item-data-size");
 			if (itemDataSizeRaw instanceof String) {
-				itemDataSize = new SizeInBytes((String) itemDataSizeRaw);
+				itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 			} else {
 				itemDataSize = new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 			}

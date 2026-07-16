@@ -36,6 +36,7 @@ import com.dell.spt.base.item.op.list.shard.ListShardingConfig;
 import com.dell.spt.base.item.op.list.shard.ListShardingContext;
 import com.dell.spt.base.item.op.list.shard.ListShardingMode;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl;
 import com.dell.spt.base.item.op.path.PathOperationsBuilderImpl;
 import com.dell.spt.base.item.op.token.TokenOperationsBuilderImpl;
@@ -197,7 +198,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			final long sizeThreshold;
 			final var sizeThresholdRaw = rangesConfig.val("threshold");
 			if (sizeThresholdRaw instanceof String) {
-				sizeThreshold = SizeInBytes.toFixedSize((String) sizeThresholdRaw);
+				sizeThreshold = BinarySizeFormat.parseFixedSize((String) sizeThresholdRaw);
 			} else {
 				sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
 			}
@@ -663,7 +664,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			final SizeInBytes itemDataSize;
 			final var itemDataSizeRaw = itemConfig.val("data-size");
 			if (itemDataSizeRaw instanceof String) {
-				itemDataSize = new SizeInBytes((String) itemDataSizeRaw);
+				itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 			} else {
 				itemDataSize = new SizeInBytes(TypeUtil.typeConvert(itemDataSizeRaw, long.class));
 			}
