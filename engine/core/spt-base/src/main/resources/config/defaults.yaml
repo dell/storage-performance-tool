@@ -25,6 +25,7 @@ item:
     length: 12
     seed: "%{int64:xor(int64:reverse(time:millisSinceEpoch()), int64:reverseBytes(time:nanos()))}"
     prefix: null
+    shards: 0
     radix: 36
     step: 1
     type: random

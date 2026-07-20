@@ -646,6 +646,8 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			}
 		}
 		final var prefix = namingConfig.stringVal("prefix");
+		final var shardCountRaw = namingConfig.val("shards");
+		final var shardCount = shardCountRaw == null ? 0 : TypeUtil.typeConvert(shardCountRaw, int.class);
 		final var radix = namingConfig.intVal("radix");
 		final var step = namingConfig.intVal("step");
 		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
@@ -653,6 +655,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 						.length(length)
 						.seed(seed)
 						.prefix(prefix)
+						.shardCount(shardCount)
 						.radix(radix)
 						.step(step)
 						.type(type)

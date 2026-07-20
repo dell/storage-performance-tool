@@ -1306,6 +1306,30 @@ func TestGenerateDefaultsAppliesEngineOverrides(t *testing.T) {
 	}
 }
 
+func TestGenerateDefaultsAppliesPrefixShardOverride(t *testing.T) {
+	data, err := GenerateDefaults(Params{
+		WorkloadType:    "write",
+		Endpoint:        "http://minio:9000",
+		AccessKey:       "testkey",
+		SecretKey:       "testsecret",
+		Bucket:          "testbucket",
+		Threads:         4,
+		EngineOverrides: []string{"item.naming.shards=48"},
+	})
+	if err != nil {
+		t.Fatalf("GenerateDefaults() error = %v", err)
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("unmarshal defaults: %v", err)
+	}
+	item := root["item"].(map[string]any)
+	naming := item["naming"].(map[string]any)
+	if got := naming["shards"]; got != 48 {
+		t.Fatalf("item.naming.shards = %v, want 48", got)
+	}
+}
+
 func TestGenerateDefaultsAppliesDashSeparatedEngineOverrides(t *testing.T) {
 	data, err := GenerateDefaults(Params{
 		WorkloadType: "write",

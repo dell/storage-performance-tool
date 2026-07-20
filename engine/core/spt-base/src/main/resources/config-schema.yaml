@@ -24,6 +24,7 @@ item:
   naming:
     type: string
     prefix: string
+    shards: int
     radix: int
     step: int
     seed: any

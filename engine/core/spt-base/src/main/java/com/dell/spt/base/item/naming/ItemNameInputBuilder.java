@@ -16,6 +16,7 @@ public final class ItemNameInputBuilder
 	private volatile ItemNamingType type = RANDOM;
 	private volatile int radix = Character.MAX_RADIX;
 	private volatile String prefix = null;
+	private volatile int shardCount = 0;
 	private volatile int length = 12;
 	private volatile long seed = 0;
 	private volatile int step = 1;
@@ -39,6 +40,12 @@ public final class ItemNameInputBuilder
 	}
 
 	@Override
+	public final ItemNameInputBuilder shardCount(final int shardCount) {
+		this.shardCount = shardCount;
+		return this;
+	}
+
+	@Override
 	public final ItemNameInputBuilder length(final int length) {
 		this.length = length;
 		return this;
@@ -58,6 +65,9 @@ public final class ItemNameInputBuilder
 
 	@Override
 	public ItemNameInput build() {
+		if (shardCount < 0) {
+			throw new IllegalArgumentException("Item naming shard count must be non-negative");
+		}
 		final var maxId = (long) pow(radix, length);
 		Input<String> prefixInput;
 		if (prefix == null) {
@@ -69,9 +79,9 @@ public final class ItemNameInputBuilder
 		}
 		switch (type) {
 		case RANDOM:
-			return new ItemNameInputImpl((x) -> abs(xorShift(x) % maxId), seed, prefixInput, radix);
+			return new ItemNameInputImpl((x) -> abs(xorShift(x) % maxId), seed, prefixInput, radix, shardCount);
 		case SERIAL:
-			return new ItemNameInputImpl((x) -> abs((x + step) % maxId), seed, prefixInput, radix);
+			return new ItemNameInputImpl((x) -> abs((x + step) % maxId), seed, prefixInput, radix, shardCount);
 		}
 		return null;
 	}

@@ -35,6 +35,8 @@ const (
 	flagReadShuffle           = "shuffle"
 	flagReadShuffleBatchSize  = "shuffle-batch-size"
 	flagEngineOverride        = "engine-override"
+	flagPrefixShards          = "prefix-shards"
+	itemNamingShardsPath      = "item.naming.shards"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -1178,6 +1180,7 @@ func init() {
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
+	runCmd.Flags().Int(flagPrefixShards, 0, "Distribute generated object keys across this many fixed-width prefix directories (0 = disabled)")
 
 	// Multipart Upload Options
 	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MiB, 64MiB, 256MiB; legacy MB also accepted)")
@@ -1415,6 +1418,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if len(engineOverrides) > 0 {
 		params.EngineOverrides = engineOverrides
 	}
+	prefixShards, _ := cmd.Flags().GetInt(flagPrefixShards)
+	if err := applyPrefixShards(&params, prefixShards); err != nil {
+		return scenario.Params{}, err
+	}
 
 	// S3 Tables parameters
 	if workloadType == WorkloadTypeTables {
@@ -1635,6 +1642,35 @@ func sanitizeLabel(s string) string {
 	return out
 }
 
+func applyPrefixShards(params *scenario.Params, shardCount int) error {
+	if shardCount < 0 {
+		return fmt.Errorf("--%s must be non-negative", flagPrefixShards)
+	}
+	if shardCount == 0 {
+		return nil
+	}
+	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeRead &&
+		params.WorkloadType != WorkloadTypeMixed {
+		return fmt.Errorf("--%s is not supported for %s workload", flagPrefixShards, params.WorkloadType)
+	}
+	if params.WorkloadType == WorkloadTypeRead && params.ItemsFile != "" {
+		return fmt.Errorf("--%s cannot change object names supplied by --items-file", flagPrefixShards)
+	}
+	for _, override := range params.EngineOverrides {
+		path, _, _ := strings.Cut(override, "=")
+		path = strings.TrimSpace(path)
+		if path == itemNamingShardsPath || path == strings.ReplaceAll(itemNamingShardsPath, ".", "-") {
+			return fmt.Errorf("--%s conflicts with engine override %q", flagPrefixShards, override)
+		}
+	}
+	params.PrefixShards = shardCount
+	params.EngineOverrides = append(
+		params.EngineOverrides,
+		fmt.Sprintf("%s=%d", itemNamingShardsPath, shardCount),
+	)
+	return nil
+}
+
 // formatScenarioParams formats scenario parameters for display
 func formatScenarioParams(params scenario.Params) string {
 	var lines []string
@@ -1647,6 +1683,9 @@ func formatScenarioParams(params scenario.Params) string {
 
 	// Always show all workload parameters
 	lines = append(lines, fmt.Sprintf("Threads: %d", params.Threads))
+	if params.PrefixShards > 0 {
+		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
+	}
 	if params.WorkloadType == WorkloadTypeList {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {

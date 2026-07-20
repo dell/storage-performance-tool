@@ -5,9 +5,35 @@ import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ItemNamingTest {
+
+	@Test
+	public final void testSerialItemNamesWithPrefixShards()
+					throws Exception {
+		try (
+						final var in = ItemNameInput.Builder.newInstance()
+										.prefix("base/")
+										.shardCount(3)
+										.radix(10)
+										.seed(0)
+										.step(1)
+										.type(ItemNameInput.ItemNamingType.SERIAL)
+										.build()) {
+			assertEquals("base/s0000001/1", in.get());
+			assertEquals("base/s0000002/2", in.get());
+			assertEquals("base/s0000000/3", in.get());
+		}
+	}
+
+	@Test
+	public final void testNegativePrefixShardCountRejected() {
+		assertThrows(
+						IllegalArgumentException.class,
+						() -> ItemNameInput.Builder.newInstance().shardCount(-1).build());
+	}
 
 	@Test
 	public final void testRandomItemNames()
