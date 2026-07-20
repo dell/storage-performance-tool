@@ -59,3 +59,57 @@ func TestApplyPrefixShardsAllowsSeededReadAndMixedCreate(t *testing.T) {
 		}
 	}
 }
+
+func TestPrefixShardsPreserveGeneratedItemHandoffThroughReadAndDelete(t *testing.T) {
+	tests := []struct {
+		name   string
+		params scenario.Params
+		phases []string
+	}{
+		{
+			name: "seeded read cleanup",
+			params: scenario.Params{
+				WorkloadType: WorkloadTypeRead, Bucket: "bucket", Threads: 4,
+				ObjectSize: "10K", Duration: "30s", SeedCount: 100, Cleanup: true,
+				Endpoint: "http://storage.example", AccessKey: "test-access", SecretKey: "test-secret",
+			},
+			phases: []string{"PreconditionLoad", "ReadLoad", "DeleteLoad"},
+		},
+		{
+			name: "write cleanup",
+			params: scenario.Params{
+				WorkloadType: WorkloadTypeWrite, Bucket: "bucket", Threads: 4,
+				ObjectSize: "10K", ObjectCount: 100, Cleanup: true,
+				Endpoint: "http://storage.example", AccessKey: "test-access", SecretKey: "test-secret",
+			},
+			phases: []string{"CreateLoad", "DeleteLoad"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := applyPrefixShards(&tt.params, 48); err != nil {
+				t.Fatalf("applyPrefixShards() error = %v", err)
+			}
+			defaults, err := scenario.GenerateDefaults(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateDefaults() error = %v", err)
+			}
+			if !strings.Contains(string(defaults), "shards: 48") {
+				t.Fatalf("generated defaults omitted prefix shards:\n%s", defaults)
+			}
+			scenarioJS, err := scenario.GenerateScenario(tt.params)
+			if err != nil {
+				t.Fatalf("GenerateScenario() error = %v", err)
+			}
+			for _, phase := range tt.phases {
+				if !strings.Contains(scenarioJS, phase) {
+					t.Fatalf("scenario omitted %s:\n%s", phase, scenarioJS)
+				}
+			}
+			if !strings.Contains(scenarioJS, "itemsFile") {
+				t.Fatalf("scenario omitted generated-item handoff:\n%s", scenarioJS)
+			}
+		})
+	}
+}
