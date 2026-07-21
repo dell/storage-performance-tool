@@ -50,6 +50,8 @@ class ResponseHandlerBaseTest {
 		when(driver.isStopped()).thenReturn(false);
 		final var handler = newHandler(driver);
 		final Operation<Item> op = mock(Operation.class);
+		when(op.toString()).thenReturn("READ,/bucket/b0000007/key,,");
+		when(op.nodeAddr()).thenReturn("swfs");
 		final var ch = channelWithHandler(handler, op);
 
 		ch.pipeline().fireExceptionCaught(new IOException("connection reset"));
@@ -57,6 +59,19 @@ class ResponseHandlerBaseTest {
 		verify(op).status(Operation.Status.FAIL_IO);
 		verify(driver).complete(eq(ch), eq(op));
 		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void failureContext_includesOperationKeyNodeAndChannel() {
+		final Operation<Item> op = mock(Operation.class);
+		when(op.toString()).thenReturn("READ,/bucket/b0000007/key,,");
+		when(op.nodeAddr()).thenReturn("swfs");
+		final var channel = new EmbeddedChannel();
+
+		assertEquals(
+					"op=READ,/bucket/b0000007/key,,, node=swfs, channel=embedded",
+					ResponseHandlerBase.failureContext(op, channel));
+		channel.finishAndReleaseAll();
 	}
 
 	@Test

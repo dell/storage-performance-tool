@@ -62,6 +62,10 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 	protected abstract void handle(final Channel channel, final O op, final M msg)
 					throws IOException;
 
+	static String failureContext(final Operation<?> op, final Channel channel) {
+		return "op=" + op + ", node=" + op.nodeAddr() + ", channel=" + channel.id().asShortText();
+	}
+
 	@Override
 	@SuppressWarnings("unchecked")
 	public final void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause)
@@ -77,7 +81,7 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 		final var op = (O) rawOp;
 		if (op != null) {
 			if (driver.isStarted() || driver.isShutdown()) {
-				LogUtil.exception(Level.WARN, cause, "Premature channel closure");
+				LogUtil.exception(Level.WARN, cause, "Premature channel closure: {}", failureContext(op, channel));
 				op.status(FAIL_IO);
 			} else if (cause instanceof PrematureChannelClosureException) {
 				op.status(INTERRUPTED);
