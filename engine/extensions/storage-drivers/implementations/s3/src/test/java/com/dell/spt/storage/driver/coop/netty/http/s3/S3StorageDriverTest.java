@@ -67,6 +67,8 @@ import java.util.Queue;
 import java.util.TreeMap;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -281,7 +283,7 @@ public class S3StorageDriverTest {
 	}
 
 	private static class TestS3Driver extends S3StorageDriver<Item, Operation<Item>> {
-		private final Queue<FullHttpRequest> requests = new ArrayDeque<>();
+		private final Queue<FullHttpRequest> requests = new ConcurrentLinkedQueue<>();
 		private final ArrayDeque<FullHttpResponse> stubResponses = new ArrayDeque<>();
 
 		TestS3Driver(Config cfg) throws Exception {
@@ -300,6 +302,10 @@ public class S3StorageDriverTest {
 			return submit(ops, from, to);
 		}
 
+		boolean prepareForTest(Operation<Item> op) {
+			return prepare(op);
+		}
+
 		void limitAvailableDispatchPermitsForTest(int permits) {
 			concurrencyThrottle.drainPermits();
 			concurrencyThrottle.release(permits);
@@ -314,6 +320,13 @@ public class S3StorageDriverTest {
 			}
 			return new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
 		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> mockOperation(final String dstPath) {
+		final var op = (Operation<Item>) Mockito.mock(Operation.class);
+		Mockito.when(op.dstPath()).thenReturn(dstPath);
+		return op;
 	}
 
 	// ---------- requestNewPath ----------
@@ -358,6 +371,47 @@ public class S3StorageDriverTest {
 		assertEquals(HttpMethod.PUT, put.method());
 		assertEquals(path, put.uri());
 		assertTrue(put.headers().contains(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	void prepare_checksOneBucketOnceAcrossConcurrentObjectParents() throws Exception {
+		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		final int parentCount = 48;
+		final var start = new CountDownLatch(1);
+		try (final var executor = Executors.newFixedThreadPool(8)) {
+			final var futures = new ArrayList<java.util.concurrent.Future<Boolean>>(parentCount);
+			for (int i = 0; i < parentCount; i++) {
+				final var op = mockOperation("/bucket/s" + i);
+				futures.add(
+								executor.submit(
+												() -> {
+													start.await();
+													return drv.prepareForTest(op);
+												}));
+			}
+			start.countDown();
+			for (final var future : futures) {
+				assertTrue(future.get(5, TimeUnit.SECONDS));
+			}
+		}
+
+		assertEquals(1, drv.log().size());
+		assertEquals("/bucket", drv.log().remove().uri());
+	}
+
+	@Test
+	void prepare_initializesDifferentBucketsIndependently() throws Exception {
+		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		for (final var path : List.of("/bucket-a/parent-1", "/bucket-a/parent-2", "/bucket-b/parent")) {
+			final var op = mockOperation(path);
+			assertTrue(drv.prepareForTest(op));
+		}
+
+		assertEquals(
+						List.of("/bucket-a", "/bucket-b"),
+						drv.log().stream().map(FullHttpRequest::uri).toList());
 	}
 
 	// ---------- applyAuthHeaders (v2 and v4) ----------

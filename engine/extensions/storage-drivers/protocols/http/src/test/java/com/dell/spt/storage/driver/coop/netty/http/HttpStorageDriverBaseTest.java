@@ -17,10 +17,12 @@ import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpVersion;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +30,17 @@ import org.junit.jupiter.api.Test;
 
 /** Tests for HttpStorageDriverBase that do not require any real network. */
 class HttpStorageDriverBaseTest {
+
+	@Test
+	void timeoutRequestDescriptionExcludesHeaders() {
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/bucket");
+		request.headers().set(HttpHeaderNames.AUTHORIZATION, "sensitive-signature");
+
+		final var description = HttpStorageDriverBase.timeoutRequestDescription(request);
+
+		assertEquals("method=HEAD, uri=/bucket", description);
+		assertFalse(description.contains("sensitive-signature"));
+	}
 
 	private static Config baseConfig() {
 		try {

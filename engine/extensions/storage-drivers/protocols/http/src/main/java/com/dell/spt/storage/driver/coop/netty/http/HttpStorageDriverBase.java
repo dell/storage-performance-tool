@@ -156,7 +156,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							});
 			channel.writeAndFlush(request).sync();
 			if (null == (resp = fullRespSync.poll(netTimeoutMilliSec, TimeUnit.MILLISECONDS))) {
-				Loggers.MSG.warn("{}: Response timeout \n Request: {}", stepId, request);
+				Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
 			}
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");
@@ -173,6 +173,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			channel.close();
 		}
 		return resp;
+	}
+
+	static String timeoutRequestDescription(final FullHttpRequest request) {
+		return "method=" + request.method() + ", uri=" + request.uri();
 	}
 
 	@Override

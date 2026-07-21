@@ -69,8 +69,8 @@ class ResponseHandlerBaseTest {
 		final var channel = new EmbeddedChannel();
 
 		assertEquals(
-					"op=READ,/bucket/b0000007/key,,, node=swfs, channel=embedded",
-					ResponseHandlerBase.failureContext(op, channel));
+						"op=READ,/bucket/b0000007/key,,, node=swfs, channel=embedded",
+						ResponseHandlerBase.failureContext(op, channel));
 		channel.finishAndReleaseAll();
 	}
 
