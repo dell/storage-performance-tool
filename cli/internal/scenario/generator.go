@@ -126,6 +126,10 @@ func GenerateReadScenario(params Params) (string, error) {
 			readShuffleBatchSize = constants.ReadShuffleMaxBatchSize
 		}
 	}
+	readPhasePauseSeconds := params.ReadPhasePauseSeconds
+	if readPhasePauseSeconds <= 0 {
+		readPhasePauseSeconds = DefaultReadPhasePauseSeconds
+	}
 
 	data := map[string]interface{}{
 		templateKeyConcurrency:          params.Threads,
@@ -140,6 +144,7 @@ func GenerateReadScenario(params Params) (string, error) {
 		templateKeySeedCount:            seedCount,
 		templateKeyReadShuffle:          params.ReadShuffle,
 		templateKeyReadShuffleBatchSize: readShuffleBatchSize,
+		templateKeyReadPhasePause:       readPhasePauseSeconds,
 		// Step IDs: seed=1, read=2, delete=3 (read-from-file: read=1, delete=2)
 		templateKeyStepIDSeed:   formatStepID(1, ts, stepOpSeed),
 		templateKeyStepIDRead:   formatStepID(2, ts, stepOpRead),

@@ -505,7 +505,7 @@ var outputPath = {{.OutputPath}};
 var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
 if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
 var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -649,7 +649,7 @@ var outputPath = {{.OutputPath}};
 var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
 if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
 var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -793,7 +793,7 @@ var outputPath = {{.OutputPath}};
 var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
 if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
 var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -907,7 +907,7 @@ var outputPath = {{.OutputPath}};
 var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
 if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
 var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -1021,7 +1021,7 @@ var outputPath = {{.OutputPath}};
 var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
 if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
 var itemsFile = sptLogDir + "/log/" + "{{.StepIDSeed}}" + "/items.csv";
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -1167,7 +1167,7 @@ var itemSize = {{.ItemSize}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
 var itemsFile = {{.ItemsFile}};
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -1250,7 +1250,7 @@ var itemSize = {{.ItemSize}};
 var readCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
 var itemsFile = {{.ItemsFile}};
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -1333,7 +1333,7 @@ var itemSize = {{.ItemSize}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
 var itemsFile = {{.ItemsFile}};
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {
@@ -1439,7 +1439,7 @@ var itemSize = {{.ItemSize}};
 var readCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
 var itemsFile = {{.ItemsFile}};
-var pauseTime = 10; // seconds between phases
+var pauseTime = {{.ReadPhasePauseSeconds}}; // seconds between phases
 
 // Helper functions
 function pause(seconds, message) {

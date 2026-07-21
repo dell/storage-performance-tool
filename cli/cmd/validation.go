@@ -168,6 +168,20 @@ func validateReadShuffleFlags(cmd *cobra.Command, workloadType string) error {
 	return nil
 }
 
+func validateReadPhasePauseFlag(cmd *cobra.Command, workloadType string) error {
+	if !cmd.Flags().Changed(flagReadPhasePauseSeconds) {
+		return nil
+	}
+	if workloadType != WorkloadTypeRead {
+		return fmt.Errorf(ErrFlagNotSupported, "--"+flagReadPhasePauseSeconds, workloadType)
+	}
+	seconds, _ := cmd.Flags().GetInt(flagReadPhasePauseSeconds)
+	if seconds <= 0 {
+		return errors.New(ErrReadPhasePausePositive)
+	}
+	return nil
+}
+
 // ValidateRunCommand performs all validation for the run command
 func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	workloadType := args[0]
@@ -199,6 +213,10 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := validateReadShuffleFlags(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
+	if err := validateReadPhasePauseFlag(cmd, workloadType); err != nil {
 		cmd.SilenceUsage = false
 		return err
 	}

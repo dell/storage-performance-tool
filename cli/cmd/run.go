@@ -34,6 +34,7 @@ const (
 	flagAttachExistingWorkers = "attach-existing"
 	flagReadShuffle           = "shuffle"
 	flagReadShuffleBatchSize  = "shuffle-batch-size"
+	flagReadPhasePauseSeconds = "read-phase-pause-seconds"
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -1200,6 +1201,7 @@ func init() {
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
+	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")
 	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
 
 	// Mixed Workload Distribution Options (defaults: GET 45 / STAT 30 / PUT 15 / DELETE 10)
@@ -1410,6 +1412,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	readShuffleBatchSize, _ := cmd.Flags().GetInt(flagReadShuffleBatchSize)
 	params.ReadShuffleBatchSize = readShuffleBatchSize
+
+	readPhasePauseSeconds, _ := cmd.Flags().GetInt(flagReadPhasePauseSeconds)
+	params.ReadPhasePauseSeconds = readPhasePauseSeconds
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
