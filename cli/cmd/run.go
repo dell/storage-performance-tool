@@ -38,6 +38,7 @@ const (
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
 	itemNamingShardsPath      = "item.naming.shards"
+	prefixShardsAuto          = -1
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -1181,7 +1182,7 @@ func init() {
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
-	runCmd.Flags().Int(flagPrefixShards, 0, "Distribute generated object keys across this many fixed-width prefix directories (0 = disabled)")
+	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from aggregate concurrency, 0 = disabled)")
 
 	// Multipart Upload Options
 	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MiB, 64MiB, 256MiB; legacy MB also accepted)")
@@ -1423,7 +1424,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if len(engineOverrides) > 0 {
 		params.EngineOverrides = engineOverrides
 	}
-	prefixShards, _ := cmd.Flags().GetInt(flagPrefixShards)
+	prefixShards, err := resolvePrefixShardCount(cmd, params)
+	if err != nil {
+		return scenario.Params{}, err
+	}
 	if err := applyPrefixShards(&params, prefixShards); err != nil {
 		return scenario.Params{}, err
 	}
@@ -1674,6 +1678,43 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 		fmt.Sprintf("%s=%d", itemNamingShardsPath, shardCount),
 	)
 	return nil
+}
+
+func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, error) {
+	flag := cmd.Flags().Lookup(flagPrefixShards)
+	if flag == nil {
+		return 0, nil
+	}
+	shardCount, err := cmd.Flags().GetInt(flagPrefixShards)
+	if err != nil || shardCount != prefixShardsAuto {
+		return shardCount, err
+	}
+	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeMixed &&
+		(params.WorkloadType != WorkloadTypeRead || params.ItemsFile != "") {
+		return 0, nil
+	}
+	if params.Threads <= 0 {
+		return 0, nil
+	}
+	hostCount := 1
+	if cmd.Flags().Lookup("test-hosts") != nil {
+		testHosts, getErr := cmd.Flags().GetString("test-hosts")
+		if getErr != nil {
+			return 0, getErr
+		}
+		hosts, parseErr := hostparse.ParseTestHosts(testHosts)
+		if parseErr != nil {
+			return 0, fmt.Errorf("resolve automatic prefix shards: %w", parseErr)
+		}
+		if len(hosts) > 0 {
+			hostCount = len(hosts)
+		}
+	}
+	maxInt := int(^uint(0) >> 1)
+	if params.Threads > maxInt/hostCount {
+		return 0, fmt.Errorf("automatic prefix shard count exceeds integer range")
+	}
+	return params.Threads * hostCount, nil
 }
 
 // formatScenarioParams formats scenario parameters for display

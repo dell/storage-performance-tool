@@ -5,7 +5,78 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/spf13/cobra"
 )
+
+func prefixShardTestCommand(t *testing.T, value string, changed bool, hosts string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{}
+	cmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "")
+	cmd.Flags().String("test-hosts", "127.0.0.1", "")
+	if err := cmd.Flags().Set(flagPrefixShards, value); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Flags().Lookup(flagPrefixShards).Changed = changed
+	if err := cmd.Flags().Set("test-hosts", hosts); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+func TestResolvePrefixShardsDefaultsToAggregateConcurrency(t *testing.T) {
+	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
+	cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
+
+	got, err := resolvePrefixShardCount(cmd, params)
+	if err != nil {
+		t.Fatalf("resolvePrefixShardCount() error = %v", err)
+	}
+	if got != 48 {
+		t.Fatalf("resolvePrefixShardCount() = %d, want 48", got)
+	}
+}
+
+func TestResolvePrefixShardsPreservesExplicitValueAndOptOut(t *testing.T) {
+	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
+	for _, tt := range []struct {
+		value string
+		want  int
+	}{{"0", 0}, {"7", 7}} {
+		cmd := prefixShardTestCommand(t, tt.value, true, "root@wrk1,root@wrk2,root@wrk3")
+		got, err := resolvePrefixShardCount(cmd, params)
+		if err != nil {
+			t.Fatalf("resolvePrefixShardCount(%s) error = %v", tt.value, err)
+		}
+		if got != tt.want {
+			t.Fatalf("resolvePrefixShardCount(%s) = %d, want %d", tt.value, got, tt.want)
+		}
+	}
+}
+
+func TestResolvePrefixShardsLeavesNonGeneratingWorkloadsFlat(t *testing.T) {
+	cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
+	for _, params := range []scenario.Params{
+		{WorkloadType: WorkloadTypeList, Threads: 16},
+		{WorkloadType: WorkloadTypeDelete, Threads: 16},
+		{WorkloadType: WorkloadTypeRead, Threads: 16, ItemsFile: "items.csv"},
+	} {
+		got, err := resolvePrefixShardCount(cmd, params)
+		if err != nil {
+			t.Fatalf("resolvePrefixShardCount(%s) error = %v", params.WorkloadType, err)
+		}
+		if got != 0 {
+			t.Fatalf("resolvePrefixShardCount(%s) = %d, want 0", params.WorkloadType, got)
+		}
+	}
+}
+
+func TestResolvePrefixShardsRejectsInvalidAutoHosts(t *testing.T) {
+	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
+	cmd := prefixShardTestCommand(t, "-1", false, "root@")
+	if _, err := resolvePrefixShardCount(cmd, params); err == nil {
+		t.Fatal("resolvePrefixShardCount() error = nil, want invalid hosts error")
+	}
+}
 
 func TestApplyPrefixShardsAddsBoundedEngineOverride(t *testing.T) {
 	params := scenario.Params{WorkloadType: WorkloadTypeWrite}

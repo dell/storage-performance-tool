@@ -41,11 +41,13 @@ Once comfortable with the tool, try a real S3 benchmark:
   --object-size 1MB
 ```
 
-Generated write keys are flat by default. Use `--prefix-shards N` to distribute
-them deterministically across `N` fixed-width prefix directories. For example,
-`--prefix-shards 16` produces parents `s0000000/` through `s000000f/` before the
-normal generated object name. The option also applies to generated seed objects
-for read and mixed workloads; it cannot rewrite names supplied by `--items-file`.
+Generated keys use one fixed-width prefix directory per unit of configured
+aggregate client concurrency by default. For example, three hosts at
+`--threads 16` use 48 parents. Use `--prefix-shards N` to select an exact count
+or `--prefix-shards 0` to retain flat generated keys. `--prefix-shards 16`
+produces parents `s0000000/` through `s000000f/` before the normal generated
+object name. The option also applies to generated seed objects for read and
+mixed workloads; it cannot rewrite names supplied by `--items-file`.
 
 Need to profile how fast an existing namespace can be enumerated? The list workload reuses the same credential handling but never creates or deletes data:
 
