@@ -9,6 +9,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.naming.ItemNameInput;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -196,6 +197,34 @@ class HttpStorageDriverBaseTest {
 		final var item = new DataItemImpl("fileB", 0, 64);
 		final String uri = drv.exposeDataUriPath(item, "srcBucket", null, OpType.CREATE);
 		assertEquals("/srcBucket/fileB", uri);
+	}
+
+	@Test
+	void shardedCreateResultRoundTripsToIdenticalReadUri() throws Exception {
+		final var cfg = baseConfig();
+		final var drv = new TestHttpDriver(cfg);
+		final String generatedName;
+		try (final var names = ItemNameInput.Builder.newInstance()
+						.prefix("base/")
+						.shardCount(3)
+						.radix(10)
+						.seed(0)
+						.step(1)
+						.type(ItemNameInput.ItemNamingType.SERIAL)
+						.build()) {
+			generatedName = names.get();
+		}
+		final var createdItem = new DataItemImpl(generatedName, 0, 128);
+		final var create = new DataOperationImpl<>(
+						0, OpType.CREATE, createdItem, null, "/bucket", null, null, 0);
+		final var createResult = create.result();
+		assertEquals("/bucket/base/s0000001/1", createResult.item().name());
+
+		final var read = new DataOperationImpl<>(
+						0, OpType.READ, createResult.item(), null, null, null, null, 0);
+		assertEquals(
+						"/bucket/base/s0000001/1",
+						drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
 	}
 
 	@Test

@@ -27,6 +27,9 @@ public final class ItemNameInputImpl
 	public ItemNameInputImpl(
 					final Long2LongFunction idFunction, final long offset, final Input<String> prefixInput,
 					final int radix, final int shardCount) {
+		if (shardCount < 0) {
+			throw new IllegalArgumentException("Item naming shard count must be non-negative");
+		}
 		this.initialId = offset;
 		this.lastId = initialId;
 		this.idFunction = idFunction;

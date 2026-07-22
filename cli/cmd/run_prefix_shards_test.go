@@ -13,6 +13,7 @@ func prefixShardTestCommand(t *testing.T, value string, changed bool, hosts stri
 	cmd := &cobra.Command{}
 	cmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "")
 	cmd.Flags().String("test-hosts", "127.0.0.1", "")
+	cmd.Flags().Int("min-hosts", 0, "")
 	if err := cmd.Flags().Set(flagPrefixShards, value); err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +22,22 @@ func prefixShardTestCommand(t *testing.T, value string, changed bool, hosts stri
 		t.Fatal(err)
 	}
 	return cmd
+}
+
+func TestResolvePrefixShardsUsesConfiguredHostsWhenMinHostsIsLower(t *testing.T) {
+	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
+	cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
+	if err := cmd.Flags().Set("min-hosts", "2"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolvePrefixShardCount(cmd, params)
+	if err != nil {
+		t.Fatalf("resolvePrefixShardCount() error = %v", err)
+	}
+	if got != 48 {
+		t.Fatalf("resolvePrefixShardCount() = %d, want configured concurrency 48", got)
+	}
 }
 
 func TestResolvePrefixShardsDefaultsToAggregateConcurrency(t *testing.T) {

@@ -464,7 +464,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(reqHeaders);
 		applySharedHeaders(reqHeaders);
-		final var credential = pathToCredMap.getOrDefault(uri, this.credential);
+		final var credential = pathToCredMap.getOrDefault(bucketPath, this.credential);
 		applyAuthHeaders(reqHeaders, HttpMethod.HEAD, uri, credential);
 		if (Loggers.MSG.isDebugEnabled()) {
 			for (final var header : reqHeaders) {

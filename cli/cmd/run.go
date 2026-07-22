@@ -1182,7 +1182,7 @@ func init() {
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Defines the workload by a fixed number of objects to process")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
-	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from aggregate concurrency, 0 = disabled)")
+	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
 	// Multipart Upload Options
 	runCmd.Flags().String("part-size", "", "Enable multipart upload with the given part size (e.g., 5MiB, 64MiB, 256MiB; legacy MB also accepted)")

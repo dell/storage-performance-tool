@@ -102,9 +102,12 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			((DataOperation) op).item().dataInput(itemDataInput);
 		}
 		final String dstPath = op.dstPath();
+		final String pathCacheKey = dstPath == null || dstPath.isEmpty()
+						? ""
+						: requestNewPathCacheKey(dstPath);
 		final Credential credential = op.credential();
 		if (credential != null) {
-			pathToCredMap.putIfAbsent(dstPath == null ? "" : dstPath, credential);
+			pathToCredMap.putIfAbsent(pathCacheKey, credential);
 			if (requestAuthTokenFunc != null) {
 				authTokens.computeIfAbsent(credential, requestAuthTokenFunc);
 			}
@@ -112,7 +115,6 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		if (requestNewPathFunc != null) {
 			// NOTE: in the distributed mode null dstPath becomes empty one
 			if (dstPath != null && !dstPath.isEmpty()) {
-				final var pathCacheKey = requestNewPathCacheKey(dstPath);
 				if (null == pathMap.computeIfAbsent(pathCacheKey, requestNewPathFunc)) {
 					Loggers.ERR.debug("Failed to compute the destination path for the operation: {}", op);
 					op.status(Operation.Status.FAIL_UNKNOWN);

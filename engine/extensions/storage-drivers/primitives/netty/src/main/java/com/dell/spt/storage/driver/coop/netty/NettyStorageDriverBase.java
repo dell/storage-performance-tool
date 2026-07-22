@@ -99,6 +99,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final String sslPqcMode;
 	private final AtomicBoolean namedGroupsWarned = new AtomicBoolean(false);
 	private final AtomicBoolean tlsHandshakeLogged = new AtomicBoolean(false);
+	private final AtomicBoolean channelFailureWarned = new AtomicBoolean(false);
 	protected final ChannelFutureListener reqSentCallback = this::sendFullRequestComplete;
 
 	@SuppressWarnings("unchecked")
@@ -265,6 +266,10 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 						connAttemptsLimit,
 						netTimeoutMilliSec,
 						TimeUnit.MILLISECONDS);
+	}
+
+	final boolean shouldLogChannelFailureWarning() {
+		return channelFailureWarned.compareAndSet(false, true);
 	}
 
 	@Override

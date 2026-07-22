@@ -1,5 +1,6 @@
 package com.dell.spt.base.item.naming;
 
+import com.dell.spt.base.config.ConstantValueInputImpl;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,6 +34,14 @@ public class ItemNamingTest {
 		assertThrows(
 						IllegalArgumentException.class,
 						() -> ItemNameInput.Builder.newInstance().shardCount(-1).build());
+	}
+
+	@Test
+	public final void testNegativePrefixShardCountRejectedByPublicConstructor() {
+		assertThrows(
+						IllegalArgumentException.class,
+						() -> new ItemNameInputImpl(
+										x -> x + 1, 0, new ConstantValueInputImpl<>(""), 36, -1));
 	}
 
 	@Test

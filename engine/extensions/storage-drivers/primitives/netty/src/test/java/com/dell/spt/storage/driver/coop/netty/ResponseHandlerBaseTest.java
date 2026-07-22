@@ -48,6 +48,7 @@ class ResponseHandlerBaseTest {
 		final var driver = mock(NettyStorageDriverBase.class);
 		when(driver.isStarted()).thenReturn(true);
 		when(driver.isStopped()).thenReturn(false);
+		when(driver.shouldLogChannelFailureWarning()).thenReturn(true);
 		final var handler = newHandler(driver);
 		final Operation<Item> op = mock(Operation.class);
 		when(op.toString()).thenReturn("READ,/bucket/b0000007/key,,");
@@ -57,6 +58,25 @@ class ResponseHandlerBaseTest {
 		ch.pipeline().fireExceptionCaught(new IOException("connection reset"));
 
 		verify(op).status(Operation.Status.FAIL_IO);
+		verify(driver).shouldLogChannelFailureWarning();
+		verify(driver).complete(eq(ch), eq(op));
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void exceptionCaught_repeatedIoFailureDoesNotBuildWarningContext() {
+		final var driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		when(driver.shouldLogChannelFailureWarning()).thenReturn(false);
+		final var handler = newHandler(driver);
+		final Operation<Item> op = mock(Operation.class);
+		final var ch = channelWithHandler(handler, op);
+
+		ch.pipeline().fireExceptionCaught(new IOException("connection reset"));
+
+		verify(op).status(Operation.Status.FAIL_IO);
+		verify(op, never()).nodeAddr();
 		verify(driver).complete(eq(ch), eq(op));
 		ch.finishAndReleaseAll();
 	}

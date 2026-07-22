@@ -119,7 +119,9 @@ fixed-width prefix directories so namespace work can be distributed across the
 target. In automatic mode, the shard count is the configured threads per
 worker multiplied by the number of configured workers. A local run with
 `--threads 16` therefore uses 16 shards, while three `--test-hosts` at the same
-thread count use 48. The generated directories are named `s0000000/`,
+thread count use 48. This is configured aggregate concurrency: `--min-hosts`
+does not reduce the value if fewer hosts eventually connect. The generated
+directories are named `s0000000/`,
 `s0000001/`, and so on using base-36 shard identifiers; any configured naming
 prefix appears before the shard directory.
 
@@ -268,6 +270,8 @@ These flags apply only to the `mixed` workload type.
 - `--duration` is required (mixed workloads are time-based only).
 - `--seed-objects` must be > 0 unless `--read-items-file` is provided.
 - `--cleanup` cannot be combined with `--read-items-file` or `--delete-items-file`.
+- `--read-items-file` supplies only the mixed READ pool; prefix sharding still
+  applies to object names generated for mixed PUT operations.
 
 **Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means per-node DELETE throughput is bounded by that node's PUT throughput, and cross-node deletion is not supported.
 

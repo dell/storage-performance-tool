@@ -81,7 +81,13 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 		final var op = (O) rawOp;
 		if (op != null) {
 			if (driver.isStarted() || driver.isShutdown()) {
-				LogUtil.exception(Level.WARN, cause, "Premature channel closure: {}", failureContext(op, channel));
+				if (driver.shouldLogChannelFailureWarning()) {
+					LogUtil.exception(
+									Level.WARN,
+									cause,
+									"Premature channel closure (further occurrences suppressed): {}",
+									failureContext(op, channel));
+				}
 				op.status(FAIL_IO);
 			} else if (cause instanceof PrematureChannelClosureException) {
 				op.status(INTERRUPTED);

@@ -1,6 +1,7 @@
 package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -17,6 +18,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
+
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -39,6 +44,39 @@ import static org.junit.jupiter.api.Assertions.*;
 @SuppressWarnings({"unchecked", "rawtypes"
 })
 class MixedLoadGeneratorTest {
+
+	@Test
+	void mixedPutItemInputUsesConfiguredPrefixShards() throws Exception {
+		final Map<String, Object> namingSchema = new java.util.HashMap<>();
+		namingSchema.put("length", Integer.class);
+		namingSchema.put("seed", Object.class);
+		namingSchema.put("prefix", String.class);
+		namingSchema.put("shards", Integer.class);
+		namingSchema.put("radix", Integer.class);
+		namingSchema.put("step", Integer.class);
+		namingSchema.put("type", String.class);
+		final Map<String, Object> namingValues = new java.util.HashMap<>();
+		namingValues.put("length", 12);
+		namingValues.put("seed", 0L);
+		namingValues.put("prefix", "base/");
+		namingValues.put("shards", 3);
+		namingValues.put("radix", 10);
+		namingValues.put("step", 1);
+		namingValues.put("type", "serial");
+		final Config itemConfig = new BasicConfig(
+						"-",
+						Map.of("naming", namingSchema, "data", Map.of("size", Object.class)),
+						Map.of("naming", namingValues, "data", Map.of("size", "1KB")));
+		final Method factoryMethod = MixedLoadStepLocal.class.getDeclaredMethod(
+						"createNewItemInput", Config.class, com.dell.spt.base.item.ItemFactory.class);
+		factoryMethod.setAccessible(true);
+
+		try (final Input<Item> input = (Input<Item>) factoryMethod.invoke(
+						null, itemConfig, new DataItemFactoryImpl<>())) {
+			assertEquals("base/s0000001/1", input.get().name(),
+							"mixed PUT item generation must consume item.naming.shards");
+		}
+	}
 
 	@Test
 	void legacyVirtualThreadConstructorDescriptorRemainsAvailable() throws Exception {

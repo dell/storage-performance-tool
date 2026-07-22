@@ -86,6 +86,9 @@ concurrency. Use CLI `--prefix-shards 0` when flat generated keys are required.
 This setting affects newly generated items. It does not reorganize existing
 items or rewrite paths read from an item input file. Keep the same naming
 configuration when a later phase must regenerate the names from the same seed.
+For a direct-JAR non-create operation that regenerates names, include the storage
+bucket/container in `item-naming-prefix`, or supply `item-input-file` or
+`item-input-path`; a shard directory by itself is not a storage bucket.
 
 #### 3.1.4. Radix
 
