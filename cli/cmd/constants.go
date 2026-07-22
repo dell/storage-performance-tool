@@ -50,6 +50,7 @@ const (
 	ErrReadShuffleBatchRequiresToggle = "--shuffle-batch-size requires --shuffle"
 	ErrReadShuffleBatchPositive       = "--shuffle-batch-size must be > 0"
 	ErrReadShuffleBatchTooLarge       = "--shuffle-batch-size must be <= %d"
+	ErrReadPhasePausePositive         = "--read-phase-pause-seconds must be > 0"
 )
 
 // Spt parameter constants

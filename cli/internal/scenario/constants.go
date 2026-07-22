@@ -84,6 +84,7 @@ const (
 	templateKeyItemsFile            = "ItemsFile"
 	templateKeyReadShuffle          = "ReadShuffle"
 	templateKeyReadShuffleBatchSize = "ReadShuffleBatchSize"
+	templateKeyReadPhasePause       = "ReadPhasePauseSeconds"
 
 	stepOpCreate = "create"
 	stepOpRead   = "read"
@@ -91,6 +92,10 @@ const (
 	stepOpDelete = "delete"
 	stepOpMixed  = "mixed"
 )
+
+// DefaultReadPhasePauseSeconds preserves the historical pause between read
+// scenario phases while allowing qualification runs to request a longer settle.
+const DefaultReadPhasePauseSeconds = 10
 
 // Tables opMode constants
 const (

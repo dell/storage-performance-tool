@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
 )
 
@@ -433,6 +434,32 @@ func TestValidateReadShuffleFlags(t *testing.T) {
 			}
 			if err != nil && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 				t.Errorf("validateReadShuffleFlags() error = %v, want containing %q", err, tt.errContains)
+			}
+		})
+	}
+}
+
+func TestValidateReadPhasePauseFlag(t *testing.T) {
+	tests := []struct {
+		name         string
+		workloadType string
+		seconds      string
+		wantErr      bool
+	}{
+		{name: "read positive", workloadType: WorkloadTypeRead, seconds: "30"},
+		{name: "read zero", workloadType: WorkloadTypeRead, seconds: "0", wantErr: true},
+		{name: "write unsupported", workloadType: WorkloadTypeWrite, seconds: "30", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "")
+			if err := cmd.Flags().Set(flagReadPhasePauseSeconds, tt.seconds); err != nil {
+				t.Fatal(err)
+			}
+			err := validateReadPhasePauseFlag(cmd, tt.workloadType)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateReadPhasePauseFlag() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

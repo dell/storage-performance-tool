@@ -27,6 +27,13 @@ public interface ItemNameInput
 
 		Builder prefix(final String prefix);
 
+		default Builder shardCount(final int shardCount) {
+			if (shardCount != 0) {
+				throw new UnsupportedOperationException("Prefix sharding is not supported by this builder");
+			}
+			return this;
+		}
+
 		Builder length(final int length);
 
 		Builder seed(final long offset);

@@ -441,16 +441,20 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
-	protected String requestNewPath(final String path) {
+	protected String requestNewPathCacheKey(final String path) {
 		final var relPath = path.startsWith(SLASH) ? path.substring(1) : path;
 		final var slashPos = relPath.indexOf(SLASH);
-		final var bucketPath = SLASH + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
+		return SLASH + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
+	}
+
+	@Override
+	protected String requestNewPath(final String path) {
+		final var bucketPath = requestNewPathCacheKey(path);
 		final var uriQuery = uriQuery();
 		final var uri = uriQuery == null || uriQuery.isEmpty() ? bucketPath : bucketPath + uriQuery;
 		Loggers.MSG.debug(
-						"requestNewPath: path={}, relPath={}, bucketPath={}, uri={}",
+						"requestNewPath: path={}, bucketPath={}, uri={}",
 						path,
-						relPath,
 						bucketPath,
 						uri);
 		// check the destination bucket if it exists w/ HEAD request
@@ -460,7 +464,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(reqHeaders);
 		applySharedHeaders(reqHeaders);
-		final var credential = pathToCredMap.getOrDefault(uri, this.credential);
+		final var credential = pathToCredMap.getOrDefault(bucketPath, this.credential);
 		applyAuthHeaders(reqHeaders, HttpMethod.HEAD, uri, credential);
 		if (Loggers.MSG.isDebugEnabled()) {
 			for (final var header : reqHeaders) {

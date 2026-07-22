@@ -22,15 +22,17 @@ type Params struct {
 	// Engine tuning
 	ServiceThreads  int      // VT carrier thread parallelism (0 = JVM default)
 	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries
+	PrefixShards    int      // Optional count of fixed-width object-key prefix directories (0 = disabled)
 
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
 	// Read workload
-	SeedCount            int    // Number of seed objects for read benchmark (default: 2500)
-	ItemsFile            string // Path to a local items.csv for read workload (skips seed phase)
-	ReadShuffle          bool   // Enable batch-local item shuffling for the read phase
-	ReadShuffleBatchSize int    // Read-phase batch size override used when ReadShuffle is enabled
+	SeedCount             int    // Number of seed objects for read benchmark (default: 2500)
+	ItemsFile             string // Path to a local items.csv for read workload (skips seed phase)
+	ReadShuffle           bool   // Enable batch-local item shuffling for the read phase
+	ReadShuffleBatchSize  int    // Read-phase batch size override used when ReadShuffle is enabled
+	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts []FileMount

@@ -84,6 +84,16 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	protected abstract String requestNewPath(final String path);
 
+	/**
+	 * Return the resource identity used to cache path initialization.
+	 *
+	 * <p>Drivers whose initialization operates on a parent resource may normalize the operation
+	 * destination path. The default preserves the historical full-path behavior.
+	 */
+	protected String requestNewPathCacheKey(final String path) {
+		return path;
+	}
+
 	protected abstract String requestNewAuthToken(final Credential credential);
 
 	protected boolean prepare(final O op) {
@@ -92,9 +102,12 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			((DataOperation) op).item().dataInput(itemDataInput);
 		}
 		final String dstPath = op.dstPath();
+		final String pathCacheKey = dstPath == null || dstPath.isEmpty()
+						? ""
+						: requestNewPathCacheKey(dstPath);
 		final Credential credential = op.credential();
 		if (credential != null) {
-			pathToCredMap.putIfAbsent(dstPath == null ? "" : dstPath, credential);
+			pathToCredMap.putIfAbsent(pathCacheKey, credential);
 			if (requestAuthTokenFunc != null) {
 				authTokens.computeIfAbsent(credential, requestAuthTokenFunc);
 			}
@@ -102,7 +115,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		if (requestNewPathFunc != null) {
 			// NOTE: in the distributed mode null dstPath becomes empty one
 			if (dstPath != null && !dstPath.isEmpty()) {
-				if (null == pathMap.computeIfAbsent(dstPath, requestNewPathFunc)) {
+				if (null == pathMap.computeIfAbsent(pathCacheKey, requestNewPathFunc)) {
 					Loggers.ERR.debug("Failed to compute the destination path for the operation: {}", op);
 					op.status(Operation.Status.FAIL_UNKNOWN);
 					// return false;

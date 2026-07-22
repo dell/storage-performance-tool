@@ -1673,6 +1673,35 @@ func TestGenerateReadScenario_NoReadShuffleByDefault(t *testing.T) {
 	}
 }
 
+func TestGenerateReadScenario_ReadPhasePause(t *testing.T) {
+	params := Params{
+		WorkloadType:          "read",
+		Endpoint:              "http://localhost:9000",
+		Bucket:                "test-bucket",
+		Threads:               4,
+		ObjectSize:            "128K",
+		Duration:              "1m",
+		ReadPhasePauseSeconds: 30,
+	}
+
+	got, err := GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "var pauseTime = 30;") {
+		t.Fatalf("expected explicit read phase pause in generated scenario\nGot:\n%s", got)
+	}
+
+	params.ReadPhasePauseSeconds = 0
+	got, err = GenerateReadScenario(params)
+	if err != nil {
+		t.Fatalf("GenerateReadScenario() default pause unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "var pauseTime = 10;") {
+		t.Fatalf("expected historical default read phase pause in generated scenario\nGot:\n%s", got)
+	}
+}
+
 func TestGenerateReadScenario_ReadShuffleDefaultBatch(t *testing.T) {
 	got, err := GenerateReadScenario(Params{
 		WorkloadType: "read",

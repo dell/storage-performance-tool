@@ -1,7 +1,6 @@
 package com.dell.spt.base.load.generator;
 
 import static com.dell.spt.base.Constants.M;
-import static com.dell.spt.base.config.el.Language.withLanguage;
 import static com.dell.spt.base.item.DataItem.rangeCount;
 import static com.dell.spt.base.storage.driver.StorageDriver.BUFF_SIZE_MIN;
 import static com.github.akurilov.commons.io.el.ExpressionInput.ASYNC_MARKER;
@@ -22,8 +21,7 @@ import com.dell.spt.base.item.TransferConvertBuffer;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.io.ListPathItemInput;
 import com.dell.spt.base.item.io.ShardedListPathItemInput;
-import com.dell.spt.base.item.naming.ItemNameInput;
-import com.dell.spt.base.item.naming.ItemNameInput.ItemNamingType;
+import com.dell.spt.base.item.naming.ItemNameInputFactory;
 import com.dell.spt.base.item.io.NewDataItemInput;
 import com.dell.spt.base.item.io.NewItemInput;
 import com.dell.spt.base.item.op.OpType;
@@ -52,7 +50,6 @@ import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
-import com.github.akurilov.commons.io.el.ExpressionInput;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -625,38 +622,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 
 	private Input<I> newItemInput() throws IllegalConfigurationException {
 		final var namingConfig = itemConfig.configVal("naming");
-		final var length = namingConfig.intVal("length");
-		final var seedRaw = namingConfig.val("seed");
-		long seed = 0;
-		try {
-			seed = TypeUtil.typeConvert(seedRaw, long.class);
-		} catch (final ClassCastException | NumberFormatException e) {
-			if (seedRaw instanceof String) {
-				try (
-								final var in = withLanguage(ExpressionInput.builder())
-												.expression((String) seedRaw)
-												.<ExpressionInput<Long>> build()) {
-					seed = in.get();
-				} catch (final Exception ee) {
-					LogUtil.exception(Level.WARN, e, "Item naming seed expression (\"{}\") failure", seedRaw);
-				}
-			} else {
-				throw new IllegalStateException(
-								"Item naming seed (" + seedRaw + ") should be an integer either an expression");
-			}
-		}
-		final var prefix = namingConfig.stringVal("prefix");
-		final var radix = namingConfig.intVal("radix");
-		final var step = namingConfig.intVal("step");
-		final var type = ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
-		final var itemNameInput = ItemNameInput.Builder.newInstance()
-						.length(length)
-						.seed(seed)
-						.prefix(prefix)
-						.radix(radix)
-						.step(step)
-						.type(type)
-						.build();
+		final var itemNameInput = ItemNameInputFactory.fromConfig(namingConfig);
 		if (itemFactory == null) {
 			throw new IllegalConfigurationException("Item factory is not set");
 		}

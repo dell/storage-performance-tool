@@ -181,12 +181,48 @@ public class LoadGeneratorBuilderImplTest {
 		options.put("load-op-limit-recycle", 1_000_000);
 		options.put("load-op-recycle-mode", false);
 		options.put("load-op-recycle-content-update", false);
+		options.put("load-op-retry", false);
 		options.put("load-op-retryLimit", 10);
 		options.put("load-op-shuffle", false);
 		options.put("load-op-type", OpType.CREATE.name().toLowerCase(Locale.ROOT));
 		options.put("storage-auth-uid", "test-uid");
 		options.put("storage-auth-secret", "test-secret");
 		return options;
+	}
+
+	@Test
+	public void configuredPrefixShardsReachGeneratedOperationNames() throws Exception {
+		final Map<String, Object> options = baseSingleOpOptions();
+		options.put("item-naming-prefix", "base/");
+		options.put("item-naming-shards", 3);
+		options.put("item-naming-seed", 0L);
+		options.put("item-naming-step", 1);
+		options.put("item-naming-type", "serial");
+		options.put("load-batch-size", 3);
+		options.put("load-op-limit-count", 3);
+		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
+		options.forEach(config::val);
+		final var itemFactory = (ItemFactory) new DataItemFactoryImpl();
+		final List<DataOperation<DataItem>> ops = new ArrayList<>(3);
+
+		try (final IoBuffer<DataOperation<DataItem>> opBuff = new LimitedQueueBuffer<>(new ArrayBlockingQueue<>(3));
+						final LoadGenerator loadGenerator = new LoadGeneratorBuilderImpl()
+										.authConfig(config.configVal("storage-auth"))
+										.itemConfig(config.configVal("item"))
+										.itemFactory(itemFactory)
+										.itemType(ItemType.DATA)
+										.loadConfig(config.configVal("load"))
+										.loadOperationsOutput(opBuff)
+										.originIndex(0)
+										.build()) {
+			loadGenerator.start();
+			assertTrue(loadGenerator.await(10, TimeUnit.SECONDS), "load generator should complete");
+			assertEquals(3, opBuff.get(ops, 3));
+		}
+
+		assertEquals(
+						List.of("base/s0000001/1", "base/s0000002/2", "base/s0000000/3"),
+						ops.stream().map(op -> op.item().name()).toList());
 	}
 
 	/**

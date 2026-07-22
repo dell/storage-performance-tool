@@ -9,6 +9,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.naming.ItemNameInput;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -17,10 +18,12 @@ import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpVersion;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +31,17 @@ import org.junit.jupiter.api.Test;
 
 /** Tests for HttpStorageDriverBase that do not require any real network. */
 class HttpStorageDriverBaseTest {
+
+	@Test
+	void timeoutRequestDescriptionExcludesHeaders() {
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/bucket");
+		request.headers().set(HttpHeaderNames.AUTHORIZATION, "sensitive-signature");
+
+		final var description = HttpStorageDriverBase.timeoutRequestDescription(request);
+
+		assertEquals("method=HEAD, uri=/bucket", description);
+		assertFalse(description.contains("sensitive-signature"));
+	}
 
 	private static Config baseConfig() {
 		try {
@@ -183,6 +197,34 @@ class HttpStorageDriverBaseTest {
 		final var item = new DataItemImpl("fileB", 0, 64);
 		final String uri = drv.exposeDataUriPath(item, "srcBucket", null, OpType.CREATE);
 		assertEquals("/srcBucket/fileB", uri);
+	}
+
+	@Test
+	void shardedCreateResultRoundTripsToIdenticalReadUri() throws Exception {
+		final var cfg = baseConfig();
+		final var drv = new TestHttpDriver(cfg);
+		final String generatedName;
+		try (final var names = ItemNameInput.Builder.newInstance()
+						.prefix("base/")
+						.shardCount(3)
+						.radix(10)
+						.seed(0)
+						.step(1)
+						.type(ItemNameInput.ItemNamingType.SERIAL)
+						.build()) {
+			generatedName = names.get();
+		}
+		final var createdItem = new DataItemImpl(generatedName, 0, 128);
+		final var create = new DataOperationImpl<>(
+						0, OpType.CREATE, createdItem, null, "/bucket", null, null, 0);
+		final var createResult = create.result();
+		assertEquals("/bucket/base/s0000001/1", createResult.item().name());
+
+		final var read = new DataOperationImpl<>(
+						0, OpType.READ, createResult.item(), null, null, null, null, 0);
+		assertEquals(
+						"/bucket/base/s0000001/1",
+						drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
 	}
 
 	@Test

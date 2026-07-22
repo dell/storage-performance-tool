@@ -162,6 +162,7 @@ public class TestConfigBuilder {
 		Map<String, Object> itemNaming = new HashMap<>();
 		itemNaming.put("type", "random");
 		itemNaming.put("prefix", "");
+		itemNaming.put("shards", 0);
 		itemNaming.put("radix", 36);
 		itemNaming.put("step", 1);
 		itemNaming.put("seed", 0L);

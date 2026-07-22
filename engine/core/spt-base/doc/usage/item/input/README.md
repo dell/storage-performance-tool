@@ -61,7 +61,36 @@ java spt-<VERSION>.jar --item-naming-prefix=item_prefix_ ...
 
 The prefix may be dynamic (see [expressions](../../../../src/main/java/com/dell/spt/base/config/el/README.md)).
 
-#### 3.1.3. Radix
+#### 3.1.3. Prefix Shards
+
+`item-naming-shards` places generated item names into a bounded set of
+fixed-width prefix directories. The default is `0`, which preserves flat item
+names. A positive value selects the exact number of directories:
+
+```bash
+java spt-<VERSION>.jar --item-naming-shards=16 ...
+```
+
+With 16 shards, generated paths use `s0000000/` through `s000000f/` before the
+ordinary generated item id. If `item-naming-prefix` is also configured, it
+appears before this directory, for example `benchmark/s000000f/<item-id>`.
+Shard identifiers use base 36 and are selected from the generated item id
+modulo the configured count.
+
+The engine does not derive this value from concurrency or cluster size. Direct
+JAR and scenario users must choose an explicit positive value when sharding is
+desired. The higher-level SPT CLI defaults its `--prefix-shards` option to
+automatic mode and supplies `item.naming.shards` using aggregate configured
+concurrency. Use CLI `--prefix-shards 0` when flat generated keys are required.
+
+This setting affects newly generated items. It does not reorganize existing
+items or rewrite paths read from an item input file. Keep the same naming
+configuration when a later phase must regenerate the names from the same seed.
+For a direct-JAR non-create operation that regenerates names, include the storage
+bucket/container in `item-naming-prefix`, or supply `item-input-file` or
+`item-input-path`; a shard directory by itself is not a storage bucket.
+
+#### 3.1.4. Radix
 
 The radix option is used to encode the source number into the id. The radix should be in the range of \[2; 36].
 
@@ -69,7 +98,7 @@ The radix option is used to encode the source number into the id. The radix shou
 java spt-<VERSION>.jar --item-naming-radix=16 ...
 ```
 
-#### 3.1.4. Seed
+#### 3.1.5. Seed
 
 The item ids will start from the next value calculated using the specified seed.
 
@@ -77,7 +106,7 @@ The item ids will start from the next value calculated using the specified seed.
 java spt-<VERSION>.jar --item-naming-seed=9876543210 ...
 ```
 
-#### 3.1.5. Length
+#### 3.1.6. Length
 
 The length option determines the id length for the new item ids. The minor bits are used if the source number is
 truncated.
@@ -85,4 +114,3 @@ truncated.
 ```bash
 java spt-<VERSION>.jar --item-naming-lenth=15 ...
 ```
-

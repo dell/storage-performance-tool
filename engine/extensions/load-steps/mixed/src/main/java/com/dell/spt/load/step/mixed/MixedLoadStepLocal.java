@@ -1,7 +1,5 @@
 package com.dell.spt.load.step.mixed;
 
-import static com.dell.spt.base.config.el.Language.withLanguage;
-import com.github.akurilov.commons.io.el.ExpressionInput;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -14,7 +12,7 @@ import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.io.ItemTimingMetricsFileOutput;
 import com.dell.spt.base.item.io.NewDataItemInput;
-import com.dell.spt.base.item.naming.ItemNameInput;
+import com.dell.spt.base.item.naming.ItemNameInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
@@ -467,38 +465,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	/** Creates a new-item input for CREATE operations. */
 	private static Input createNewItemInput(final Config itemConfig, final ItemFactory itemFactory) {
 		final var namingConfig = itemConfig.configVal("naming");
-		final int length = namingConfig.intVal("length");
-		final var seedRaw = namingConfig.val("seed");
-		long seed = 0;
-		try {
-			seed = TypeUtil.typeConvert(seedRaw, long.class);
-		} catch (final ClassCastException | NumberFormatException e) {
-			if (seedRaw instanceof String) {
-				try (
-								final var in = withLanguage(ExpressionInput.builder())
-												.expression((String) seedRaw)
-												.<ExpressionInput<Long>> build()) {
-					seed = in.get();
-				} catch (final Exception ee) {
-					LogUtil.exception(Level.WARN, e, "Item naming seed expression (\"{}\") failure", seedRaw);
-				}
-			} else {
-				throw new IllegalStateException(
-								"Item naming seed (" + seedRaw + ") should be an integer either an expression");
-			}
-		}
-		final var prefix = namingConfig.stringVal("prefix");
-		final var radix = namingConfig.intVal("radix");
-		final var step = namingConfig.intVal("step");
-		final var type = ItemNameInput.ItemNamingType.valueOf(namingConfig.stringVal("type").toUpperCase(Locale.ROOT));
-		final var itemNameInput = ItemNameInput.Builder.newInstance()
-						.length(length)
-						.seed(seed)
-						.prefix(prefix)
-						.radix(radix)
-						.step(step)
-						.type(type)
-						.build();
+		final var itemNameInput = ItemNameInputFactory.fromConfig(namingConfig);
 
 		final Object itemDataSizeRaw = itemConfig.val("data-size");
 		final SizeInBytes dataSize;
