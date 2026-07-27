@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.13.0] - 2026-07-27
+
+### Added
+
+- **Prefix-sharded object naming** — Generated write, mixed, and read-seed keys now use concurrency-derived prefix directories by default; `--prefix-shards` selects an exact count or restores flat naming.
+- **Read-phase settle control** — Added `--read-phase-pause-seconds` to configure the delay between seed, read, and cleanup phases.
+
+### Changed
+
+- **Engine scheduling efficiency** — Reused dispatch scratch state and moved recurring service tasks to dedicated platform threads to reduce client CPU overhead.
+- **Dependency updates** — Updated Jackson, fastutil, Docker Go connections, and GitHub setup actions.
+- **Netty failure diagnostics** — Added operation context to response-handler failure logs.
+
+### Fixed
+
+- **Sharded S3 lifecycle handling** — Cached bucket initialization across prefix paths to avoid redundant initialization during generated read workflows.
+
 ## [5.12.2] - 2026-07-16
 
 ### Fixed
