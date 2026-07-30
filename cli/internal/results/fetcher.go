@@ -40,6 +40,9 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"Scenario"}, Suffix: constants.ResultsArtifactSuffixScenario, Required: false},
 	{Loggers: []string{"metrics.threshold.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsThreshold, Required: false},
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
+	{Loggers: []string{"IntegrityFailures"}, Suffix: constants.ResultsArtifactSuffixIntegrityFailures, Required: false},
+	{Loggers: []string{"IntegrityPerformance"}, Suffix: constants.ResultsArtifactSuffixIntegrityPerformance, Required: false},
+	{Loggers: []string{"MultipartLifecycle"}, Suffix: constants.ResultsArtifactSuffixMultipartLifecycle, Required: false},
 	// Multipart per-part timings (name standardized to multipart.csv); try common loggers
 	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
 	// S3 Tables metrics (only present on s3-tables runs)

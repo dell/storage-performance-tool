@@ -42,6 +42,18 @@ class ConfigSliceUtilTest {
 	}
 
 	@Test
+	@DisplayName("Base slice preserves the positive run ID")
+	void initSlicePreservesRunId() {
+		final Config base = TestConfigBuilder.config();
+		base.val("run-id", 987654321L);
+
+		final Config slice = ConfigSliceUtil.initSlice(base);
+
+		assertEquals(987654321L, slice.longVal("run-id"));
+		assertTrue(slice.<String> listVal("load-step-node-addrs").isEmpty());
+	}
+
+	@Test
 	@DisplayName("Missing item naming config is tolerated without side effects")
 	@SuppressWarnings("unchecked")
 	void sliceItemNamingMissingConfigNoop() {

@@ -63,6 +63,14 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	/** Returns the maximum concurrent operations supported, or 0 when unlimited. */
 	int concurrencyLimit();
 
+	default String driverType() {
+		return getClass().getSimpleName();
+	}
+
+	default boolean metadataIntegrityEnabled() {
+		return false;
+	}
+
 	int activeOpCount();
 
 	long scheduledOpCount();

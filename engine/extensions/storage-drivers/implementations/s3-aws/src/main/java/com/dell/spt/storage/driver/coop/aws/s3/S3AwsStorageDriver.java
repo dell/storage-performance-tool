@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityResponseObserver;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
@@ -77,6 +78,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";
 	private static final String KEY_MPU_ABORT = "mpuAbort";
+	private static final String KEY_MPU_FAILURE = "mpuFailure";
 
 	private final S3AsyncClient s3AsyncClient;
 	private final ExecutorService executor; // For read operations
@@ -282,39 +284,94 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	@Override
 	protected void invokeNio(final O op) {
+		final CompositeDataOperation mpuOp = op instanceof CompositeDataOperation
+						&& op.type() == OpType.CREATE ? (CompositeDataOperation) op : null;
+		final boolean aborting = mpuOp != null && mpuOp.get(KEY_MPU_ABORT) != null;
+		final boolean completing = mpuOp != null && !aborting && mpuOp.allSubOperationsDone();
 		try {
-			// Execute AWS SDK operation asynchronously and block for result
-			// This maintains the existing NioStorageDriverBase threading model
+			// Execute AWS SDK operation asynchronously and block for result.
 			execute(op).join();
 
-			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes)
+			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes).
 			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
-				DataItem dataItem = (DataItem) op.item();
+				final DataItem dataItem = (DataItem) op.item();
 				if (op instanceof DataOperation) {
 					((DataOperation) op).countBytesDone(dataItem.size());
 				}
 			}
 
-			// For READ operations, timing is handled in readObject with startResponse/finishResponse
-			// For other operations, use finishOperation helper
 			if (op.type() != OpType.READ) {
 				finishOperation(op);
+				if (aborting) {
+					op.status(Operation.Status.FAIL_UNKNOWN);
+					emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, mpuFailure(mpuOp));
+				} else if (completing) {
+					emitMultipartLifecycle(mpuOp, "completed", false, null, null);
+				}
 			} else if (op.status() == Operation.Status.ACTIVE) {
 				// READ operations call finishResponse in readObject. Preserve terminal corruption.
 				op.status(Operation.Status.SUCC);
 			}
 
-		} catch (Exception e) {
-			op.status(classifyFailure(e));
-			LOG.error("{} {} failed: {} - {}", op.type(), op.item().name(), e.getClass().getSimpleName(), e.getMessage());
+		} catch (final Exception e) {
+			final Status originalStatus = classifyFailure(e);
+			if (aborting) {
+				emitMultipartLifecycle(
+								mpuOp, "failed_orphaned", true, false, "abort failed: " + originalStatus.name());
+			} else if (completing && mpuOp.get(KEY_UPLOAD_ID) != null) {
+				try {
+					abortMultipartUpload(mpuOp).join();
+					emitMultipartLifecycle(
+									mpuOp, "failed_aborted", true, true, "completion failed: " + originalStatus.name());
+				} catch (final Exception abortFailure) {
+					emitMultipartLifecycle(
+									mpuOp,
+									"failed_orphaned",
+									true,
+									false,
+									"completion failed: " + originalStatus.name()
+													+ "; abort failed: " + classifyFailure(abortFailure).name());
+				}
+			}
+			op.status(originalStatus);
+			LOG.error("{} {} failed: {}", op.type(), op.item().name(), originalStatus);
 			LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			try {
 				op.startResponse();
 				op.finishResponse();
-			} catch (Exception responseEx) {
+			} catch (final Exception responseEx) {
 				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
 			}
 		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void emitMultipartLifecycle(
+					final CompositeDataOperation op,
+					final String state,
+					final boolean abortAttempted,
+					final Boolean abortSucceeded,
+					final String error) {
+		if (!integrityMetadataEnabled()) {
+			return;
+		}
+		final var bucketAndKey = resolveBucketAndKey((O) op);
+		IntegrityCsvArtifacts.logMultipartLifecycle(
+						IntegrityCsvArtifacts.nodeIdentity(),
+						stepId,
+						driverType(),
+						bucketAndKey[0],
+						bucketAndKey[1],
+						op.get(KEY_UPLOAD_ID),
+						state,
+						abortAttempted,
+						abortSucceeded,
+						error);
+	}
+
+	private static String mpuFailure(final CompositeDataOperation op) {
+		final String failure = op.get(KEY_MPU_FAILURE);
+		return failure == null ? "multipart part failed" : "multipart part failed: " + failure;
 	}
 
 	/**

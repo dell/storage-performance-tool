@@ -110,6 +110,27 @@ Configuration:
         Policies:
           StepIdTriggeringPolicy: {}
         DirectWriteRolloverStrategy: {}
+      - name: integrityFailuresFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}integrity.failures.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
+      - name: integrityPerformanceFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}integrity.performance.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
+      - name: multipartLifecycleFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}multipart.lifecycle.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
       - name: partsUploadFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}parts.upload.csv"
         Policies:
@@ -220,10 +241,25 @@ Configuration:
           - ref: stdout
           - ref: msgFile
         additivity: false
+      - name: com.dell.spt.base.logging.IntegrityFailures
+        level: INFO
+        AppenderRef:
+          ref: integrityFailuresFile
+        additivity: false
+      - name: com.dell.spt.base.logging.IntegrityPerformance
+        level: INFO
+        AppenderRef:
+          ref: integrityPerformanceFile
+        additivity: false
       - name: com.dell.spt.base.logging.Multipart
         level: DEBUG
         AppenderRef:
           ref: partsUploadFile
+        additivity: false
+      - name: com.dell.spt.base.logging.MultipartLifecycle
+        level: INFO
+        AppenderRef:
+          ref: multipartLifecycleFile
         additivity: false
       - name: com.dell.spt.base.logging.Scenario
         level: INFO

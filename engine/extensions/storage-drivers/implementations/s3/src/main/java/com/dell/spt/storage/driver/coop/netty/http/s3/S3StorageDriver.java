@@ -17,11 +17,13 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static com.dell.spt.base.item.op.Operation.SLASH;
 
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.DataItem;
@@ -70,8 +72,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Set;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -307,6 +312,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final String checksumAlgorithm;
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
+	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
 
 	public S3StorageDriver(
 					final String stepId,
@@ -1531,6 +1537,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (channel != null && op instanceof CompositeDataOperation
 						&& OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeDataOperation) op;
+			final boolean abortRequested = compositeOp.get(S3Api.KEY_MPU_ABORT) != null;
+			final boolean completing = !abortRequested && compositeOp.allSubOperationsDone();
+			if (abortRequested) {
+				final boolean abortSucceeded = Operation.Status.SUCC.equals(op.status());
+				emitMultipartLifecycle(
+								compositeOp,
+								abortSucceeded ? "failed_aborted" : "failed_orphaned",
+								true,
+								abortSucceeded,
+								abortSucceeded ? mpuFailure(compositeOp) : "abort failed: " + op.status());
+				op.status(Operation.Status.FAIL_UNKNOWN);
+			} else if (completing) {
+				if (Operation.Status.SUCC.equals(op.status())) {
+					emitMultipartLifecycle(compositeOp, "completed", false, null, null);
+				} else if (compositeOp.get(S3Api.KEY_UPLOAD_ID) != null) {
+					scheduleFailedCompletionAbort(compositeOp, op.status());
+				}
+			}
 			// Pre-super: extract upload ID from channel (channel may be released by super)
 			// and set failure status so super.complete() can close the channel if needed
 			if (compositeOp.get(S3Api.KEY_MPU_ABORT) == null
@@ -1601,6 +1625,111 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	private void scheduleFailedCompletionAbort(
+					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		final CompletableFuture<Void> cleanupTask = new CompletableFuture<>();
+		multipartCleanupTasks.add(cleanupTask);
+		ServiceTaskExecutor.VT_EXECUTOR.submit(() -> {
+			try {
+				abortAfterFailedCompletion(op, completionStatus);
+				cleanupTask.complete(null);
+			} catch (final Throwable failure) {
+				cleanupTask.completeExceptionally(failure);
+			} finally {
+				multipartCleanupTasks.remove(cleanupTask);
+			}
+		});
+	}
+
+	private void abortAfterFailedCompletion(
+					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		FullHttpResponse response = null;
+		try {
+			final HttpRequest abortRequest = abortMultipartUploadRequest(op, storageNodeAddrs[0]);
+			final FullHttpRequest fullAbortRequest = new DefaultFullHttpRequest(
+							abortRequest.protocolVersion(),
+							abortRequest.method(),
+							abortRequest.uri(),
+							Unpooled.EMPTY_BUFFER,
+							abortRequest.headers(),
+							EmptyHttpHeaders.INSTANCE);
+			response = executeHttpRequest(fullAbortRequest);
+			final boolean succeeded = response != null
+							&& HttpStatusClass.SUCCESS.equals(response.status().codeClass());
+			emitMultipartLifecycle(
+							op,
+							succeeded ? "failed_aborted" : "failed_orphaned",
+							true,
+							succeeded,
+							"completion failed: " + completionStatus + (succeeded ? "" : "; abort failed"));
+		} catch (final Exception e) {
+			emitMultipartLifecycle(
+							op,
+							"failed_orphaned",
+							true,
+							false,
+							"completion failed: " + completionStatus
+											+ "; abort failed: " + e.getClass().getSimpleName());
+		} finally {
+			if (response != null) {
+				response.release();
+			}
+		}
+	}
+
+	private void emitMultipartLifecycle(
+					final CompositeDataOperation op,
+					final String state,
+					final boolean abortAttempted,
+					final Boolean abortSucceeded,
+					final String error) {
+		if (!integrityMetadataEnabled()) {
+			return;
+		}
+		final String bucket = multipartBucket(op);
+		final String key = multipartKey(op, bucket);
+		IntegrityCsvArtifacts.logMultipartLifecycle(
+						IntegrityCsvArtifacts.nodeIdentity(),
+						stepId,
+						driverType(),
+						bucket,
+						key,
+						op.get(S3Api.KEY_UPLOAD_ID),
+						state,
+						abortAttempted,
+						abortSucceeded,
+						error);
+	}
+
+	private String multipartBucket(final CompositeDataOperation op) {
+		String path = op.dstPath();
+		if (path == null || path.isBlank()) {
+			path = namespace;
+		}
+		if (path == null) {
+			return "";
+		}
+		final String relative = path.startsWith(SLASH) ? path.substring(1) : path;
+		final int slash = relative.indexOf(SLASH);
+		return slash < 0 ? relative : relative.substring(0, slash);
+	}
+
+	private static String multipartKey(final CompositeDataOperation op, final String bucket) {
+		String key = op.item().name();
+		if (key.startsWith(SLASH)) {
+			key = key.substring(1);
+		}
+		if (!bucket.isEmpty() && key.startsWith(bucket + SLASH)) {
+			key = key.substring(bucket.length() + 1);
+		}
+		return key;
+	}
+
+	private static String mpuFailure(final CompositeDataOperation op) {
+		final String failure = op.get("mpuFailure");
+		return failure == null ? "multipart part failed" : "multipart part failed: " + failure;
+	}
+
 	@Override
 	protected void appendHandlers(final Channel channel) {
 		super.appendHandlers(channel);
@@ -1609,6 +1738,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						verifyFlag,
 						versioning,
 						checksumStrategy == null ? null : checksumStrategy.responseChecksumHeaderName));
+	}
+
+	@Override
+	protected void doClose() throws IOException {
+		final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
+		if (pending.length > 0) {
+			CompletableFuture.allOf(pending).join();
+		}
+		multipartCleanupTasks.clear();
+		super.doClose();
 	}
 
 	@Override

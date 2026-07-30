@@ -8,6 +8,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.DigestResult;
 import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityPerformanceAccumulator;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
@@ -26,6 +27,7 @@ import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.apache.logging.log4j.CloseableThreadContext;
 
@@ -39,11 +41,13 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected final int concurrencyLimit;
 	protected final int ioWorkerCount;
 	protected final String namespace;
+	private final String driverType;
 	protected final Credential credential;
 	protected final boolean verifyFlag;
 	protected final IntegrityConfig integrityConfig;
 	protected final IntegrityPerformanceAccumulator integrityPerformance;
 	private final StreamingSha256 integrityHasher;
+	private final AtomicReference<String> integrityPhase = new AtomicReference<>();
 
 	protected final ConcurrentMap<String, Credential> pathToCredMap = new ConcurrentHashMap<>(1);
 
@@ -65,6 +69,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		final var limitConfig = driverConfig.configVal("limit");
 		this.stepId = stepId;
 		this.namespace = storageConfig.stringVal("namespace");
+		this.driverType = storageConfig.stringVal("driver-type");
 		final var authConfig = storageConfig.configVal("auth");
 		this.credential = Credential.getInstance(authConfig.stringVal("uid"), authConfig.stringVal("secret"));
 		final var authToken = authConfig.stringVal("token");
@@ -153,6 +158,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 		switch (op.type()) {
 		case CREATE:
+			integrityPhase.compareAndSet(null, "write_prehash");
 			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
 				throw unsupportedIntegrityCombination("copy CREATE operations are outside integrity metadata v1");
 			}
@@ -168,7 +174,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 					integrityPerformance.recordDigest(result.metadata().size(), result.workerNanos());
 				} catch (final IOException e) {
 					throw new IntegrityTerminalException(
-									IntegrityTerminalException.Category.DIGEST,
+									IntegrityTerminalException.Category.EXECUTION,
 									"failed to pre-hash CREATE object " + dataOperation.item().name(),
 									e);
 				}
@@ -220,12 +226,23 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	protected final void recordIntegrityReadResult(final IntegrityVerificationResult result) {
 		if (integrityPerformance != null && result != null) {
+			integrityPhase.compareAndSet(null, "read_verify");
 			integrityPerformance.recordDigest(result.actualSize(), result.workerNanos());
 		}
 	}
 
 	protected final IntegrityPerformanceAccumulator.Snapshot integrityPerformanceSnapshot() {
 		return integrityPerformance == null ? null : integrityPerformance.snapshot();
+	}
+
+	@Override
+	public final String driverType() {
+		return driverType;
+	}
+
+	@Override
+	public final boolean metadataIntegrityEnabled() {
+		return integrityConfig.enabled();
 	}
 
 	protected final int integrityDigestWorkerCount() {
@@ -265,6 +282,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected void doClose() throws IOException, IllegalStateException {
 		try (final CloseableThreadContext.Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
+			emitIntegrityPerformance();
 			if (integrityHasher != null) {
 				integrityHasher.close();
 			}
@@ -276,6 +294,19 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			Loggers.MSG.debug("{}: closed", toString());
 		}
 		opResultOut = null;
+	}
+
+	private void emitIntegrityPerformance() {
+		if (integrityPerformance == null) {
+			return;
+		}
+		final var snapshot = integrityPerformance.snapshot();
+		final String phase = integrityPhase.get();
+		if (phase != null && snapshot.objects() > 0) {
+			Loggers.INTEGRITY_PERFORMANCE.info(
+							IntegrityCsvArtifacts.performanceRecord(
+											IntegrityCsvArtifacts.nodeIdentity(), stepId, driverType, phase, snapshot));
+		}
 	}
 
 	@Override

@@ -12,6 +12,7 @@ import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.logging.LogUtil;
@@ -243,12 +244,12 @@ public class RunServlet extends HttpServlet {
 	/**
 	 * Wrapper around a Run that updates ApiStatus on completion.
 	 */
-	private static final class StatusAwareRun implements Run {
+	static final class StatusAwareRun implements Run {
 
 		private final Run delegate;
 		private final ApiStatus apiStatus;
 
-		private StatusAwareRun(final Run delegate, final ApiStatus apiStatus) {
+		StatusAwareRun(final Run delegate, final ApiStatus apiStatus) {
 			this.delegate = delegate;
 			this.apiStatus = apiStatus;
 		}
@@ -267,6 +268,9 @@ public class RunServlet extends HttpServlet {
 		public void run() {
 			try {
 				delegate.run();
+			} catch (final IntegrityTerminalException e) {
+				apiStatus.setFailed(e.stepId(), e.category(), e.getMessage());
+				throw e;
 			} finally {
 				apiStatus.completeIfNotStopped();
 			}

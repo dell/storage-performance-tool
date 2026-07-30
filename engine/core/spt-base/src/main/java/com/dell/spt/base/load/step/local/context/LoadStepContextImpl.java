@@ -10,6 +10,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
@@ -819,6 +820,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final var metrics = resolveMetrics(opResult.type());
 		if (Operation.Status.RESP_FAIL_CORRUPT.equals(status)) {
 			metrics.markCorrupt();
+			if (driver.metadataIntegrityEnabled() && opResult.integrityVerificationResult() != null) {
+				Loggers.INTEGRITY_FAILURES.info(
+								IntegrityCsvArtifacts.failureRecord(
+												IntegrityCsvArtifacts.nodeIdentity(), id, driver.driverType(), opResult));
+			}
 		} else {
 			metrics.markFail();
 		}

@@ -383,12 +383,19 @@ public final class Main {
 					final ClassLoader extClsLoader,
 					final MetricsManager metricsMgr,
 					final Path appHomePath) {
+		initializeRunId(config);
 		Path scenarioPath = null;
 		final var scenarioFile = config.stringVal("run-scenario");
 		if (scenarioFile != null && !scenarioFile.isEmpty()) {
 			scenarioPath = Paths.get(scenarioFile);
 		}
 		runScenarioFile(config, extensions, extClsLoader, metricsMgr, scenarioPath, appHomePath);
+	}
+
+	static void initializeRunId(final Config config) {
+		if (config.longVal("run-id") == 0L) {
+			config.val("run-id", System.currentTimeMillis());
+		}
 	}
 
 	private static void runScenarioFile(

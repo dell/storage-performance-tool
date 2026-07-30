@@ -11,6 +11,8 @@ import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
@@ -271,6 +273,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			throw new AssertionError(e);
 		}
 		final var sliceCount = configSlices.size();
+		final boolean validateRunId = IntegrityConfig.fromStorage(config.configVal("storage")).enabled();
+		final long expectedRunId = runId();
 		for (var i = 0; i < sliceCount; i++) {
 			final var configSlice = configSlices.get(i);
 			final LoadStep stepSlice;
@@ -288,6 +292,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			stepSlices.add(stepSlice);
+			if (validateRunId) {
+				requireMatchingRunId(stepSlice, expectedRunId);
+			}
 			try {
 				stepSlice.start();
 			} catch (final Exception e) {
@@ -297,6 +304,29 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 			}
+		}
+	}
+
+	static void requireMatchingRunId(final LoadStep stepSlice, final long expectedRunId) {
+		if (expectedRunId <= 0L) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"metadata-mode step requires a positive run.id");
+		}
+		final long actualRunId;
+		try {
+			actualRunId = stepSlice.runId();
+		} catch (final RemoteException e) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"failed to validate metadata-mode worker run.id",
+							e);
+		}
+		if (actualRunId != expectedRunId) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"metadata-mode worker run.id mismatch: expected "
+											+ expectedRunId + ", actual " + actualRunId);
 		}
 	}
 
