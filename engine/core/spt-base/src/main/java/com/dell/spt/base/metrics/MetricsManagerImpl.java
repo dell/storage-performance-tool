@@ -475,6 +475,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 		final long successCount = snapshot.successSnapshot().count();
 		final long failCount = snapshot.failsSnapshot().count();
+		final long corruptCount = corruptCount(snapshot);
 		final long bytesTotal = snapshot.byteSnapshot().count();
 		if (successCount <= 0 && failCount <= 0 && bytesTotal <= 0) {
 			return;
@@ -486,6 +487,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		if (existing != null
 						&& existing.successCount >= successCount
 						&& existing.failedCount >= failCount
+						&& existing.corruptCount >= corruptCount
 						&& existing.bytesTotal >= bytesTotal) {
 			return;
 		}
@@ -506,11 +508,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		lastProgressByStepId.put(progressKey, entry);
 		if (Loggers.MSG.isDebugEnabled()) {
 			Loggers.MSG.debug(
-							"{}: cached progress snapshot updated (distributed={}, success={}, fails={}, bytes={})",
+							"{}: cached progress snapshot updated (distributed={}, success={}, fails={}, corrupt={}, bytes={})",
 							metricsCtx.loadStepId(),
 							distributedEntry,
 							entry.successCount,
 							entry.failedCount,
+							entry.corruptCount,
 							entry.bytesTotal);
 		}
 	}
@@ -534,6 +537,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						System.currentTimeMillis(),
 						snapshot.successSnapshot().count(),
 						snapshot.failsSnapshot().count(),
+						corruptCount(snapshot),
 						snapshot.byteSnapshot().count(),
 						snapshot.latencySnapshot().mean(),
 						snapshot.durationSnapshot().mean(),
@@ -617,6 +621,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			return fallback;
 		}
 		return primary != null ? primary : fallback;
+	}
+
+	private static long corruptCount(final AllMetricsSnapshot snapshot) {
+		final var corruptSnapshot = snapshot.corruptSnapshot();
+		return corruptSnapshot == null ? 0L : corruptSnapshot.count();
 	}
 
 	private static boolean hasProgress(final AllMetricsSnapshot snapshot) {

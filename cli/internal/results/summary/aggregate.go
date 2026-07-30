@@ -111,6 +111,8 @@ type OperationBreakdown struct {
 type PhaseMetrics struct {
 	SuccessCount       int64
 	FailureCount       int64
+	CorruptCount       int64
+	HasCorruptCount    bool
 	DataBytes          int64
 	DataMiB            float64
 	DataGiB            float64
@@ -444,10 +446,12 @@ func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) Phas
 		return PhaseMetrics{}
 	}
 	best := rows[0]
-	metrics := PhaseMetrics{}
+	metrics := PhaseMetrics{HasCorruptCount: true}
 	for _, row := range rows {
 		metrics.SuccessCount += row.SuccessCount
 		metrics.FailureCount += row.FailureCount
+		metrics.CorruptCount += row.CorruptCount
+		metrics.HasCorruptCount = metrics.HasCorruptCount && row.HasCorruptCount
 		metrics.DataBytes += row.SizeBytes
 		metrics.ThroughputAvgOps += row.ThroughputAvgOps
 		metrics.ThroughputLastOps += row.ThroughputLastOps
@@ -583,6 +587,8 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 	metrics := &PhaseMetrics{
 		SuccessCount:       row.SuccessCount,
 		FailureCount:       row.FailureCount,
+		CorruptCount:       row.CorruptCount,
+		HasCorruptCount:    row.HasCorruptCount,
 		DataBytes:          row.SizeBytes,
 		DataMiB:            bytesToMiB(row.SizeBytes),
 		DataGiB:            bytesToGiB(row.SizeBytes),

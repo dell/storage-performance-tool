@@ -125,9 +125,12 @@ class MetricsContextImplTest {
 
 		ctx.markFail();
 		ctx.markFail(5);
+		ctx.markCorrupt();
 
 		ctx.refreshLastSnapshot();
 		assertNotNull(ctx.lastSnapshot());
+		assertEquals(7, ctx.lastSnapshot().failsSnapshot().count());
+		assertEquals(1, ctx.lastSnapshot().corruptSnapshot().count());
 	}
 
 	@Test

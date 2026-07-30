@@ -57,6 +57,11 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 
 	void markFail(final long count);
 
+	/** Marks one terminal corruption, which is also a failed operation. */
+	default void markCorrupt() {
+		markFail();
+	}
+
 	void start();
 
 	boolean isStarted();

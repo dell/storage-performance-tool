@@ -105,6 +105,9 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 			collectSnapshot(snapshot.byteSnapshot(), mfsList);
 			collectSnapshot(snapshot.successSnapshot(), mfsList);
 			collectSnapshot(snapshot.failsSnapshot(), mfsList);
+			if (snapshot.corruptSnapshot() != null) {
+				collectSnapshot(snapshot.corruptSnapshot(), mfsList);
+			}
 			collectElapsedTime(snapshot.elapsedTimeMillis(), mfsList);
 			collectTestState(snapshot, mfsList);
 			collectCompletionPercent(snapshot, mfsList);

@@ -102,6 +102,7 @@ type JSONMetricsStep struct {
 type JSONMetricsOperations struct {
 	SuccessCount    int64   `json:"success_count"`
 	FailedCount     int64   `json:"failed_count"`
+	CorruptCount    *int64  `json:"corrupt_count"`
 	SuccessRateLast float64 `json:"success_rate_last"`
 	FailedRateLast  float64 `json:"failed_rate_last"`
 }
@@ -555,6 +556,11 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 	if hasTTFB {
 		ttfbUs = displayStatTimingUs(step.Timing.TTFB)
 	}
+	corruptCount := int64(0)
+	hasCorruptCount := step.Operations.CorruptCount != nil
+	if hasCorruptCount {
+		corruptCount = *step.Operations.CorruptCount
+	}
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
 		SampleTimestamp:          sampleTimestamp,
@@ -566,6 +572,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		ConcurrencyMean:          step.Concurrency.Mean,
 		SuccessCount:             step.Operations.SuccessCount,
 		FailedCount:              step.Operations.FailedCount,
+		CorruptCount:             corruptCount,
+		HasCorruptCount:          hasCorruptCount,
 		StepTime:                 step.ElapsedTimeSeconds,
 		OpsPerSec:                int64(math.Round(step.Operations.SuccessRateLast)),
 		MiBPerSec:                int64(step.Bandwidth.BytesRateLast / float64(constants.BytesPerMiB)),

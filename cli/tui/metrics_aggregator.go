@@ -109,6 +109,7 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		limitType            string
 		totalLimitOps        int64
 		maxLimitTime         int64
+		allHaveCorruptCount  = true
 	)
 
 	for _, metric := range nodeMetrics {
@@ -126,6 +127,11 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		result.MiBPerSec += metric.MiBPerSec
 		result.SuccessCount += metric.SuccessCount
 		result.FailedCount += metric.FailedCount
+		if metric.HasCorruptCount {
+			result.CorruptCount += metric.CorruptCount
+		} else {
+			allHaveCorruptCount = false
+		}
 		result.ConcurrencyCurrent += metric.ConcurrencyCurrent
 		result.ConcurrencyMean += metric.ConcurrencyMean
 
@@ -215,6 +221,7 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	}
 	result.Unbounded = allUnbounded
 	result.OverallUnbounded = allOverallUnbounded
+	result.HasCorruptCount = metricCount > 0 && allHaveCorruptCount
 
 	if !limitMixed && limitPresent {
 		result.HasLimit = true
@@ -333,6 +340,7 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	var agg PerformanceMetric
 	var totalLatencyWeight, totalDurationWeight, totalTTFBWeight int64
 	var ttfbMetricCount int
+	allHaveCorruptCount := true
 	first := metrics[0]
 	allSameTTFBOpType := true
 
@@ -360,6 +368,11 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 		agg.MiBPerSec += m.MiBPerSec
 		agg.SuccessCount += m.SuccessCount
 		agg.FailedCount += m.FailedCount
+		if m.HasCorruptCount {
+			agg.CorruptCount += m.CorruptCount
+		} else {
+			allHaveCorruptCount = false
+		}
 		agg.ConcurrencyCurrent += m.ConcurrencyCurrent
 		agg.ConcurrencyMean += m.ConcurrencyMean
 
@@ -401,6 +414,8 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 		agg.MeanTTFB = 0
 		agg.HasTTFB = false
 	}
+
+	agg.HasCorruptCount = allHaveCorruptCount
 
 	// Completion: use the first metric's values (all ops in a mixed step
 	// share the same time limit and overall completion).

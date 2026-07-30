@@ -54,6 +54,7 @@ public class MetricsJsonResponderTest {
 		assertEquals("READ", obj.get("op_type").asText());
 		assertEquals(200, obj.get("limit").get("op_count").asInt(0));
 		assertTrue(obj.get("operations").get("success_count").asLong() > 0L);
+		assertEquals(2L, obj.get("operations").get("corrupt_count").asLong());
 		assertTrue(obj.get("bandwidth").get("bytes_total").asLong() > 0L);
 		assertEquals(1, obj.get("nodes_count").asInt());
 		assertEquals(1, obj.get("nodes_present").size());
@@ -582,6 +583,7 @@ public class MetricsJsonResponderTest {
 		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
 		final RateMetricSnapshot success = mock(RateMetricSnapshot.class);
 		final RateMetricSnapshot fails = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot corrupt = mock(RateMetricSnapshot.class);
 		final RateMetricSnapshot bytes = mock(RateMetricSnapshot.class);
 		final TimingMetricSnapshot latency = mock(TimingMetricSnapshot.class);
 		final TimingMetricSnapshot duration = mock(TimingMetricSnapshot.class);
@@ -589,6 +591,7 @@ public class MetricsJsonResponderTest {
 
 		when(success.count()).thenReturn(60L);
 		when(fails.count()).thenReturn(40L);
+		when(corrupt.count()).thenReturn(2L);
 		when(success.last()).thenReturn(6.0);
 		when(fails.last()).thenReturn(4.0);
 		when(bytes.count()).thenReturn(1024L);
@@ -600,6 +603,7 @@ public class MetricsJsonResponderTest {
 
 		when(snapshot.successSnapshot()).thenReturn(success);
 		when(snapshot.failsSnapshot()).thenReturn(fails);
+		when(snapshot.corruptSnapshot()).thenReturn(corrupt);
 		when(snapshot.byteSnapshot()).thenReturn(bytes);
 		when(snapshot.latencySnapshot()).thenReturn(latency);
 		when(snapshot.durationSnapshot()).thenReturn(duration);

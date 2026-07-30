@@ -1,5 +1,7 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import com.dell.spt.base.metrics.MetricsConstants;
+
 public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 
 	private final TimingMetricSnapshot durSnapshot;
@@ -7,6 +9,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	private final TimingMetricSnapshot ttfbSnapshot;
 	private final ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 	private final RateMetricSnapshot failsSnapshot;
+	private final RateMetricSnapshot corruptSnapshot;
 	private final RateMetricSnapshot successSnapshot;
 	private final RateMetricSnapshot bytesSnapshot;
 	protected final long elapsedTimeMillis;
@@ -25,6 +28,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 						new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, "ttfb"),
 						actualConcurrencySnapshot,
 						failsSnapshot,
+						new RateMetricSnapshotImpl(0.0, 0.0, MetricsConstants.METRIC_NAME_CORRUPT, 0, elapsedTimeMillis),
 						successSnapshot,
 						bytesSnapshot,
 						elapsedTimeMillis);
@@ -39,11 +43,34 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final RateMetricSnapshot successSnapshot,
 					final RateMetricSnapshot bytesSnapshot,
 					final long elapsedTimeMillis) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						new RateMetricSnapshotImpl(0.0, 0.0, MetricsConstants.METRIC_NAME_CORRUPT, 0, elapsedTimeMillis),
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis);
+	}
+
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis) {
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
 		this.ttfbSnapshot = ttfbSnapshot;
 		this.actualConcurrencySnapshot = actualConcurrencySnapshot;
 		this.failsSnapshot = failsSnapshot;
+		this.corruptSnapshot = corruptSnapshot;
 		this.successSnapshot = successSnapshot;
 		this.bytesSnapshot = bytesSnapshot;
 		this.elapsedTimeMillis = elapsedTimeMillis;
@@ -82,6 +109,11 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	@Override
 	public RateMetricSnapshot failsSnapshot() {
 		return failsSnapshot;
+	}
+
+	@Override
+	public RateMetricSnapshot corruptSnapshot() {
+		return corruptSnapshot;
 	}
 
 	@Override

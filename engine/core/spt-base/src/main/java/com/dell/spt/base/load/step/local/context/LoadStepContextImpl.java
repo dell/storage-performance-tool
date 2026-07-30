@@ -816,7 +816,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} else {
 			Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
 		}
-		resolveMetrics(opResult.type()).markFail();
+		final var metrics = resolveMetrics(opResult.type());
+		if (Operation.Status.RESP_FAIL_CORRUPT.equals(status)) {
+			metrics.markCorrupt();
+		} else {
+			metrics.markFail();
+		}
 		counterResults.increment();
 	}
 

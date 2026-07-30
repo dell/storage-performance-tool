@@ -30,7 +30,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 
 	private final LongMeter<TimingMetricSnapshot> reqDuration, respLatency, timeToFirstByte;
 	private final LongMeter<ConcurrencyMetricSnapshot> actualConcurrency;
-	private final RateMeter<RateMetricSnapshot> throughputSuccess, throughputFail, reqBytes;
+	private final RateMeter<RateMetricSnapshot> throughputSuccess, throughputFail, throughputCorrupt, reqBytes;
 	private volatile TimingMetricSnapshot reqDurSnapshot, respLatSnapshot, ttfbSnapshot;
 	private volatile ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 	private volatile long lastSnapshotsUpdateTs = 0;
@@ -67,6 +67,8 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		//
 		throughputFail = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_FAIL);
 		//
+		throughputCorrupt = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_CORRUPT);
+		//
 		reqBytes = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_BYTE);
 	}
 
@@ -75,6 +77,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		super.start();
 		throughputSuccess.resetStartTime();
 		throughputFail.resetStartTime();
+		throughputCorrupt.resetStartTime();
 		reqBytes.resetStartTime();
 	}
 
@@ -188,6 +191,15 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
+	public final void markCorrupt() {
+		throughputFail.update(1);
+		throughputCorrupt.update(1);
+		if (thresholdMetricsCtx != null) {
+			thresholdMetricsCtx.markCorrupt();
+		}
+	}
+
+	@Override
 	public final boolean avgPersistEnabled() {
 		return false;
 	}
@@ -224,6 +236,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 						ttfbSnapshot,
 						actualConcurrencySnapshot,
 						throughputFail.snapshot(),
+						throughputCorrupt.snapshot(),
 						throughputSuccess.snapshot(),
 						reqBytes.snapshot(),
 						elapsedTimeMillis());

@@ -467,7 +467,8 @@ public class LoadStepContextImplTest {
 			assertEquals(0, op.opRetryCount(), status + ": should never have been retried");
 		}
 		verify(mockGenerator, never()).retry(any());
-		verify(metrics, times(5)).markFail();
+		verify(metrics, times(4)).markFail();
+		verify(metrics, times(1)).markCorrupt();
 	}
 
 	@Test
