@@ -138,6 +138,12 @@ storage:
         input: int
     threads: int
     type: string
+  integrity:
+    algorithm: string
+    input:
+      expectedProducerId: string
+      provenance: string
+    mode: string
   namespace: string
   net:
     node:

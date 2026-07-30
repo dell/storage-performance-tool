@@ -108,7 +108,8 @@ const (
 
 // REST API endpoint constants
 const (
-	SptMetricsEndpoint = "/metrics/json"
+	SptMetricsEndpoint      = "/metrics/json"
+	SptConfigSchemaEndpoint = "/config/schema"
 )
 
 // Engine log artifact constants
