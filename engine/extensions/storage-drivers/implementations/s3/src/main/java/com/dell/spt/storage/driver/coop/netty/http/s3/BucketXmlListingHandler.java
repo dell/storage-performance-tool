@@ -31,14 +31,22 @@ public final class BucketXmlListingHandler<I extends Item>
 
 	private final List<I> itemsBuffer;
 	private final String path;
+	private final String prefix;
 	private final ItemFactory<I> itemFactory;
 	private final int idRadix;
 
 	public BucketXmlListingHandler(
 					final List<I> itemsBuffer, final String path, final ItemFactory<I> itemFactory,
 					final int idRadix) {
+		this(itemsBuffer, path, null, itemFactory, idRadix);
+	}
+
+	public BucketXmlListingHandler(
+					final List<I> itemsBuffer, final String path, final String prefix,
+					final ItemFactory<I> itemFactory, final int idRadix) {
 		this.itemsBuffer = itemsBuffer;
 		this.path = path == null ? "" : (path.endsWith("/") ? path : path + "/");
+		this.prefix = prefix == null ? "" : prefix;
 		this.itemFactory = itemFactory;
 		this.idRadix = idRadix;
 	}
@@ -80,11 +88,9 @@ public final class BucketXmlListingHandler<I extends Item>
 
 			if (oid != null && oid.length() > 0 && size > -1) {
 				try {
-					offset = Long.parseLong(oid, idRadix);
+					offset = Long.parseLong(generatedItemId(oid), idRadix);
 				} catch (final NumberFormatException e) {
-					LogUtil.exception(
-									Level.WARN, e, "Failed to parse the item id \"{}\"", oid);
-					offset = 0;
+					throw new SAXException("Failed to parse the generated item id from object key \"" + oid + "\"", e);
 				}
 				nextItem = itemFactory.getItem(path + oid, offset, size);
 				itemsBuffer.add(nextItem);
@@ -95,6 +101,26 @@ public final class BucketXmlListingHandler<I extends Item>
 		}
 
 		super.endElement(uri, localName, qName);
+	}
+
+
+	private String generatedItemId(final String objectKey) throws NumberFormatException {
+		String relativeKey = objectKey;
+		if (!prefix.isEmpty()) {
+			if (!relativeKey.startsWith(prefix)) {
+				throw new NumberFormatException(
+								"Object key does not start with the configured prefix \"" + prefix + "\"");
+			}
+			relativeKey = relativeKey.substring(prefix.length());
+		}
+		final int lastSlash = relativeKey.lastIndexOf('/');
+		if (lastSlash >= 0) {
+			relativeKey = relativeKey.substring(lastSlash + 1);
+		}
+		if (relativeKey.isEmpty()) {
+			throw new NumberFormatException("Object key has no generated leaf id");
+		}
+		return relativeKey;
 	}
 
 	@Override

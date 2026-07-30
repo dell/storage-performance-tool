@@ -700,7 +700,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
-		} catch (final SAXException | ParserConfigurationException e) {
+		} catch (final SAXException e) {
+			throw new IOException("Failed to parse the S3 object listing", e);
+		} catch (final ParserConfigurationException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
 		} catch (final ConnectException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
@@ -769,7 +771,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				} else {
 					listRespParser.reset();
 				}
-				final var listingHandler = new BucketXmlListingHandler<>(buff, path, itemFactory, idRadix);
+				final var listingHandler = new BucketXmlListingHandler<>(buff, path, prefix, itemFactory, idRadix);
 				try (final InputStream contentStream = new ByteBufInputStream(listRespContent)) {
 					listRespParser.parse(contentStream, listingHandler);
 				}
@@ -784,7 +786,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
-		} catch (final SAXException | ParserConfigurationException e) {
+		} catch (final SAXException e) {
+			throw new IOException("Failed to parse the S3 object listing", e);
+		} catch (final ParserConfigurationException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
 		} catch (final ConnectException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
