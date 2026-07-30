@@ -2,7 +2,11 @@ package com.dell.spt.base.item.op;
 
 import static java.lang.System.nanoTime;
 
+import com.dell.spt.base.integrity.IntegrityMetadata;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.VersionedItem;
 import com.dell.spt.base.storage.Credential;
 
 /** Created by kurila on 20.10.15. */
@@ -23,6 +27,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile long respTimeDone;
 	protected volatile boolean driverRecycled;
 	protected volatile int opRetryCount;
+	protected volatile String requestedVersionId;
+	protected volatile String returnedVersionId;
+	protected volatile String responseRequestId;
+	protected volatile IntegrityMetadata integrityMetadata;
+	protected volatile IntegrityVerificationResult integrityVerificationResult;
 
 	public OperationImpl() {}
 
@@ -41,6 +50,10 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		// Preserve the item name as-is and keep srcPath as provided (usually null).
 		if (OpType.CREATE.equals(opType)) {
 			this.srcPath = srcPath;
+		} else if (item instanceof IntegrityManifestDataItem manifestItem) {
+			this.srcPath = manifestItem.bucket().startsWith(SLASH)
+							? manifestItem.bucket()
+							: SLASH + manifestItem.bucket();
 		} else {
 			final String itemName = item.name();
 			final int lastSlashIndex = itemName.lastIndexOf(SLASH);
@@ -64,6 +77,9 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		}
 
 		this.credential = credential;
+		if (item instanceof VersionedItem versionedItem) {
+			this.requestedVersionId = emptyToNull(versionedItem.versionId());
+		}
 	}
 
 	protected OperationImpl(final OperationImpl<I> other) {
@@ -84,6 +100,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		// the reset()+redispatch cycle a retried operation goes through, or the retry
 		// counter added for load-op-retry could never reach its limit.
 		this.opRetryCount = other.opRetryCount;
+		this.requestedVersionId = other.requestedVersionId;
+		this.returnedVersionId = other.returnedVersionId;
+		this.responseRequestId = other.responseRequestId;
+		this.integrityMetadata = other.integrityMetadata;
+		this.integrityVerificationResult = other.integrityVerificationResult;
 	}
 
 	@Override
@@ -103,6 +124,9 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		nodeAddr = null;
 		status = Status.PENDING;
 		reqTimeStart = reqTimeDone = respTimeStart = respTimeDone = 0;
+		returnedVersionId = null;
+		responseRequestId = null;
+		integrityVerificationResult = null;
 		driverRecycled = false;
 	}
 
@@ -134,6 +158,60 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	@Override
 	public final boolean supportsOpRetryTracking() {
 		return true;
+	}
+
+	@Override
+	public final String requestedVersionId() {
+		return requestedVersionId;
+	}
+
+	@Override
+	public final void requestedVersionId(final String versionId) {
+		requestedVersionId = emptyToNull(versionId);
+	}
+
+	@Override
+	public final String returnedVersionId() {
+		return returnedVersionId;
+	}
+
+	@Override
+	public final void returnedVersionId(final String versionId) {
+		returnedVersionId = emptyToNull(versionId);
+	}
+
+	@Override
+	public final String responseRequestId() {
+		return responseRequestId;
+	}
+
+	@Override
+	public final void responseRequestId(final String requestId) {
+		responseRequestId = emptyToNull(requestId);
+	}
+
+	@Override
+	public final IntegrityMetadata integrityMetadata() {
+		return integrityMetadata;
+	}
+
+	@Override
+	public final void integrityMetadata(final IntegrityMetadata metadata) {
+		integrityMetadata = metadata;
+	}
+
+	@Override
+	public final IntegrityVerificationResult integrityVerificationResult() {
+		return integrityVerificationResult;
+	}
+
+	@Override
+	public final void integrityVerificationResult(final IntegrityVerificationResult result) {
+		integrityVerificationResult = result;
+	}
+
+	private static String emptyToNull(final String value) {
+		return value == null || value.isEmpty() ? null : value;
 	}
 
 	@Override

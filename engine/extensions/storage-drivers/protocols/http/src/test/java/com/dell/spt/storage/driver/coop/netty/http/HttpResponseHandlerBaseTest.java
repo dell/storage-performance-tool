@@ -15,8 +15,10 @@ import com.dell.spt.base.item.op.token.TokenOperation;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.HttpStatusClass;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +27,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
@@ -190,4 +193,41 @@ class HttpResponseHandlerBaseTest {
 		assertDoesNotThrow(() -> invokeHandleResponseContentChunk(op, contentChunk(1)));
 		verify(op).countBytesDone(1L);
 	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void fullHttpResponseDeliversItsBodyExactlyOnce() throws Exception {
+		final var chunkCalls = new AtomicInteger();
+		final var finishCalls = new AtomicInteger();
+		final DataOperation<DataItemImpl> op = mock(DataOperation.class);
+		final HttpResponseHandlerBase<DataItemImpl, DataOperation<DataItemImpl>> countingHandler = new HttpResponseHandlerBase<>(driver, false) {
+			@Override
+			protected void handleResponseHeaders(
+							final Channel channel,
+							final DataOperation<DataItemImpl> operation,
+							final HttpHeaders headers) {}
+
+			@Override
+			protected void handleResponseContentChunk(
+							final Channel channel,
+							final DataOperation<DataItemImpl> operation,
+							final ByteBuf content) {
+				chunkCalls.incrementAndGet();
+			}
+
+			@Override
+			protected void handleResponseContentFinish(
+							final Channel channel, final DataOperation<DataItemImpl> operation) {
+				finishCalls.incrementAndGet();
+			}
+		};
+		final var response = new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.OK, contentChunk(3));
+
+		countingHandler.handle(mock(Channel.class), op, response);
+
+		assertEquals(1, chunkCalls.get());
+		assertEquals(1, finishCalls.get());
+	}
+
 }

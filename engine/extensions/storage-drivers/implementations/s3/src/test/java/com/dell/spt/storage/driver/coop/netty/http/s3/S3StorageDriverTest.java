@@ -1,7 +1,10 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityMetadata;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemFactoryImpl;
@@ -9,6 +12,7 @@ import com.dell.spt.base.item.ItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.path.PathOperationsBuilderImpl;
@@ -30,6 +34,7 @@ import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpRequest;
@@ -285,6 +290,8 @@ public class S3StorageDriverTest {
 	private static class TestS3Driver extends S3StorageDriver<Item, Operation<Item>> {
 		private final Queue<FullHttpRequest> requests = new ConcurrentLinkedQueue<>();
 		private final ArrayDeque<FullHttpResponse> stubResponses = new ArrayDeque<>();
+		private boolean suppressCompletion;
+		private boolean outOfBandReadBody;
 
 		TestS3Driver(Config cfg) throws Exception {
 			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
@@ -309,6 +316,31 @@ public class S3StorageDriverTest {
 		void limitAvailableDispatchPermitsForTest(int permits) {
 			concurrencyThrottle.drainPermits();
 			concurrencyThrottle.release(permits);
+		}
+
+		void suppressCompletionForResponseTest() {
+			suppressCompletion = true;
+		}
+
+		void useOutOfBandReadBodyForTest() {
+			outOfBandReadBody = true;
+		}
+
+		void finishOutOfBandReadForTest(
+						final Channel channel, final Operation<Item> op, final ByteBuffer body) {
+			finishOutOfBandIntegrityRead(channel, op, body);
+		}
+
+		@Override
+		protected boolean observesReadBodyOutOfBand(final Operation<Item> op) {
+			return outOfBandReadBody && OpType.READ.equals(op.type());
+		}
+
+		@Override
+		public void complete(final Channel channel, final Operation<Item> op) {
+			if (!suppressCompletion) {
+				super.complete(channel, op);
+			}
 		}
 
 		@Override
@@ -1958,4 +1990,184 @@ public class S3StorageDriverTest {
 						"Non-CREATE composite op with non-null channel should not produce MPU log rows");
 		assertNull(deleteOp.get(S3Api.KEY_UPLOAD_ID), "DELETE op should not get upload ID");
 	}
+
+	private static Config metadataConfig(final boolean versioning) {
+		final Config config = baseConfig(
+						versioning, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-integrity-algorithm", "sha256");
+		config.val("storage-integrity-input-provenance", "external");
+		config.val("storage-integrity-input-expectedProducerId", "");
+		return config;
+	}
+
+	@Test
+	void integrityMetadataIsSignedOnPutAndMultipartInitOnly() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		final var item = new com.dell.spt.base.item.DataItemImpl("object", 0, 3);
+		final Operation<Item> op = new OperationImpl<>(
+						1, OpType.CREATE, item, null, "/bucket", TEST_CRED);
+		op.integrityMetadata(new IntegrityMetadata(
+						"1",
+						"sha256",
+						"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+						3));
+
+		final HttpRequest put = driver.httpRequest(op, "s3.us-east-1.amazonaws.com:443");
+		assertIntegrityHeaders(put.headers());
+		assertTrue(put.headers().get(HttpHeaderNames.AUTHORIZATION)
+						.contains(IntegrityMetadataCodec.KEY_DIGEST));
+
+		final HttpRequest init = driver.initMultipartUploadRequest(
+						op, "s3.us-east-1.amazonaws.com:443");
+		assertIntegrityHeaders(init.headers());
+
+		final var parent = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", TEST_CRED, null, 0, 2);
+		parent.put(S3Api.KEY_UPLOAD_ID, "upload");
+		final var part = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item.slice(0, 2), null, "/bucket", TEST_CRED, 0, parent);
+		final HttpRequest partRequest = driver.partUploadRequest(
+						part, "s3.us-east-1.amazonaws.com:443");
+		assertNull(partRequest.headers().get(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST));
+	}
+
+	@Test
+	void integrityVersionCarrierUsesQueryAndPreservesTildeInKey() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		final Item item = new IntegrityManifestDataItem(
+						"bucket", "prefix/key~literal", 3, "version/with+chars");
+		final Operation<Item> op = new OperationImpl<>(
+						1, OpType.READ, item, null, null, TEST_CRED);
+
+		final HttpRequest request = driver.httpRequest(op, "s3.us-east-1.amazonaws.com:443");
+		assertEquals(
+						"/bucket/prefix/key~literal?versionId=version%2Fwith%2Bchars", request.uri());
+		assertEquals("prefix/key~literal", item.name());
+		assertNull(request.headers().get("x-amz-version-id"));
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void integrityResponseVerifiesCompleteBodyAndPreservesResponseIdentity() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(true));
+		driver.suppressCompletionForResponseTest();
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final var item = new com.dell.spt.base.item.DataItemImpl("key~literal", 0, 3);
+		final DataOperationImpl<DataItem> dataOp = new DataOperationImpl<>(
+						0, OpType.READ, item, "/bucket", null, TEST_CRED, null, 0);
+		final Operation op = dataOp;
+		op.status(Operation.Status.SUCC);
+		final var channel = new EmbeddedChannel();
+		final var headers = integrityResponseHeaders(
+						"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+						3);
+		headers.set("x-amz-version-id", "returned-version");
+		headers.set("x-amz-request-id", "request-123");
+
+		handler.handleResponseHeaders(channel, op, headers);
+		handler.handleResponseContentChunk(channel, op, Unpooled.wrappedBuffer("a".getBytes(StandardCharsets.UTF_8)));
+		handler.handleResponseContentChunk(channel, op, Unpooled.wrappedBuffer("bc".getBytes(StandardCharsets.UTF_8)));
+		handler.handleResponseContentFinish(channel, op);
+
+		assertEquals(Operation.Status.SUCC, op.status());
+		assertTrue(op.integrityVerificationResult().verified());
+		assertEquals("returned-version", op.returnedVersionId());
+		assertEquals("request-123", op.responseRequestId());
+		assertEquals("key~literal", op.item().name());
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void integrityOutOfBandReadWaitsForAndVerifiesTheTransportBuffer() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		driver.suppressCompletionForResponseTest();
+		driver.useOutOfBandReadBodyForTest();
+		final var handler = new S3ResponseHandler(driver, false, false, null);
+		final DataOperationImpl<DataItem> dataOp = new DataOperationImpl<>(
+						0,
+						OpType.READ,
+						new com.dell.spt.base.item.DataItemImpl("key", 0, 3),
+						"/bucket",
+						null,
+						TEST_CRED,
+						null,
+						0);
+		final Operation op = dataOp;
+		op.status(Operation.Status.SUCC);
+		final var channel = new EmbeddedChannel();
+		final var headers = integrityResponseHeaders(
+						"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+						3);
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+
+		handler.handleResponseHeaders(channel, op, headers);
+		handler.handleResponseContentFinish(channel, op);
+		assertNull(op.integrityVerificationResult(),
+						"HTTP completion must not hash an empty body for an out-of-band transport");
+
+		driver.finishOutOfBandReadForTest(
+						channel, op, ByteBuffer.wrap("abc".getBytes(StandardCharsets.UTF_8)));
+
+		assertEquals(Operation.Status.SUCC, op.status());
+		assertNotNull(op.integrityVerificationResult());
+		assertTrue(op.integrityVerificationResult().verified());
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void integrityResponseMarksDigestMismatchAsCorruptOnlyAtCompletion() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		driver.suppressCompletionForResponseTest();
+		final var handler = new S3ResponseHandler(driver, false, false, null);
+		final DataOperationImpl<DataItem> dataOp = new DataOperationImpl<>(
+						0,
+						OpType.READ,
+						new com.dell.spt.base.item.DataItemImpl("key", 0, 3),
+						"/bucket",
+						null,
+						TEST_CRED,
+						null,
+						0);
+		final Operation op = dataOp;
+		op.status(Operation.Status.SUCC);
+		final var channel = new EmbeddedChannel();
+
+		handler.handleResponseHeaders(
+						channel, op, integrityResponseHeaders("0".repeat(64), 3));
+		handler.handleResponseContentChunk(
+						channel, op, Unpooled.wrappedBuffer("abc".getBytes(StandardCharsets.UTF_8)));
+		assertEquals(Operation.Status.SUCC, op.status(), "comparison waits for protocol completion");
+
+		handler.handleResponseContentFinish(channel, op);
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+		assertEquals(
+						"digest_mismatch", op.integrityVerificationResult().failureReason().value());
+	}
+
+	private static HttpHeaders integrityResponseHeaders(final String digest, final long size) {
+		final var headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, size);
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM, "sha256");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST, digest);
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, Long.toString(size));
+		return headers;
+	}
+
+	private static void assertIntegrityHeaders(final HttpHeaders headers) {
+		assertEquals("1", headers.get(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION));
+		assertEquals("sha256", headers.get(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM));
+		assertEquals("3", headers.get(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE));
+		assertEquals(64, headers.get(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST).length());
+	}
+
 }

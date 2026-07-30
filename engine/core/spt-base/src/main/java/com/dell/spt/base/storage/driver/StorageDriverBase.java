@@ -6,7 +6,15 @@ import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.DigestResult;
+import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityPerformanceAccumulator;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.integrity.StreamingSha256;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.logging.Loggers;
@@ -33,6 +41,9 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected final String namespace;
 	protected final Credential credential;
 	protected final boolean verifyFlag;
+	protected final IntegrityConfig integrityConfig;
+	protected final IntegrityPerformanceAccumulator integrityPerformance;
+	private final StreamingSha256 integrityHasher;
 
 	protected final ConcurrentMap<String, Credential> pathToCredMap = new ConcurrentHashMap<>(1);
 
@@ -66,6 +77,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 		this.concurrencyLimit = limitConfig.intVal("concurrency");
 		this.verifyFlag = verifyFlag;
+		this.integrityConfig = IntegrityConfig.fromStorage(storageConfig);
 
 		final var confWorkerCount = driverConfig.intVal("threads");
 		if (confWorkerCount > 0) {
@@ -74,6 +86,13 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			ioWorkerCount = Math.min(concurrencyLimit, ThreadUtil.getHardwareThreadCount());
 		} else {
 			ioWorkerCount = ThreadUtil.getHardwareThreadCount();
+		}
+		if (integrityConfig.enabled()) {
+			integrityPerformance = new IntegrityPerformanceAccumulator();
+			integrityHasher = new StreamingSha256(Math.max(1, ioWorkerCount));
+		} else {
+			integrityPerformance = null;
+			integrityHasher = null;
 		}
 	}
 
@@ -98,8 +117,11 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	protected boolean prepare(final O op) {
 		op.reset();
-		if (op instanceof DataOperation) {
-			((DataOperation) op).item().dataInput(itemDataInput);
+		if (op instanceof DataOperation<?> dataOperation) {
+			dataOperation.item().dataInput(itemDataInput);
+			prepareIntegrity(op, dataOperation);
+		} else if (integrityConfig.enabled() && op.type() == OpType.UPDATE) {
+			throw unsupportedIntegrityCombination("UPDATE operations are outside integrity metadata v1");
 		}
 		final String dstPath = op.dstPath();
 		final String pathCacheKey = dstPath == null || dstPath.isEmpty()
@@ -123,6 +145,91 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			}
 		}
 		return true;
+	}
+
+	private void prepareIntegrity(final O op, final DataOperation<?> dataOperation) {
+		if (!integrityConfig.enabled()) {
+			return;
+		}
+		switch (op.type()) {
+		case CREATE:
+			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
+				throw unsupportedIntegrityCombination("copy CREATE operations are outside integrity metadata v1");
+			}
+			if (dataOperation.srcItemsToConcat() != null
+							&& !dataOperation.srcItemsToConcat().isEmpty()) {
+				throw unsupportedIntegrityCombination("concatenated CREATE operations are outside integrity metadata v1");
+			}
+			if (op.integrityMetadata() == null) {
+				integrityPerformance.markPrehashStarted(System.nanoTime());
+				try {
+					final DigestResult result = integrityHasher.hash(dataOperation.item());
+					op.integrityMetadata(result.metadata());
+					integrityPerformance.recordDigest(result.metadata().size(), result.workerNanos());
+				} catch (final IOException e) {
+					throw new IntegrityTerminalException(
+									IntegrityTerminalException.Category.DIGEST,
+									"failed to pre-hash CREATE object " + dataOperation.item().name(),
+									e);
+				}
+			}
+			break;
+		case READ:
+			if (dataOperation instanceof CompositeDataOperation<?>) {
+				throw unsupportedIntegrityCombination(
+								"parallel/composite READ cannot use whole-object integrity metadata v1");
+			}
+			try {
+				integrityConfig.requireReadProvenance();
+			} catch (final IllegalConfigurationException e) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.CONFIGURATION, e.getMessage(), e);
+			}
+			if (dataOperation.randomRangesCount() > 0
+							|| (dataOperation.fixedRanges() != null && !dataOperation.fixedRanges().isEmpty())) {
+				throw unsupportedIntegrityCombination("range READ cannot use whole-object integrity metadata v1");
+			}
+			break;
+		case UPDATE:
+			throw unsupportedIntegrityCombination("UPDATE operations are outside integrity metadata v1");
+		default:
+			break;
+		}
+	}
+
+	private static IntegrityTerminalException unsupportedIntegrityCombination(final String message) {
+		return new IntegrityTerminalException(
+						IntegrityTerminalException.Category.CONFIGURATION, message);
+	}
+
+	protected final boolean integrityMetadataEnabled() {
+		return integrityConfig != null && integrityConfig.enabled();
+	}
+
+	protected final void markIntegrityRequestDispatched() {
+		if (integrityPerformance != null) {
+			integrityPerformance.markFirstRequestDispatched(System.nanoTime());
+		}
+	}
+
+	protected final void recordIntegrityAdditionalPayloadPass() {
+		if (integrityPerformance != null) {
+			integrityPerformance.recordAdditionalPayloadPass();
+		}
+	}
+
+	protected final void recordIntegrityReadResult(final IntegrityVerificationResult result) {
+		if (integrityPerformance != null && result != null) {
+			integrityPerformance.recordDigest(result.actualSize(), result.workerNanos());
+		}
+	}
+
+	protected final IntegrityPerformanceAccumulator.Snapshot integrityPerformanceSnapshot() {
+		return integrityPerformance == null ? null : integrityPerformance.snapshot();
+	}
+
+	protected final int integrityDigestWorkerCount() {
+		return integrityHasher == null ? 0 : integrityHasher.workerCount();
 	}
 
 	protected boolean handleCompleted(final O op) {
@@ -158,6 +265,9 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected void doClose() throws IOException, IllegalStateException {
 		try (final CloseableThreadContext.Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
+			if (integrityHasher != null) {
+				integrityHasher.close();
+			}
 			itemDataInput.close();
 			authTokens.clear();
 			pathToCredMap.clear();

@@ -2,6 +2,9 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityResponseObserver;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
@@ -52,6 +55,8 @@ import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,8 +102,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
-			LOG.warn(
-							"S3-AWS driver does not support --item-data-verify; reads will report SUCC without integrity checks");
+			throw new IllegalConfigurationException(
+							"S3-AWS driver does not support legacy item.data.verify; "
+											+ "use storage.integrity.mode=metadata for whole-object verification");
 		}
 		this.s3AsyncClient = s3AsyncClient;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
@@ -293,8 +299,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// For other operations, use finishOperation helper
 			if (op.type() != OpType.READ) {
 				finishOperation(op);
-			} else {
-				// READ operations call finishResponse in readObject, just set status
+			} else if (op.status() == Operation.Status.ACTIVE) {
+				// READ operations call finishResponse in readObject. Preserve terminal corruption.
 				op.status(Operation.Status.SUCC);
 			}
 
@@ -611,11 +617,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		var reqBuilder = PutObjectRequest.builder()
 						.bucket(bk[0])
 						.key(bk[1]);
+		if (integrityMetadataEnabled() && op.integrityMetadata() != null) {
+			reqBuilder.metadata(IntegrityMetadataCodec.logicalMetadata(op.integrityMetadata()));
+		}
 		if (checksumEnabled && checksumAlgorithm != null) {
-			reqBuilder.checksumAlgorithm(checksumAlgorithm);
+			if (checksumAlgorithm == ChecksumAlgorithm.SHA256 && op.integrityMetadata() != null) {
+				reqBuilder.checksumSHA256(Base64.getEncoder().encodeToString(
+								HexFormat.of().parseHex(op.integrityMetadata().digest())));
+			} else {
+				reqBuilder.checksumAlgorithm(checksumAlgorithm);
+			}
 		}
 
-		// Add tags if tagging is enabled
 		if (taggingEnabled && !objectTags.isEmpty()) {
 			final var tagSet = objectTags.entrySet().stream()
 							.map(entry -> Tag.builder().key(entry.getKey()).value(entry.getValue()).build())
@@ -628,7 +641,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			dataItem.position(0);
 			try {
 				final long size = dataItem.size();
-
 				if (size <= 8 * 1024) {
 					ByteBuffer buffer = ByteBuffer.allocate((int) size);
 					int bytesRead = dataItem.read(buffer);
@@ -636,74 +648,86 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
 					}
 					buffer.flip();
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromByteBuffer(buffer))
-									.thenApply(response -> null);
-				} else if (size <= smallObjectThresholdBytes) {
-					LOG.trace(
-									"Streaming small object upload, size={}B, threshold={}B, partSize={}B",
-									size, smallObjectThresholdBytes, partSizeBytes);
-					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-									.thenApply(response -> null);
-				} else {
-					LOG.trace(
-									"Streaming large object upload, size={}B, threshold={}B, partSize={}B",
-									size, smallObjectThresholdBytes, partSizeBytes);
-					final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
-					return s3AsyncClient.putObject(
-									reqBuilder.build(),
-									AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-									.thenApply(response -> null);
+					return dispatchPutObject(
+									op, reqBuilder.build(), AsyncRequestBody.fromByteBuffer(buffer));
 				}
+
+				LOG.trace(
+								"Streaming {} object upload, size={}B, threshold={}B, partSize={}B",
+								size <= smallObjectThresholdBytes ? "small" : "large",
+								size,
+								smallObjectThresholdBytes,
+								partSizeBytes);
+				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
+				return dispatchPutObject(
+								op,
+								reqBuilder.build(),
+								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor));
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}
 		} else if (op.item() instanceof PathItem) {
-			PathItem pathItem = (PathItem) op.item();
-			Path path = Path.of(pathItem.name());
-			return s3AsyncClient.putObject(
-							reqBuilder.build(),
-							AsyncRequestBody.fromFile(path))
-							.thenApply(response -> null);
-		} else {
-			return CompletableFuture.failedFuture(
-							new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem"));
+			Path path = Path.of(op.item().name());
+			return dispatchPutObject(op, reqBuilder.build(), AsyncRequestBody.fromFile(path));
 		}
+		return CompletableFuture.failedFuture(
+						new UnsupportedOperationException("s3-aws PUT requires DataItem or PathItem"));
+	}
+
+	private CompletableFuture<Void> dispatchPutObject(
+					final O op, final PutObjectRequest request, final AsyncRequestBody body) {
+		markIntegrityRequestDispatched();
+		return s3AsyncClient.putObject(request, body)
+						.thenAccept(response -> captureResponseIdentity(
+										op, response.versionId(), requestId(response)));
+	}
+
+	private static void captureResponseIdentity(
+					final Operation<?> op, final String versionId, final String requestId) {
+		op.returnedVersionId(versionId);
+		op.responseRequestId(requestId);
+	}
+
+	private static String requestId(final S3Response response) {
+		return response.responseMetadata() == null
+						? null
+						: response.responseMetadata().requestId();
 	}
 
 	private CompletableFuture<Void> readObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
-		// Extract version ID from the resolved key if versioning is enabled
-		// Use the properly resolved key from resolveBucketAndKey to handle recycled/prefixed reads correctly
-		final String[] versionInfo = extractVersionId(bk[1]);
-		final String key = versionInfo[0];
-		final String versionId = versionInfo[1];
+		final String key;
+		final String versionId;
+		if (integrityMetadataEnabled()) {
+			key = bk[1];
+			versionId = op.requestedVersionId();
+		} else {
+			// Preserve the legacy key~version carrier outside metadata mode.
+			final String[] versionInfo = extractVersionId(bk[1]);
+			key = versionInfo[0];
+			versionId = versionInfo[1];
+		}
 
 		var reqBuilder = GetObjectRequest.builder()
 						.bucket(bk[0])
 						.key(key);
-
-		// Add version ID if present
-		if (versionId != null) {
+		if (versionId != null && !versionId.isEmpty()) {
 			reqBuilder.versionId(versionId);
 		}
 
-		// Get the response asynchronously - this completes when headers arrive
-		// Since invokeNio already blocks, we can join() here and read synchronously
-		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
 		try (var response = s3AsyncClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream()).join()) {
-			// Call startResponse() when headers are available (measures latency)
-			op.startResponse();
+			final GetObjectResponse getResponse = response.response();
+			captureResponseIdentity(
+							op, getResponse.versionId(), requestId(getResponse));
+			final IntegrityResponseObserver integrityObserver = integrityMetadataEnabled()
+							? new IntegrityResponseObserver(
+											getResponse.metadata().entrySet(), getResponse.contentLength())
+							: null;
 
-			// Stream the data to count bytes without loading into memory
-			// This blocking read runs on the caller thread (virtual thread)
+			op.startResponse();
 			long bytesRead = 0;
 			byte[] buffer = new byte[8192];
 			int n;
@@ -711,13 +735,22 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				if (bytesRead == 0 && n > 0 && op instanceof DataOperation) {
 					((DataOperation) op).startDataResponse();
 				}
+				if (integrityObserver != null && n > 0) {
+					integrityObserver.onBody(ByteBuffer.wrap(buffer, 0, n));
+				}
 				bytesRead += n;
 			}
 			if (op instanceof DataOperation) {
 				((DataOperation) op).countBytesDone(bytesRead);
 			}
-
-			// Call finishResponse() when body is fully consumed (measures duration)
+			if (integrityObserver != null) {
+				final IntegrityVerificationResult result = integrityObserver.finish();
+				op.integrityVerificationResult(result);
+				recordIntegrityReadResult(result);
+				if (!result.verified()) {
+					op.status(Operation.Status.RESP_FAIL_CORRUPT);
+				}
+			}
 			op.finishResponse();
 		} catch (IOException e) {
 			throw new RuntimeException("Failed to read S3 object data", e);
@@ -1079,17 +1112,21 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		var reqBuilder = CreateMultipartUploadRequest.builder()
 						.bucket(bk[0])
 						.key(bk[1]);
+		if (integrityMetadataEnabled() && op.integrityMetadata() != null) {
+			reqBuilder.metadata(IntegrityMetadataCodec.logicalMetadata(op.integrityMetadata()));
+		}
 
 		// Add checksum algorithm if enabled
 		if (checksumEnabled && checksumAlgorithm != null) {
 			reqBuilder.checksumAlgorithm(checksumAlgorithm);
 		}
 
+		markIntegrityRequestDispatched();
 		return s3AsyncClient.createMultipartUpload(reqBuilder.build())
-						.thenApply(response -> {
-							// Store the upload ID in the operation context
+						.thenAccept(response -> {
 							op.put(KEY_UPLOAD_ID, response.uploadId());
-							return null;
+							captureResponseIdentity(
+											op, null, requestId(response));
 						});
 	}
 
@@ -1180,7 +1217,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build());
 
 		return s3AsyncClient.completeMultipartUpload(reqBuilder.build())
-						.thenApply(response -> null);
+						.thenAccept(response -> captureResponseIdentity(
+										op, response.versionId(), requestId(response)));
 	}
 
 	/**

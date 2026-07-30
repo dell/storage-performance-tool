@@ -66,6 +66,7 @@ dependencies {
 	annotationProcessor libs.log4j.core
 	implementation(
 		libs.commons.codec,
+		libs.commons.csv,
 		libs.commons.lang,
 		libs.commons.text,
 		libs.jackson.annotations,

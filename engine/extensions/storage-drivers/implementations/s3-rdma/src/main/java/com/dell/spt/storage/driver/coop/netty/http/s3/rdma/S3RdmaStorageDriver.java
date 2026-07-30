@@ -469,6 +469,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	@Override
+	protected boolean observesReadBodyOutOfBand(final O op) {
+		return rdmaOps.containsKey(op) && OpType.READ.equals(op.type());
+	}
+
 	/**
 	 * Clean up RDMA resources after the server responds.
 	 *
@@ -481,6 +486,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		if (ctx != null) {
 			try {
 				if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
+					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
+					body.position(0);
+					body.limit(ctx.size);
+					finishOutOfBandIntegrityRead(channel, op, body);
 					((DataOperation) op).countBytesDone(ctx.size);
 				}
 			} finally {

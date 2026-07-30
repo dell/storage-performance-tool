@@ -178,7 +178,9 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 		}
 
 		if (msg instanceof HttpContent) {
-			handleResponseContentChunk(channel, op, ((HttpContent) msg).content());
+			if (!(msg instanceof FullHttpResponse)) {
+				handleResponseContentChunk(channel, op, ((HttpContent) msg).content());
+			}
 			if (msg instanceof LastHttpContent) {
 				handleResponseContentFinish(channel, op);
 			}

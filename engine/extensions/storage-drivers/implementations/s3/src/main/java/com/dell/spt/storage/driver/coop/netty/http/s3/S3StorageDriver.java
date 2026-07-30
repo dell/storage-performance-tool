@@ -22,6 +22,8 @@ import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
@@ -70,6 +72,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -832,7 +835,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			httpRequest = listRequest((ListOperation<?>) op, nodeAddr);
 		} else if (taggingEnabled) {
 			httpRequest = objectTaggingRequest(op, nodeAddr);
-		} else if (versioning) {
+		} else if (versioning
+						|| (integrityMetadataEnabled() && op.requestedVersionId() != null)) {
 			httpRequest = objectVersioningRequest(op, nodeAddr);
 		} else {
 			httpRequest = super.httpRequest(op, nodeAddr);
@@ -1068,6 +1072,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (checksumStrategy == null || !(op.item() instanceof DataItem)) {
 			return;
 		}
+		if (OpType.CREATE.equals(op.type())
+						&& op.integrityMetadata() != null
+						&& IntegrityMetadataCodec.ALGORITHM_SHA256.equals(checksumStrategy.configToken)
+						&& !(op instanceof PartialDataOperation)) {
+			final byte[] digestBytes = HexFormat.of().parseHex(op.integrityMetadata().digest());
+			httpHeaders.set(
+							checksumStrategy.requestHeaderName, BASE64_ENCODER.encodeToString(digestBytes));
+			return;
+		}
+		if (integrityMetadataEnabled() && OpType.CREATE.equals(op.type())) {
+			recordIntegrityAdditionalPayloadPass();
+		}
 
 		var dataItem = (DataItem) op.item();
 		final MessageDigest digest = checksumStrategy.digestSupplier.get();
@@ -1114,6 +1130,47 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {}
 
+	@Override
+	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders, final O op) {
+		super.applyMetaDataHeaders(httpHeaders, op);
+		if (!integrityMetadataEnabled()
+						|| !OpType.CREATE.equals(op.type())
+						|| op.integrityMetadata() == null
+						|| op instanceof PartialDataOperation) {
+			return;
+		}
+		IntegrityMetadataCodec.httpHeaders(op.integrityMetadata()).forEach(httpHeaders::set);
+	}
+
+	final boolean integrityMetadataEnabledForResponse() {
+		return integrityMetadataEnabled();
+	}
+
+	final void recordIntegrityReadResultFromResponse(final IntegrityVerificationResult result) {
+		recordIntegrityReadResult(result);
+	}
+
+	/** Extension hook for transports which deliver a successful GET body outside HTTP. */
+	protected boolean observesReadBodyOutOfBand(final O op) {
+		return false;
+	}
+
+	final boolean observesIntegrityReadBodyOutOfBand(final O op) {
+		return observesReadBodyOutOfBand(op);
+	}
+
+	protected final void finishOutOfBandIntegrityRead(
+					final Channel channel, final O op, final java.nio.ByteBuffer body) {
+		final IntegrityVerificationResult result = S3ResponseHandler.finishOutOfBandIntegrityRead(channel, body);
+		if (result != null) {
+			op.integrityVerificationResult(result);
+			recordIntegrityReadResult(result);
+			if (!result.verified()) {
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+			}
+		}
+	}
+
 	HttpRequest initMultipartUploadRequest(final O op, final String nodeAddr) {
 		final var item = op.item();
 		final var srcPath = op.srcPath();
@@ -1131,7 +1188,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var httpMethod = HttpMethod.POST;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
-		applyMetaDataHeaders(httpHeaders);
+		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, uri, op.credential());
@@ -1280,22 +1337,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var item = (I) op.item();
 		final var opType = op.type();
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
-		// /<bucket>/<itemName>~<versionId>,
-		// /bucket/30auvg3756cw~16788129946F0FF5,57ec29fc427c270,10,0/0
-		var indexOfVersionStart = item.name().lastIndexOf('~');
-		// versioning relies on the fact that ~ is used for versions only
-		// so far ecs doesn't use ~ symbol in versionId. If that changes, then algorithm will break
-		// another chance for it to break is when ~ is used in bucket name, versioning enabled, but
-		// no actual version is provided. That can happen on the first run for creates
-		String versionId = null;
-		if (indexOfVersionStart != -1) {
-			versionId = item.name().substring(indexOfVersionStart + 1);
-			item.name(item.name().substring(0, indexOfVersionStart));
+		final boolean explicitVersionCarrier = integrityMetadataEnabled();
+		String versionId = op.requestedVersionId();
+		if (!explicitVersionCarrier) {
+			// Retain the legacy key~version convention only for ordinary mode.
+			final int indexOfVersionStart = item.name().lastIndexOf('~');
+			if (indexOfVersionStart != -1) {
+				versionId = item.name().substring(indexOfVersionStart + 1);
+				item.name(item.name().substring(0, indexOfVersionStart));
+			}
 		}
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
-		final var uri = dataUriPath(item, srcPath, op.dstPath(), op.type());
-		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
+		final String objectUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		final String uri = explicitVersionCarrier && versionId != null
+						? objectUri + "?versionId=" + percentEncode(versionId)
+						: objectUri;
+		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
+						HTTP_1_1, httpMethod, uri, httpHeaders);
 		switch (opType) {
 		case CREATE:
 			if (srcPath == null || srcPath.isEmpty()) {
@@ -1312,24 +1371,30 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 			break;
 		case READ:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			if (op instanceof DataOperation) {
 				applyRangesHeaders(httpHeaders, (DataOperation) op);
 			}
 			break;
 		case UPDATE:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			final var dataOp = (DataOperation) op;
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, dataOp.markedRangesSize());
 			applyRangesHeaders(httpHeaders, dataOp);
 			break;
 		case DELETE:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			break;
 		}
-		applyMetaDataHeaders(httpHeaders);
+		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpRequest.method(), uri, op.credential());

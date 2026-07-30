@@ -1,5 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
+import com.dell.spt.base.integrity.IntegrityResponseObserver;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -36,16 +38,19 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<ByteBuf> CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"content");
+	private static final AttributeKey<IntegrityResponseObserver> INTEGRITY_OBSERVER_ATTR_KEY = AttributeKey.newInstance("spt-integrity-observer");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
+	private final S3StorageDriver<I, O> s3Driver;
 	private final boolean versioningEnabled;
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
 					final boolean versioningEnabled, final String checksumHeader) {
 		super(driver, verifyFlag);
+		this.s3Driver = driver;
 		this.versioningEnabled = versioningEnabled;
 		this.checksumHeader = checksumHeader;
 	}
@@ -71,19 +76,44 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				}
 			}
 		}
-		if (versioningEnabled) {
-			// Skip on error responses (no x-amz-version-id header); otherwise the literal
-			// string "null" gets appended to the item name, compounding on each retry.
-			final String versionId = respHeaders.get("x-amz-version-id");
-			if (versionId != null) {
-				op.item().name(op.item().name() + "~" + versionId);
-			}
+		final String versionId = respHeaders.get("x-amz-version-id");
+		if (versionId != null) {
+			op.returnedVersionId(versionId);
+		}
+		final String requestId = respHeaders.get("x-amz-request-id");
+		if (requestId != null) {
+			op.responseRequestId(requestId);
+		}
+		final boolean integrityEnabled = s3Driver != null && s3Driver.integrityMetadataEnabledForResponse();
+		if (versioningEnabled && !integrityEnabled && versionId != null) {
+			op.item().name(op.item().name() + "~" + versionId);
+		}
+		if (integrityEnabled
+						&& channel != null
+						&& OpType.READ.equals(op.type())
+						&& op.status() == Operation.Status.SUCC
+						&& op instanceof com.dell.spt.base.item.op.data.DataOperation
+						&& !(op instanceof PartialDataOperation)
+						&& !(op instanceof CompositeDataOperation)) {
+			final Long contentLength = s3Driver.observesIntegrityReadBodyOutOfBand(op)
+							? null
+							: parseContentLength(respHeaders);
+			channel.attr(INTEGRITY_OBSERVER_ATTR_KEY).set(
+							new IntegrityResponseObserver(respHeaders, contentLength));
 		}
 	}
 
 	@Override
 	protected final void handleResponseContentChunk(final Channel channel, final O op, final ByteBuf contentChunk)
 					throws IOException {
+		if (channel != null) {
+			final IntegrityResponseObserver observer = channel.attr(INTEGRITY_OBSERVER_ATTR_KEY).get();
+			if (observer != null && contentChunk.isReadable()) {
+				for (final var buffer : contentChunk.nioBuffers()) {
+					observer.onBody(buffer);
+				}
+			}
+		}
 		if (op instanceof CompositeDataOperation) {
 			handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
 		} else if (op instanceof ListOperation) {
@@ -92,6 +122,31 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			bufferListContent(channel, contentChunk);
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
+		}
+	}
+
+	static IntegrityVerificationResult finishOutOfBandIntegrityRead(
+					final Channel channel, final java.nio.ByteBuffer body) {
+		if (channel == null) {
+			return null;
+		}
+		final IntegrityResponseObserver observer = channel.attr(INTEGRITY_OBSERVER_ATTR_KEY).getAndSet(null);
+		if (observer == null) {
+			return null;
+		}
+		observer.onBody(body);
+		return observer.finish();
+	}
+
+	private static Long parseContentLength(final HttpHeaders headers) {
+		final String value = headers.get(HttpHeaderNames.CONTENT_LENGTH);
+		if (value == null) {
+			return null;
+		}
+		try {
+			return Long.valueOf(value);
+		} catch (final NumberFormatException ignored) {
+			return null;
 		}
 	}
 
@@ -135,6 +190,19 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void handleResponseContentFinish(final Channel channel, final O op) {
+		final boolean outOfBand = s3Driver != null && s3Driver.observesIntegrityReadBodyOutOfBand(op);
+		final Attribute<IntegrityResponseObserver> observerAttr = channel.attr(INTEGRITY_OBSERVER_ATTR_KEY);
+		final IntegrityResponseObserver observer = outOfBand && op.status() == Operation.Status.SUCC
+						? observerAttr.get()
+						: observerAttr.getAndSet(null);
+		if (observer != null && op.status() == Operation.Status.SUCC && !outOfBand) {
+			final var result = observer.finish();
+			op.integrityVerificationResult(result);
+			s3Driver.recordIntegrityReadResultFromResponse(result);
+			if (!result.verified()) {
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+			}
+		}
 		final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
 		final ByteBuf content = contentAttr.get();
 		if (content != null && content.readableBytes() > 0) {
