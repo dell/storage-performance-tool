@@ -6,6 +6,9 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.io.IntegrityOperationManifestOutput;
 import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.io.ItemTimingMetricsFileOutput;
 import com.dell.spt.base.item.op.OpType;
@@ -142,10 +145,26 @@ public class LinearLoadStepLocal
 						if (Files.exists(itemOutputPath)) {
 							Loggers.ERR.warn("Items output file \"{}\" already exists", itemOutputPath);
 						}
+						final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
 						try {
-							final Output<? extends Item> itemOutput = new ItemInfoFileOutput<>(itemOutputPath);
+							final Output itemOutput;
+							if (metadataMode) {
+								final String bucketPath = OpType.CREATE.equals(opType)
+												? itemConfig.configVal("output").stringVal("path")
+												: itemConfig.configVal("input").stringVal("path");
+								itemOutput = new IntegrityOperationManifestOutput<>(itemOutputPath, bucketPath, opType);
+							} else {
+								itemOutput = new ItemInfoFileOutput<>(itemOutputPath);
+							}
 							stepCtx.operationsResultsOutput(itemOutput);
 						} catch (final IOException e) {
+							if (metadataMode) {
+								throw new IntegrityTerminalException(
+												IntegrityTerminalException.Category.PUBLICATION,
+												testStepId,
+												"failed to initialize canonical integrity manifest source",
+												e);
+							}
 							LogUtil.exception(
 											Level.ERROR, e,
 											"Failed to initialize the item output, the processed items info won't be persisted");

@@ -103,7 +103,6 @@ public final class BucketXmlListingHandler<I extends Item>
 		super.endElement(uri, localName, qName);
 	}
 
-
 	private String generatedItemId(final String objectKey) throws NumberFormatException {
 		String relativeKey = objectKey;
 		if (!prefix.isEmpty()) {

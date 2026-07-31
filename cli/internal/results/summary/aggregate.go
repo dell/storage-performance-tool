@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
 // RunSummary represents the aggregated data set used when rendering result summaries.
@@ -20,6 +21,7 @@ type RunSummary struct {
 	MetadataPath      string
 	Environment       EnvironmentSummary
 	Workload          WorkloadSummary
+	Integrity         *results.IntegritySummary
 	Steps             []StepSummary
 	Totals            RunTotals
 	MissingExpected   []string
@@ -184,6 +186,9 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 		MissingExpected:   append([]string(nil), data.MissingExpectedSteps...),
 		ActualStepIDs:     append([]string(nil), data.Params.ActualStepIDs...),
 		DiscoveredStepIDs: append([]string(nil), data.Params.DiscoveredStepIDs...),
+	}
+	if data.Manifest != nil {
+		summary.Integrity = data.Manifest.Integrity
 	}
 
 	summary.Environment = buildEnvironmentSummary(data)

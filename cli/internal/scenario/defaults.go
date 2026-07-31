@@ -18,9 +18,15 @@ const (
 // DefaultsConfig represents the Spt defaults configuration
 type DefaultsConfig struct {
 	Storage StorageConfig `yaml:"storage"`
+	Run     *RunConfig    `yaml:"run,omitempty"`
 	Item    *ItemConfig   `yaml:"item,omitempty"` // pointer so omitted when nil
 	Output  OutputConfig  `yaml:"output"`
 	Load    *LoadConfig   `yaml:"load,omitempty"` // pointer so omitted when nil
+}
+
+// RunConfig carries a preallocated verification run identity.
+type RunConfig struct {
+	ID int64 `yaml:"id"`
 }
 
 // StorageConfig represents storage configuration
@@ -143,6 +149,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 		},
 	}
+	if params.RunID > 0 {
+		config.Run = &RunConfig{ID: params.RunID}
+	}
 
 	// Configure based on workload type
 	switch params.WorkloadType {
@@ -205,7 +214,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}
 
-	case "write", "read", "mixed", "delete", "list":
+	case "write", "read", "write-verify", "read-verify", "mixed", "delete", "list":
 		// For S3 workloads, parse one or more endpoints and configure accordingly
 		authVersion := params.AuthVersion
 		if authVersion == 0 {

@@ -59,9 +59,14 @@ public record IntegrityConfig(
 	}
 
 	public void requireReadProvenance() {
+		requireInputProvenance("READ");
+	}
+
+	public void requireInputProvenance(final String operation) {
 		if (enabled() && inputProvenance == IntegrityInputProvenance.NONE) {
 			throw new IllegalConfigurationException(
-					"metadata-mode READ requires explicit storage.integrity.input.provenance");
+					"metadata-mode " + operation
+							+ " requires explicit storage.integrity.input.provenance");
 		}
 	}
 

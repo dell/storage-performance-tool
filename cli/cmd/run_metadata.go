@@ -13,34 +13,39 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
 // runMetadata captures the launch context for a single spt run.
 type runMetadata struct {
-	GeneratedAt          time.Time              `json:"generatedAt"`
-	WorkloadType         string                 `json:"workloadType"`
-	SptImage             string                 `json:"sptImage"`
-	APIPort              string                 `json:"apiPort"`
-	BaseURL              string                 `json:"baseUrl"`
-	TraceFile            string                 `json:"traceFile,omitempty"`
-	TraceAuto            bool                   `json:"traceAuto,omitempty"`
-	Label                string                 `json:"label"`
-	ResultsDir           string                 `json:"resultsDir"`
-	ResultsRoot          string                 `json:"resultsRoot"`
-	ScenarioFile         string                 `json:"scenarioFile"`
-	ScenarioStoredPath   string                 `json:"scenarioStoredPath,omitempty"`
-	ScenarioParams       scenario.Params        `json:"scenarioParams"`
-	Hosts                []runHostMetadata      `json:"hosts"`
-	TestHosts            string                 `json:"testHosts"`
-	ExpectedStepIDs      []string               `json:"expectedStepIds,omitempty"`
-	ActualStepIDs        []string               `json:"actualStepIds,omitempty"`
-	DiscoveredStepIDs    []string               `json:"discoveredStepIds,omitempty"`
-	ResultsOptions       resultsOptionsSnapshot `json:"resultsOptions"`
-	CLI                  runCLIInfo             `json:"cli"`
-	MultiHost            *runMultiHostMetadata  `json:"multiHost,omitempty"`
-	AutoTerminateSeconds int                    `json:"autoTerminateSeconds,omitempty"`
+	GeneratedAt             time.Time                                               `json:"generatedAt"`
+	WorkloadType            string                                                  `json:"workloadType"`
+	SptImage                string                                                  `json:"sptImage"`
+	APIPort                 string                                                  `json:"apiPort"`
+	BaseURL                 string                                                  `json:"baseUrl"`
+	TraceFile               string                                                  `json:"traceFile,omitempty"`
+	TraceAuto               bool                                                    `json:"traceAuto,omitempty"`
+	Label                   string                                                  `json:"label"`
+	ResultsDir              string                                                  `json:"resultsDir"`
+	ResultsRoot             string                                                  `json:"resultsRoot"`
+	ScenarioFile            string                                                  `json:"scenarioFile"`
+	ScenarioStoredPath      string                                                  `json:"scenarioStoredPath,omitempty"`
+	ScenarioParams          scenario.Params                                         `json:"scenarioParams"`
+	Hosts                   []runHostMetadata                                       `json:"hosts"`
+	TestHosts               string                                                  `json:"testHosts"`
+	ExpectedStepIDs         []string                                                `json:"expectedStepIds,omitempty"`
+	ActualStepIDs           []string                                                `json:"actualStepIds,omitempty"`
+	DiscoveredStepIDs       []string                                                `json:"discoveredStepIds,omitempty"`
+	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
+	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
+	CLI                     runCLIInfo                                              `json:"cli"`
+	MultiHost               *runMultiHostMetadata                                   `json:"multiHost,omitempty"`
+	RuntimeIdentity         *tui.DistributedRuntimeIdentityEvidence                 `json:"runtimeIdentity,omitempty"`
+	RuntimeIdentityError    string                                                  `json:"runtimeIdentityError,omitempty"`
+	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
+	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
 }
 
 type runHostMetadata struct {
@@ -305,6 +310,15 @@ func copyScenarioForResults(srcPath, destDir string) (string, error) {
 func writeRunMetadata(meta *runMetadata, root string) error {
 	if meta == nil {
 		return nil
+	}
+	if meta.runtimeIdentityProvider != nil && meta.RuntimeIdentity == nil {
+		evidence, err := meta.runtimeIdentityProvider()
+		if err != nil {
+			meta.RuntimeIdentityError = err.Error()
+		} else {
+			meta.RuntimeIdentity = evidence
+			meta.RuntimeIdentityError = ""
+		}
 	}
 	meta.GeneratedAt = time.Now().UTC()
 	meta.ResultsRoot = root

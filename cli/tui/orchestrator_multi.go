@@ -104,6 +104,11 @@ type MultiHostOrchestrator struct {
 	// a caller-side timeout fallback) — see FinalizeDiagnosticsAndCleanup.
 	finalizeOnce sync.Once
 	finalizeErr  error
+
+	runtimeIdentityRecorder  func(DistributedRuntimeIdentityEvidence)
+	runtimeIdentityTier      string
+	runtimeIdentityReference string
+	runtimeIdentityEvidence  *DistributedRuntimeIdentityEvidence
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -111,6 +116,24 @@ type RMIConfig struct {
 	NetworkMode string
 	PortStart   int
 	PortCount   int
+}
+
+// DistributedRuntimeIdentityEvidence records the mandatory immutable-image tier used by a
+// distributed persisted-data verification run.
+type DistributedRuntimeIdentityEvidence struct {
+	Tier           string                                  `json:"tier"`
+	ImageReference string                                  `json:"imageReference"`
+	ImageID        string                                  `json:"imageId"`
+	PayloadSHA256  string                                  `json:"payloadSha256,omitempty"`
+	Participants   []DistributedRuntimeIdentityParticipant `json:"participants"`
+}
+
+// DistributedRuntimeIdentityParticipant is host-specific image evidence.
+type DistributedRuntimeIdentityParticipant struct {
+	Host          string   `json:"host"`
+	ImageID       string   `json:"imageId"`
+	RepoDigests   []string `json:"repoDigests,omitempty"`
+	PayloadSHA256 string   `json:"payloadSha256,omitempty"`
 }
 
 // NewMultiHostOrchestrator creates a new multi-host orchestrator
@@ -134,13 +157,14 @@ func NewMultiHostOrchestratorWithRMI(hostInfos []*hostparse.HostInfo, minHosts i
 	}
 
 	o := &MultiHostOrchestrator{
-		hosts:        hosts,
-		minHosts:     minHosts,
-		apiPort:      constants.SptAPIPort, // Use Spt standard port on all hosts
-		networkMode:  rmiConfig.NetworkMode,
-		rmiPortStart: rmiConfig.PortStart,
-		rmiPortCount: rmiConfig.PortCount,
-		preflight:    preflight.NewDefaultChecker(),
+		hosts:               hosts,
+		minHosts:            minHosts,
+		apiPort:             constants.SptAPIPort, // Use Spt standard port on all hosts
+		networkMode:         rmiConfig.NetworkMode,
+		rmiPortStart:        rmiConfig.PortStart,
+		rmiPortCount:        rmiConfig.PortCount,
+		preflight:           preflight.NewDefaultChecker(),
+		runtimeIdentityTier: constants.IntegrityRuntimeIdentityTierImage,
 	}
 	// Default detection uses remoteip via the command executor (SSH or local)
 	o.detectAdvIP = func(ctx context.Context, host *hostparse.HostInfo) (string, error) {
@@ -185,6 +209,24 @@ func (o *MultiHostOrchestrator) SetImage(image string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.image = image
+}
+
+// SetRuntimeIdentityRecorder receives immutable runtime evidence before any verification container
+// starts. The command layer uses it to persist evidence in run metadata.
+func (o *MultiHostOrchestrator) SetRuntimeIdentityRecorder(recorder func(DistributedRuntimeIdentityEvidence)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.runtimeIdentityRecorder = recorder
+}
+
+// SetIntegrityRuntimeIdentityTier selects the mandatory image-only tier or the stronger image
+// plus /opt/spt payload tier for distributed persisted-data verification.
+func (o *MultiHostOrchestrator) SetIntegrityRuntimeIdentityTier(tier string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.runtimeIdentityTier = strings.ToLower(strings.TrimSpace(tier))
+	o.runtimeIdentityReference = ""
+	o.runtimeIdentityEvidence = nil
 }
 
 // SetResultsRoot configures the run results directory used for local diagnostics collection.
@@ -682,6 +724,23 @@ func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Dura
 	}
 
 	return nil
+}
+
+// cleanupManagedContainersAfterStartFailure removes containers immediately when no workload was
+// submitted. There is no run to shut down or linger window to preserve in this path.
+func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure() error {
+	var cleanupErrors []error
+	for _, host := range o.hosts {
+		if host == nil || !host.IsManaged() || host.DockerManager == nil {
+			continue
+		}
+		if err := host.DockerManager.Cleanup(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, err))
+		}
+		host.SetStatus(HostStatusStopped)
+		host.SetManaged(false)
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 // StopAllContainers stops all running containers
@@ -1642,7 +1701,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		if derr != nil {
 			return fmt.Errorf("failed to generate defaults: %w", derr)
 		}
-		return m.startEntryAPIRun(ctx, []byte(m.multiHost.scenarioContent), defaultsContent, "Distributed test")
+		return m.startEntryAPIRun(ctx, image, params, []byte(m.multiHost.scenarioContent), defaultsContent, "Distributed test")
 	}
 }
 
@@ -1679,7 +1738,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 		if err := m.multiHost.StartDistributedTestWithContent(ctx, image, params, scenarioContent); err != nil {
 			return err
 		}
-		return m.startEntryAPIRun(ctx, scenarioContent, defaultsContent, "Distributed replay")
+		return m.startEntryAPIRun(ctx, image, params, scenarioContent, defaultsContent, "Distributed replay")
 	}
 
 	host := readyHosts[0]
@@ -1715,6 +1774,11 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	if host.APIClient == nil {
 		return fmt.Errorf("host %s API client not initialized", host.Info.Original)
 	}
+	if scenario.IsIntegrityWorkload(params) {
+		if err := host.APIClient.VerifyIntegrityCapability(image); err != nil {
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+		}
+	}
 	host.APIClient.LogReadySnapshot("pre-start")
 
 	if m.onOutput != nil {
@@ -1733,7 +1797,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	return nil
 }
 
-func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, scenarioContent, defaultsContent []byte, runLabel string) error {
+func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent, defaultsContent []byte, runLabel string) error {
 	// Wait for APIs to be ready on all running hosts (ensures API clients set)
 	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
 		return fmt.Errorf("failed waiting for APIs after distributed start: %w", err)
@@ -1754,6 +1818,11 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, scenar
 	// Start the distributed test via the entry node API (first host is entry)
 	if len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0].APIClient == nil {
 		return fmt.Errorf("entry node API client not initialized")
+	}
+	if scenario.IsIntegrityWorkload(params) {
+		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapability(image); err != nil {
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+		}
 	}
 	if m.onOutput != nil {
 		m.onOutput("Starting test via entry node API...")
@@ -1990,6 +2059,208 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	return nil
 }
 
+const (
+	distributedRuntimeIdentityTierImmutableImage  = "immutable_image"
+	distributedRuntimeIdentityTierImageAndPayload = "immutable_image_and_payload"
+	// RuntimeIdentityTierAvailableImage records one participant's available immutable image
+	// evidence without representing a cross-host equality proof.
+	RuntimeIdentityTierAvailableImage = "available_image"
+)
+
+// RecordAvailableIntegrityRuntimeIdentity records the immutable image evidence available on a
+// single ready participant. Unlike PrepareDistributedIntegrityRuntimeIdentity, this is evidence
+// capture only: it does not claim or require a cross-host equality proof.
+func (o *MultiHostOrchestrator) RecordAvailableIntegrityRuntimeIdentity(
+	ctx context.Context,
+	image string,
+) (DistributedRuntimeIdentityEvidence, error) {
+	evidence := DistributedRuntimeIdentityEvidence{
+		Tier:           RuntimeIdentityTierAvailableImage,
+		ImageReference: image,
+	}
+	o.mu.Lock()
+	checker := o.preflight
+	recorder := o.runtimeIdentityRecorder
+	o.mu.Unlock()
+	identityChecker, ok := checker.(preflight.ImageIdentityChecker)
+	if !ok {
+		return evidence, fmt.Errorf("runtime image evidence requires an image identity checker")
+	}
+	hosts := o.GetReadyHosts()
+	if len(hosts) != 1 {
+		return evidence, fmt.Errorf("available runtime image evidence requires exactly one ready participant, got %d", len(hosts))
+	}
+	identity, err := identityChecker.InspectImageIdentity(ctx, hosts[0].Info, image)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.ImageID = identity.ID
+	evidence.Participants = []DistributedRuntimeIdentityParticipant{{
+		Host:        hosts[0].Info.Original,
+		ImageID:     identity.ID,
+		RepoDigests: append([]string(nil), identity.RepoDigests...),
+	}}
+	if recorder != nil {
+		recorder(evidence)
+	}
+	o.notifyf("Integrity runtime identity: tier=%s image_id=%s participants=1",
+		evidence.Tier, evidence.ImageID)
+	return evidence, nil
+}
+
+func (o *MultiHostOrchestrator) verifyDistributedIntegrityImageIdentity(
+	ctx context.Context,
+	image string,
+) (DistributedRuntimeIdentityEvidence, error) {
+	evidence := DistributedRuntimeIdentityEvidence{ImageReference: image}
+	o.mu.Lock()
+	attachWorkers := o.attachWorkers
+	checker := o.preflight
+	recorder := o.runtimeIdentityRecorder
+	selectedTier := o.runtimeIdentityTier
+	o.mu.Unlock()
+	switch selectedTier {
+	case "", constants.IntegrityRuntimeIdentityTierImage:
+		evidence.Tier = distributedRuntimeIdentityTierImmutableImage
+	case constants.IntegrityRuntimeIdentityTierPayload:
+		evidence.Tier = distributedRuntimeIdentityTierImageAndPayload
+	default:
+		return evidence, fmt.Errorf("distributed verification runtime identity tier %q is invalid", selectedTier)
+	}
+	if attachWorkers {
+		return evidence, fmt.Errorf("distributed verification cannot attach existing workers because their runtime image identity is not provable")
+	}
+	identityChecker, ok := checker.(preflight.ImageIdentityChecker)
+	if !ok {
+		return evidence, fmt.Errorf("distributed verification requires an immutable image identity checker")
+	}
+	hosts := o.GetReadyHosts()
+	if len(hosts) < 2 {
+		return evidence, fmt.Errorf("distributed verification image identity requires at least two ready participants")
+	}
+	type identityResult struct {
+		index    int
+		identity preflight.ImageIdentity
+		err      error
+	}
+	resultsCh := make(chan identityResult, len(hosts))
+	for index, host := range hosts {
+		go func(index int, host *HostConnection) {
+			identity, err := identityChecker.InspectImageIdentity(ctx, host.Info, image)
+			resultsCh <- identityResult{index: index, identity: identity, err: err}
+		}(index, host)
+	}
+	identities := make([]preflight.ImageIdentity, len(hosts))
+	var identityErrors []error
+	for range hosts {
+		result := <-resultsCh
+		if result.err != nil {
+			identityErrors = append(identityErrors, fmt.Errorf("%s: %w", hosts[result.index].Info.Original, result.err))
+			continue
+		}
+		identities[result.index] = result.identity
+	}
+	if len(identityErrors) > 0 {
+		return evidence, fmt.Errorf("distributed verification image identity unavailable: %w", errors.Join(identityErrors...))
+	}
+	evidence.ImageID = identities[0].ID
+	for index, identity := range identities {
+		evidence.Participants = append(evidence.Participants, DistributedRuntimeIdentityParticipant{
+			Host:        hosts[index].Info.Original,
+			ImageID:     identity.ID,
+			RepoDigests: append([]string(nil), identity.RepoDigests...),
+		})
+		if identity.ID != evidence.ImageID {
+			return evidence, fmt.Errorf(
+				"distributed verification image identity mismatch: %s uses %s but %s uses %s",
+				hosts[0].Info.Original,
+				evidence.ImageID,
+				hosts[index].Info.Original,
+				identity.ID,
+			)
+		}
+	}
+	if selectedTier == constants.IntegrityRuntimeIdentityTierPayload {
+		payloadChecker, ok := checker.(preflight.PayloadIdentityChecker)
+		if !ok {
+			return evidence, fmt.Errorf("distributed verification payload tier requires a payload identity checker")
+		}
+		type payloadResult struct {
+			index  int
+			digest string
+			err    error
+		}
+		payloadResults := make(chan payloadResult, len(hosts))
+		for index, host := range hosts {
+			go func(index int, host *HostConnection) {
+				digest, err := payloadChecker.InspectPayloadIdentity(ctx, host.Info, evidence.ImageID)
+				payloadResults <- payloadResult{index: index, digest: digest, err: err}
+			}(index, host)
+		}
+		payloadDigests := make([]string, len(hosts))
+		var payloadErrors []error
+		for range hosts {
+			result := <-payloadResults
+			if result.err != nil {
+				payloadErrors = append(payloadErrors, fmt.Errorf("%s: %w", hosts[result.index].Info.Original, result.err))
+				continue
+			}
+			payloadDigests[result.index] = result.digest
+		}
+		if len(payloadErrors) > 0 {
+			return evidence, fmt.Errorf("distributed verification payload identity unavailable: %w", errors.Join(payloadErrors...))
+		}
+		evidence.PayloadSHA256 = payloadDigests[0]
+		for index, digest := range payloadDigests {
+			evidence.Participants[index].PayloadSHA256 = digest
+			if digest != evidence.PayloadSHA256 {
+				return evidence, fmt.Errorf(
+					"distributed verification payload identity mismatch: %s uses %s but %s uses %s",
+					hosts[0].Info.Original,
+					evidence.PayloadSHA256,
+					hosts[index].Info.Original,
+					digest,
+				)
+			}
+		}
+	}
+	if recorder != nil {
+		recorder(evidence)
+	}
+	o.notifyf("Integrity runtime identity: tier=%s image_id=%s payload_sha256=%s participants=%d",
+		evidence.Tier, evidence.ImageID, evidence.PayloadSHA256, len(evidence.Participants))
+	return evidence, nil
+}
+
+// PrepareDistributedIntegrityRuntimeIdentity runs and caches the selected distributed identity
+// gate. The command layer calls this after host preflight but before starting auto-results, so a
+// pre-I/O gate failure cannot leave a completion tracker waiting for an engine that never starts.
+func (o *MultiHostOrchestrator) PrepareDistributedIntegrityRuntimeIdentity(
+	ctx context.Context,
+	image string,
+) (DistributedRuntimeIdentityEvidence, error) {
+	o.mu.Lock()
+	if o.runtimeIdentityEvidence != nil && o.runtimeIdentityReference == image {
+		evidence := *o.runtimeIdentityEvidence
+		evidence.Participants = append([]DistributedRuntimeIdentityParticipant(nil), evidence.Participants...)
+		o.mu.Unlock()
+		return evidence, nil
+	}
+	o.mu.Unlock()
+
+	evidence, err := o.verifyDistributedIntegrityImageIdentity(ctx, image)
+	if err != nil {
+		return evidence, err
+	}
+	o.mu.Lock()
+	cached := evidence
+	cached.Participants = append([]DistributedRuntimeIdentityParticipant(nil), evidence.Participants...)
+	o.runtimeIdentityReference = image
+	o.runtimeIdentityEvidence = &cached
+	o.mu.Unlock()
+	return evidence, nil
+}
+
 // StartDistributedTest starts a distributed test using RMI coordination
 func (o *MultiHostOrchestrator) StartDistributedTest(ctx context.Context, image string, params scenario.ScenarioParams) error {
 	scenarioContent, err := scenario.GenerateScenario(params)
@@ -2001,9 +2272,17 @@ func (o *MultiHostOrchestrator) StartDistributedTest(ctx context.Context, image 
 
 // StartDistributedTestWithContent starts the RMI entry/worker topology with
 // caller-provided scenario content for later API submission.
-func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Context, image string, params scenario.ScenarioParams, scenarioContent []byte) error {
+func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent []byte) error {
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
+	}
+	runtimeImage := image
+	if scenario.IsIntegrityWorkload(params) {
+		evidence, identityErr := o.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
+		if identityErr != nil {
+			return identityErr
+		}
+		runtimeImage = evidence.ImageID
 	}
 	startupArgs, err := scenario.BuildEngineStartupArgs(params)
 	if err != nil {
@@ -2013,7 +2292,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(_ context.Contex
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	o.image = image
+	o.image = runtimeImage
 	attachWorkers := o.attachWorkers
 	if attachWorkers && len(startupArgs) > 0 {
 		return fmt.Errorf("engine startup settings cannot be applied with attached workers; start every worker with %s", startupArgs[0])

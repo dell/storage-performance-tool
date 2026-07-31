@@ -7,7 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemImpl;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class StreamingSha256Test {
 
@@ -36,6 +40,28 @@ class StreamingSha256Test {
 		hasher.close();
 		final var item = new DataItemImpl("empty", 0, 0);
 		assertThrows(IllegalStateException.class, () -> hasher.hash(item));
+	}
+
+	@ParameterizedTest
+	@ValueSource(ints = {0, 1, StreamingSha256.BUFFER_SIZE - 1, StreamingSha256.BUFFER_SIZE,
+			StreamingSha256.BUFFER_SIZE + 1, StreamingSha256.BUFFER_SIZE * 2 + 17
+	})
+	void matchesReferenceDigestAcrossStreamingBufferBoundaries(final int size) throws Exception {
+		final byte[] bytes = new byte[size];
+		for (int i = 0; i < bytes.length; i++) {
+			bytes[i] = (byte) (i * 31 + 7);
+		}
+		final var item = new DataItemImpl("boundary-" + size, 0, size);
+		item.dataInput(new FixedDataInput(bytes));
+		final String expected = HexFormat.of().formatHex(
+						MessageDigest.getInstance("SHA-256").digest(bytes));
+
+		try (final var hasher = new StreamingSha256(1)) {
+			final var result = hasher.hash(item);
+			assertEquals(expected, result.metadata().digest());
+			assertEquals(size, result.metadata().size());
+			assertEquals(0, item.position());
+		}
 	}
 
 	private static final class FixedDataInput implements DataInput {

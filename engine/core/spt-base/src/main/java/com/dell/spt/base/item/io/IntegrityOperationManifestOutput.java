@@ -1,0 +1,146 @@
+package com.dell.spt.base.item.io;
+
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
+
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.list.ListOperation;
+import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.Output;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.List;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
+
+/** Writes successful operation results in the canonical integrity-manifest format. */
+public final class IntegrityOperationManifestOutput<O extends Operation<? extends Item>>
+				implements Output<O> {
+
+	private final String configuredBucket;
+	private final OpType opType;
+	private final CSVPrinter printer;
+	private boolean closed;
+
+	public IntegrityOperationManifestOutput(
+					final Path manifestPath, final String configuredPath, final OpType opType) throws IOException {
+		this.configuredBucket = bucketFromPath(configuredPath);
+		this.opType = opType;
+		final Path parent = manifestPath.toAbsolutePath().getParent();
+		if (parent != null) {
+			Files.createDirectories(parent);
+		}
+		printer = new CSVPrinter(
+						Files.newBufferedWriter(
+										manifestPath,
+										StandardCharsets.UTF_8,
+										StandardOpenOption.CREATE_NEW,
+										StandardOpenOption.WRITE),
+						CSVFormat.RFC4180);
+		printer.printRecord(IntegrityManifestItemInput.HEADER);
+		printer.flush();
+	}
+
+	@Override
+	public synchronized boolean put(final O result) {
+		if (result == null) {
+			close();
+			return true;
+		}
+		try {
+			if (result instanceof ListOperation<?> listOperation) {
+				for (final var listedObject : listOperation.listedObjects()) {
+					printer.printRecord(configuredBucket, listedObject.key(), listedObject.size(), "");
+				}
+				return true;
+			}
+			final Item item = result.item();
+			if (!(item instanceof DataItem dataItem)) {
+				throw new IOException("integrity manifests require data items");
+			}
+			final String bucket;
+			final String key;
+			if (item instanceof IntegrityManifestDataItem manifestItem) {
+				bucket = manifestItem.bucket();
+				key = manifestItem.name();
+			} else {
+				bucket = configuredBucket;
+				key = keyFromResult(item.name(), bucket);
+			}
+			final String version = OpType.CREATE.equals(opType)
+							? result.returnedVersionId()
+							: result.requestedVersionId();
+			printer.printRecord(bucket, key, dataItem.size(), version == null ? "" : version);
+			return true;
+		} catch (final IOException e) {
+			throwUnchecked(e);
+			return false;
+		}
+	}
+
+	@Override
+	public synchronized int put(final List<O> results, final int from, final int to) {
+		int index = from;
+		while (index < to && put(results.get(index))) {
+			index++;
+		}
+		return index - from;
+	}
+
+	@Override
+	public int put(final List<O> results) {
+		return put(results, 0, results.size());
+	}
+
+	@Override
+	public Input<O> getInput() {
+		throw new UnsupportedOperationException();
+	}
+
+	@Override
+	public synchronized void close() {
+		if (closed) {
+			return;
+		}
+		closed = true;
+		try {
+			printer.close(true);
+		} catch (final IOException e) {
+			throwUnchecked(e);
+		}
+	}
+
+	static String bucketFromPath(final String path) {
+		if (path == null) {
+			return "";
+		}
+		final String normalized = path.replace('\\', '/');
+		int start = 0;
+		while (start < normalized.length() && normalized.charAt(start) == '/') {
+			start++;
+		}
+		final int slash = normalized.indexOf('/', start);
+		return slash < 0 ? normalized.substring(start) : normalized.substring(start, slash);
+	}
+
+	static String keyFromResult(final String itemName, final String bucket) throws IOException {
+		if (itemName == null || itemName.isEmpty()) {
+			throw new IOException("integrity manifest object key must not be empty");
+		}
+		String key = itemName.startsWith("/") ? itemName.substring(1) : itemName;
+		final String bucketPrefix = bucket + "/";
+		if (key.startsWith(bucketPrefix)) {
+			key = key.substring(bucketPrefix.length());
+		}
+		if (bucket.isEmpty() || key.isEmpty()) {
+			throw new IOException("integrity manifest bucket and key must not be empty");
+		}
+		return key;
+	}
+}

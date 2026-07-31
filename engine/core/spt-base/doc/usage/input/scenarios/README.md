@@ -20,6 +20,7 @@
 3.1.2. [Load](#312-load)<br/>
 3.1.3. [Weighted Load](#313-weighted-load)<br/>
 3.1.4. [Pipeline Load](#314-pipeline-load)<br/>
+3.1.5. [S3 persisted-data integrity](#315-s3-persisted-data-integrity)<br/>
 3.2. [Other Scripting Languages](#32-other-scripting-languages)
 
 ## 1. Introduction
@@ -521,6 +522,52 @@ the `config/defaults.yaml` file in the Spt home directory for the
 reference). Subsequent calls on the same step appends the configuration
 structure to the list. **Returns** the new step instance of the same
 type so the call may be included into the call chain.
+
+#### 3.1.5. S3 persisted-data integrity
+
+Metadata integrity is available to direct `spt.jar` users through a custom
+JavaScript scenario:
+
+```bash
+java -jar <SPT_DIR>/spt.jar \
+    --run-scenario=/path/to/s3_integrity_write_verify.js
+```
+
+- [`s3_integrity_write_verify.js`](s3_integrity_write_verify.js) writes a finite
+  generated set and then verifies every successful write.
+- [`s3_integrity_read_verify.js`](s3_integrity_read_verify.js) verifies a finite
+  QA-maintained item file without a preceding write.
+
+Use `CreateLoad` and `ReadLoad` with the nested
+`storage.integrity.mode: metadata` configuration. Do not use `ReadVerifyLoad` or
+`ReadVerifyRandomRangeLoad`; those aliases enable the legacy deterministic
+content verifier. Flattened `--storage-integrity-*` startup arguments are not a
+supported v1 entry point.
+
+Metadata CREATE pre-hashes the final object and places SHA-256 and size metadata
+on the original PUT or multipart-initiation request. Metadata READ hashes a
+complete GET body and records corruption separately from transport failures.
+Use `load.op.limit.fail.count: 0` so a QA run collects all failures.
+
+The terminal corrupt counter is `operations.corrupt_count` in JSON and
+`CountCorrupt` in total CSV. The verification step writes
+`${home_dir}/log/${step_id}/integrity.failures.csv` and
+`integrity.performance.csv`; applicable distributed sources have
+`.node-NNN.csv` names. A QA harness must fail when the corrupt counter is
+nonzero, the failure CSV has data rows, a lifecycle-applicable counter or
+artifact is missing, or no verification READ succeeds unless the scenario
+explicitly expects an empty set.
+
+Metadata input, aggregation, publication, and cleanup failures propagate as a
+terminal step failure after bounded cleanup, preventing a later scenario step
+from consuming partial output. A genuine metadata failure is `FAILED` even if
+an operator stop races with it; a stop without such a failure is `STOPPED`.
+
+Direct-JAR v1 does not define a numeric process exit code matching the Go CLI,
+does not retrieve remote artifacts, and does not generate
+`verify-remaining.csv`. The QA harness owns those tasks and may choose its own
+item-list filenames. An external item file needs no completion sidecar, while
+an engine-produced handoff uses its generated completion evidence.
 
 ## 3.2. Other Scripting Languages
 

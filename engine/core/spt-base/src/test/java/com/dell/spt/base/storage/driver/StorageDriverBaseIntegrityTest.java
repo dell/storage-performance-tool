@@ -16,6 +16,8 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.github.akurilov.confuse.Config;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -49,6 +51,29 @@ class StorageDriverBaseIntegrityTest {
 		assertEquals(firstMetadata, op.integrityMetadata());
 		assertEquals(100, firstMetadata.size());
 		assertEquals(1, driver.integrityPerformanceSnapshot().objects());
+	}
+
+	@Test
+	void metadataModeCountsAdditionalPassOnceOnParentAndSkipsMultipartParts() throws Exception {
+		final var driver = driver(metadataConfig());
+		doReturn(true).when(driver).integrityAdditionalPayloadPassRequired(any());
+		final var parent = operation(OpType.CREATE, null, null, 100);
+
+		driver.prepare(parent);
+		driver.prepare(parent);
+		assertEquals(1, driver.integrityPerformanceSnapshot().objects());
+		assertEquals(1, driver.integrityPerformanceSnapshot().additionalPayloadPasses());
+
+		@SuppressWarnings("unchecked")
+		final CompositeDataOperation<DataItem> compositeParent = Mockito.mock(CompositeDataOperation.class);
+		final var part = new PartialDataOperationImpl<DataItem>(
+						0, OpType.CREATE, new DataItemImpl("object", 0, 50), null, "/bucket", null, 0,
+						compositeParent);
+		driver.prepare(part);
+
+		assertNull(part.integrityMetadata());
+		assertEquals(1, driver.integrityPerformanceSnapshot().objects());
+		assertEquals(1, driver.integrityPerformanceSnapshot().additionalPayloadPasses());
 	}
 
 	@Test

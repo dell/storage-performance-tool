@@ -2,6 +2,7 @@ package com.dell.spt.base.integrity;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.io.StringWriter;
@@ -14,16 +15,29 @@ import org.apache.commons.csv.CSVPrinter;
 /** Canonical RFC 4180 rows for logger-backed integrity artifacts. */
 public final class IntegrityCsvArtifacts {
 
+	public static final String FAILURES_FILE_NAME = "integrity.failures.csv";
+	public static final String PERFORMANCE_FILE_NAME = "integrity.performance.csv";
+	public static final String MULTIPART_LIFECYCLE_FILE_NAME = "multipart.lifecycle.csv";
+
 	public static final String FAILURES_HEADER = "timestamp,node,step,driver,key,requested_version_id,returned_version_id,request_id,reason,algorithm,expected_digest,actual_digest,expected_size,actual_size,first_mismatch_offset,attempt";
 	public static final String PERFORMANCE_HEADER = "node,step,driver,phase,algorithm,objects,bytes,hash_worker_seconds,mean_worker_hash_mib_per_second,time_to_first_request_seconds,additional_payload_passes";
 	public static final String MULTIPART_LIFECYCLE_HEADER = "timestamp,node,step,driver,bucket,key,upload_id,state,abort_attempted,abort_succeeded,error";
 
 	private static final double BYTES_PER_MIB = 1024.0 * 1024.0;
+	private static final String MULTIPART_LIFECYCLE_EMITTED_CONTEXT_KEY = "spt.integrity.multipart.lifecycle.emitted";
 
 	private IntegrityCsvArtifacts() {}
 
 	public static List<Artifact> applicableHeaders(
 					final OpType opType, final String driverType, final boolean metadataMode) {
+		return applicableHeaders(opType, driverType, metadataMode, true);
+	}
+
+	public static List<Artifact> applicableHeaders(
+					final OpType opType,
+					final String driverType,
+					final boolean metadataMode,
+					final boolean multipartEnabled) {
 		if (!metadataMode) {
 			return List.of();
 		}
@@ -33,7 +47,7 @@ public final class IntegrityCsvArtifacts {
 							new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER));
 		}
 		if (opType == OpType.CREATE) {
-			if (driverType != null && driverType.toLowerCase(Locale.ROOT).startsWith("s3")) {
+			if (multipartEnabled && driverType != null && driverType.toLowerCase(Locale.ROOT).startsWith("s3")) {
 				return List.of(
 								new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER),
 								new Artifact(Kind.MULTIPART_LIFECYCLE, MULTIPART_LIFECYCLE_HEADER));
@@ -83,7 +97,8 @@ public final class IntegrityCsvArtifacts {
 						firstRequestSeconds, snapshot.additionalPayloadPasses());
 	}
 
-	public static void logMultipartLifecycle(
+	public static boolean logMultipartLifecycleOnce(
+					final CompositeOperation<?> operation,
 					final String node,
 					final String step,
 					final String driver,
@@ -94,9 +109,16 @@ public final class IntegrityCsvArtifacts {
 					final Boolean abortAttempted,
 					final Boolean abortSucceeded,
 					final String error) {
+		synchronized (operation) {
+			if (Boolean.parseBoolean(operation.get(MULTIPART_LIFECYCLE_EMITTED_CONTEXT_KEY))) {
+				return false;
+			}
+			operation.put(MULTIPART_LIFECYCLE_EMITTED_CONTEXT_KEY, Boolean.TRUE.toString());
+		}
 		Loggers.MULTIPART_LIFECYCLE.info(multipartLifecycleRecord(
 						node, step, driver, bucket, key, uploadId, state,
 						abortAttempted, abortSucceeded, error));
+		return true;
 	}
 
 	public static String multipartLifecycleRecord(

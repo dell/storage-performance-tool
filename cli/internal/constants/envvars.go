@@ -21,7 +21,9 @@ const (
 	EnvPartSize = "SPT_PART_SIZE"
 
 	// Checksum configuration
-	EnvChecksum = "SPT_CHECKSUM"
+	EnvChecksum                 = "SPT_CHECKSUM"
+	EnvIntegrityMaxConsoleFails = "SPT_INTEGRITY_MAX_CONSOLE_FAILURES"
+	EnvIntegrityRuntimeIdentity = "SPT_INTEGRITY_RUNTIME_IDENTITY_TIER"
 
 	// Object data shaping configuration
 	EnvObjectDataCompressibility = "SPT_OBJECT_DATA_COMPRESSIBILITY"

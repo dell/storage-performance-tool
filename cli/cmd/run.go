@@ -18,8 +18,10 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
@@ -58,12 +60,27 @@ func (r *runTrackerAdapter) SetDebug(debug bool) {
 	r.Debug = debug
 }
 
+func (r *runTrackerAdapter) SetRequireTerminalState(required bool) {
+	r.RequireTerminalState = required
+}
+
 type autoResultsFetcher interface {
 	FetchArtifactsForSteps(context.Context, []string) (*results.Manifest, error)
 }
 
 type fetcherAdapter struct {
 	*results.Fetcher
+}
+
+// autoResultsOutcome preserves terminal, artifact, finalization, and summary outcomes independently.
+type autoResultsOutcome struct {
+	Tracker         *portcheck.RunResult
+	TrackerErr      error
+	ArtifactErr     error
+	Finalization    *integrity.FinalizeOutcome
+	FinalizationErr error
+	SummaryErr      error
+	StepIDs         []string
 }
 
 func (f *fetcherAdapter) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
@@ -146,10 +163,11 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 // After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
 // preSummaryHook, if non-nil, runs after shutdown completes but before the run
 // summary is generated — see its call site below for why that ordering matters.
-func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func()) chan struct{} {
-	done := make(chan struct{}, 1)
+func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(), integrityOptions ...*integrity.FinalizeOptions) chan autoResultsOutcome {
+	done := make(chan autoResultsOutcome, 1)
 	go func() {
-		defer func() { done <- struct{}{} }()
+		outcome := autoResultsOutcome{}
+		defer func() { done <- outcome }()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if progressOut == nil {
@@ -186,6 +204,11 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			}
 		}
 		tracker := newRunTrackerFunc(baseURL)
+		if len(integrityOptions) > 0 && integrityOptions[0] != nil {
+			if terminalTracker, ok := tracker.(interface{ SetRequireTerminalState(bool) }); ok {
+				terminalTracker.SetRequireTerminalState(true)
+			}
+		}
 		// Wait for terminal run state; step IDs discovered later via metrics/json
 		if len(expectedStepIDs) > 0 {
 			writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
@@ -253,7 +276,16 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 				}
 			}
 		}()
-		_, _ = tracker.WaitForCompletion(ctx, expectedStepIDs)
+		outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(ctx, expectedStepIDs)
+		if metadata != nil && outcome.Tracker != nil {
+			metadata.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
+			for stepID, step := range outcome.Tracker.Steps {
+				metadata.StepLifecycles[stepID] = string(step.Lifecycle)
+			}
+		}
+		if outcome.TrackerErr != nil {
+			logging.LogError("auto-results", "completion tracking failed", outcome.TrackerErr)
+		}
 		close(stopCh)
 		// Wait for the polling goroutine to actually observe stopCh and return
 		// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
@@ -313,6 +345,8 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			fleetFallback, _ := discoverFleetStepIDsFunc(baseURL)
 			stepIDs = uniqueStepIDs(fleetFallback, stepIDs, fallback)
 		}
+		outcome.StepIDs = append([]string(nil), stepIDs...)
+		artifactsReady := len(stepIDs) > 0
 		if len(stepIDs) == 0 {
 			var logErr error
 			if discoverErr != nil {
@@ -320,10 +354,12 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			} else {
 				logErr = fmt.Errorf("no steps reported by metrics/json or metrics/fleet/json")
 			}
+			outcome.ArtifactErr = logErr
 			logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
-			return
+			writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
+		} else {
+			writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 		}
-		writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 
 		if metadata != nil {
 			metadata.ActualStepIDs = append([]string(nil), stepIDs...)
@@ -332,11 +368,41 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 				logging.LogError("auto-results", "write run metadata", err, "dest", root)
 			}
 		}
-		fetch := newResultsFetcherFunc(baseURL, root)
-		if _, ferr := fetch.FetchArtifactsForSteps(ctx, stepIDs); ferr != nil {
-			logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
-			writeProgress("Results fetch encountered errors; see log. Output: %s\n", root)
-			return
+		if artifactsReady {
+			fetch := newResultsFetcherFunc(baseURL, root)
+			if _, ferr := fetch.FetchArtifactsForSteps(ctx, stepIDs); ferr != nil {
+				outcome.ArtifactErr = ferr
+				artifactsReady = false
+				logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
+				writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
+			}
+		}
+		if artifactsReady && len(integrityOptions) > 0 && integrityOptions[0] != nil {
+			options := *integrityOptions[0]
+			options.ResultsRoot = root
+			options.BaseURL = baseURL
+			options.StepIDs = append([]string(nil), stepIDs...)
+			finalized, finalizeErr := integrity.FinalizeResults(options)
+			outcome.Finalization = &finalized
+			outcome.FinalizationErr = finalizeErr
+			if finalizeErr != nil {
+				logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
+				writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
+			} else {
+				writeProgress("Integrity: selected=%d attempted=%d verified=%d remaining=%d corrupt=%d\n",
+					finalized.SelectionCount, finalized.VerificationAttemptedCount, finalized.VerifiedCount, finalized.RemainingCount, finalized.CorruptCount)
+				digest := finalized.DigestPerformance
+				writeProgress("Integrity digest work: objects=%d bytes=%d worker_seconds=%.6f mean_worker_mib_per_second=%.3f additional_payload_passes=%d\n",
+					digest.Objects, digest.Bytes, digest.HashWorkerSeconds, digest.MeanWorkerHashMiBPerSecond, digest.AdditionalPayloadPasses)
+				if digest.InitialWriteDelaySecondsMaxNode != nil {
+					writeProgress("Integrity initial write delay: maximum_node_seconds=%.6f\n", *digest.InitialWriteDelaySecondsMaxNode)
+				}
+				for _, sample := range finalized.FailureSamples {
+					writeProgress("Integrity failure: key=%q version=%q returned_version=%q reason=%s expected_digest=%s actual_digest=%s expected_size=%s actual_size=%s request_id=%q\n",
+						sample.Key, sample.RequestedVersion, sample.ReturnedVersion, sample.Reason, sample.ExpectedDigest, sample.ActualDigest, sample.ExpectedSize, sample.ActualSize, sample.RequestID)
+				}
+				writeProgress("Integrity artifacts: %s\n", root)
+			}
 		}
 		if traceFile != "" {
 			if err := appendTraceToResultsManifest(root, traceFile); err != nil {
@@ -380,11 +446,96 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			writer = io.Discard
 		}
 		if err := generateRunSummaryFunc(context.Background(), root, writer); err != nil {
+			outcome.SummaryErr = err
 			logging.LogError("auto-results", "generate summary", err)
 			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
 	}()
 	return done
+}
+
+func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOptions {
+	options := &integrity.FinalizeOptions{
+		Workload:            params.WorkloadType,
+		RunID:               params.RunID,
+		AllowEmptySelection: params.AllowEmptySelection,
+		MaxConsoleFailures:  params.IntegrityMaxConsoleFailures,
+		Multipart:           params.PartSize != "",
+	}
+	for _, mount := range params.ItemFileMounts {
+		switch filepath.Base(mount.ContainerPath) {
+		case integrity.VerifyInputName:
+			options.StagedManifest = mount.HostPath
+		case integrity.VerifyInputCompletionName:
+			options.StagedCompletion = mount.HostPath
+		}
+	}
+	return options
+}
+
+func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
+	if !scenario.IsIntegrityWorkload(params) {
+		return runErr
+	}
+	corrupt := int64(0)
+	if outcome.Finalization != nil {
+		corrupt = outcome.Finalization.CorruptCount
+	}
+	primary := ""
+	if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed {
+		primary = fmt.Sprintf("step %s failed (%s): %s", outcome.Tracker.FailureStepID, outcome.Tracker.FailureCategory, outcome.Tracker.FailureMessage)
+	}
+	if corrupt > 0 {
+		message := fmt.Sprintf("integrity verification detected %d corrupt object(s)", corrupt)
+		if primary != "" {
+			message += "; primary terminal cause: " + primary
+		}
+		if outcome.FinalizationErr != nil {
+			message += "; result finalization also failed: " + outcome.FinalizationErr.Error()
+		}
+		if runErr != nil {
+			message += "; run also failed: " + runErr.Error()
+		}
+		return &ExitCodeError{Code: constants.ExitCodeIntegrityCorruption, Msg: message}
+	}
+
+	var reasons []string
+	if runErr != nil {
+		reasons = append(reasons, runErr.Error())
+	}
+	if !received {
+		reasons = append(reasons, "automatic verification results did not complete")
+	}
+	if outcome.TrackerErr != nil {
+		reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
+	}
+	if outcome.Tracker == nil {
+		reasons = append(reasons, "terminal engine status was not captured")
+	} else if outcome.Tracker.FinalState != constants.StateCompleted {
+		if primary != "" {
+			reasons = append(reasons, primary)
+		} else {
+			reasons = append(reasons, fmt.Sprintf("engine terminal state is %s", outcome.Tracker.FinalState))
+		}
+	}
+	if outcome.ArtifactErr != nil {
+		reasons = append(reasons, "artifact retrieval: "+outcome.ArtifactErr.Error())
+	}
+	if outcome.FinalizationErr != nil {
+		reasons = append(reasons, "integrity result finalization: "+outcome.FinalizationErr.Error())
+	}
+	if outcome.Finalization == nil {
+		reasons = append(reasons, "integrity result finalization did not produce an outcome")
+	} else if outcome.Finalization.EmptySelection && !outcome.Finalization.EmptyAllowed {
+		reasons = append(reasons, "verification selected zero objects; read-verify requires --allow-empty-selection for a clean empty set")
+	}
+	if outcome.SummaryErr != nil {
+		reasons = append(reasons, "summary generation: "+outcome.SummaryErr.Error())
+	}
+	if len(reasons) > 0 {
+		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: strings.Join(reasons, "; ")}
+	}
+	return nil
 }
 
 // uniqueStepIDs merges ordered slices of step IDs, removing duplicates and empty entries.
@@ -717,6 +868,8 @@ Available workload types:
   write: Perform a write-only test, creating new objects.
   list: Benchmark object listing throughput against a bucket.
   read: Perform a read-only test on pre-existing objects.
+  write-verify: Write, read back, and verify every successfully written object.
+  read-verify: Verify self-verifying objects from discovery or --items-file.
   mixed: Perform a test with a specified mix of read and write operations.
   delete: Perform a test to measure object deletion performance.
   mock: Run a mock test using the dummy-mock driver (no S3 endpoint required).
@@ -747,6 +900,10 @@ Available workload types:
 			return err
 		}
 
+		if workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify {
+			params.RunID = time.Now().UnixMilli()
+		}
+
 		// Seed size warning for read workloads
 		if workloadType == WorkloadTypeRead {
 			warnSeedSize(params)
@@ -758,6 +915,11 @@ Available workload types:
 		params, err = scenario.PrepareExternalItemFiles(params)
 		if err != nil {
 			return err
+		}
+		defer scenario.CleanupPreparedItemFiles(params)
+		verificationRun := scenario.IsIntegrityWorkload(params)
+		for _, notice := range integrityCostNotices(params) {
+			fmt.Println(notice)
 		}
 
 		// Generate scenario content
@@ -843,6 +1005,11 @@ Available workload types:
 					"error", removeErr.Error())
 			}
 			return fmt.Errorf("invalid test hosts: %w", err)
+		}
+		integrityIdentityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
+		if verificationRun && integrityIdentityTier == constants.IntegrityRuntimeIdentityTierPayload && len(hostInfos) < 2 {
+			return fmt.Errorf("--%s=%s requires at least two --test-hosts participants",
+				flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierPayload)
 		}
 
 		// Set default min-hosts to total host count if not specified
@@ -939,6 +1106,26 @@ Available workload types:
 		if plannedResultsRoot != "" {
 			metadata.ResultsRoot = plannedResultsRoot
 		}
+		if verificationRun && !useMultiHostOrchestrator && len(hostInfos) == 1 {
+			localHost := hostInfos[0]
+			metadata.runtimeIdentityProvider = func() (*tui.DistributedRuntimeIdentityEvidence, error) {
+				identity, err := preflight.NewDefaultChecker().InspectImageIdentity(
+					context.Background(), localHost, sptImage)
+				if err != nil {
+					return nil, err
+				}
+				return &tui.DistributedRuntimeIdentityEvidence{
+					Tier:           tui.RuntimeIdentityTierAvailableImage,
+					ImageReference: sptImage,
+					ImageID:        identity.ID,
+					Participants: []tui.DistributedRuntimeIdentityParticipant{{
+						Host:        localHost.Original,
+						ImageID:     identity.ID,
+						RepoDigests: append([]string(nil), identity.RepoDigests...),
+					}},
+				}, nil
+			}
+		}
 
 		headlessMode := shouldRunHeadless(cmd)
 
@@ -974,6 +1161,10 @@ Available workload types:
 			multiHostOrchestrator.SetImage(sptImage)
 			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
 			multiHostOrchestrator.SetResultsRoot(plannedResultsRoot)
+			multiHostOrchestrator.SetRuntimeIdentityRecorder(func(evidence tui.DistributedRuntimeIdentityEvidence) {
+				metadata.RuntimeIdentity = &evidence
+			})
+			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
 		}
 		finalizeMultiHost := func() {
 			if multiHostOrchestrator == nil || plannedResultsRoot == "" {
@@ -986,15 +1177,24 @@ Available workload types:
 			}
 		}
 
-		// Start background auto-results tracker/fetcher if enabled
-		var autoResultsDone chan struct{}
-		if resultsOpts.AutoResults {
-			autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost)
+		// Start background auto-results tracker/fetcher if enabled.
+		var integrityOptions *integrity.FinalizeOptions
+		if verificationRun {
+			integrityOptions = buildIntegrityFinalizeOptions(params)
 		}
+		var autoResultsDone chan autoResultsOutcome
+		startAutoResultsMonitoring := func() {
+			if resultsOpts.AutoResults && autoResultsDone == nil {
+				autoResultsDone = startAutoResults(baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
+			}
+		}
+		var autoOutcome autoResultsOutcome
+		autoOutcomeReceived := false
 		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
 				select {
-				case <-autoResultsDone:
+				case autoOutcome = <-autoResultsDone:
+					autoOutcomeReceived = true
 					return true
 				case <-time.After(func() time.Duration {
 					if required {
@@ -1066,6 +1266,18 @@ Available workload types:
 				}
 				return fmt.Errorf("failed to connect to required hosts: %w", err)
 			}
+			if verificationRun {
+				if len(hostInfos) > 1 {
+					if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(ctx, sptImage); err != nil {
+						return err
+					}
+				} else if _, err := orchestrator.RecordAvailableIntegrityRuntimeIdentity(ctx, sptImage); err != nil {
+					logger.Warn("Unable to record available runtime image evidence",
+						"host", hostInfos[0].Original, "error", err.Error())
+					metadata.RuntimeIdentityError = err.Error()
+				}
+			}
+			startAutoResultsMonitoring()
 
 			// Check if we should run in headless mode
 			if headlessMode {
@@ -1082,9 +1294,9 @@ Available workload types:
 				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
 				if autoTerminated {
 					finalizeTraceArtifact()
-					return normalizedErr
+					return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 				}
-				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults)
+				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults || verificationRun)
 				// finalizeMultiHost normally already ran as startAutoResults'
 				// pre-summary hook by the time we get here; calling it again
 				// is a safe, near-instant no-op (FinalizeDiagnosticsAndCleanup
@@ -1105,30 +1317,31 @@ Available workload types:
 					finalizeMultiHost()
 				}
 				finalizeTraceArtifact()
-				return normalizedErr
+				return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				autoResultsComplete := waitForAutoResults(false)
+				autoResultsComplete := waitForAutoResults(verificationRun)
 				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
 					finalizeMultiHost()
 				}
 				finalizeTraceArtifact()
-				return err
+				return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
-			autoResultsComplete := waitForAutoResults(false)
+			autoResultsComplete := waitForAutoResults(verificationRun)
 			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
 				finalizeMultiHost()
 			}
 			finalizeTraceArtifact()
-			return err
+			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		// Single host mode (existing logic)
+		startAutoResultsMonitoring()
 		// Check if we should run in headless mode
 		if headlessMode {
 			verbose, _ := cmd.Flags().GetBool("verbose")
@@ -1142,9 +1355,9 @@ Available workload types:
 			}
 
 			err := headless.StartHeadlessModeWithParams(sptImage, scenarioPath, params, options)
-			waitForAutoResults(false)
+			waitForAutoResults(verificationRun)
 			finalizeTraceArtifact()
-			return err
+			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		fmt.Printf("Starting TUI...\n\n")
@@ -1155,9 +1368,9 @@ Available workload types:
 		} else {
 			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
-		waitForAutoResults(false)
+		waitForAutoResults(verificationRun)
 		finalizeTraceArtifact()
-		return err
+		return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 	},
 }
 
@@ -1172,7 +1385,7 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
-	runCmd.Flags().String("prefix", "", "List workload: optional object key prefix to constrain listings")
+	runCmd.Flags().String("prefix", "", "List/read-verify: optional object key prefix to constrain listings")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
@@ -1199,7 +1412,10 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read workload (skips seed phase)")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read/read-verify workload")
+	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
+	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
+	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")
@@ -1407,6 +1623,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	itemsFile, _ := cmd.Flags().GetString("items-file")
 	params.ItemsFile = itemsFile
+	params.AllowEmptySelection, _ = cmd.Flags().GetBool("allow-empty-selection")
+	params.IntegrityMaxConsoleFailures, _ = cmd.Flags().GetInt("integrity-max-console-failures")
 
 	readShuffle, _ := cmd.Flags().GetBool(flagReadShuffle)
 	params.ReadShuffle = readShuffle
@@ -1552,7 +1770,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.MinimalTUI = minimalTUI
 
 	// Set defaults (tables workload has no object size concept)
-	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeTables {
+	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList &&
+		params.WorkloadType != WorkloadTypeReadVerify && params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
 	}
 
@@ -1658,7 +1877,8 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 	if shardCount == 0 {
 		return nil
 	}
-	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeRead &&
+	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeWriteVerify &&
+		params.WorkloadType != WorkloadTypeRead &&
 		params.WorkloadType != WorkloadTypeMixed {
 		return fmt.Errorf("--%s is not supported for %s workload", flagPrefixShards, params.WorkloadType)
 	}
@@ -1689,7 +1909,8 @@ func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, e
 	if err != nil || shardCount != prefixShardsAuto {
 		return shardCount, err
 	}
-	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeMixed &&
+	if params.WorkloadType != WorkloadTypeWrite && params.WorkloadType != WorkloadTypeWriteVerify &&
+		params.WorkloadType != WorkloadTypeMixed &&
 		(params.WorkloadType != WorkloadTypeRead || params.ItemsFile != "") {
 		return 0, nil
 	}
@@ -1732,7 +1953,7 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
 	}
-	if params.WorkloadType == WorkloadTypeList {
+	if params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
@@ -1835,7 +2056,7 @@ func appendS3DisplayLines(lines []string, params scenario.Params) []string {
 		lines = append(lines, "Bucket: (not set)")
 	}
 
-	if params.WorkloadType == WorkloadTypeList {
+	if params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		if params.Prefix != "" {
 			lines = append(lines, fmt.Sprintf("Prefix: %s", params.Prefix))
 		} else {
@@ -1872,4 +2093,21 @@ func appendS3DisplayLines(lines []string, params scenario.Params) []string {
 	}
 
 	return lines
+}
+
+func integrityCostNotices(params scenario.Params) []string {
+	if params.WorkloadType != WorkloadTypeWriteVerify {
+		return nil
+	}
+	var notices []string
+	if params.PartSize != "" {
+		notices = append(notices,
+			"Integrity notice: each multipart object is fully pre-hashed before multipart initiation.")
+	}
+	if params.Checksum != "" &&
+		(params.PartSize != "" || !strings.EqualFold(params.Checksum, scenario.ChecksumSHA256)) {
+		notices = append(notices,
+			"Integrity notice: the selected transport checksum requires an additional payload digest pass; see integrity.performance.csv.")
+	}
+	return notices
 }

@@ -144,6 +144,8 @@ storage:
       expectedProducerId: string
       provenance: string
     mode: string
+    selection:
+      maxCount: long
   namespace: string
   net:
     node:

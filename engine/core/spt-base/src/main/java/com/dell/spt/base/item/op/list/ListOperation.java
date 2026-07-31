@@ -4,6 +4,7 @@ import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.storage.driver.ListOptions;
+import java.util.List;
 
 /**
  * Specialized path operation representing an S3 LIST page.
@@ -14,6 +15,14 @@ public interface ListOperation<I extends PathItem> extends PathOperation<I> {
 	int objectsListed();
 
 	void objectsListed(int n);
+
+	/** Bounded concrete object records returned by this page. */
+	default List<ListedObject> listedObjects() {
+		return List.of();
+	}
+
+	/** Replaces the concrete object records returned by this page. */
+	default void listedObjects(final List<ListedObject> objects) {}
 
 	/** Returns aggregated bytes across listed objects (0 when metadata absent). */
 	long bytesListed();

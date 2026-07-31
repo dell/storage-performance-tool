@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.load.step.client.LoadStepClient.OUTPUT_PROGRESS_PERIOD_MILLIS;
 
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
@@ -30,6 +32,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	private final String loadStepId;
 	private final Map<FileManager, String> itemInputFileSlices;
 	private final List<FileManager> fileMgrs;
+	private final boolean strictMode;
 
 	public <I extends Item> ItemInputFileSlicer(
 					final String loadStepId,
@@ -37,7 +40,18 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					final List<Config> configSlices,
 					final Input<I> itemInput,
 					final int batchSize) {
+		this(loadStepId, fileMgrs, configSlices, itemInput, batchSize, false);
+	}
+
+	public <I extends Item> ItemInputFileSlicer(
+					final String loadStepId,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final Input<I> itemInput,
+					final int batchSize,
+					final boolean strictMode) {
 		this.loadStepId = loadStepId;
+		this.strictMode = strictMode;
 		final var sliceCount = configSlices.size();
 		itemInputFileSlices = new HashMap<>(sliceCount);
 		this.fileMgrs = fileMgrs;
@@ -54,6 +68,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				configSlice.val("item-input-file", itemInputFileName);
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
+				if (strictMode) {
+					throw terminal("failed to allocate item input file for slice " + i, e);
+				}
 				LogUtil.exception(
 								Level.ERROR, e, "Failed to get the item input file name for the step slice #" + i);
 			}
@@ -63,36 +80,53 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			Loggers.MSG.info("{}: scatter the items from the input \"{}\"...", loadStepId, itemInput);
 			scatterItems(itemInput, batchSize);
 		} catch (final IOException e) {
+			if (strictMode) {
+				throw terminal("failed to parse or scatter canonical integrity input", e);
+			}
 			LogUtil.exception(Level.WARN, e, "{}: failed to use the item input", loadStepId);
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
+			if (strictMode) {
+				throw terminal("unexpected canonical integrity input failure", cause);
+			}
 			LogUtil.exception(Level.ERROR, cause, "{}: unexpected failure", loadStepId);
 		}
 	}
 
 	@Override
 	public final void close() {
-		itemInputFileSlices
-						.entrySet()
-						.parallelStream()
-						.forEach(
-										entry -> {
-											final var fileMgr = entry.getKey();
-											final var itemInputFileName = entry.getValue();
-											try {
-												fileMgr.deleteFile(itemInputFileName);
-											} catch (final Exception e) {
-												throwUncheckedIfInterrupted(e);
-												LogUtil.exception(
-																Level.WARN,
-																e,
-																"{}: failed to delete the file \"{}\" @ file manager \"{}\"",
-																loadStepId,
-																itemInputFileName,
-																fileMgr);
-											}
-										});
+		Throwable cleanupFailure = null;
+		for (final var entry : itemInputFileSlices.entrySet()) {
+			final var fileMgr = entry.getKey();
+			final var itemInputFileName = entry.getValue();
+			try {
+				fileMgr.deleteFile(itemInputFileName);
+			} catch (final Exception e) {
+				throwUncheckedIfInterrupted(e);
+				LogUtil.exception(
+								Level.WARN,
+								e,
+								"{}: failed to delete the file \"{}\" @ file manager \"{}\"",
+								loadStepId,
+								itemInputFileName,
+								fileMgr);
+				if (strictMode) {
+					if (cleanupFailure == null) {
+						cleanupFailure = e;
+					} else {
+						cleanupFailure.addSuppressed(e);
+					}
+				}
+			}
+		}
 		itemInputFileSlices.clear();
+		if (cleanupFailure != null) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CLEANUP,
+							loadStepId,
+							"failed to remove one or more distributed integrity input slices",
+							cleanupFailure);
+		}
 	}
 
 	private <I extends Item> void scatterItems(final Input<I> itemInput, final int batchSize)
@@ -179,6 +213,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				itemsBuff.clear();
 
 				// write the text items data to the remote input files
+				final var writeFailure = new AtomicReference<IOException>();
 				fileMgrs
 								.stream()
 								.filter(fm -> fm != null)
@@ -192,6 +227,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 														fileMgr.writeToFile(itemInputFileName, data);
 														buff.reset();
 													} catch (final IOException e) {
+														writeFailure.compareAndSet(null, e);
 														LogUtil.exception(
 																		Level.WARN,
 																		e,
@@ -200,6 +236,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 																		(fileMgr instanceof FileManagerService ? "remote" : "local"));
 													}
 												});
+				if (strictMode && writeFailure.get() != null) {
+					throw writeFailure.get();
+				}
 
 				count += n;
 
@@ -229,6 +268,11 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to close item input slice stream", loadStepId);
 		}
+	}
+
+	private IntegrityTerminalException terminal(final String message, final Throwable cause) {
+		return new IntegrityTerminalException(
+						IntegrityTerminalException.Category.INPUT, loadStepId, message, cause);
 	}
 
 	@FunctionalInterface

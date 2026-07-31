@@ -1087,10 +1087,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							checksumStrategy.requestHeaderName, BASE64_ENCODER.encodeToString(digestBytes));
 			return;
 		}
-		if (integrityMetadataEnabled() && OpType.CREATE.equals(op.type())) {
-			recordIntegrityAdditionalPayloadPass();
-		}
-
 		var dataItem = (DataItem) op.item();
 		final MessageDigest digest = checksumStrategy.digestSupplier.get();
 
@@ -1131,6 +1127,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			// Always reset the data item
 			dataItem.reset();
 		}
+	}
+
+	@Override
+	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
+		return checksumStrategy != null
+						&& (op instanceof CompositeDataOperation
+										|| !IntegrityMetadataCodec.ALGORITHM_SHA256.equals(checksumStrategy.configToken));
 	}
 
 	@Override
@@ -1688,7 +1691,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final String bucket = multipartBucket(op);
 		final String key = multipartKey(op, bucket);
-		IntegrityCsvArtifacts.logMultipartLifecycle(
+		IntegrityCsvArtifacts.logMultipartLifecycleOnce(
+						op,
 						IntegrityCsvArtifacts.nodeIdentity(),
 						stepId,
 						driverType(),

@@ -28,7 +28,10 @@ public class FileManagerImpl implements FileManager {
 	public final String logFileName(final String loggerName, final String testStepId) {
 		try (final CloseableThreadContext.Instance logCtx = put(KEY_STEP_ID, testStepId)) {
 			final Logger logger = LogManager.getLogger(loggerName);
-			final Appender appender = ((AsyncLogger) logger).getAppenders().get("opTraceFile");
+			final Appender appender = ((AsyncLogger) logger).getAppenders().values().stream()
+							.filter(RollingRandomAccessFileAppender.class::isInstance)
+							.findFirst()
+							.orElseThrow(() -> new IllegalStateException("logger has no rolling file appender: " + loggerName));
 			final String filePtrn = ((RollingRandomAccessFileAppender) appender).getFilePattern();
 			return filePtrn.contains(LOG_CONFIG_STEP_ID_PTRN)
 							? filePtrn.replace(LOG_CONFIG_STEP_ID_PTRN, testStepId)

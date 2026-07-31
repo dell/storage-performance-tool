@@ -114,3 +114,34 @@ truncated.
 ```bash
 java spt-<VERSION>.jar --item-naming-lenth=15 ...
 ```
+
+## 4. Integrity manifest input
+
+Metadata verification auto-detects a canonical RFC 4180 CSV only when its first
+record exactly matches:
+
+```text
+bucket,key,size,version_id
+```
+
+The complete object key is CSV-escaped and is never parsed as a generated
+numeric ID. `size` is a nonnegative decimal byte count. `version_id` may be
+blank for current-version semantics or contain the exact S3 version to request.
+Identity for de-duplication and resumability is `(bucket,key,version_id)`.
+Quoted keys, including embedded newlines, are supported. A file without the
+exact header continues through the legacy item-file reader, preserving existing
+QA formats for current-version reads.
+
+Engine-produced `written.csv`, discovery-produced `verify-input.csv`, and
+verification-produced `verified.csv` have matching `*.complete.json` records.
+The marker is published only after its CSV and binds version/status, positive
+`run_id`, producer kind and ID, source/unique/selected counts, byte length, and
+SHA-256. `engine_step` provenance requires the exact producing step ID;
+`cli_stager` requires `spt-cli-items-stager-v1`. A missing, malformed, stale, or
+mismatched marker prevents dependent I/O.
+
+LIST discovery streams complete object entries into per-node sources, merges
+RFC 4180 records in stable node order, de-duplicates shard overlap, applies the
+configured selection maximum, publishes `verify-input.csv`, and only then
+starts READ. QA-owned `external` input is parsed and validated but intentionally
+does not require an engine completion marker.

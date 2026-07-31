@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 )
 
 const containerItemFilesDir = "/spt-input/items"
@@ -24,9 +26,21 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 	var mounts []FileMount
 	var err error
 	if params.ItemsFile != "" {
-		params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
-		if err != nil {
-			return params, fmt.Errorf("--items-file: %w", err)
+		if params.WorkloadType == WorkloadTypeReadVerify {
+			stagingDir, manifest, marker, stageErr := integrity.StageInputManifest(params.ItemsFile, params.RunID)
+			if stageErr != nil {
+				return params, fmt.Errorf("--items-file: %w", stageErr)
+			}
+			params.ItemStagingDirs = append(params.ItemStagingDirs, stagingDir)
+			params.ItemsFile = containerItemFilesDir + "/" + integrity.VerifyInputName
+			mounts = append(mounts,
+				FileMount{HostPath: manifest, ContainerPath: params.ItemsFile},
+				FileMount{HostPath: marker, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})
+		} else {
+			params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
+			if err != nil {
+				return params, fmt.Errorf("--items-file: %w", err)
+			}
 		}
 	}
 	if params.ReadItemsFile != "" {
@@ -67,4 +81,13 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 	containerPath := containerItemFilesDir + "/" + containerName
 	mounts = append(mounts, FileMount{HostPath: absPath, ContainerPath: containerPath})
 	return containerPath, mounts, nil
+}
+
+// CleanupPreparedItemFiles removes only private staging directories created by this package.
+func CleanupPreparedItemFiles(params Params) {
+	for _, dir := range params.ItemStagingDirs {
+		if strings.HasPrefix(filepath.Base(dir), "spt-integrity-input-") {
+			_ = os.RemoveAll(dir)
+		}
+	}
 }

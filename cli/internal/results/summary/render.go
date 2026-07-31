@@ -58,6 +58,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderEnvironment(b, summary)
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderIntegrity(b, summary)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
@@ -104,6 +105,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
+	r.renderCompactIntegrity(sb, summary)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -206,6 +208,42 @@ func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Performance by Phase\n")
 	b.WriteString(r.performanceTable(summary))
 	b.WriteString("\n\n")
+}
+
+func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
+	if summary.Integrity == nil {
+		return
+	}
+	integrity := summary.Integrity
+	digest := integrity.DigestPerformance
+	fmt.Fprintf(b, "Integrity Verification\n")
+	r.writeBullet(b, "Selection", fmt.Sprintf("selected %d, attempted %d, verified %d, remaining %d, corrupt %d",
+		integrity.SelectionCount, integrity.VerificationAttemptedCount, integrity.VerifiedCount,
+		integrity.RemainingCount, integrity.CorruptCount))
+	r.writeBullet(b, "Digest work", fmt.Sprintf("%d objects, %s", digest.Objects, formatBytesHuman(digest.Bytes)))
+	r.writeBullet(b, "Digest worker time", fmt.Sprintf("%.6f s cumulative worker time", digest.HashWorkerSeconds))
+	r.writeBullet(b, "Mean worker rate", fmt.Sprintf("%.3f MiB/s", digest.MeanWorkerHashMiBPerSecond))
+	if digest.InitialWriteDelaySecondsMaxNode != nil {
+		r.writeBullet(b, "Initial write delay", fmt.Sprintf("%.6f s (maximum node interval)", *digest.InitialWriteDelaySecondsMaxNode))
+	}
+	r.writeBullet(b, "Additional passes", fmt.Sprintf("%d full payload passes", digest.AdditionalPayloadPasses))
+	b.WriteString("\n")
+}
+
+func (r *Renderer) renderCompactIntegrity(b *strings.Builder, summary *RunSummary) {
+	if summary.Integrity == nil {
+		return
+	}
+	i := summary.Integrity
+	d := i.DigestPerformance
+	fmt.Fprintf(b, "Integrity: selected %d, attempted %d, verified %d, remaining %d, corrupt %d\n",
+		i.SelectionCount, i.VerificationAttemptedCount, i.VerifiedCount, i.RemainingCount, i.CorruptCount)
+	fmt.Fprintf(b, "Digest work: %d objects, %s, %.6f cumulative worker seconds, %.3f MiB/s mean worker rate",
+		d.Objects, formatBytesHuman(d.Bytes), d.HashWorkerSeconds, d.MeanWorkerHashMiBPerSecond)
+	if d.InitialWriteDelaySecondsMaxNode != nil {
+		fmt.Fprintf(b, ", %.6f s maximum-node initial write delay", *d.InitialWriteDelaySecondsMaxNode)
+	}
+	fmt.Fprintf(b, ", %d additional full payload passes\n", d.AdditionalPayloadPasses)
 }
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {

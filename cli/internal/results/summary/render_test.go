@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
 func TestRendererFullReportIncludesSections(t *testing.T) {
@@ -89,6 +91,32 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 	if !headerFound {
 		t.Fatalf("table header not found in report:\n%s", report)
 	}
+}
+
+func TestRendererReportsIntegrityDigestCostSeparately(t *testing.T) {
+	t.Parallel()
+	delay := 0.25
+	summary := &RunSummary{
+		Integrity: &results.IntegritySummary{
+			SelectionCount: 4, VerificationAttemptedCount: 4, VerifiedCount: 3,
+			RemainingCount: 1, CorruptCount: 1,
+			DigestPerformance: results.IntegrityPerformanceSummary{
+				Objects: 8, Bytes: 8 * 1024 * 1024, HashWorkerSeconds: 0.5,
+				MeanWorkerHashMiBPerSecond: 16, InitialWriteDelaySecondsMaxNode: &delay,
+				AdditionalPayloadPasses: 2,
+			},
+		},
+	}
+
+	report := NewRenderer(RenderOptions{}).FullReport(summary)
+	for _, want := range []string{
+		"Integrity Verification", "selected 4, attempted 4, verified 3, remaining 1, corrupt 1",
+		"8 objects, 8.00 MiB", "0.500000 s cumulative worker time", "16.000 MiB/s",
+		"0.250000 s (maximum node interval)", "2 full payload passes",
+	} {
+		mustContain(t, report, want)
+	}
+	mustNotContain(t, report, "overhead")
 }
 
 func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {

@@ -11,6 +11,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
@@ -1077,10 +1078,24 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (opsResultsOutput != null) {
 			try {
 				if (!opsResultsOutput.put(opResult)) {
+					if (driver.metadataIntegrityEnabled()) {
+						throw new IntegrityTerminalException(
+										IntegrityTerminalException.Category.PUBLICATION,
+										id,
+										"integrity manifest output rejected a successful operation",
+										null);
+					}
 					Loggers.ERR.warn("Failed to output the I/O result");
 				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
+				if (driver.metadataIntegrityEnabled() && e instanceof IOException) {
+					throw new IntegrityTerminalException(
+									IntegrityTerminalException.Category.PUBLICATION,
+									id,
+									"failed to publish a successful operation to the integrity manifest",
+									e);
+				}
 				if (e instanceof EOFException) {
 					LogUtil.exception(Level.DEBUG, e, "Load operations results destination end of input");
 				} else if (e instanceof IOException) {

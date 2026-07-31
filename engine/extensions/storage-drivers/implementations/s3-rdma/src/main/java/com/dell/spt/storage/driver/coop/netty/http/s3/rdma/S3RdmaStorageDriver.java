@@ -484,19 +484,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	public void complete(final Channel channel, final O op) {
 		final RdmaContext ctx = rdmaOps.remove(op);
 		if (ctx != null) {
-			try {
-				if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
-					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
-					body.position(0);
-					body.limit(ctx.size);
-					finishOutOfBandIntegrityRead(channel, op, body);
-					((DataOperation) op).countBytesDone(ctx.size);
-				}
-			} finally {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-			}
+			completeRdmaContext(channel, op, ctx);
 		}
 		super.complete(channel, op);
+	}
+
+	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
+		try {
+			if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
+				final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
+				body.position(0);
+				body.limit(ctx.size);
+				finishOutOfBandIntegrityRead(channel, op, body);
+				((DataOperation) op).countBytesDone(ctx.size);
+			}
+		} finally {
+			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+		}
 	}
 
 	/**

@@ -1050,6 +1050,11 @@ public class S3AwsStorageDriverTest {
 			assertEquals("mybucket", cap.getValue().bucket());
 
 			verify(op).objectsListed(2);
+			@SuppressWarnings("rawtypes")
+			ArgumentCaptor<List> objects = ArgumentCaptor.forClass(List.class);
+			verify(op).listedObjects(objects.capture());
+			assertEquals("obj1", ((com.dell.spt.base.item.op.list.ListedObject) objects.getValue().get(0)).key());
+			assertEquals(100L, ((com.dell.spt.base.item.op.list.ListedObject) objects.getValue().get(0)).size());
 			verify(op).truncated(false);
 			verify(op).pageFirstKey("obj1");
 			verify(op).startAfter("obj2");

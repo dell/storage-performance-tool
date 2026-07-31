@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,9 +20,56 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	dockerconf "github.com/dell/storage-performance-tool/cli/internal/docker"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
+
+type identityPreflight struct {
+	identities    map[string]preflight.ImageIdentity
+	errors        map[string]error
+	payloads      map[string]string
+	payloadErrors map[string]error
+	payloadCalls  *atomic.Int64
+}
+
+func (f identityPreflight) InspectPayloadIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (string, error) {
+	if f.payloadCalls != nil {
+		f.payloadCalls.Add(1)
+	}
+	if err := f.payloadErrors[host.Original]; err != nil {
+		return "", err
+	}
+	return f.payloads[host.Original], nil
+}
+
+func (f identityPreflight) CheckDocker(context.Context, *hostparse.HostInfo) (string, error) {
+	return "test", nil
+}
+
+func (f identityPreflight) EnsureImage(context.Context, *hostparse.HostInfo, string) error {
+	return nil
+}
+
+func (f identityPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int) (*dockerconf.ConflictInfo, error) {
+	return &dockerconf.ConflictInfo{}, nil
+}
+
+func (f identityPreflight) InspectImageIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (preflight.ImageIdentity, error) {
+	if err := f.errors[host.Original]; err != nil {
+		return preflight.ImageIdentity{}, err
+	}
+	return f.identities[host.Original], nil
+}
 
 func TestMultiHostOrchestrator_NewMultiHostTestOrchestrator(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
@@ -990,6 +1038,253 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_SingleHostPostsProvidedA
 	}
 	if !orchestrator.hosts[0].IsManaged() {
 		t.Fatal("expected single-host replay container to be marked managed")
+	}
+}
+
+func TestDistributedIntegrityImageIdentityRecordsMatchingFleet(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":  {ID: id, RepoDigests: []string{"repo/spt@sha256:one"}},
+		"worker": {ID: id},
+	}, payloadCalls: payloadCalls}
+	var recorded *DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = &evidence
+	})
+
+	evidence, err := orchestrator.verifyDistributedIntegrityImageIdentity(context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ImageID != id || evidence.Tier != distributedRuntimeIdentityTierImmutableImage || len(evidence.Participants) != 2 {
+		t.Fatalf("unexpected evidence: %+v", evidence)
+	}
+	if recorded == nil || recorded.ImageID != id {
+		t.Fatalf("runtime identity recorder received %+v", recorded)
+	}
+	if payloadCalls.Load() != 0 {
+		t.Fatalf("image tier made %d payload probes, want 0", payloadCalls.Load())
+	}
+}
+
+func TestAvailableIntegrityImageIdentityRecordsSingleParticipant(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry": {ID: id, RepoDigests: []string{"repo/spt@sha256:one"}},
+	}}
+	var recorded *DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = &evidence
+	})
+
+	evidence, err := orchestrator.RecordAvailableIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Tier != RuntimeIdentityTierAvailableImage || evidence.ImageID != id ||
+		len(evidence.Participants) != 1 {
+		t.Fatalf("unexpected evidence: %+v", evidence)
+	}
+	if recorded == nil || recorded.ImageID != id {
+		t.Fatalf("runtime identity recorder received %+v", recorded)
+	}
+}
+
+func TestDistributedIntegrityPayloadIdentityRecordsMatchingFleet(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities:   map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:     map[string]string{"entry": payload, "worker": payload},
+		payloadCalls: payloadCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	evidence, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Tier != distributedRuntimeIdentityTierImageAndPayload || evidence.PayloadSHA256 != payload {
+		t.Fatalf("unexpected payload evidence: %+v", evidence)
+	}
+	for _, participant := range evidence.Participants {
+		if participant.PayloadSHA256 != payload {
+			t.Fatalf("participant payload evidence = %+v", participant)
+		}
+	}
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	if payloadCalls.Load() != 2 {
+		t.Fatalf("payload probes = %d after cached second prepare, want 2", payloadCalls.Load())
+	}
+}
+
+func TestDistributedIntegrityPayloadMismatchStopsBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].DockerManager = workerDM
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:   map[string]string{"entry": strings.Repeat("b", 64), "worker": strings.Repeat("c", 64)},
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(), "repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify}, []byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "payload identity mismatch") ||
+		!strings.Contains(err.Error(), "entry") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+	if len(entryDM.GetEntryNodeCalls()) != 0 || len(workerDM.GetWorkerNodeCalls()) != 0 {
+		t.Fatal("mixed payload fleet started containers before the identity gate")
+	}
+}
+
+func TestDistributedIntegrityPayloadUnavailableNamesHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{
+		identities:    map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:      map[string]string{"entry": strings.Repeat("b", 64)},
+		payloadErrors: map[string]error{"worker": errors.New("sha256sum unavailable")},
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	_, err := orchestrator.verifyDistributedIntegrityImageIdentity(context.Background(), "repo/spt:test")
+	if err == nil || !strings.Contains(err.Error(), "payload identity unavailable") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("payload identity error = %v", err)
+	}
+}
+
+func TestDistributedIntegrityImageMismatchStopsBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].DockerManager = workerDM
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":  {ID: "sha256:" + strings.Repeat("a", 64)},
+		"worker": {ID: "sha256:" + strings.Repeat("b", 64)},
+	}}
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "image identity mismatch") ||
+		!strings.Contains(err.Error(), "entry") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+	if len(entryDM.GetEntryNodeCalls()) != 0 || len(workerDM.GetWorkerNodeCalls()) != 0 {
+		t.Fatal("mixed image fleet started containers before the identity gate")
+	}
+}
+
+func TestDistributedIntegrityRejectsAttachedWorkersBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetAttachExistingWorkers(true)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "runtime image identity is not provable") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+}
+
+func TestMultiHostIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *testing.T) {
+	var runPosts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string"}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err := wrapper.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDocker.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+	if orchestrator.hosts[0].IsManaged() {
+		t.Fatal("failed capability gate left the host marked managed")
 	}
 }
 

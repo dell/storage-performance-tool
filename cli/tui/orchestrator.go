@@ -236,6 +236,16 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 		return fmt.Errorf("spt API failed to become ready: %w", err)
 	}
 
+	if scenario.IsIntegrityWorkload(params) {
+		if err := o.apiClient.VerifyIntegrityCapability(image); err != nil {
+			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
+			if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+				logging.LogError("orchestrator", "failed to cleanup container after capability failure", cleanupErr)
+			}
+			return err
+		}
+	}
+
 	if o.apiClient != nil {
 		o.apiClient.LogReadySnapshot("pre-start")
 	}

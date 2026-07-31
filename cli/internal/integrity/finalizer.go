@@ -1,0 +1,868 @@
+package integrity
+
+import (
+	"encoding/csv"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
+)
+
+// WrittenName and the constants in this block are canonical integrity result artifact names.
+const (
+	WrittenName              = "written.csv"
+	WrittenCompletionName    = "written.complete.json"
+	VerifiedName             = "verified.csv"
+	VerifiedCompletionName   = "verified.complete.json"
+	VerifyRemainingName      = "verify-remaining.csv"
+	IntegrityFailuresName    = "integrity.failures.csv"
+	IntegrityPerformanceName = "integrity.performance.csv"
+	MultipartLifecycleName   = "multipart.lifecycle.csv"
+)
+
+var failureHeader = []string{
+	"timestamp", "node", "step", "driver", "key", "requested_version_id", "returned_version_id",
+	"request_id", "reason", "algorithm", "expected_digest", "actual_digest", "expected_size",
+	"actual_size", "first_mismatch_offset", "attempt",
+}
+
+var performanceHeader = []string{
+	"node", "step", "driver", "phase", "algorithm", "objects", "bytes", "hash_worker_seconds",
+	"mean_worker_hash_mib_per_second", "time_to_first_request_seconds", "additional_payload_passes",
+}
+
+// FinalizeOptions binds the generated step roles and any CLI-staged input to one result run.
+type FinalizeOptions struct {
+	ResultsRoot         string
+	BaseURL             string
+	Workload            string
+	RunID               int64
+	StepIDs             []string
+	StagedManifest      string
+	StagedCompletion    string
+	AllowEmptySelection bool
+	MaxConsoleFailures  int
+	Multipart           bool
+}
+
+// FinalizeOutcome is the integrity-specific machine outcome used by console reporting and exit policy.
+type FinalizeOutcome struct {
+	SelectionCount             int64                               `json:"selection_count"`
+	VerificationAttemptedCount int64                               `json:"verification_attempted_count"`
+	VerifiedCount              int64                               `json:"verified_count"`
+	CorruptCount               int64                               `json:"corrupt_count"`
+	EmptySelection             bool                                `json:"empty_selection"`
+	EmptyAllowed               bool                                `json:"empty_allowed"`
+	RemainingCount             int64                               `json:"remaining_count"`
+	DigestPerformance          results.IntegrityPerformanceSummary `json:"digest_performance"`
+	FailureSamples             []FailureSample                     `json:"-"`
+}
+
+// FailureSample is a bounded, sanitized console projection of one canonical failure row.
+type FailureSample struct {
+	Key              string
+	RequestedVersion string
+	ReturnedVersion  string
+	RequestID        string
+	Reason           string
+	ExpectedDigest   string
+	ActualDigest     string
+	ExpectedSize     string
+	ActualSize       string
+}
+
+// FinalizeResults promotes role-specific evidence, validates commit records, derives the exact
+// remaining set, combines performance rows, and atomically updates index.json.
+func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
+	var outcome FinalizeOutcome
+	if options.Workload != workload.WriteVerify && options.Workload != workload.ReadVerify {
+		return outcome, fmt.Errorf("integrity finalizer does not support workload %q", options.Workload)
+	}
+	if options.RunID <= 0 || options.ResultsRoot == "" {
+		return outcome, fmt.Errorf("integrity finalization requires a positive run id and results root")
+	}
+	manifest, err := readResultsManifest(options.ResultsRoot)
+	if err != nil {
+		return outcome, err
+	}
+	createStep, listStep, readStep := resolveStepRoles(options.Workload, options.StepIDs, manifest)
+	if readStep == "" {
+		return outcome, fmt.Errorf("verification READ step could not be identified")
+	}
+	readCounts, metricsErr := readOperationMetrics(options.ResultsRoot, readStep, "READ")
+	if metricsErr != nil {
+		return outcome, metricsErr
+	}
+	outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
+	outcome.CorruptCount = readCounts.corrupt
+	if options.BaseURL != "" {
+		if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
+			return outcome, err
+		}
+	}
+
+	inputName := WrittenName
+	inputCompletionName := WrittenCompletionName
+	inputProducerKind := "engine_step"
+	inputProducerID := createStep
+	if options.Workload == workload.ReadVerify {
+		inputName = VerifyInputName
+		inputCompletionName = VerifyInputCompletionName
+		inputProducerID = listStep
+	}
+
+	inputPath := filepath.Join(options.ResultsRoot, inputName)
+	inputCompletionPath := filepath.Join(options.ResultsRoot, inputCompletionName)
+	if options.Workload == workload.ReadVerify && options.StagedManifest != "" {
+		inputProducerKind = "cli_stager"
+		inputProducerID = CLIStagerProducerID
+		if err = copyAtomic(options.StagedManifest, inputPath); err != nil {
+			return outcome, fmt.Errorf("promote staged verification input: %w", err)
+		}
+		if err = copyAtomic(options.StagedCompletion, inputCompletionPath); err != nil {
+			return outcome, fmt.Errorf("promote staged verification completion: %w", err)
+		}
+	} else {
+		producerStep := createStep
+		if options.Workload == workload.ReadVerify {
+			producerStep = listStep
+		}
+		if producerStep == "" {
+			return outcome, fmt.Errorf("verification input producer step could not be identified")
+		}
+		if err = promoteStepFile(options.ResultsRoot, producerStep, inputName); err != nil {
+			return outcome, err
+		}
+		if err = promoteStepFile(options.ResultsRoot, producerStep, inputCompletionName); err != nil {
+			return outcome, err
+		}
+	}
+	inputCompletion, err := ValidateCompletion(inputPath, inputCompletionPath, options.RunID, inputProducerKind, inputProducerID, inputName)
+	if err != nil {
+		return outcome, fmt.Errorf("validate %s: %w", inputName, err)
+	}
+	if options.Workload == workload.WriteVerify &&
+		(inputCompletion.SourceRecordCount != inputCompletion.SelectedRecordCount ||
+			inputCompletion.UniqueRecordCount != inputCompletion.SelectedRecordCount) {
+		return outcome, fmt.Errorf("%s completion counts must match for CREATE output", inputName)
+	}
+	outcome.SelectionCount = int64(inputCompletion.SelectedRecordCount)
+	if options.Workload == workload.WriteVerify {
+		createCounts, countsErr := readOperationMetrics(options.ResultsRoot, createStep, "CREATE")
+		if countsErr != nil {
+			return outcome, countsErr
+		}
+		if outcome.SelectionCount != createCounts.success {
+			return outcome, fmt.Errorf("written manifest count %d does not equal successful CREATE count %d",
+				outcome.SelectionCount, createCounts.success)
+		}
+	}
+	outcome.EmptySelection = outcome.SelectionCount == 0
+	outcome.EmptyAllowed = outcome.EmptySelection && options.Workload == workload.ReadVerify && options.AllowEmptySelection
+
+	verifiedPath := filepath.Join(options.ResultsRoot, VerifiedName)
+	verifiedCompletionPath := filepath.Join(options.ResultsRoot, VerifiedCompletionName)
+	if err = promoteStepFile(options.ResultsRoot, readStep, VerifiedName); err != nil {
+		return outcome, err
+	}
+	if err = promoteStepFile(options.ResultsRoot, readStep, VerifiedCompletionName); err != nil {
+		return outcome, err
+	}
+	verifiedCompletion, err := ValidateCompletion(verifiedPath, verifiedCompletionPath, options.RunID, "engine_step", readStep, VerifiedName)
+	if err != nil {
+		return outcome, fmt.Errorf("validate %s: %w", VerifiedName, err)
+	}
+	if verifiedCompletion.SourceRecordCount != verifiedCompletion.SelectedRecordCount ||
+		verifiedCompletion.UniqueRecordCount != verifiedCompletion.SelectedRecordCount {
+		return outcome, fmt.Errorf("%s completion counts must match for READ output", VerifiedName)
+	}
+	outcome.VerifiedCount = int64(verifiedCompletion.SelectedRecordCount)
+	if outcome.VerifiedCount != readCounts.success {
+		return outcome, fmt.Errorf("verified manifest count %d does not equal successful READ count %d",
+			outcome.VerifiedCount, readCounts.success)
+	}
+	if err = promoteStepFile(options.ResultsRoot, readStep, IntegrityFailuresName); err != nil {
+		return outcome, err
+	}
+	failureCount, samples, failureErr := readFailureArtifact(
+		filepath.Join(options.ResultsRoot, IntegrityFailuresName), options.MaxConsoleFailures)
+	if failureErr != nil {
+		return outcome, failureErr
+	}
+	outcome.FailureSamples = samples
+	if failureCount != outcome.CorruptCount {
+		return outcome, fmt.Errorf("integrity failure rows %d do not equal CountCorrupt %d", failureCount, outcome.CorruptCount)
+	}
+
+	inputSorted, inputUnique, err := sortManifestBounded(inputPath, options.ResultsRoot)
+	if err != nil {
+		return outcome, fmt.Errorf("sort %s: %w", inputName, err)
+	}
+	defer func() { _ = os.Remove(inputSorted) }()
+	verifiedSorted, verifiedUnique, err := sortManifestBounded(verifiedPath, options.ResultsRoot)
+	if err != nil {
+		return outcome, fmt.Errorf("sort %s: %w", VerifiedName, err)
+	}
+	defer func() { _ = os.Remove(verifiedSorted) }()
+	if inputUnique != inputCompletion.SelectedRecordCount || verifiedUnique != verifiedCompletion.SelectedRecordCount {
+		return outcome, fmt.Errorf("canonical manifest contains duplicate identities inconsistent with its completion record")
+	}
+	remaining, err := subtractSortedManifests(inputSorted, verifiedSorted, filepath.Join(options.ResultsRoot, VerifyRemainingName))
+	if err != nil {
+		return outcome, err
+	}
+	outcome.RemainingCount = int64(remaining)
+
+	if outcome.VerificationAttemptedCount != outcome.SelectionCount ||
+		outcome.VerifiedCount > outcome.VerificationAttemptedCount {
+		return outcome, fmt.Errorf("verification operation counts do not reconcile: selected=%d attempted=%d verified=%d",
+			outcome.SelectionCount, outcome.VerificationAttemptedCount, outcome.VerifiedCount)
+	}
+
+	performanceSteps := []string{readStep}
+	if options.Workload == workload.WriteVerify {
+		performanceSteps = []string{createStep, readStep}
+	}
+	outcome.DigestPerformance, err = combinePerformance(options.ResultsRoot, performanceSteps)
+	if err != nil {
+		return outcome, err
+	}
+	if options.Multipart {
+		if err = promoteStepFile(options.ResultsRoot, createStep, MultipartLifecycleName); err != nil {
+			return outcome, err
+		}
+	}
+
+	for _, name := range []string{inputName, inputCompletionName, VerifiedName, VerifiedCompletionName,
+		VerifyRemainingName, IntegrityFailuresName, IntegrityPerformanceName} {
+		if err = addRunFile(manifest, options.ResultsRoot, name); err != nil {
+			return outcome, err
+		}
+	}
+	if options.Multipart {
+		if err = addRunFile(manifest, options.ResultsRoot, MultipartLifecycleName); err != nil {
+			return outcome, err
+		}
+	}
+	manifest.Integrity = &results.IntegritySummary{
+		SelectionCount: outcome.SelectionCount, VerificationAttemptedCount: outcome.VerificationAttemptedCount,
+		VerifiedCount: outcome.VerifiedCount, CorruptCount: outcome.CorruptCount, RemainingCount: outcome.RemainingCount,
+		EmptySelection: outcome.EmptySelection, EmptyAllowed: outcome.EmptyAllowed,
+		DigestPerformance: outcome.DigestPerformance,
+	}
+	if err = writeResultsManifest(options.ResultsRoot, manifest); err != nil {
+		return outcome, err
+	}
+	return outcome, nil
+}
+
+func resolveStepRoles(workloadName string, configured []string, manifest *results.Manifest) (create, list, read string) {
+	ids := append([]string(nil), configured...)
+	for _, step := range manifest.Steps {
+		if !contains(ids, step.StepID) {
+			ids = append(ids, step.StepID)
+		}
+	}
+	for _, id := range ids {
+		switch {
+		case strings.HasSuffix(id, "-create"):
+			create = id
+		case strings.HasSuffix(id, "-list"):
+			list = id
+		case strings.HasSuffix(id, "-verify"):
+			read = id
+		}
+	}
+	if workloadName == workload.WriteVerify {
+		if create == "" && len(configured) > 0 {
+			create = configured[0]
+		}
+		if read == "" && len(configured) > 1 {
+			read = configured[1]
+		}
+	} else {
+		if read == "" && len(configured) > 0 {
+			read = configured[len(configured)-1]
+		}
+		if list == "" && len(configured) > 1 {
+			list = configured[0]
+		}
+	}
+	return create, list, read
+}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func promoteStepFile(root, step, name string) error {
+	if step == "" {
+		return fmt.Errorf("cannot promote %s without a producing step", name)
+	}
+	source := filepath.Join(root, step+"."+name)
+	if err := copyAtomic(source, filepath.Join(root, name)); err != nil {
+		return fmt.Errorf("promote %s from step %s: %w", name, step, err)
+	}
+	return nil
+}
+
+func copyAtomic(source, destination string) error {
+	in, err := os.Open(source) // #nosec G304 -- internally resolved result/staging path
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	tmp, err := os.CreateTemp(filepath.Dir(destination), ".integrity-promote-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err = io.Copy(tmp, in); err == nil {
+		err = tmp.Close()
+	} else {
+		_ = tmp.Close()
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err = os.Chmod(tmpPath, 0o600); err == nil {
+		err = os.Rename(tmpPath, destination)
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+	}
+	return err
+}
+
+func subtractSortedManifests(inputPath, verifiedPath, destination string) (int, error) {
+	input, err := openSortedManifest(inputPath)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = input.file.Close() }()
+	verified, err := openSortedManifest(verifiedPath)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = verified.file.Close() }()
+
+	tmp, err := os.CreateTemp(filepath.Dir(destination), ".verify-remaining-*")
+	if err != nil {
+		return 0, err
+	}
+	tmpPath := tmp.Name()
+	writer := csv.NewWriter(tmp)
+	writer.UseCRLF = true
+	if err = writer.Write(canonicalHeader); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return 0, err
+	}
+	left, leftErr := input.next()
+	right, rightErr := verified.next()
+	remaining := 0
+	for leftErr == nil {
+		if errors.Is(rightErr, io.EOF) || left.compare(right) < 0 {
+			if err = writer.Write(left.fields()); err != nil {
+				break
+			}
+			remaining++
+			left, leftErr = input.next()
+			continue
+		}
+		if left.compare(right) > 0 {
+			err = fmt.Errorf("verified identity %q is not in the selected input", right.identity())
+			break
+		}
+		if left.size != right.size {
+			err = fmt.Errorf("verified identity %q has a different size than selected input", right.identity())
+			break
+		}
+		left, leftErr = input.next()
+		right, rightErr = verified.next()
+	}
+	if err == nil && !errors.Is(leftErr, io.EOF) {
+		err = leftErr
+	}
+	if err == nil && rightErr == nil {
+		err = fmt.Errorf("verified identity %q is not in the selected input", right.identity())
+	}
+	if err == nil && !errors.Is(rightErr, io.EOF) {
+		err = rightErr
+	}
+	writer.Flush()
+	if err == nil {
+		err = writer.Error()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Chmod(tmpPath, 0o600)
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, destination)
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("derive %s: %w", VerifyRemainingName, err)
+	}
+	return remaining, nil
+}
+
+type sortedManifest struct {
+	file   *os.File
+	reader *csv.Reader
+}
+
+func openSortedManifest(path string) (*sortedManifest, error) {
+	file, err := os.Open(path) // #nosec G304 -- private sorted path
+	if err != nil {
+		return nil, err
+	}
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = len(canonicalHeader)
+	header, err := reader.Read()
+	if err != nil || !equalFields(header, canonicalHeader) {
+		_ = file.Close()
+		return nil, fmt.Errorf("sorted manifest has invalid header")
+	}
+	return &sortedManifest{file: file, reader: reader}, nil
+}
+
+func (manifest *sortedManifest) next() (ManifestRecord, error) {
+	fields, err := manifest.reader.Read()
+	if err != nil {
+		return ManifestRecord{}, err
+	}
+	return parseManifestRecord(fields, 0)
+}
+
+func readFailureArtifact(filePath string, maxSamples int) (int64, []FailureSample, error) {
+	file, err := os.Open(filePath) // #nosec G304 -- internally promoted results path
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = file.Close() }()
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = len(failureHeader)
+	header, err := reader.Read()
+	if err != nil || !equalFields(header, failureHeader) {
+		return 0, nil, fmt.Errorf("%s has an invalid header", IntegrityFailuresName)
+	}
+	allowedReasons := map[string]struct{}{
+		"metadata_missing": {}, "metadata_invalid": {}, "algorithm_unsupported": {},
+		"size_mismatch": {}, "digest_mismatch": {},
+	}
+	var count int64
+	var samples []FailureSample
+	for {
+		row, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return 0, nil, fmt.Errorf("parse %s row %d: %w", IntegrityFailuresName, count+2, readErr)
+		}
+		count++
+		if _, ok := allowedReasons[row[8]]; !ok {
+			return 0, nil, fmt.Errorf("%s row %d has unsupported reason %q", IntegrityFailuresName, count+1, row[8])
+		}
+		if maxSamples > 0 && len(samples) < maxSamples {
+			samples = append(samples, FailureSample{
+				Key: row[4], RequestedVersion: row[5], ReturnedVersion: row[6], RequestID: row[7],
+				Reason: row[8], ExpectedDigest: row[10], ActualDigest: row[11], ExpectedSize: row[12], ActualSize: row[13],
+			})
+		}
+	}
+	return count, samples, nil
+}
+
+type operationCounts struct {
+	success int64
+	failure int64
+	corrupt int64
+}
+
+func readOperationMetrics(root, step, opType string) (operationCounts, error) {
+	var counts operationCounts
+	metricsPath := filepath.Join(root, step+"."+constants.ResultsArtifactSuffixMetricsTotal)
+	file, err := os.Open(metricsPath) // #nosec G304 -- internally resolved results path
+	if err != nil {
+		return counts, fmt.Errorf("open %s metrics: %w", opType, err)
+	}
+	defer func() { _ = file.Close() }()
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil || len(records) < 2 {
+		return counts, fmt.Errorf("parse %s metrics: %w", opType, err)
+	}
+	columns := make(map[string]int, len(records[0]))
+	for i, name := range records[0] {
+		columns[name] = i
+	}
+	for _, required := range []string{"OpType", "CountSucc", "CountFail", "CountCorrupt"} {
+		if _, ok := columns[required]; !ok {
+			return counts, fmt.Errorf("%s metrics missing required column %s", opType, required)
+		}
+	}
+	matched := false
+	for rowIndex, row := range records[1:] {
+		if len(row) != len(records[0]) || !strings.EqualFold(strings.TrimSpace(row[columns["OpType"]]), opType) {
+			continue
+		}
+		matched = true
+		values := []*int64{&counts.success, &counts.failure, &counts.corrupt}
+		for i, column := range []string{"CountSucc", "CountFail", "CountCorrupt"} {
+			value, parseErr := strconv.ParseInt(row[columns[column]], 10, 64)
+			if parseErr != nil || value < 0 {
+				return counts, fmt.Errorf("parse %s row %d: %w", column, rowIndex+2, parseErr)
+			}
+			*values[i] += value
+		}
+	}
+	if !matched {
+		return counts, fmt.Errorf("%s metrics contain no %s row", opType, opType)
+	}
+	if counts.corrupt > counts.failure {
+		return counts, fmt.Errorf("%s corrupt count %d exceeds failure count %d", opType, counts.corrupt, counts.failure)
+	}
+	return counts, nil
+}
+
+func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
+	for _, endpoint := range []string{"/metrics/fleet/json", "/metrics/json"} {
+		url := strings.TrimSuffix(baseURL, "/") + endpoint
+		response, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
+		if err != nil {
+			return fmt.Errorf("fetch required corruption metrics from %s: %w", endpoint, err)
+		}
+		if response.StatusCode == http.StatusNotFound {
+			_ = response.Body.Close()
+			continue
+		}
+		if response.StatusCode != http.StatusOK {
+			_ = response.Body.Close()
+			return fmt.Errorf("required corruption metrics endpoint %s returned HTTP %d", endpoint, response.StatusCode)
+		}
+		var rows []struct {
+			StepID     string `json:"step_id"`
+			OpType     string `json:"op_type"`
+			Operations struct {
+				CorruptCount *int64 `json:"corrupt_count"`
+			} `json:"operations"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&rows)
+		_ = response.Body.Close()
+		if decodeErr != nil {
+			return fmt.Errorf("decode required corruption metrics from %s: %w", endpoint, decodeErr)
+		}
+		var observed int64
+		matched := false
+		for _, row := range rows {
+			if row.StepID != readStep || !strings.EqualFold(row.OpType, "READ") {
+				continue
+			}
+			matched = true
+			if row.Operations.CorruptCount == nil {
+				return fmt.Errorf("verification JSON metrics missing operations.corrupt_count for step %s", readStep)
+			}
+			observed += *row.Operations.CorruptCount
+		}
+		if !matched {
+			// A present fleet endpoint without this step may be a single-host empty view; try node metrics.
+			if endpoint == "/metrics/fleet/json" {
+				continue
+			}
+			return fmt.Errorf("verification JSON metrics contain no READ row for step %s", readStep)
+		}
+		if observed != expected {
+			return fmt.Errorf("JSON corruption count %d does not match CountCorrupt %d", observed, expected)
+		}
+		return nil
+	}
+	return fmt.Errorf("verification JSON metrics are unavailable")
+}
+
+func combinePerformance(root string, steps []string) (results.IntegrityPerformanceSummary, error) {
+	var summary results.IntegrityPerformanceSummary
+	destination := filepath.Join(root, IntegrityPerformanceName)
+	tmp, err := os.CreateTemp(root, ".integrity-performance-*")
+	if err != nil {
+		return summary, err
+	}
+	tmpPath := tmp.Name()
+	writer := csv.NewWriter(tmp)
+	writer.UseCRLF = true
+	if err = writer.Write(performanceHeader); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return summary, err
+	}
+	seen := make(map[string]struct{})
+	phaseOrder := []string{"write_prehash", "read_verify"}
+	phaseTotals := make(map[string]*results.IntegrityPhaseSummary, len(phaseOrder))
+	for _, phase := range phaseOrder {
+		phaseTotals[phase] = &results.IntegrityPhaseSummary{Phase: phase}
+	}
+	for stepIndex, step := range steps {
+		path := filepath.Join(root, step+"."+IntegrityPerformanceName)
+		file, openErr := os.Open(path) // #nosec G304 -- internally resolved results path
+		if openErr != nil {
+			err = fmt.Errorf("open performance artifact for step %s: %w", step, openErr)
+			break
+		}
+		reader := csv.NewReader(file)
+		reader.FieldsPerRecord = len(performanceHeader)
+		header, readErr := reader.Read()
+		if readErr != nil || !equalFields(header, performanceHeader) {
+			_ = file.Close()
+			err = fmt.Errorf("performance artifact for step %s has invalid header", step)
+			break
+		}
+		for {
+			row, readErr := reader.Read()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil {
+				err = fmt.Errorf("parse performance artifact for step %s: %w", step, readErr)
+				break
+			}
+			phase := row[3]
+			if (stepIndex == 0 && len(steps) == 2 && phase != "write_prehash") ||
+				((len(steps) == 1 || stepIndex == len(steps)-1) && phase != "read_verify") {
+				err = fmt.Errorf("performance artifact step %s has unexpected phase %q", step, phase)
+				break
+			}
+			identity := strings.Join(row[:4], "\x00")
+			if _, exists := seen[identity]; exists {
+				err = fmt.Errorf("duplicate performance row identity for step %s", step)
+				break
+			}
+			seen[identity] = struct{}{}
+			parsed, parseErr := parsePerformanceRow(step, row)
+			if parseErr != nil {
+				err = parseErr
+				break
+			}
+			addPerformanceTotals(&summary, phaseTotals[phase], parsed)
+			if err = writer.Write(row); err != nil {
+				break
+			}
+		}
+		_ = file.Close()
+		if err != nil {
+			break
+		}
+	}
+	writer.Flush()
+	if err == nil {
+		err = writer.Error()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Chmod(tmpPath, 0o600)
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, destination)
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return summary, fmt.Errorf("combine %s: %w", IntegrityPerformanceName, err)
+	}
+	if summary.HashWorkerSeconds > 0 {
+		summary.MeanWorkerHashMiBPerSecond = float64(summary.Bytes) /
+			float64(constants.BytesPerMiB) / summary.HashWorkerSeconds
+	}
+	for _, phase := range phaseOrder {
+		phaseSummary := phaseTotals[phase]
+		if phaseSummary.HashWorkerSeconds > 0 {
+			phaseSummary.MeanWorkerHashMiBPerSecond = float64(phaseSummary.Bytes) /
+				float64(constants.BytesPerMiB) / phaseSummary.HashWorkerSeconds
+		}
+		if phaseSummary.Objects > 0 || phaseSummary.Bytes > 0 || phaseSummary.HashWorkerSeconds > 0 {
+			summary.Phases = append(summary.Phases, *phaseSummary)
+		}
+	}
+	return summary, nil
+}
+
+type performanceRow struct {
+	phase                   string
+	objects                 int64
+	bytes                   int64
+	workerSeconds           float64
+	initialWriteDelay       *float64
+	additionalPayloadPasses int64
+}
+
+func parsePerformanceRow(step string, row []string) (performanceRow, error) {
+	var parsed performanceRow
+	if row[0] == "" || row[1] != step || row[2] == "" {
+		return parsed, fmt.Errorf("performance artifact for step %s has invalid row identity", step)
+	}
+	if row[4] != "sha256" {
+		return parsed, fmt.Errorf("performance artifact for step %s has unsupported algorithm %q", step, row[4])
+	}
+	parsed.phase = row[3]
+	var err error
+	if parsed.objects, err = parseNonnegativePerformanceInt(row[5], "objects", step); err != nil {
+		return parsed, err
+	}
+	if parsed.bytes, err = parseNonnegativePerformanceInt(row[6], "bytes", step); err != nil {
+		return parsed, err
+	}
+	if parsed.workerSeconds, err = parseNonnegativePerformanceFloat(row[7], "hash_worker_seconds", step); err != nil {
+		return parsed, err
+	}
+	if parsed.additionalPayloadPasses, err = parseNonnegativePerformanceInt(row[10], "additional_payload_passes", step); err != nil {
+		return parsed, err
+	}
+	if parsed.bytes > 0 && parsed.workerSeconds == 0 {
+		return parsed, fmt.Errorf("performance artifact for step %s reports digest bytes with zero worker time", step)
+	}
+	if parsed.workerSeconds == 0 {
+		if row[8] != "" {
+			return parsed, fmt.Errorf("performance artifact for step %s must leave mean worker rate blank without digest work", step)
+		}
+	} else {
+		reportedRate, rateErr := parseNonnegativePerformanceFloat(row[8], "mean_worker_hash_mib_per_second", step)
+		if rateErr != nil {
+			return parsed, rateErr
+		}
+		expectedRate := float64(parsed.bytes) / float64(constants.BytesPerMiB) / parsed.workerSeconds
+		tolerance := math.Max(1e-9, math.Abs(expectedRate)*1e-6)
+		if math.Abs(reportedRate-expectedRate) > tolerance {
+			return parsed, fmt.Errorf("performance artifact for step %s has inconsistent mean worker rate", step)
+		}
+	}
+	if parsed.phase == "read_verify" {
+		if row[9] != "" {
+			return parsed, fmt.Errorf("performance artifact for step %s must leave read initial request delay blank", step)
+		}
+	} else if row[9] != "" {
+		value, delayErr := parseNonnegativePerformanceFloat(row[9], "time_to_first_request_seconds", step)
+		if delayErr != nil {
+			return parsed, delayErr
+		}
+		parsed.initialWriteDelay = &value
+	} else if parsed.objects > 0 {
+		return parsed, fmt.Errorf("performance artifact for step %s is missing initial write delay", step)
+	}
+	return parsed, nil
+}
+
+func parseNonnegativePerformanceInt(value, field, step string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("performance artifact for step %s has invalid %s %q", step, field, value)
+	}
+	return parsed, nil
+}
+
+func parseNonnegativePerformanceFloat(value, field, step string) (float64, error) {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("performance artifact for step %s has invalid %s %q", step, field, value)
+	}
+	return parsed, nil
+}
+
+func addPerformanceTotals(
+	summary *results.IntegrityPerformanceSummary,
+	phase *results.IntegrityPhaseSummary,
+	row performanceRow,
+) {
+	summary.Objects += row.objects
+	summary.Bytes += row.bytes
+	summary.HashWorkerSeconds += row.workerSeconds
+	summary.AdditionalPayloadPasses += row.additionalPayloadPasses
+	phase.Objects += row.objects
+	phase.Bytes += row.bytes
+	phase.HashWorkerSeconds += row.workerSeconds
+	phase.AdditionalPayloadPasses += row.additionalPayloadPasses
+	if row.initialWriteDelay != nil &&
+		(summary.InitialWriteDelaySecondsMaxNode == nil || *row.initialWriteDelay > *summary.InitialWriteDelaySecondsMaxNode) {
+		value := *row.initialWriteDelay
+		summary.InitialWriteDelaySecondsMaxNode = &value
+	}
+}
+
+func readResultsManifest(root string) (*results.Manifest, error) {
+	path := filepath.Join(root, constants.ResultsManifestFileName)
+	data, err := os.ReadFile(path) // #nosec G304 -- internally resolved results path
+	if err != nil {
+		return nil, fmt.Errorf("read results manifest: %w", err)
+	}
+	manifest := &results.Manifest{}
+	if err = json.Unmarshal(data, manifest); err != nil {
+		return nil, fmt.Errorf("decode results manifest: %w", err)
+	}
+	return manifest, nil
+}
+
+func addRunFile(manifest *results.Manifest, root, name string) error {
+	info, err := os.Stat(filepath.Join(root, name))
+	if err != nil {
+		return fmt.Errorf("stat run artifact %s: %w", name, err)
+	}
+	contentType := "application/octet-stream"
+	if strings.HasSuffix(name, ".csv") {
+		contentType = "text/csv"
+	} else if strings.HasSuffix(name, ".json") {
+		contentType = "application/json"
+	}
+	status := results.FileStatus{Name: name, Size: info.Size(), Status: "ok", Modified: info.ModTime().UTC().Format(time.RFC3339), ContentType: contentType}
+	for i := range manifest.RunFiles {
+		if manifest.RunFiles[i].Name == name {
+			manifest.RunFiles[i] = status
+			return nil
+		}
+	}
+	manifest.RunFiles = append(manifest.RunFiles, status)
+	return nil
+}
+
+func writeResultsManifest(root string, manifest *results.Manifest) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(root, ".index.json.integrity-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err = tmp.Write(append(data, '\n')); err == nil {
+		err = tmp.Close()
+	} else {
+		_ = tmp.Close()
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, filepath.Join(root, constants.ResultsManifestFileName))
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+	}
+	return err
+}

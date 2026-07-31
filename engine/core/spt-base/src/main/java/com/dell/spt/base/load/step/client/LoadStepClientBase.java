@@ -12,6 +12,9 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityInputProvenance;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
@@ -65,6 +68,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemDataInputFileSlicers = new ArrayList<>();
 	private final List<AutoCloseable> itemInputFileSlicers = new ArrayList<>();
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
+	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> storageAuthFileSlicers = new ArrayList<>();
@@ -196,6 +200,41 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final var effectiveVerifyFlag = effectiveVerifyFlag(verifyFlag, isDedupable, loadStepId());
 		final var opConfig = loadConfig.configVal("op");
 		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
+		final var integrityConfig = IntegrityConfig.fromStorage(storageConfig);
+		if (integrityConfig.enabled()
+						&& (OpType.READ.equals(opType) || OpType.DELETE.equals(opType))) {
+			integrityConfig.requireInputProvenance(opType.name());
+			if (OpType.READ.equals(opType) && itemDataInputFile != null && !itemDataInputFile.isEmpty()) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.CONFIGURATION,
+								"metadata verification does not support item.data.input.file",
+								null);
+			}
+			final var itemInputFile = itemConfig.configVal("input").stringVal("file");
+			if (itemInputFile == null || itemInputFile.isEmpty()) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.INPUT,
+								"metadata-mode " + opType + " requires a finite item input file",
+								null);
+			}
+			if (IntegrityInputProvenance.ENGINE_STEP.equals(integrityConfig.inputProvenance())
+							|| IntegrityInputProvenance.CLI_STAGER.equals(integrityConfig.inputProvenance())) {
+				try {
+					IntegrityManifestCompletion.validate(
+									java.nio.file.Path.of(itemInputFile),
+									config.longVal("run-id"),
+									integrityConfig.inputProvenance(),
+									integrityConfig.expectedProducerId());
+				} catch (final IOException e) {
+					throw terminalFailure(
+									IntegrityTerminalException.Category.INPUT,
+									"integrity input is not committed by the expected producer",
+									e);
+				}
+			}
+		}
+
+		initIntegrityLogFileAggregators(integrityConfig, opType, itemConfig);
 		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final boolean skipScatter = ItemType.PATH.equals(itemType) && OpType.LIST.equals(opType);
 		if (skipScatter) {
@@ -218,20 +257,42 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			if (!skipScatter && itemInput != null) {
 				itemInputFileSlicers.add(
-								new ItemInputFileSlicer(loadStepId(), fileMgrs, configSlices, itemInput, batchSize));
+								new ItemInputFileSlicer(
+												loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled()));
 				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
 			}
 		} catch (final IllegalConfigurationException e) {
+			if (integrityConfig.enabled()) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.CONFIGURATION,
+								"failed to initialize metadata verification storage driver",
+								e);
+			}
 			LogUtil.exception(Level.ERROR, e, "{}: failed to init the storage driver", loadStepId());
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
 		} catch (final Exception e) {
+			if (integrityConfig.enabled()) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.INPUT,
+								"failed to validate or distribute integrity input",
+								e);
+			}
 			LogUtil.exception(Level.WARN, e, "{}: failed to close the item input", loadStepId());
 		}
 		final var itemOutputFile = config.stringVal("item-output-file");
 		if (itemOutputFile != null && !itemOutputFile.isEmpty()) {
-			itemOutputFileAggregators.add(
-							new ItemOutputFileAggregator(loadStepId(), fileMgrs, configSlices, itemOutputFile));
+			if (integrityConfig.enabled()) {
+				final long selectionLimit = OpType.LIST.equals(opType)
+								? storageConfig.configVal("integrity").configVal("selection").longVal("maxCount")
+								: 0;
+				itemOutputFileAggregators.add(
+								new CsvArtifactAggregator(
+												loadStepId(), fileMgrs, configSlices, itemOutputFile, config.longVal("run-id"), selectionLimit));
+			} else {
+				itemOutputFileAggregators.add(
+								new ItemOutputFileAggregator(loadStepId(), fileMgrs, configSlices, itemOutputFile));
+			}
 			Loggers.MSG.debug("{}: item output file aggregator initialized", loadStepId());
 		}
 
@@ -252,6 +313,47 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 											loadStepId(), storageAuthFile, fileMgrs, "storage-auth-file", configSlices, batchSize));
 			Loggers.MSG.debug("{}: storage auth file slicer initialized", loadStepId());
 		}
+	}
+
+	private void initIntegrityLogFileAggregators(
+					final IntegrityConfig integrityConfig, final OpType opType, final Config itemConfig) {
+		if (!integrityConfig.enabled() || !integrityLogFileAggregators.isEmpty()) {
+			return;
+		}
+		try {
+			if (OpType.READ.equals(opType)) {
+				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
+								loadStepId(), fileMgrs, Loggers.INTEGRITY_FAILURES.getName(),
+								IntegrityCsvArtifacts.FAILURES_FILE_NAME, IntegrityCsvArtifacts.FAILURES_HEADER));
+				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
+								loadStepId(), fileMgrs, Loggers.INTEGRITY_PERFORMANCE.getName(),
+								IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME, IntegrityCsvArtifacts.PERFORMANCE_HEADER));
+			} else if (OpType.CREATE.equals(opType)) {
+				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
+								loadStepId(), fileMgrs, Loggers.INTEGRITY_PERFORMANCE.getName(),
+								IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME, IntegrityCsvArtifacts.PERFORMANCE_HEADER));
+				final var threshold = itemConfig.configVal("data").configVal("ranges").val("threshold");
+				final long thresholdBytes = threshold instanceof String
+								? BinarySizeFormat.parseFixedSize((String) threshold)
+								: TypeUtil.typeConvert(threshold, long.class);
+				if (thresholdBytes > 0) {
+					integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
+									loadStepId(), fileMgrs, Loggers.MULTIPART_LIFECYCLE.getName(),
+									IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_FILE_NAME,
+									IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_HEADER));
+				}
+			}
+		} catch (final IOException e) {
+			throw terminalFailure(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"failed to initialize integrity logger artifact aggregation",
+							e);
+		}
+	}
+
+	@Override
+	protected boolean emitsOperationArtifacts() {
+		return false;
 	}
 
 	private void initAndStartMetricsAggregator(Config config) {
@@ -300,6 +402,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} catch (final Exception e) {
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
+				}
+				if (validateRunId) {
+					throw terminalFailure(
+									IntegrityTerminalException.Category.EXECUTION,
+									"failed to start metadata-mode step slice " + i,
+									e);
 				}
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
@@ -609,12 +717,40 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	protected final void doClose()
 					throws IOException {
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			super.doClose();
+			IntegrityTerminalException terminalCause = null;
+			try {
+				super.doClose();
+			} catch (final Throwable cause) {
+				throwUncheckedIfInterrupted(cause);
+				if (!integrityModeEnabled()) {
+					rethrowCloseFailure(cause);
+				}
+				terminalCause = appendTerminalFailure(
+								terminalCause,
+								IntegrityTerminalException.Category.CLEANUP,
+								"failed to close metadata-mode metrics contexts",
+								cause);
+			}
 			if (null != metricsAggregator) {
-				metricsAggregator.close();
+				try {
+					metricsAggregator.close();
+				} catch (final Throwable cause) {
+					throwUncheckedIfInterrupted(cause);
+					if (!integrityModeEnabled()) {
+						rethrowCloseFailure(cause);
+					}
+					terminalCause = appendTerminalFailure(
+									terminalCause,
+									IntegrityTerminalException.Category.CLEANUP,
+									"failed to close metadata-mode metrics aggregator",
+									cause);
+				}
 				metricsAggregator = null;
 			}
-			stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
+			for (final var stepSlice : stepSlices) {
+				if (stepSlice == null) {
+					continue;
+				}
 				try {
 					stepSlice.close();
 					Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
@@ -622,41 +758,87 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e, "{}: failed to close the step service \"{}\"", loadStepId(),
 									stepSlice);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.CLEANUP,
+										"failed to close metadata-mode step slice",
+										e);
+					}
 				}
-			});
+			}
 			Loggers.MSG.debug("{}: closed all {} step slices", loadStepId(), stepSlices.size());
 			stepSlices.clear();
-			itemDataInputFileSlicers.forEach(itemDataInputFileSlicer -> {
+			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
+				try {
+					integrityLogFileAggregator.close();
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					terminalCause = appendTerminalFailure(
+									terminalCause,
+									IntegrityTerminalException.Category.AGGREGATION,
+									"failed to collect and publish integrity logger artifacts",
+									e);
+				}
+			}
+			integrityLogFileAggregators.clear();
+			for (final var itemDataInputFileSlicer : itemDataInputFileSlicers) {
 				try {
 					itemDataInputFileSlicer.close();
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e, "{}: failed to close the item data input file slicer \"{}\"",
 									loadStepId(), itemDataInputFileSlicer);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.CLEANUP,
+										"failed to close metadata-mode item data input slicer",
+										e);
+					}
 				}
-			});
+			}
 			itemDataInputFileSlicers.clear();
-			itemInputFileSlicers.forEach(itemInputFileSlicer -> {
+			for (final var itemInputFileSlicer : itemInputFileSlicers) {
 				try {
 					itemInputFileSlicer.close();
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e, "{}: failed to close the item input file slicer \"{}\"",
 									loadStepId(), itemInputFileSlicer);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.CLEANUP,
+										"failed to close metadata-mode item input slicer",
+										e);
+					}
 				}
-			});
+			}
 			itemInputFileSlicers.clear();
-			itemOutputFileAggregators.parallelStream().forEach(itemOutputFileAggregator -> {
+			for (final var itemOutputFileAggregator : itemOutputFileAggregators) {
 				try {
 					itemOutputFileAggregator.close();
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
-					LogUtil.exception(Level.WARN, e, "{}: failed to close the item output file aggregator \"{}\"",
-									loadStepId(), itemOutputFileAggregator);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.AGGREGATION,
+										"failed to close and publish canonical integrity manifest",
+										e);
+					} else {
+						LogUtil.exception(
+										Level.WARN,
+										e,
+										"{}: failed to close the item output file aggregator \"{}\"",
+										loadStepId(),
+										itemOutputFileAggregator);
+					}
 				}
-			});
+			}
 			itemOutputFileAggregators.clear();
-			opTraceLogFileAggregators.parallelStream().forEach(opTraceLogFileAggregator -> {
+			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
 					opTraceLogFileAggregator.close();
 				} catch (final Exception e) {
@@ -664,20 +846,65 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					LogUtil.exception(Level.WARN, e,
 									"{}: failed to close the operation traces log file aggregator \"{}\"", loadStepId(),
 									opTraceLogFileAggregator);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.CLEANUP,
+										"failed to close metadata-mode operation trace aggregator",
+										e);
+					}
 				}
-			});
+			}
 			opTraceLogFileAggregators.clear();
-			storageAuthFileSlicers.forEach(storageAuthFileSlicer -> {
+			for (final var storageAuthFileSlicer : storageAuthFileSlicers) {
 				try {
 					storageAuthFileSlicer.close();
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e, "{}: failed to close the storage auth file slicer \"{}\"",
 									loadStepId(), storageAuthFileSlicer);
+					if (integrityModeEnabled()) {
+						terminalCause = appendTerminalFailure(
+										terminalCause,
+										IntegrityTerminalException.Category.CLEANUP,
+										"failed to close metadata-mode storage auth slicer",
+										e);
+					}
 				}
-			});
+			}
 			storageAuthFileSlicers.clear();
+			if (terminalCause != null) {
+				throw terminalCause;
+			}
 		}
+	}
+
+	private IntegrityTerminalException appendTerminalFailure(
+					final IntegrityTerminalException current,
+					final IntegrityTerminalException.Category category,
+					final String message,
+					final Throwable cause) {
+		final var failure = terminalFailure(category, message, cause);
+		if (current == null) {
+			return failure;
+		}
+		if (failure != current) {
+			current.addSuppressed(failure);
+		}
+		return current;
+	}
+
+	private static void rethrowCloseFailure(final Throwable cause) throws IOException {
+		if (cause instanceof IOException) {
+			throw (IOException) cause;
+		}
+		if (cause instanceof RuntimeException) {
+			throw (RuntimeException) cause;
+		}
+		if (cause instanceof Error) {
+			throw (Error) cause;
+		}
+		throw new IOException(cause);
 	}
 
 	@Override

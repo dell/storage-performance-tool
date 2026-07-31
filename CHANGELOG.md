@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, independent later reads, corruption-specific exit code `20`, empty-selection policy, and direct-`spt.jar` custom-scenario access.
+- **Integrity evidence and resumability** — Added canonical written/input/verified manifests and completion records, `verify-remaining.csv`, corruption diagnostics, digest-cost telemetry, multipart lifecycle evidence, structured step lifecycle, and distributed immutable-image identity checks.
+
+### Changed
+
+- **Versioned integrity identity** — Metadata-mode reads carry S3 version IDs separately from object keys, while ordinary mode retains the legacy Netty `key~version` result naming for compatibility.
+
+### Fixed
+
+- **Legacy deterministic verification prefixes** — Parse only the generated leaf ID after configured prefixes and shards, and fail explicitly when it cannot be decoded instead of silently using offset zero.
+
 ## [5.13.0] - 2026-07-27
 
 ### Added

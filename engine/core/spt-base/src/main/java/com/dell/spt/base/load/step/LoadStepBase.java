@@ -10,6 +10,7 @@ import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TimeUtil;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
@@ -247,12 +248,13 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	private void seedIntegrityArtifactHeaders() {
-		if (!integrityModeEnabled) {
+		if (!integrityModeEnabled || !emitsOperationArtifacts()) {
 			return;
 		}
 		final OpType opType = OpType.valueOf(config.stringVal("load-op-type").toUpperCase());
 		final String driverType = config.stringVal("storage-driver-type");
-		for (final var artifact : IntegrityCsvArtifacts.applicableHeaders(opType, driverType, true)) {
+		for (final var artifact : IntegrityCsvArtifacts.applicableHeaders(
+						opType, driverType, true, multipartEnabled())) {
 			switch (artifact.kind()) {
 			case FAILURES -> Loggers.INTEGRITY_FAILURES.info(artifact.header());
 			case PERFORMANCE -> Loggers.INTEGRITY_PERFORMANCE.info(artifact.header());
@@ -260,6 +262,17 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			default -> throw new AssertionError("unsupported integrity artifact kind " + artifact.kind());
 			}
 		}
+	}
+
+	protected boolean emitsOperationArtifacts() {
+		return true;
+	}
+
+	private boolean multipartEnabled() {
+		final var threshold = config.val("item-data-ranges-threshold");
+		return threshold instanceof String
+						? BinarySizeFormat.parseFixedSize((String) threshold) > 0
+						: TypeUtil.typeConvert(threshold, long.class) > 0;
 	}
 
 	protected final boolean integrityModeEnabled() {

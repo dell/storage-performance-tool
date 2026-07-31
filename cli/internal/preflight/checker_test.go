@@ -76,6 +76,75 @@ func TestPreflight_EnsureImage_DevImageMissing(t *testing.T) {
 	}
 }
 
+func TestPreflightInspectImageIdentity(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	image := "repo/spt:test"
+	id := "sha256:" + strings.Repeat("a", 64)
+	cmd := fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdImage, constants.DockerCmdInspect, image)
+	mock.SetCommandSuccess(cmd, `[{"Id":"`+id+`","RepoDigests":["repo/spt@sha256:bbb","repo/spt@sha256:aaa"]}]`)
+
+	identity, err := NewCheckerWithExecutor(mock).InspectImageIdentity(context.Background(), testHost(), image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ID != id {
+		t.Fatalf("identity ID = %q, want %q", identity.ID, id)
+	}
+	if got := strings.Join(identity.RepoDigests, ","); got != "repo/spt@sha256:aaa,repo/spt@sha256:bbb" {
+		t.Fatalf("repo digests = %q", got)
+	}
+}
+
+func TestPreflightInspectImageIdentityRejectsUnverifiableID(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	image := "repo/spt:test"
+	cmd := fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdImage, constants.DockerCmdInspect, image)
+	mock.SetCommandSuccess(cmd, `[{"Id":"mutable-tag-only","RepoDigests":[]}]`)
+
+	if _, err := NewCheckerWithExecutor(mock).InspectImageIdentity(context.Background(), testHost(), image); err == nil {
+		t.Fatal("expected invalid image identity to fail")
+	}
+}
+
+func TestPreflightInspectPayloadIdentity(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	host := testHost()
+	host.IsLocal = true
+	image := "sha256:" + strings.Repeat("a", 64)
+	digest := strings.Repeat("b", 64)
+	cmd := strings.Join([]string{
+		constants.DockerCommand, constants.DockerCmdRun, constants.DockerFlagRemove,
+		constants.DockerFlagReadOnly, constants.DockerFlagNetwork, "none",
+		constants.DockerFlagEntrypoint, "sh", image, "-c", integrityPayloadHashScript,
+	}, " ")
+	mock.SetCommandSuccess(cmd, digest+"  -")
+
+	got, err := NewCheckerWithExecutor(mock).InspectPayloadIdentity(context.Background(), host, image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != digest {
+		t.Fatalf("payload digest = %q, want %q", got, digest)
+	}
+}
+
+func TestPreflightInspectPayloadIdentityQuotesRemoteScriptAndRejectsBadEvidence(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	host := testHost()
+	image := "sha256:" + strings.Repeat("a", 64)
+	quotedScript := quoteRemoteShellArg(integrityPayloadHashScript)
+	cmd := strings.Join([]string{
+		constants.DockerCommand, constants.DockerCmdRun, constants.DockerFlagRemove,
+		constants.DockerFlagReadOnly, constants.DockerFlagNetwork, "none",
+		constants.DockerFlagEntrypoint, "sh", image, "-c", quotedScript,
+	}, " ")
+	mock.SetCommandSuccess(cmd, "not-a-digest")
+
+	if _, err := NewCheckerWithExecutor(mock).InspectPayloadIdentity(context.Background(), host, image); err == nil {
+		t.Fatal("expected invalid payload identity to fail")
+	}
+}
+
 func TestPreflight_CheckPorts_NoConflicts(t *testing.T) {
 	mock := command.NewMockCommandExecutor()
 	// Empty listeners snapshot

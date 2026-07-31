@@ -26,7 +26,8 @@ const integritySchemaJSON = `{
         "expectedProducerId": "string",
         "provenance": "string"
       },
-      "mode": "string"
+      "mode": "string",
+      "selection": {"maxCount": "long"}
     }
   },
   "run": {"id": "long"}
@@ -62,7 +63,8 @@ func TestVerifyIntegrityCapability_ArbitraryLeafDescriptorsAccepted(t *testing.T
 	body := `{"storage":{"integrity":{
 		"algorithm": null,
 		"input": {"expectedProducerId": 17, "provenance": ["anything"]},
-		"mode": {"nested": "still-present"}
+		"mode": {"nested": "still-present"},
+		"selection": {"maxCount": "anything"}
 	}}}`
 	server := schemaServer(t, http.StatusOK, body)
 	defer server.Close()
@@ -85,7 +87,8 @@ func TestVerifyIntegrityCapability_MissingPaths(t *testing.T) {
 		},
 		{
 			name: "integrity present but input subtree absent",
-			body: `{"storage":{"integrity":{"mode":"string","algorithm":"string"}}}`,
+			body: `{"storage":{"integrity":{"mode":"string","algorithm":"string",
+				"selection":{"maxCount":"long"}}}}`,
 			wantMissing: []string{
 				constants.IntegrityInputProvenancePath,
 				constants.IntegrityInputProducerIDPath,
@@ -94,7 +97,7 @@ func TestVerifyIntegrityCapability_MissingPaths(t *testing.T) {
 		{
 			name: "single leaf absent",
 			body: `{"storage":{"integrity":{"mode":"string","algorithm":"string",
-				"input":{"provenance":"string"}}}}`,
+				"input":{"provenance":"string"},"selection":{"maxCount":"long"}}}}`,
 			wantMissing: []string{constants.IntegrityInputProducerIDPath},
 		},
 		{

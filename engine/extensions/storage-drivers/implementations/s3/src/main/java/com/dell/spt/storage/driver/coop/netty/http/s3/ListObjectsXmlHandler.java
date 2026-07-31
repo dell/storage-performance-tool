@@ -1,6 +1,9 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.ListedObject;
+import java.util.ArrayList;
+import java.util.List;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
@@ -30,6 +33,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 
 	private int objectCount;
 	private long bytesTotal;
+	private final List<ListedObject> listedObjects = new ArrayList<>();
 
 	ListObjectsXmlHandler(
 					final ListOperation<?> listOp, final boolean includeVersions, final boolean fetchMetadata) {
@@ -44,6 +48,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		firstKey = null;
 		objectCount = 0;
 		bytesTotal = 0;
+		listedObjects.clear();
 		truncated = false;
 		nextContinuationToken = null;
 		nextKeyMarker = null;
@@ -138,6 +143,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	@Override
 	public void endDocument() throws SAXException {
 		listOp.objectsListed(objectCount);
+		listOp.listedObjects(listedObjects);
 		listOp.bytesListed(fetchMetadata ? bytesTotal : 0);
 		listOp.truncated(truncated);
 		if (firstKey != null) {
@@ -167,6 +173,9 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		}
 		objectCount++;
 		lastKey = currentKey;
+		if (!insideDeleteMarker) {
+			listedObjects.add(new ListedObject(currentKey, Math.max(0, currentSize)));
+		}
 		if (fetchMetadata) {
 			bytesTotal += Math.max(0, currentSize);
 		}

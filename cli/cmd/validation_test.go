@@ -465,6 +465,33 @@ func TestValidateReadPhasePauseFlag(t *testing.T) {
 	}
 }
 
+func TestValidateIntegrityRuntimeIdentityTier(t *testing.T) {
+	newCommand := func(value string, changed bool) *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool("allow-empty-selection", false, "")
+		cmd.Flags().Int("integrity-max-console-failures", 20, "")
+		cmd.Flags().Bool("auto-results", true, "")
+		cmd.Flags().String("items-file", "", "")
+		cmd.Flags().StringArray(flagEngineOverride, nil, "")
+		cmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "")
+		if changed {
+			if err := cmd.Flags().Set(flagIntegrityRuntimeIdentityTier, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return cmd
+	}
+	if err := validateIntegrityWorkloadFlags(newCommand("payload", true), WorkloadTypeWriteVerify); err != nil {
+		t.Fatalf("payload tier should be valid for verification: %v", err)
+	}
+	if err := validateIntegrityWorkloadFlags(newCommand("unknown", true), WorkloadTypeReadVerify); err == nil {
+		t.Fatal("unknown identity tier should fail")
+	}
+	if err := validateIntegrityWorkloadFlags(newCommand("payload", true), WorkloadTypeWrite); err == nil {
+		t.Fatal("identity tier on ordinary workload should fail")
+	}
+}
+
 func TestValidateRunCommand(t *testing.T) {
 	tests := []struct {
 		name         string

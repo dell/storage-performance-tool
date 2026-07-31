@@ -14,6 +14,7 @@ const (
 	DockerCmdRM      = "rm"
 	DockerCmdLogs    = "logs"
 	DockerCmdImages  = "images"
+	DockerCmdImage   = "image"
 	DockerCmdInspect = "inspect"
 	DockerCmdVersion = "version"
 	DockerCmdStop    = "stop"
@@ -33,6 +34,9 @@ const (
 	DockerFlagAll        = "-a"
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
+	DockerFlagRemove     = "--rm"
+	DockerFlagReadOnly   = "--read-only"
+	DockerFlagEntrypoint = "--entrypoint"
 )
 
 // SSH connection constants

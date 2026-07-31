@@ -39,6 +39,9 @@ final class ListObjectsXmlHandlerTest {
 		assertTrue(op.truncated());
 		assertEquals("token-123", op.options().continuationToken());
 		assertEquals("token-123", op.continuationToken());
+		assertEquals(2, op.listedObjects().size());
+		assertEquals("a.txt", op.listedObjects().get(0).key());
+		assertEquals(123L, op.listedObjects().get(0).size());
 	}
 
 	@Test
@@ -58,6 +61,8 @@ final class ListObjectsXmlHandlerTest {
 		assertEquals("key-marker", op.continuationToken());
 		assertEquals("key-marker", op.options().keyMarker());
 		assertEquals("version-marker", op.options().versionIdMarker());
+		assertEquals(1, op.listedObjects().size());
+		assertEquals("a.txt", op.listedObjects().get(0).key());
 	}
 
 	private static final String LIST_V2_RESPONSE = "<ListBucketResult>" +

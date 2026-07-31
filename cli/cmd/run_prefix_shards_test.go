@@ -41,15 +41,17 @@ func TestResolvePrefixShardsUsesConfiguredHostsWhenMinHostsIsLower(t *testing.T)
 }
 
 func TestResolvePrefixShardsDefaultsToAggregateConcurrency(t *testing.T) {
-	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
-	cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
+	for _, workloadType := range []string{WorkloadTypeWrite, WorkloadTypeWriteVerify} {
+		params := scenario.Params{WorkloadType: workloadType, Threads: 16}
+		cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
 
-	got, err := resolvePrefixShardCount(cmd, params)
-	if err != nil {
-		t.Fatalf("resolvePrefixShardCount() error = %v", err)
-	}
-	if got != 48 {
-		t.Fatalf("resolvePrefixShardCount() = %d, want 48", got)
+		got, err := resolvePrefixShardCount(cmd, params)
+		if err != nil {
+			t.Fatalf("resolvePrefixShardCount(%s) error = %v", workloadType, err)
+		}
+		if got != 48 {
+			t.Fatalf("resolvePrefixShardCount(%s) = %d, want 48", workloadType, got)
+		}
 	}
 }
 
@@ -140,11 +142,32 @@ func TestApplyPrefixShardsRejectsInapplicableAndConflictingInputs(t *testing.T) 
 }
 
 func TestApplyPrefixShardsAllowsSeededReadAndMixedCreate(t *testing.T) {
-	for _, workload := range []string{WorkloadTypeRead, WorkloadTypeMixed} {
+	for _, workload := range []string{WorkloadTypeRead, WorkloadTypeWriteVerify, WorkloadTypeMixed} {
 		params := scenario.Params{WorkloadType: workload}
 		if err := applyPrefixShards(&params, 16); err != nil {
 			t.Fatalf("applyPrefixShards(%s) error = %v", workload, err)
 		}
+	}
+}
+
+func TestIntegrityCostNotices(t *testing.T) {
+	tests := []struct {
+		name   string
+		params scenario.Params
+		want   int
+	}{
+		{name: "ordinary write", params: scenario.Params{WorkloadType: WorkloadTypeWrite, PartSize: "5MiB", Checksum: "crc32c"}},
+		{name: "reused sha256", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumSHA256}},
+		{name: "separate checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumCRC32C}, want: 1},
+		{name: "multipart only", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB"}, want: 1},
+		{name: "multipart checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB", Checksum: scenario.ChecksumSHA256}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := len(integrityCostNotices(tt.params)); got != tt.want {
+				t.Fatalf("len(integrityCostNotices()) = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

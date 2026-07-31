@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.concurrent.ThreadUtil;
@@ -125,7 +126,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		if (op instanceof DataOperation<?> dataOperation) {
 			dataOperation.item().dataInput(itemDataInput);
 			prepareIntegrity(op, dataOperation);
-		} else if (integrityConfig.enabled() && op.type() == OpType.UPDATE) {
+		} else if (integrityMetadataEnabled() && op.type() == OpType.UPDATE) {
 			throw unsupportedIntegrityCombination("UPDATE operations are outside integrity metadata v1");
 		}
 		final String dstPath = op.dstPath();
@@ -153,7 +154,12 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	}
 
 	private void prepareIntegrity(final O op, final DataOperation<?> dataOperation) {
-		if (!integrityConfig.enabled()) {
+		if (!integrityMetadataEnabled()) {
+			return;
+		}
+		// Multipart parts are transport fragments. V1 metadata and performance accounting describe
+		// the complete logical object and are prepared once on the parent operation.
+		if (op instanceof PartialDataOperation<?>) {
 			return;
 		}
 		switch (op.type()) {
@@ -172,6 +178,9 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 					final DigestResult result = integrityHasher.hash(dataOperation.item());
 					op.integrityMetadata(result.metadata());
 					integrityPerformance.recordDigest(result.metadata().size(), result.workerNanos());
+					if (integrityAdditionalPayloadPassRequired(op)) {
+						integrityPerformance.recordAdditionalPayloadPass();
+					}
 				} catch (final IOException e) {
 					throw new IntegrityTerminalException(
 									IntegrityTerminalException.Category.EXECUTION,
@@ -203,6 +212,14 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 	}
 
+	/**
+	 * Reports whether transport processing performs one additional logical-object payload pass
+	 * beyond the metadata prehash. Called only for the first parent CREATE preparation.
+	 */
+	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
+		return false;
+	}
+
 	private static IntegrityTerminalException unsupportedIntegrityCombination(final String message) {
 		return new IntegrityTerminalException(
 						IntegrityTerminalException.Category.CONFIGURATION, message);
@@ -215,12 +232,6 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected final void markIntegrityRequestDispatched() {
 		if (integrityPerformance != null) {
 			integrityPerformance.markFirstRequestDispatched(System.nanoTime());
-		}
-	}
-
-	protected final void recordIntegrityAdditionalPayloadPass() {
-		if (integrityPerformance != null) {
-			integrityPerformance.recordAdditionalPayloadPass();
 		}
 	}
 
@@ -242,7 +253,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	@Override
 	public final boolean metadataIntegrityEnabled() {
-		return integrityConfig.enabled();
+		return integrityMetadataEnabled();
 	}
 
 	protected final int integrityDigestWorkerCount() {

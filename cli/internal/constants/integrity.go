@@ -30,6 +30,14 @@ const (
 	IntegrityModeMetadata = "metadata"
 )
 
+// Distributed verification runtime-identity tiers. The public CLI accepts these short values;
+// result evidence records the more descriptive engine-runtime tier names.
+const (
+	IntegrityRuntimeIdentityTierImage   = "image"
+	IntegrityRuntimeIdentityTierPayload = "payload"
+	IntegrityPayloadRoot                = "/opt/spt"
+)
+
 // Integrity input provenance values.
 const (
 	IntegrityProvenanceNone       = "none"
@@ -41,3 +49,10 @@ const (
 // IntegrityCLIStagerProducerID is the stable producer identity the CLI records when it stages an
 // external `--items-file` selection and publishes the matching completion record.
 const IntegrityCLIStagerProducerID = "spt-cli-items-stager-v1"
+
+// Verification process exit codes are stable public automation contracts.
+const (
+	ExitCodeSuccess             = 0
+	ExitCodeWorkloadFailure     = 1
+	ExitCodeIntegrityCorruption = 20
+)

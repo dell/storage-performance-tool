@@ -89,8 +89,7 @@ public class DistributedLatencyMeanTest {
 		workerCtx.refreshLastSnapshot();
 		entryCtx.refreshLastSnapshot();
 
-		final DistributedAllMetricsSnapshot snapshot =
-						(DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		final DistributedAllMetricsSnapshot snapshot = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 		assertEquals(3, snapshot.failsSnapshot().count());
 		assertEquals(2, snapshot.corruptSnapshot().count());
 	}

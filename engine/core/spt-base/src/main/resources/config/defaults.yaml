@@ -157,6 +157,8 @@ storage:
       expectedProducerId: ""
       provenance: none
     mode: none
+    selection:
+      maxCount: 0
   namespace: null
   net:
     node:

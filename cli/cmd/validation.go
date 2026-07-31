@@ -12,22 +12,13 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/spf13/cobra"
 )
 
 // ValidateWorkloadType checks if the provided workload type is valid
 func ValidateWorkloadType(workloadType string) error {
-	validTypes := map[string]bool{
-		WorkloadTypeWrite:  true,
-		WorkloadTypeRead:   true,
-		WorkloadTypeMixed:  true,
-		WorkloadTypeDelete: true,
-		WorkloadTypeList:   true,
-		WorkloadTypeMock:   true,
-		WorkloadTypeTables: true,
-	}
-
-	if !validTypes[workloadType] {
+	if _, ok := workload.Lookup(workloadType); !ok {
 		return fmt.Errorf(ErrInvalidWorkloadType, workloadType)
 	}
 	return nil
@@ -182,6 +173,82 @@ func validateReadPhasePauseFlag(cmd *cobra.Command, workloadType string) error {
 	return nil
 }
 
+func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) error {
+	verification := workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify
+	changed := func(name string) bool {
+		flag := cmd.Flags().Lookup(name)
+		return flag != nil && flag.Changed
+	}
+	if !verification {
+		if changed("allow-empty-selection") {
+			return fmt.Errorf(ErrFlagNotSupported, "--allow-empty-selection", workloadType)
+		}
+		if changed("integrity-max-console-failures") {
+			return fmt.Errorf(ErrFlagNotSupported, "--integrity-max-console-failures", workloadType)
+		}
+		if changed(flagIntegrityRuntimeIdentityTier) {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagIntegrityRuntimeIdentityTier, workloadType)
+		}
+		return nil
+	}
+	identityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
+	switch identityTier {
+	case constants.IntegrityRuntimeIdentityTierImage, constants.IntegrityRuntimeIdentityTierPayload:
+	default:
+		return fmt.Errorf("--%s must be %q or %q", flagIntegrityRuntimeIdentityTier,
+			constants.IntegrityRuntimeIdentityTierImage, constants.IntegrityRuntimeIdentityTierPayload)
+	}
+	if flag := cmd.Flags().Lookup("auto-results"); flag != nil {
+		enabled, _ := cmd.Flags().GetBool("auto-results")
+		if !enabled {
+			return errors.New("verification workloads require --auto-results=true")
+		}
+	}
+	maxFailures, _ := cmd.Flags().GetInt("integrity-max-console-failures")
+	if maxFailures < 0 {
+		return errors.New("--integrity-max-console-failures must be >= 0")
+	}
+	allowEmpty, _ := cmd.Flags().GetBool("allow-empty-selection")
+	if workloadType == WorkloadTypeWriteVerify {
+		if allowEmpty {
+			return errors.New("--allow-empty-selection is valid only for read-verify")
+		}
+		if items, _ := cmd.Flags().GetString("items-file"); items != "" {
+			return errors.New("--items-file is not supported for write-verify")
+		}
+	}
+	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
+		path, value, _ := strings.Cut(override, "=")
+		normalized := strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
+		if normalized == "item.data.input.file" || normalized == "load.op.recycle.mode" ||
+			normalized == "load.op.recycle.content.update" {
+			return fmt.Errorf("engine override %q is excluded from verification workloads", path+"="+value)
+		}
+	}
+	if workloadType != WorkloadTypeReadVerify {
+		return nil
+	}
+	unsupported := []string{
+		"duration", "part-size", "mpu-concurrent-objects", "mpu-concurrent-parts",
+		"cleanup", "save-items", "object-size", "object-data-compressibility",
+		"object-data-dedupable", "seed-objects", flagPrefixShards,
+	}
+	for _, name := range unsupported {
+		if changed(name) {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+name, workloadType)
+		}
+	}
+	return nil
+}
+
+func mustStringArrayFlag(cmd *cobra.Command, name string) []string {
+	if cmd.Flags().Lookup(name) == nil {
+		return nil
+	}
+	values, _ := cmd.Flags().GetStringArray(name)
+	return values
+}
+
 // ValidateRunCommand performs all validation for the run command
 func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	workloadType := args[0]
@@ -217,6 +284,10 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateReadPhasePauseFlag(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
+	if err := validateIntegrityWorkloadFlags(cmd, workloadType); err != nil {
 		cmd.SilenceUsage = false
 		return err
 	}

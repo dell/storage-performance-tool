@@ -1,12 +1,16 @@
 package scenario
 
+import "github.com/dell/storage-performance-tool/cli/internal/workload"
+
 const (
-	workloadTypeWrite  = "write"
-	workloadTypeRead   = "read"
-	workloadTypeMixed  = "mixed"
-	workloadTypeMock   = "mock"
-	workloadTypeList   = "list"
-	workloadTypeTables = "tables"
+	workloadTypeWrite       = workload.Write
+	workloadTypeRead        = workload.Read
+	workloadTypeWriteVerify = workload.WriteVerify
+	workloadTypeReadVerify  = workload.ReadVerify
+	workloadTypeMixed       = workload.Mixed
+	workloadTypeMock        = workload.Mock
+	workloadTypeList        = workload.List
+	workloadTypeTables      = workload.Tables
 
 	storageDriverTypeS3       = "s3"
 	storageDriverTypeS3Aws    = "s3-aws"
@@ -143,10 +147,12 @@ const (
 // Exported workload identifiers for packages that need to branch on scenario type
 // without duplicating literal strings.
 const (
-	WorkloadTypeList   = workloadTypeList
-	WorkloadTypeRead   = workloadTypeRead
-	WorkloadTypeTables = workloadTypeTables
-	WorkloadTypeMixed  = workloadTypeMixed
+	WorkloadTypeList        = workloadTypeList
+	WorkloadTypeRead        = workloadTypeRead
+	WorkloadTypeWriteVerify = workloadTypeWriteVerify
+	WorkloadTypeReadVerify  = workloadTypeReadVerify
+	WorkloadTypeTables      = workloadTypeTables
+	WorkloadTypeMixed       = workloadTypeMixed
 )
 
 // Mixed workload template keys

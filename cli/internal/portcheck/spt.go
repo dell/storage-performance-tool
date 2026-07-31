@@ -231,29 +231,44 @@ func (c *SptAPIClient) getMetrics(ctx context.Context) (*sptMetricsResponse, err
 	return &metrics, nil
 }
 
-// getStatusSimple retrieves state from /status endpoint if available.
-func (c *SptAPIClient) getStatusSimple(ctx context.Context) (string, error) {
+// terminalStatus is the stable structured /status payload used by completion tracking.
+type terminalStatus struct {
+	State    string `json:"state"`
+	RunID    int64  `json:"run_id"`
+	StepID   string `json:"step_id"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
+}
+
+func (c *SptAPIClient) getStatusDetail(ctx context.Context) (terminalStatus, error) {
 	url := c.BaseURL + "/status"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return terminalStatus{}, fmt.Errorf("failed to create request: %w", err)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
+		return terminalStatus{}, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return terminalStatus{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	var payload map[string]any
+	var payload terminalStatus
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("failed to parse JSON: %w", err)
+		return terminalStatus{}, fmt.Errorf("failed to parse JSON: %w", err)
 	}
-	if s, ok := payload["state"].(string); ok {
-		return strings.ToUpper(strings.TrimSpace(s)), nil
+	payload.State = strings.ToUpper(strings.TrimSpace(payload.State))
+	if payload.State == "" {
+		return terminalStatus{}, fmt.Errorf("missing state")
 	}
-	return "", fmt.Errorf("missing state")
+	return payload, nil
+}
+
+// getStatusSimple retrieves state from /status endpoint if available.
+func (c *SptAPIClient) getStatusSimple(ctx context.Context) (string, error) {
+	status, err := c.getStatusDetail(ctx)
+	return status.State, err
 }
 
 // Shutdown requests a graceful node shutdown via /shutdown.

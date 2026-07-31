@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import java.io.StringReader;
 import java.util.List;
 import org.apache.commons.csv.CSVFormat;
@@ -74,5 +75,21 @@ class IntegrityCsvArtifactsTest {
 										IntegrityCsvArtifacts.Kind.MULTIPART_LIFECYCLE),
 						IntegrityCsvArtifacts.applicableHeaders(OpType.CREATE, "s3-aws", true)
 										.stream().map(IntegrityCsvArtifacts.Artifact::kind).toList());
+		assertEquals(
+						List.of(IntegrityCsvArtifacts.Kind.PERFORMANCE),
+						IntegrityCsvArtifacts.applicableHeaders(OpType.CREATE, "s3-aws", true, false)
+										.stream().map(IntegrityCsvArtifacts.Artifact::kind).toList());
+	}
+
+	@Test
+	void multipartLifecycleEmissionIsClaimedExactlyOnce() {
+		final var operation = new CompositeDataOperationImpl<>();
+
+		assertTrue(IntegrityCsvArtifacts.logMultipartLifecycleOnce(
+						operation, "node", "step", "s3", "bucket", "key", "upload",
+						"completed", false, null, null));
+		assertFalse(IntegrityCsvArtifacts.logMultipartLifecycleOnce(
+						operation, "node", "step", "s3", "bucket", "key", "upload",
+						"failed_orphaned", true, false, "late callback"));
 	}
 }

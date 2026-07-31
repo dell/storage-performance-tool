@@ -244,7 +244,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Launching replay against %d configured endpoint(s)...\n", len(params.Endpoints))
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
-	var autoResultsDone chan struct{}
+	var autoResultsDone chan autoResultsOutcome
 	startReplayAutoResults := func() {
 		if autoResultsDone != nil || !resultsOpts.AutoResults {
 			return

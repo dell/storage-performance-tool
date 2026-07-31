@@ -16,15 +16,16 @@ import (
 
 // RunTracker polls the Spt API to detect run and step completion.
 type RunTracker struct {
-	Client              *SptAPIClient
-	HTTPClient          *http.Client
-	PollInterval        time.Duration
-	IdleGrace           time.Duration
-	StableConfirmations int // consecutive confirmations for a step file to be considered stable
-	Clock               Clock
-	lastJSONTimestamp   int64
-	seenActive          bool
-	Debug               bool
+	Client               *SptAPIClient
+	HTTPClient           *http.Client
+	PollInterval         time.Duration
+	IdleGrace            time.Duration
+	StableConfirmations  int // consecutive confirmations for a step file to be considered stable
+	Clock                Clock
+	lastJSONTimestamp    int64
+	seenActive           bool
+	Debug                bool
+	RequireTerminalState bool
 }
 
 // NewRunTracker constructs a tracker with sensible defaults.
@@ -40,24 +41,46 @@ func NewRunTracker(baseURL string) *RunTracker {
 	}
 }
 
-// StepCompletion represents completion info for one step.
+// StepLifecycle is the stable artifact-requiredness state for one planned step.
+type StepLifecycle string
+
+// StepLifecyclePlanned and the constants in this block define stable per-step lifecycle states.
+const (
+	StepLifecyclePlanned    StepLifecycle = "planned"
+	StepLifecycleStarted    StepLifecycle = "started"
+	StepLifecycleCompleted  StepLifecycle = "completed"
+	StepLifecycleFailed     StepLifecycle = "failed"
+	StepLifecycleNotStarted StepLifecycle = "not_started"
+)
+
+// StepCompletion represents lifecycle and completion info for one step.
 type StepCompletion struct {
 	StepID      string
+	Lifecycle   StepLifecycle
+	Planned     bool
+	Started     bool
 	Completed   bool
+	Failed      bool
 	CompletedAt time.Time
 }
 
 // RunResult summarizes the outcome of WaitForCompletion.
 type RunResult struct {
-	FinalState string
-	Steps      map[string]StepCompletion
-	UsedIdle   bool // true if idle fallback was used
+	FinalState      string
+	RunID           int64
+	FailureStepID   string
+	FailureCategory string
+	FailureMessage  string
+	Steps           map[string]StepCompletion
+	UsedIdle        bool // true if idle fallback was used
 }
 
 type stepProbe struct {
 	seenSize    int64
 	seenMod     string
 	okCount     int
+	started     bool
+	failed      bool
 	completed   bool
 	completedAt time.Time
 }
@@ -84,7 +107,8 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 
 		// 1) Check run state
-		state, terminal := t.checkRunState(ctx)
+		status, terminal := t.checkRunState(ctx)
+		state := status.State
 		if t.Debug {
 			logging.LogDebug("auto-results", "poll",
 				"state", state,
@@ -93,6 +117,16 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 		if state != "" {
 			final.FinalState = state
+			final.RunID = status.RunID
+			final.FailureStepID = status.StepID
+			final.FailureCategory = status.Category
+			final.FailureMessage = status.Message
+		}
+		if current, ok := stepState[status.StepID]; ok {
+			current.started = true
+			if state == constants.StateFailed {
+				current.failed = true
+			}
 		}
 
 		// 2) Probe steps
@@ -106,6 +140,7 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 				logging.LogDebug("tracker", "probe error", "stepId", id, "error", err.Error())
 			}
 			if done && size > 0 {
+				st.started = true
 				if st.okCount == 0 {
 					st.seenSize = size
 					st.seenMod = mod
@@ -162,36 +197,59 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 
 		// Exit conditions
-		if terminal || (len(stepState) > 0 && allDone) {
+		if terminal || (len(stepState) > 0 && allDone && (!t.RequireTerminalState ||
+			(final.FinalState != constants.StateRunning && final.FinalState != constants.StateStarting &&
+				final.FinalState != constants.StateInitializing))) {
 			break
 		}
 	}
 
-	for id, st := range stepState {
-		final.Steps[id] = StepCompletion{StepID: id, Completed: st.completed, CompletedAt: st.completedAt}
+	terminalStepIndex := -1
+	for index, id := range stepIDs {
+		if id == final.FailureStepID {
+			terminalStepIndex = index
+			break
+		}
+	}
+	for index, id := range stepIDs {
+		st := stepState[id]
+		lifecycle := StepLifecyclePlanned
+		switch {
+		case st.completed:
+			lifecycle = StepLifecycleCompleted
+		case st.failed || (final.FinalState == constants.StateFailed && id == final.FailureStepID):
+			lifecycle = StepLifecycleFailed
+		case st.started || (terminalStepIndex >= 0 && index <= terminalStepIndex):
+			lifecycle = StepLifecycleStarted
+		case terminalStepIndex >= 0 && index > terminalStepIndex &&
+			(final.FinalState == constants.StateFailed || final.FinalState == constants.StateStopped):
+			lifecycle = StepLifecycleNotStarted
+		}
+		final.Steps[id] = StepCompletion{
+			StepID: id, Lifecycle: lifecycle, Planned: true, Started: st.started || lifecycle == StepLifecycleStarted ||
+				lifecycle == StepLifecycleCompleted || lifecycle == StepLifecycleFailed,
+			Completed: st.completed, Failed: lifecycle == StepLifecycleFailed, CompletedAt: st.completedAt,
+		}
 	}
 	return final, nil
 }
 
-func (t *RunTracker) checkRunState(ctx context.Context) (state string, terminal bool) {
-	// New contract: rely on /status only
-	if st, err := t.Client.getStatusSimple(ctx); err == nil {
-		switch st {
+func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal bool) {
+	// New contract: rely on /status only and retain its structured terminal cause.
+	if status, err := t.Client.getStatusDetail(ctx); err == nil {
+		switch status.State {
 		case constants.StateRunning, constants.StateStarting, constants.StateInitializing:
 			t.seenActive = true
-			return st, false
+			return status, false
 		case constants.StateIdle:
-			if t.seenActive {
-				return st, true
-			}
-			return st, false
+			return status, t.seenActive
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
-			return st, true
+			return status, true
 		default:
-			return st, false
+			return status, false
 		}
 	}
-	return "", false
+	return terminalStatus{}, false
 }
 
 // checkIdle tries to infer idle state via /metrics when /run is absent or unhelpful.

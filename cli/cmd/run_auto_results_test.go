@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/tui"
 )
 
 type fakeRunTracker struct {
@@ -617,6 +619,85 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 	if summaryIndex <= hookIndex {
 		t.Fatalf("summary should be emitted after the pre-summary hook runs (this is the whole point of "+
 			"the hook: diagnostics/cleanup must be observable before the summary is); events=%v", got)
+	}
+}
+
+func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	}()
+
+	stepID := "mt-001-integrity-verify"
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		return &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateFailed}}
+	}
+	discoverStepIDsFunc = func(string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(string) ([]string, error) { return nil, nil }
+	newResultsFetcherFunc = func(string, string) autoResultsFetcher {
+		return &fakeFetcher{err: errors.New("truncated integrity artifact")}
+	}
+
+	var shutdownCalled int32
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+		atomic.AddInt32(&shutdownCalled, 1)
+		return nil
+	}
+	var summaryCalled int32
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) error {
+		atomic.AddInt32(&summaryCalled, 1)
+		return nil
+	}
+
+	done := startAutoResults(
+		"http://example", "mt", t.TempDir(), []string{stepID}, false, nil, "9999", true, 1,
+		"", nil, io.Discard, io.Discard, "", nil,
+	)
+	select {
+	case outcome := <-done:
+		if outcome.ArtifactErr == nil || !strings.Contains(outcome.ArtifactErr.Error(), "truncated integrity artifact") {
+			t.Fatalf("ArtifactErr = %v, want fetch failure", outcome.ArtifactErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("startAutoResults did not complete in time")
+	}
+	if atomic.LoadInt32(&shutdownCalled) != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdownCalled)
+	}
+	if atomic.LoadInt32(&summaryCalled) != 1 {
+		t.Fatalf("summary calls = %d, want 1", summaryCalled)
+	}
+}
+
+func TestWriteRunMetadataCapturesAvailableRuntimeIdentity(t *testing.T) {
+	root := t.TempDir()
+	id := "sha256:" + strings.Repeat("a", 64)
+	meta := &runMetadata{
+		runtimeIdentityProvider: func() (*tui.DistributedRuntimeIdentityEvidence, error) {
+			return &tui.DistributedRuntimeIdentityEvidence{
+				Tier:    tui.RuntimeIdentityTierAvailableImage,
+				ImageID: id,
+			}, nil
+		},
+	}
+
+	if err := writeRunMetadata(meta, root); err != nil {
+		t.Fatal(err)
+	}
+	if meta.RuntimeIdentity == nil || meta.RuntimeIdentity.ImageID != id ||
+		meta.RuntimeIdentityError != "" {
+		t.Fatalf("unexpected runtime evidence: identity=%+v error=%q",
+			meta.RuntimeIdentity, meta.RuntimeIdentityError)
 	}
 }
 

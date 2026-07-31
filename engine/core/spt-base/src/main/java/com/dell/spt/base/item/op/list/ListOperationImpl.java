@@ -6,12 +6,14 @@ import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.path.PathOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
+import java.util.List;
 
 /** Default implementation for {@link ListOperation}. */
 public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 				implements ListOperation<I> {
 
 	private int objectsListed;
+	private List<ListedObject> listedObjects = List.of();
 	private long bytesListed;
 	private String continuationToken;
 	private boolean truncated;
@@ -32,6 +34,7 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 	protected ListOperationImpl(final ListOperationImpl<I> other) {
 		super(other);
 		this.objectsListed = other.objectsListed;
+		this.listedObjects = other.listedObjects;
 		this.bytesListed = other.bytesListed;
 		this.continuationToken = other.continuationToken;
 		this.truncated = other.truncated;
@@ -53,6 +56,16 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 	@Override
 	public void objectsListed(final int n) {
 		this.objectsListed = n;
+	}
+
+	@Override
+	public List<ListedObject> listedObjects() {
+		return listedObjects;
+	}
+
+	@Override
+	public void listedObjects(final List<ListedObject> objects) {
+		listedObjects = objects == null ? List.of() : List.copyOf(objects);
 	}
 
 	@Override
@@ -115,6 +128,7 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 	public void reset() {
 		super.reset();
 		objectsListed = 0;
+		listedObjects = List.of();
 		bytesListed = 0;
 		truncated = false;
 		countBytesDone(0);

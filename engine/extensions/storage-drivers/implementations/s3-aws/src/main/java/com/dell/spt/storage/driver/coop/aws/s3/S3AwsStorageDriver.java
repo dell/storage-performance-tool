@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
@@ -71,6 +72,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				implements ListDiscoveryProbe {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
+
+	@Override
+	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
+		return checksumEnabled && checksumAlgorithm != null
+						&& (op instanceof CompositeDataOperation || checksumAlgorithm != ChecksumAlgorithm.SHA256);
+	}
+
 	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptListTtfbOperation");
 	static final ExecutionInterceptor LIST_TTFB_INTERCEPTOR = new ListTtfbExecutionInterceptor();
 	private static final SdkPlugin LIST_TTFB_SDK_PLUGIN = new ListTtfbSdkPlugin();
@@ -356,7 +364,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return;
 		}
 		final var bucketAndKey = resolveBucketAndKey((O) op);
-		IntegrityCsvArtifacts.logMultipartLifecycle(
+		IntegrityCsvArtifacts.logMultipartLifecycleOnce(
+						op,
 						IntegrityCsvArtifacts.nodeIdentity(),
 						stepId,
 						driverType(),
@@ -889,6 +898,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.thenAccept(resp -> {
 							int objectCount = 0;
 							long bytesTotal = 0;
+							final List<ListedObject> listedObjects = new ArrayList<>(resp.contents().size());
 							String firstKey = null;
 							String lastKey = null;
 
@@ -898,6 +908,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 									bytesTotal += s3obj.size();
 								}
 								final var key = s3obj.key();
+								listedObjects.add(new ListedObject(key, Math.max(0, s3obj.size())));
 								if (firstKey == null) {
 									firstKey = key;
 								}
@@ -905,6 +916,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							}
 
 							listOp.objectsListed(objectCount);
+							listOp.listedObjects(listedObjects);
 							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
 							listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
 

@@ -847,3 +847,42 @@ func TestNormalizeResultXML_EmptyFile(t *testing.T) {
 		t.Fatalf("normalizeResultXML empty mismatch:\ngot:  %q\nwant: %q", string(got), want)
 	}
 }
+
+func TestFetcherPreservesDiscoveredIntegrityNodeSources(t *testing.T) {
+	step := "mt-002-test-verify"
+	sourceName := "integrity.failures.node-001.csv"
+	content := []byte("header\r\nrow\r\n")
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+				{"logger": "metrics.FileTotal", "size": 5},
+				{"logger": sourceName, "size": len(content), "content_type": "text/csv"},
+			}})
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/" + sourceName:     func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(content) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	fetcher := NewFetcher(srv.URL, out)
+	fetcher.Artifacts = []ArtifactSpec{{Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true}}
+	manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(out, step+"."+sourceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("node source content = %q, want %q", got, content)
+	}
+	found := false
+	for _, status := range manifest.Steps[0].Files {
+		found = found || status.Name == step+"."+sourceName && status.Status == "ok"
+	}
+	if !found {
+		t.Fatal("node source status was not recorded")
+	}
+}

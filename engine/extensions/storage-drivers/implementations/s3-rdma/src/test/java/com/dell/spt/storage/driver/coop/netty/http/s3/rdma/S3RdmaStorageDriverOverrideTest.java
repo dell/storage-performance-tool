@@ -5,7 +5,10 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityResponseObserver;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.netty.http.s3.S3ResponseHandler;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
@@ -17,12 +20,15 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.util.AttributeKey;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -137,6 +143,18 @@ public class S3RdmaStorageDriverOverrideTest {
 		final var removed = rdmaOps.remove(op);
 		assertNotNull(removed);
 		assertTrue(rdmaOps.isEmpty());
+	}
+
+	@Test
+	void integrityReadVerifiesBeforeBufferDeregistration() throws Exception {
+		assertRdmaIntegrityCompletion(
+						"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+						Operation.Status.SUCC);
+	}
+
+	@Test
+	void integrityMismatchBecomesCorruptBeforeBufferDeregistration() throws Exception {
+		assertRdmaIntegrityCompletion("0".repeat(64), Operation.Status.RESP_FAIL_CORRUPT);
 	}
 
 	// ---------- reapTimedOutOps ----------
@@ -475,6 +493,46 @@ public class S3RdmaStorageDriverOverrideTest {
 		return new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 	}
 
+	private static void assertRdmaIntegrityCompletion(
+					final String expectedDigest, final Operation.Status expectedStatus) throws Exception {
+		final var transport = availableTransport();
+		final var driver = newMockDriver(enabledConfig(), transport);
+		final var op = dataOp(OpType.READ, 3);
+		op.status(Operation.Status.SUCC);
+		final byte[] payload = "abc".getBytes(StandardCharsets.UTF_8);
+		final ByteBuffer buffer = ByteBuffer.allocateDirect(payload.length);
+		buffer.put(payload);
+		final long handle = 123L;
+		final var ctx = newRdmaContext("read-token", buffer, handle, OpType.READ, payload.length);
+		final var channel = new EmbeddedChannel();
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM, "sha256");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST, expectedDigest);
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, "3");
+		final Field observerKeyField = S3ResponseHandler.class.getDeclaredField(
+						"INTEGRITY_OBSERVER_ATTR_KEY");
+		observerKeyField.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		final AttributeKey<IntegrityResponseObserver> observerKey = (AttributeKey<IntegrityResponseObserver>) observerKeyField.get(null);
+		channel.attr(observerKey).set(new IntegrityResponseObserver(headers, null));
+		Mockito.doAnswer(invocation -> {
+			assertNotNull(op.integrityVerificationResult(),
+							"verification must finish before registered memory is released");
+			assertEquals(expectedStatus, op.status());
+			return null;
+		}).when(transport).deregisterBuffer(buffer, handle);
+
+		invokeCompleteRdmaContext(driver, channel, op, ctx);
+
+		assertEquals(expectedStatus, op.status());
+		assertNotNull(op.integrityVerificationResult());
+		assertEquals(expectedStatus == Operation.Status.SUCC,
+						op.integrityVerificationResult().verified());
+		Mockito.verify(transport).deregisterBuffer(buffer, handle);
+		channel.finishAndReleaseAll();
+	}
+
 	private static RdmaTransport availableTransport() {
 		final var transport = Mockito.mock(RdmaTransport.class);
 		Mockito.when(transport.isAvailable()).thenReturn(true);
@@ -539,6 +597,19 @@ public class S3RdmaStorageDriverOverrideTest {
 		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("reapTimedOutOps");
 		m.setAccessible(true);
 		m.invoke(driver);
+	}
+
+	private static void invokeCompleteRdmaContext(
+					final S3RdmaStorageDriver<Item, Operation<Item>> driver,
+					final EmbeddedChannel channel,
+					final Operation<Item> op,
+					final Object context) throws Exception {
+		final Class<?> contextClass = Class.forName(
+						S3RdmaStorageDriver.class.getName() + "$RdmaContext");
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"completeRdmaContext", io.netty.channel.Channel.class, Operation.class, contextClass);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op, context);
 	}
 
 	private static void setField(final Class<?> clazz, final Object obj,

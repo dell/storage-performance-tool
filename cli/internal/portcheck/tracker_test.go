@@ -38,6 +38,44 @@ func TestRunTracker_TerminalRun(t *testing.T) {
 	}
 }
 
+func TestRunTrackerPreservesStructuredFailureAndClassifiesStepLifecycle(t *testing.T) {
+	const createStep = "mt-001-create"
+	const readStep = "mt-002-verify"
+	const deleteStep = "mt-003-delete"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "FAILED", "run_id": 42, "step_id": readStep,
+			"category": "input", "message": "completion marker mismatch",
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.PollInterval = time.Millisecond
+	tracker.RequireTerminalState = true
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tracker.WaitForCompletion(ctx, []string{createStep, readStep, deleteStep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalState != "FAILED" || result.RunID != 42 || result.FailureStepID != readStep ||
+		result.FailureCategory != "input" || result.FailureMessage != "completion marker mismatch" {
+		t.Fatalf("structured terminal result = %+v", result)
+	}
+	if got := result.Steps[createStep].Lifecycle; got != StepLifecycleStarted {
+		t.Fatalf("create lifecycle = %q, want started", got)
+	}
+	if got := result.Steps[readStep].Lifecycle; got != StepLifecycleFailed {
+		t.Fatalf("read lifecycle = %q, want failed", got)
+	}
+	if got := result.Steps[deleteStep].Lifecycle; got != StepLifecycleNotStarted {
+		t.Fatalf("delete lifecycle = %q, want not_started", got)
+	}
+}
+
 func TestRunTracker_StepCompletion(t *testing.T) {
 	// Step id used by test
 	stepID := "mt-001-20250101.000000.000-create"

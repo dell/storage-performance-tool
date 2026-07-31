@@ -1,0 +1,348 @@
+package integrity
+
+import (
+	"container/heap"
+	"crypto/sha256"
+	"encoding/csv"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+const manifestSortChunkRecords = 64 * 1024
+
+func (r ManifestRecord) compare(other ManifestRecord) int {
+	if value := strings.Compare(r.bucket, other.bucket); value != 0 {
+		return value
+	}
+	if value := strings.Compare(r.key, other.key); value != 0 {
+		return value
+	}
+	return strings.Compare(r.version, other.version)
+}
+
+func (r ManifestRecord) fields() []string {
+	return []string{r.bucket, r.key, strconv.FormatInt(r.size, 10), r.version}
+}
+
+func parseManifestRecord(fields []string, recordNumber int) (ManifestRecord, error) {
+	if len(fields) != len(canonicalHeader) {
+		return ManifestRecord{}, fmt.Errorf("canonical record %d has %d fields, want %d", recordNumber, len(fields), len(canonicalHeader))
+	}
+	if fields[0] == "" || fields[1] == "" {
+		return ManifestRecord{}, fmt.Errorf("canonical record %d has an empty bucket or key", recordNumber)
+	}
+	size, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil || size < 0 {
+		return ManifestRecord{}, fmt.Errorf("canonical record %d has invalid nonnegative size %q", recordNumber, fields[2])
+	}
+	return ManifestRecord{bucket: fields[0], key: fields[1], size: size, version: fields[3]}, nil
+}
+
+// ValidateCompletion verifies the two-file commit record and the complete canonical manifest.
+func ValidateCompletion(manifestPath, completionPath string, runID int64, producerKind, producerID, artifact string) (Completion, error) {
+	var marker Completion
+	markerFile, err := os.Open(completionPath) // #nosec G304 -- result/staging path selected by the caller
+	if err != nil {
+		return marker, fmt.Errorf("open completion record: %w", err)
+	}
+	decoder := json.NewDecoder(markerFile)
+	if err = decoder.Decode(&marker); err != nil {
+		_ = markerFile.Close()
+		return marker, fmt.Errorf("decode completion record: %w", err)
+	}
+	if err = markerFile.Close(); err != nil {
+		return marker, fmt.Errorf("close completion record: %w", err)
+	}
+	if marker.Version != 1 || marker.Status != "complete" {
+		return marker, fmt.Errorf("completion record has unsupported version/status %d/%q", marker.Version, marker.Status)
+	}
+	if runID <= 0 || marker.RunID != runID {
+		return marker, fmt.Errorf("completion run_id %d does not match expected %d", marker.RunID, runID)
+	}
+	if marker.ProducerKind != producerKind || marker.ProducerID != producerID {
+		return marker, fmt.Errorf("completion producer %q/%q does not match expected %q/%q", marker.ProducerKind, marker.ProducerID, producerKind, producerID)
+	}
+	if marker.Artifact != artifact || filepath.Base(manifestPath) != artifact {
+		return marker, fmt.Errorf("completion artifact %q does not match %q", marker.Artifact, artifact)
+	}
+	if marker.SourceRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
+		marker.SourceRecordCount < marker.UniqueRecordCount || marker.UniqueRecordCount < marker.SelectedRecordCount {
+		return marker, fmt.Errorf("completion record counts are inconsistent")
+	}
+
+	manifest, err := os.Open(manifestPath) // #nosec G304 -- result/staging path selected by the caller
+	if err != nil {
+		return marker, fmt.Errorf("open committed manifest: %w", err)
+	}
+	hasher := sha256.New()
+	bytesRead, err := io.Copy(hasher, manifest)
+	if closeErr := manifest.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return marker, fmt.Errorf("hash committed manifest: %w", err)
+	}
+	actualDigest := hex.EncodeToString(hasher.Sum(nil))
+	if marker.ManifestBytes != bytesRead || marker.ManifestSHA256 != actualDigest ||
+		len(marker.ManifestSHA256) != sha256.Size*2 || marker.ManifestSHA256 != strings.ToLower(marker.ManifestSHA256) {
+		return marker, fmt.Errorf("completion length/digest does not match committed manifest")
+	}
+
+	count, err := validateCanonicalManifest(manifestPath)
+	if err != nil {
+		return marker, err
+	}
+	if count != marker.SelectedRecordCount {
+		return marker, fmt.Errorf("manifest has %d records but completion selected_record_count is %d", count, marker.SelectedRecordCount)
+	}
+	return marker, nil
+}
+
+func validateCanonicalManifest(path string) (int, error) {
+	file, err := os.Open(path) // #nosec G304 -- result/staging path selected by the caller
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = file.Close() }()
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = len(canonicalHeader)
+	header, err := reader.Read()
+	if err != nil || !equalFields(header, canonicalHeader) {
+		return 0, fmt.Errorf("manifest %s does not have the exact canonical header", filepath.Base(path))
+	}
+	count := 0
+	for {
+		fields, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			return count, nil
+		}
+		if readErr != nil {
+			return 0, fmt.Errorf("parse manifest record %d: %w", count+2, readErr)
+		}
+		count++
+		if _, err := parseManifestRecord(fields, count+1); err != nil {
+			return 0, err
+		}
+	}
+}
+
+// sortManifestBounded external-sorts and de-duplicates a canonical manifest without retaining the
+// complete selection in memory. Conflicting sizes for one identity are rejected.
+func sortManifestBounded(path, tempDir string) (sortedPath string, uniqueCount int, err error) {
+	file, err := os.Open(path) // #nosec G304 -- result path selected by the caller
+	if err != nil {
+		return "", 0, err
+	}
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = len(canonicalHeader)
+	header, err := reader.Read()
+	if err != nil || !equalFields(header, canonicalHeader) {
+		_ = file.Close()
+		return "", 0, fmt.Errorf("manifest %s does not have the exact canonical header", filepath.Base(path))
+	}
+
+	var chunks []string
+	cleanup := func() {
+		for _, chunk := range chunks {
+			_ = os.Remove(chunk)
+		}
+	}
+	defer func() {
+		_ = file.Close()
+		cleanup()
+	}()
+
+	recordNumber := 1
+	for {
+		batch := make([]ManifestRecord, 0, manifestSortChunkRecords)
+		for len(batch) < manifestSortChunkRecords {
+			fields, readErr := reader.Read()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil {
+				return "", 0, fmt.Errorf("parse manifest record %d: %w", recordNumber+1, readErr)
+			}
+			recordNumber++
+			record, parseErr := parseManifestRecord(fields, recordNumber)
+			if parseErr != nil {
+				return "", 0, parseErr
+			}
+			batch = append(batch, record)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		sort.Slice(batch, func(i, j int) bool { return batch[i].compare(batch[j]) < 0 })
+		chunk, writeErr := writeSortedChunk(tempDir, batch)
+		if writeErr != nil {
+			return "", 0, writeErr
+		}
+		chunks = append(chunks, chunk)
+		if len(batch) < manifestSortChunkRecords {
+			break
+		}
+	}
+	return mergeSortedChunks(tempDir, chunks)
+}
+
+func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) {
+	file, err := os.CreateTemp(tempDir, ".integrity-sort-chunk-*")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	writer := csv.NewWriter(file)
+	writer.UseCRLF = true
+	var prior *ManifestRecord
+	for i := range records {
+		record := records[i]
+		if prior != nil && prior.compare(record) == 0 {
+			if prior.size != record.size {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return "", fmt.Errorf("manifest identity %q has conflicting sizes", record.identity())
+			}
+			continue
+		}
+		if err = writer.Write(record.fields()); err != nil {
+			break
+		}
+		recordCopy := record
+		prior = &recordCopy
+	}
+	writer.Flush()
+	if err == nil {
+		err = writer.Error()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+type mergeSource struct {
+	file   *os.File
+	reader *csv.Reader
+}
+
+type mergeItem struct {
+	record ManifestRecord
+	source int
+}
+
+type mergeHeap []mergeItem
+
+func (h mergeHeap) Len() int           { return len(h) }
+func (h mergeHeap) Less(i, j int) bool { return h[i].record.compare(h[j].record) < 0 }
+func (h mergeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *mergeHeap) Push(value any)    { *h = append(*h, value.(mergeItem)) }
+func (h *mergeHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
+}
+
+func mergeSortedChunks(tempDir string, chunks []string) (string, int, error) {
+	out, err := os.CreateTemp(tempDir, ".integrity-sorted-*")
+	if err != nil {
+		return "", 0, err
+	}
+	outPath := out.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = os.Remove(outPath)
+		}
+	}()
+	writer := csv.NewWriter(out)
+	writer.UseCRLF = true
+	if err = writer.Write(canonicalHeader); err != nil {
+		_ = out.Close()
+		return "", 0, err
+	}
+
+	sources := make([]mergeSource, 0, len(chunks))
+	defer func() {
+		for i := range sources {
+			_ = sources[i].file.Close()
+		}
+	}()
+	queue := &mergeHeap{}
+	heap.Init(queue)
+	for _, chunk := range chunks {
+		file, openErr := os.Open(chunk) // #nosec G304 -- private temporary path
+		if openErr != nil {
+			_ = out.Close()
+			return "", 0, openErr
+		}
+		source := mergeSource{file: file, reader: csv.NewReader(file)}
+		source.reader.FieldsPerRecord = len(canonicalHeader)
+		sources = append(sources, source)
+		if record, readErr := readMergeRecord(source.reader); readErr == nil {
+			heap.Push(queue, mergeItem{record: record, source: len(sources) - 1})
+		} else if !errors.Is(readErr, io.EOF) {
+			_ = out.Close()
+			return "", 0, readErr
+		}
+	}
+
+	count := 0
+	var prior *ManifestRecord
+	for queue.Len() > 0 {
+		item := heap.Pop(queue).(mergeItem)
+		if prior != nil && prior.compare(item.record) == 0 {
+			if prior.size != item.record.size {
+				_ = out.Close()
+				return "", 0, fmt.Errorf("manifest identity %q has conflicting sizes", item.record.identity())
+			}
+		} else {
+			if err = writer.Write(item.record.fields()); err != nil {
+				_ = out.Close()
+				return "", 0, err
+			}
+			recordCopy := item.record
+			prior = &recordCopy
+			count++
+		}
+		next, readErr := readMergeRecord(sources[item.source].reader)
+		if readErr == nil {
+			heap.Push(queue, mergeItem{record: next, source: item.source})
+		} else if !errors.Is(readErr, io.EOF) {
+			_ = out.Close()
+			return "", 0, readErr
+		}
+	}
+	writer.Flush()
+	if err = writer.Error(); err == nil {
+		err = out.Close()
+	} else {
+		_ = out.Close()
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	success = true
+	return outPath, count, nil
+}
+
+func readMergeRecord(reader *csv.Reader) (ManifestRecord, error) {
+	fields, err := reader.Read()
+	if err != nil {
+		return ManifestRecord{}, err
+	}
+	return parseManifestRecord(fields, 0)
+}

@@ -76,10 +76,16 @@ For read benchmarks, `spt` can seed an item set automatically and optionally wid
   --cleanup
 ```
 
+For end-to-end persisted-data qualification, use `write-verify` to write each
+object with versioned SHA-256 metadata and read it back once, or `read-verify`
+to verify a previously written set later. These are correctness workloads, not
+ordinary benchmarks; corruption returns exit code `20` and leaves a resumable
+`verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
-- **Multiple Workload Types**: Support for write, read, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
+- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
@@ -376,6 +382,8 @@ Executes a benchmark test with the specified workload type.
 
 - `write`: Write-only test, creating new objects
 - `read`: Read-only test on pre-existing objects
+- `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write once
+- `read-verify`: Verify v1 metadata objects selected by LIST or `--items-file`
 - `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
 - `delete`: Test to measure object deletion performance (coming soon)
 - `mock`: Run tests with dummy-mock driver (no S3 endpoint required)
@@ -403,6 +411,9 @@ Executes a benchmark test with the specified workload type.
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
 - `--items-file`: Path to a saved `items.csv` for `read` workloads (skips the seed phase)
+- `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
+- `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
+- `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
 - `--cleanup`: Delete all created objects after test completion
