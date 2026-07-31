@@ -74,6 +74,10 @@ class PipelineLoadStepClientTest {
 		netNode.put("addrs", List.class);
 		net.put("node", netNode);
 		storage.put("net", net);
+		storage.put("integrity", Map.of(
+						"mode", String.class,
+						"algorithm", String.class,
+						"input", Map.of("provenance", String.class, "expectedProducerId", String.class)));
 
 		schema.put("storage", storage);
 
@@ -182,6 +186,10 @@ class PipelineLoadStepClientTest {
 		netNode.put("addrs", List.of());
 		net.put("node", netNode);
 		storage.put("net", net);
+		storage.put("integrity", Map.of(
+						"mode", "none",
+						"algorithm", "sha256",
+						"input", Map.of("provenance", "none", "expectedProducerId", "")));
 		values.put("storage", storage);
 
 		Map<String, Object> output = new HashMap<>();

@@ -288,7 +288,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								: 0;
 				itemOutputFileAggregators.add(
 								new CsvArtifactAggregator(
-												loadStepId(), fileMgrs, configSlices, itemOutputFile, config.longVal("run-id"), selectionLimit));
+												loadStepId(), fileMgrs, configSlices, itemOutputFile, config.longVal("run-id"), selectionLimit, opType));
 			} else {
 				itemOutputFileAggregators.add(
 								new ItemOutputFileAggregator(loadStepId(), fileMgrs, configSlices, itemOutputFile));

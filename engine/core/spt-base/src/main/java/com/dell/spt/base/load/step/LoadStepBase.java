@@ -54,7 +54,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.ctxConfigs = ctxConfigs;
 		this.metricsMgr = metricsMgr;
 		try {
-			this.integrityModeEnabled = IntegrityConfig.fromStorage(this.config.configVal("storage")).enabled();
+			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
 		} catch (final RuntimeException e) {
 			throw new IntegrityTerminalException(
 							IntegrityTerminalException.Category.CONFIGURATION,
@@ -109,8 +109,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			start();
 			try {
 				await(timeLimitSec.get(), TimeUnit.SECONDS);
-			} catch (final IllegalStateException e) {
-				if (integrityModeEnabled) {
+			} catch (final RuntimeException e) {
+				if (IntegrityTerminalException.find(e) != null || integrityModeEnabled) {
 					terminalCause = terminalFailure(
 									IntegrityTerminalException.Category.EXECUTION,
 									"failed to await metadata-mode step",
@@ -123,7 +123,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			throwUnchecked(e);
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
-			if (integrityModeEnabled) {
+			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
 				terminalCause = terminalFailure(
 								IntegrityTerminalException.Category.EXECUTION,
 								"metadata-mode step execution failed",
@@ -183,7 +183,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
-			if (integrityModeEnabled) {
+			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
 				throw terminalFailure(
 								IntegrityTerminalException.Category.EXECUTION,
 								"metadata-mode step failed to start",

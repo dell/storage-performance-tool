@@ -2,6 +2,7 @@ package com.dell.spt.base.item.io;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.OpType;
@@ -47,6 +48,8 @@ class IntegrityOperationManifestOutputTest {
 		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/bucket", OpType.LIST)) {
 			output.put(op);
 		}
+		assertEquals("2", java.nio.file.Files.readString(
+						IntegrityManifestCompletion.emissionCountPath(manifest)).trim());
 
 		final var records = CSVFormat.RFC4180.parse(java.nio.file.Files.newBufferedReader(manifest)).getRecords();
 		assertEquals(3, records.size());

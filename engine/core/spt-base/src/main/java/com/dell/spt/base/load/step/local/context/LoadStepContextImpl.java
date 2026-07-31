@@ -315,6 +315,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public boolean isDone() {
+		final var generatorFailure = generator.terminalFailure();
+		if (generatorFailure != null) {
+			throw generatorFailure;
+		}
+		final var driverFailure = driver.terminalFailure();
+		if (driverFailure != null) {
+			throw driverFailure;
+		}
 		if (!STARTED.equals(state()) && !SHUTDOWN.equals(state())) {
 			Loggers.MSG.debug("{}: done due to {} state", id, state());
 			return true;

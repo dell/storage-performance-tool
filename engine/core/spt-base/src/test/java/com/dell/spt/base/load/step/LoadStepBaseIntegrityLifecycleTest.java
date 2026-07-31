@@ -64,6 +64,7 @@ class LoadStepBaseIntegrityLifecycleTest {
 		final Config config = TestConfigBuilder.config();
 		config.val("load-step-id", "integrity-step");
 		config.val("run-id", 123L);
+		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		config.val("storage-integrity-input-provenance", "external");
 		return config;

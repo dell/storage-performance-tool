@@ -72,11 +72,19 @@ class CoopStorageDriverBaseTest {
 		final var driverConfig = mock(Config.class);
 		final var limitConfig = mock(Config.class);
 		final var authConfig = mock(Config.class);
+		final var integrityConfig = mock(Config.class);
+		final var integrityInputConfig = mock(Config.class);
 
 		when(storageConfig.configVal("driver")).thenReturn(driverConfig);
 		when(driverConfig.configVal("limit")).thenReturn(limitConfig);
 		when(storageConfig.stringVal("namespace")).thenReturn("test-ns");
 		when(storageConfig.configVal("auth")).thenReturn(authConfig);
+		when(storageConfig.configVal("integrity")).thenReturn(integrityConfig);
+		when(integrityConfig.stringVal("mode")).thenReturn("none");
+		when(integrityConfig.stringVal("algorithm")).thenReturn("sha256");
+		when(integrityConfig.configVal("input")).thenReturn(integrityInputConfig);
+		when(integrityInputConfig.stringVal("provenance")).thenReturn("none");
+		when(integrityInputConfig.stringVal("expectedProducerId")).thenReturn("");
 		when(authConfig.stringVal("uid")).thenReturn("user");
 		when(authConfig.stringVal("secret")).thenReturn("secret");
 		when(authConfig.stringVal("token")).thenReturn(null);

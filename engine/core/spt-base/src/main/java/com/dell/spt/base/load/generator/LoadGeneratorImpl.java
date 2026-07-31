@@ -6,6 +6,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.logging.LogUtil;
@@ -27,6 +28,7 @@ import java.util.Queue;
 import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
@@ -75,6 +77,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
+	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
 	private final Lock tempBufferLock = new ReentrantLock();
 	private List<I> items;
 
@@ -145,6 +148,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	protected final void doWork() throws Exception {
+
+		final var priorTerminalFailure = terminalFailure.get();
+		if (priorTerminalFailure != null) {
+			throw priorTerminalFailure;
+		}
 
 		drainRetryQueue();
 
@@ -290,6 +298,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
+								final var terminal = IntegrityTerminalException.find(e);
+								if (terminal != null) {
+									throw terminal;
+								}
 								if (e instanceof EOFException) {
 									Loggers.MSG.debug("{}: finish due to output's EOF, {}", name, e);
 									outputFinishFlag = true;
@@ -311,6 +323,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
+								final var terminal = IntegrityTerminalException.find(e);
+								if (terminal != null) {
+									throw terminal;
+								}
 								if (e instanceof EOFException) {
 									Loggers.MSG.debug("{}: finish due to output's EOF, {}", name, e);
 									outputFinishFlag = true;
@@ -357,6 +373,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			Loggers.MSG.debug("{}: terminating load generator due to EOF", name);
 		} catch (final Throwable t) {
 			throwUncheckedIfInterrupted(t);
+			final var terminal = IntegrityTerminalException.find(t);
+			if (terminal != null) {
+				terminalFailure.compareAndSet(null, terminal);
+				throw terminal;
+			}
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
 			if (isFinished()) {
@@ -378,6 +399,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			if (e instanceof EOFException) {
 				return null;
 			}
+			final var terminal = IntegrityTerminalException.find(e);
+			if (terminal != null) {
+				throw terminal;
+			}
+			LogUtil.exception(Level.WARN, e, "Failed to read the next load-generator items");
+			return null;
 		}
 		return items;
 	}
@@ -482,6 +509,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
+				final var terminal = IntegrityTerminalException.find(e);
+				if (terminal != null) {
+					throw terminal;
+				}
 				if (e instanceof EOFException) {
 					// The output itself is done and will never accept anything again
 					// (including a re-enqueue) - matches how the normal dispatch path
@@ -507,6 +538,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final boolean isNothingPendingRetry() {
 		return retryQueue.isEmpty();
+	}
+
+	@Override
+	public final IntegrityTerminalException terminalFailure() {
+		return terminalFailure.get();
 	}
 
 	@Override

@@ -105,6 +105,7 @@ class StorageDriverBaseIntegrityTest {
 
 	private static Config metadataConfig() {
 		final var config = TestConfigBuilder.config();
+		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		return config;
 	}

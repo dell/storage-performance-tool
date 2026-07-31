@@ -7,6 +7,7 @@ import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
@@ -69,6 +70,11 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 
 	default boolean metadataIntegrityEnabled() {
 		return false;
+	}
+
+	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */
+	default IntegrityTerminalException terminalFailure() {
+		return null;
 	}
 
 	int activeOpCount();

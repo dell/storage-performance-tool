@@ -6,7 +6,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /** Typed terminal cause for metadata-mode lifecycle failures. */
-public final class IntegrityTerminalException extends IllegalStateException {
+public final class IntegrityTerminalException extends RuntimeException {
 
 	public enum Category {
 		CONFIGURATION, INPUT, EXECUTION, AGGREGATION, PUBLICATION, CLEANUP;

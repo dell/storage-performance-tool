@@ -5,10 +5,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -23,6 +21,7 @@ public record IntegrityManifestCompletion(
                 @JsonProperty("producer_id") String producerId,
                 String artifact,
                 @JsonProperty("source_record_count") long sourceRecordCount,
+                @JsonProperty("emitted_record_count") long emittedRecordCount,
                 @JsonProperty("unique_record_count") long uniqueRecordCount,
                 @JsonProperty("selected_record_count") long selectedRecordCount,
                 @JsonProperty("manifest_bytes") long manifestBytes,
@@ -34,6 +33,10 @@ public record IntegrityManifestCompletion(
     public static final String PRODUCER_CLI_STAGER = "cli_stager";
 
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    public static Path emissionCountPath(final Path manifest) {
+        return manifest.resolveSibling(manifest.getFileName() + ".emitted.count");
+    }
 
     public static Path completionPath(final Path manifest) {
         final String name = manifest.getFileName().toString();
@@ -51,7 +54,22 @@ public record IntegrityManifestCompletion(
                     final long uniqueCount,
                     final long selectedCount)
                     throws IOException {
+        return create(
+                        manifest, runId, producerKind, producerId, sourceCount, sourceCount, uniqueCount, selectedCount);
+    }
+
+    public static IntegrityManifestCompletion create(
+                    final Path manifest,
+                    final long runId,
+                    final String producerKind,
+                    final String producerId,
+                    final long sourceCount,
+                    final long emittedCount,
+                    final long uniqueCount,
+                    final long selectedCount)
+                    throws IOException {
         requirePositiveRunId(runId);
+        validateCounts(sourceCount, emittedCount, uniqueCount, selectedCount);
         return new IntegrityManifestCompletion(
                         VERSION,
                         STATUS_COMPLETE,
@@ -60,6 +78,7 @@ public record IntegrityManifestCompletion(
                         requireText(producerId, "producer_id"),
                         manifest.getFileName().toString(),
                         sourceCount,
+                        emittedCount,
                         uniqueCount,
                         selectedCount,
                         Files.size(manifest),
@@ -104,6 +123,7 @@ public record IntegrityManifestCompletion(
             throw new IOException("integrity input completion record is missing: " + marker);
         }
         final IntegrityManifestCompletion record = JSON.readValue(marker.toFile(), IntegrityManifestCompletion.class);
+        validateCounts(record.sourceRecordCount, record.emittedRecordCount, record.uniqueRecordCount, record.selectedRecordCount);
         final String expectedKind = switch (provenance) {
             case ENGINE_STEP -> PRODUCER_ENGINE_STEP;
             case CLI_STAGER -> PRODUCER_CLI_STAGER;
@@ -115,8 +135,9 @@ public record IntegrityManifestCompletion(
                         || !expectedKind.equals(record.producerKind)
                         || !requireText(expectedProducerId, "expected producer id").equals(record.producerId)
                         || !manifest.getFileName().toString().equals(record.artifact)
+                        || record.manifestBytes < 0
                         || record.manifestBytes != Files.size(manifest)
-                        || !record.manifestSha256.equals(sha256(manifest))) {
+                        || !sha256(manifest).equals(record.manifestSha256)) {
             throw new IOException("integrity input completion record does not match manifest identity");
         }
         long rows = 0;
@@ -134,11 +155,7 @@ public record IntegrityManifestCompletion(
     }
 
     public static void atomicMove(final Path source, final Path target) throws IOException {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
-        } catch (final AtomicMoveNotSupportedException e) {
-            throw new IOException("atomic publication is not supported for " + target, e);
-        }
+        CrashDurableFilePublisher.publish(source, target);
     }
 
     private static String sha256(final Path path) throws IOException {
@@ -159,6 +176,20 @@ public record IntegrityManifestCompletion(
             throw new IOException(field + " must not be empty");
         }
         return value;
+    }
+
+    private static void validateCounts(
+                    final long sourceCount,
+                    final long emittedCount,
+                    final long uniqueCount,
+                    final long selectedCount)
+                    throws IOException {
+        if (sourceCount < 0 || emittedCount < 0 || uniqueCount < 0 || selectedCount < 0
+                        || sourceCount != emittedCount
+                        || sourceCount < uniqueCount || uniqueCount < selectedCount) {
+            throw new IOException(
+                            "completion counts must satisfy emitted = source >= unique >= selected >= 0");
+        }
     }
 
     private static void requirePositiveRunId(final long runId) throws IOException {

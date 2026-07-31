@@ -58,4 +58,46 @@ class IntegrityManifestCompletionTest {
 						() -> IntegrityManifestCompletion.validate(
 										manifest, 7, IntegrityInputProvenance.ENGINE_STEP, "read-step"));
 	}
+
+	@Test
+	void ignoresCompletionStagingFileAfterInterruptedPublication() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,3,\r\n");
+		final Path marker = IntegrityManifestCompletion.completionPath(manifest);
+		Files.writeString(
+						marker.resolveSibling("." + marker.getFileName() + ".staging"),
+						"{\"status\":\"complete\"}");
+
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.validate(
+										manifest, 7, IntegrityInputProvenance.ENGINE_STEP, "create-step"));
+	}
+
+	@Test
+	void rejectsInconsistentAndIndependentEmissionCounts() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,1,\r\n");
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										manifest, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", 1, 0, 1, 1));
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										manifest, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", 1, 1, 2));
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										manifest, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", -1, 0, 0));
+	}
+
+	@Test
+	void terminalExceptionDoesNotInheritRecoverableIllegalState() {
+		org.junit.jupiter.api.Assertions.assertFalse(
+						IllegalStateException.class.isAssignableFrom(IntegrityTerminalException.class));
+	}
 }

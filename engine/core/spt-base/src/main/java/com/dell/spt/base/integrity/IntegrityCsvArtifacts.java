@@ -47,7 +47,7 @@ public final class IntegrityCsvArtifacts {
 							new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER));
 		}
 		if (opType == OpType.CREATE) {
-			if (multipartEnabled && driverType != null && driverType.toLowerCase(Locale.ROOT).startsWith("s3")) {
+			if (multipartEnabled && IntegrityConfig.isSupportedDriver(driverType)) {
 				return List.of(
 								new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER),
 								new Artifact(Kind.MULTIPART_LIFECYCLE, MULTIPART_LIFECYCLE_HEADER));

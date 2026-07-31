@@ -49,6 +49,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	protected final IntegrityPerformanceAccumulator integrityPerformance;
 	private final StreamingSha256 integrityHasher;
 	private final AtomicReference<String> integrityPhase = new AtomicReference<>();
+	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
 
 	protected final ConcurrentMap<String, Credential> pathToCredMap = new ConcurrentHashMap<>(1);
 
@@ -84,6 +85,9 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		this.concurrencyLimit = limitConfig.intVal("concurrency");
 		this.verifyFlag = verifyFlag;
 		this.integrityConfig = IntegrityConfig.fromStorage(storageConfig);
+		if (integrityConfig.enabled()) {
+			IntegrityConfig.requireSupportedDriver(driverType);
+		}
 
 		final var confWorkerCount = driverConfig.intVal("threads");
 		if (confWorkerCount > 0) {
@@ -164,7 +168,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 		switch (op.type()) {
 		case CREATE:
-			integrityPhase.compareAndSet(null, "write_prehash");
+			selectIntegrityPhase("write_prehash");
 			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
 				throw unsupportedIntegrityCombination("copy CREATE operations are outside integrity metadata v1");
 			}
@@ -182,6 +186,12 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 						integrityPerformance.recordAdditionalPayloadPass();
 					}
 				} catch (final IOException e) {
+					if (e instanceof StreamingSha256.DigestFailureException digestFailure) {
+						integrityPerformance.recordDigest(
+										digestFailure.processedBytes(), digestFailure.workerNanos());
+					} else {
+						integrityPerformance.recordDigest(0, 0);
+					}
 					throw new IntegrityTerminalException(
 									IntegrityTerminalException.Category.EXECUTION,
 									"failed to pre-hash CREATE object " + dataOperation.item().name(),
@@ -235,9 +245,18 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 	}
 
+	private void selectIntegrityPhase(final String phase) {
+		final String selected = integrityPhase.updateAndGet(current -> current == null ? phase : current);
+		if (!phase.equals(selected)) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"one integrity-enabled driver instance cannot mix " + selected + " and " + phase);
+		}
+	}
+
 	protected final void recordIntegrityReadResult(final IntegrityVerificationResult result) {
 		if (integrityPerformance != null && result != null) {
-			integrityPhase.compareAndSet(null, "read_verify");
+			selectIntegrityPhase("read_verify");
 			integrityPerformance.recordDigest(result.actualSize(), result.workerNanos());
 		}
 	}
@@ -256,6 +275,18 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		return integrityMetadataEnabled();
 	}
 
+	@Override
+	public final IntegrityTerminalException terminalFailure() {
+		return terminalFailure.get();
+	}
+
+	/** Publishes a failure detected by an asynchronous response handler to the step lifecycle. */
+	protected final void recordTerminalFailure(final IntegrityTerminalException failure) {
+		if (failure != null) {
+			terminalFailure.compareAndSet(null, failure.withStepId(stepId));
+		}
+	}
+
 	protected final int integrityDigestWorkerCount() {
 		return integrityHasher == null ? 0 : integrityHasher.workerCount();
 	}
@@ -269,12 +300,21 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			}
 			@SuppressWarnings("unchecked")
 			final O opResult = (O) op.result();
-			if (opResultOut.put(opResult)) {
-				return true;
-			} else {
-				Loggers.ERR.error(
-								"{}: Load operations results queue overflow, dropping the result", toString());
-				return false;
+			try {
+				if (opResultOut.put(opResult)) {
+					return true;
+				} else {
+					Loggers.ERR.error(
+									"{}: Load operations results queue overflow, dropping the result", toString());
+					return false;
+				}
+			} catch (final RuntimeException e) {
+				final var terminal = IntegrityTerminalException.find(e);
+				if (terminal != null) {
+					recordTerminalFailure(terminal);
+					throw terminal;
+				}
+				throw e;
 			}
 		}
 	}

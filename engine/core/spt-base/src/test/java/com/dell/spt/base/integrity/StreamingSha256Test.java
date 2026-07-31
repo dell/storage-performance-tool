@@ -3,12 +3,21 @@ package com.dell.spt.base.integrity;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -39,7 +48,7 @@ class StreamingSha256Test {
 		assertEquals(2, hasher.workerCount());
 		hasher.close();
 		final var item = new DataItemImpl("empty", 0, 0);
-		assertThrows(IllegalStateException.class, () -> hasher.hash(item));
+		assertThrows(java.io.IOException.class, () -> hasher.hash(item));
 	}
 
 	@ParameterizedTest
@@ -61,6 +70,69 @@ class StreamingSha256Test {
 			assertEquals(expected, result.metadata().digest());
 			assertEquals(size, result.metadata().size());
 			assertEquals(0, item.position());
+		}
+	}
+
+	@Test
+	void closeWakesAllWaitingCallersAndAllowsInFlightDigestToFinish() throws Exception {
+		final var enteredRead = new CountDownLatch(1);
+		final var releaseRead = new CountDownLatch(1);
+		final DataItem blockingItem = mock(DataItem.class);
+		when(blockingItem.size()).thenReturn(1L);
+		doNothing().when(blockingItem).reset();
+		when(blockingItem.read(any(ByteBuffer.class))).thenAnswer(invocation -> {
+			enteredRead.countDown();
+			releaseRead.await(5, TimeUnit.SECONDS);
+			invocation.<ByteBuffer> getArgument(0).put((byte) 1);
+			return 1;
+		});
+		final DataItem waitingItem = mock(DataItem.class);
+		when(waitingItem.size()).thenReturn(0L);
+		doNothing().when(waitingItem).reset();
+		final var hasher = new StreamingSha256(1);
+		final var executor = Executors.newFixedThreadPool(3);
+		try {
+			final var inFlight = executor.submit(() -> hasher.hash(blockingItem));
+			assertTrue(enteredRead.await(5, TimeUnit.SECONDS));
+			final var waiterOne = executor.submit(() -> hasher.hash(waitingItem));
+			final var waiterTwo = executor.submit(() -> hasher.hash(waitingItem));
+			hasher.close();
+			hasher.close();
+			final var failureOne = assertThrows(
+							java.util.concurrent.ExecutionException.class,
+							() -> waiterOne.get(5, TimeUnit.SECONDS));
+			final var failureTwo = assertThrows(
+							java.util.concurrent.ExecutionException.class,
+							() -> waiterTwo.get(5, TimeUnit.SECONDS));
+			assertTrue(failureOne.getCause() instanceof java.io.IOException);
+			assertTrue(failureTwo.getCause() instanceof java.io.IOException);
+			releaseRead.countDown();
+			assertEquals(1, inFlight.get(5, TimeUnit.SECONDS).metadata().size());
+		} finally {
+			releaseRead.countDown();
+			hasher.close();
+			executor.shutdownNow();
+		}
+	}
+
+	@Test
+	void failureCarriesPartialBytesAndWorkerTime() throws Exception {
+		final DataItem item = mock(DataItem.class);
+		when(item.size()).thenReturn(2L);
+		doNothing().when(item).reset();
+		final var reads = new AtomicInteger();
+		when(item.read(any(ByteBuffer.class))).thenAnswer(invocation -> {
+			if (reads.getAndIncrement() == 0) {
+				invocation.<ByteBuffer> getArgument(0).put((byte) 1);
+				return 1;
+			}
+			return 0;
+		});
+		try (final var hasher = new StreamingSha256(1)) {
+			final var failure = assertThrows(
+							StreamingSha256.DigestFailureException.class, () -> hasher.hash(item));
+			assertEquals(1, failure.processedBytes());
+			assertTrue(failure.workerNanos() >= 0);
 		}
 	}
 

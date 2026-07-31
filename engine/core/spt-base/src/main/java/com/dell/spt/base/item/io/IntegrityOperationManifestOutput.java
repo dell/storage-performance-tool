@@ -2,6 +2,8 @@ package com.dell.spt.base.item.io;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
+import com.dell.spt.base.integrity.CrashDurableFilePublisher;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
@@ -23,13 +25,16 @@ import org.apache.commons.csv.CSVPrinter;
 public final class IntegrityOperationManifestOutput<O extends Operation<? extends Item>>
 				implements Output<O> {
 
+	private final Path manifestPath;
 	private final String configuredBucket;
 	private final OpType opType;
 	private final CSVPrinter printer;
+	private long emittedRecordCount;
 	private boolean closed;
 
 	public IntegrityOperationManifestOutput(
 					final Path manifestPath, final String configuredPath, final OpType opType) throws IOException {
+		this.manifestPath = manifestPath;
 		this.configuredBucket = bucketFromPath(configuredPath);
 		this.opType = opType;
 		final Path parent = manifestPath.toAbsolutePath().getParent();
@@ -57,6 +62,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 			if (result instanceof ListOperation<?> listOperation) {
 				for (final var listedObject : listOperation.listedObjects()) {
 					printer.printRecord(configuredBucket, listedObject.key(), listedObject.size(), "");
+					emittedRecordCount++;
 				}
 				return true;
 			}
@@ -111,8 +117,35 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		closed = true;
 		try {
 			printer.close(true);
+			CrashDurableFilePublisher.syncExisting(manifestPath);
+			if (OpType.LIST.equals(opType)) {
+				publishEmissionCount();
+			}
 		} catch (final IOException e) {
 			throwUnchecked(e);
+		}
+	}
+
+	private void publishEmissionCount() throws IOException {
+		final Path countPath = IntegrityManifestCompletion.emissionCountPath(manifestPath);
+		if (Files.exists(countPath)) {
+			throw new IOException("refusing to replace existing emission count " + countPath);
+		}
+		final Path parent = countPath.toAbsolutePath().getParent();
+		final Path staging = Files.createTempFile(parent, "." + countPath.getFileName(), ".staging");
+		boolean committed = false;
+		try {
+			Files.writeString(
+							staging,
+							Long.toString(emittedRecordCount) + System.lineSeparator(),
+							StandardCharsets.US_ASCII,
+							StandardOpenOption.TRUNCATE_EXISTING);
+			IntegrityManifestCompletion.atomicMove(staging, countPath);
+			committed = true;
+		} finally {
+			if (!committed) {
+				Files.deleteIfExists(staging);
+			}
 		}
 	}
 

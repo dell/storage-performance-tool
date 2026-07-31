@@ -53,4 +53,55 @@ class IntegrityConfigParserTest {
 		assertThrows(IllegalConfigurationException.class,
 						() -> IntegrityConfig.fromStorage(unsupportedProvenance.configVal("storage")));
 	}
+
+	@Test
+	void validatesResolvedIntegrityExclusionsBeforeExecution() {
+		for (final String opType : new String[]{"create", "read", "list", "delete"
+		}) {
+			IntegrityConfig.validateLoadStep(metadataStep(opType));
+		}
+
+		final var unsupported = metadataStep("create");
+		unsupported.val("storage-driver-type", "dummy-mock");
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(unsupported));
+
+		for (final String path : new String[]{
+				"item-data-input-file", "item-input-file", "item-data-ranges-concat"
+		}) {
+			final var config = metadataStep("create");
+			config.val(path, "configured");
+			assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(config), path);
+		}
+		for (final String path : new String[]{"load-op-recycle-mode", "load-op-recycle-content-update"
+		}) {
+			final var config = metadataStep("create");
+			config.val(path, true);
+			assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(config), path);
+		}
+		final var update = metadataStep("update");
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(update));
+		final var rangeRandom = metadataStep("read");
+		rangeRandom.val("item-data-ranges-random", 1);
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(rangeRandom));
+		final var rangeFixed = metadataStep("read");
+		rangeFixed.val("item-data-ranges-fixed", java.util.List.of("0-1"));
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(rangeFixed));
+		final var missingProvenance = metadataStep("read");
+		missingProvenance.val("storage-integrity-input-provenance", "none");
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(missingProvenance));
+	}
+
+	@Test
+	void missingStorageConfigurationIsFatalRatherThanDisabled() {
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.fromStorage(null));
+	}
+
+	private static com.github.akurilov.confuse.Config metadataStep(final String opType) {
+		final var config = TestConfigBuilder.config();
+		config.val("storage-driver-type", "s3");
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-integrity-input-provenance", "external");
+		config.val("load-op-type", opType);
+		return config;
+	}
 }

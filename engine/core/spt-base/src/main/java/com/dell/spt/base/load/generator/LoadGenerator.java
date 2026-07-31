@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.generator;
 
 import com.dell.spt.base.concurrent.Task;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import java.util.List;
@@ -93,5 +94,16 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 */
 	default boolean supportsRetry() {
 		return true;
+	}
+
+	/**
+	 * Returns the terminal integrity/input failure observed by the generator task, if any.
+	 *
+	 * <p>The generator runs asynchronously, so throwing from its work loop alone cannot notify the
+	 * load-step thread. This compatibility default lets implementations publish a typed failure for
+	 * the step completion loop to rethrow without changing third-party generators.
+	 */
+	default IntegrityTerminalException terminalFailure() {
+		return null;
 	}
 }

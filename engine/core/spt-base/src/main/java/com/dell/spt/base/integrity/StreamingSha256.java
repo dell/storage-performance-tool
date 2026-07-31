@@ -17,6 +17,7 @@ public final class StreamingSha256 implements AutoCloseable {
 
 	public static final int BUFFER_SIZE = 64 * 1024;
 	private static final String JCA_ALGORITHM = "SHA-256";
+	private static final Worker CLOSED_WORKER = new Worker(true);
 
 	private final int workerCount;
 	private final ArrayBlockingQueue<Worker> workers;
@@ -46,7 +47,7 @@ public final class StreamingSha256 implements AutoCloseable {
 			throw new IllegalArgumentException("item must not be null");
 		}
 		if (closed.get()) {
-			throw new IllegalStateException("integrity digest workers are closed");
+			throw new IOException("integrity digest workers are closed");
 		}
 		final long expectedSize = item.size();
 		if (expectedSize < 0) {
@@ -61,7 +62,13 @@ public final class StreamingSha256 implements AutoCloseable {
 			throw new IOException("interrupted while waiting for an integrity digest worker", e);
 		}
 
+		if (worker == CLOSED_WORKER) {
+			workers.offer(CLOSED_WORKER);
+			throw new IOException("integrity digest workers are closed");
+		}
+
 		final long started = System.nanoTime();
+		long processedBytes = 0;
 		byte[] digest = null;
 		IOException failure = null;
 		try {
@@ -77,6 +84,7 @@ public final class StreamingSha256 implements AutoCloseable {
 									"data item made no progress with " + remaining + " digest bytes remaining");
 				}
 				remaining -= read;
+				processedBytes += read;
 				worker.buffer.flip();
 				worker.digest.update(worker.buffer);
 			}
@@ -101,7 +109,7 @@ public final class StreamingSha256 implements AutoCloseable {
 		}
 		final long elapsed = System.nanoTime() - started;
 		if (failure != null) {
-			throw failure;
+			throw new DigestFailureException(failure, processedBytes, elapsed);
 		}
 		final IntegrityMetadata metadata = new IntegrityMetadata(
 						IntegrityMetadataCodec.VERSION_1,
@@ -115,15 +123,42 @@ public final class StreamingSha256 implements AutoCloseable {
 	public void close() {
 		if (closed.compareAndSet(false, true)) {
 			workers.clear();
+			workers.offer(CLOSED_WORKER);
+		}
+	}
+
+	public static final class DigestFailureException extends IOException {
+		private final long processedBytes;
+		private final long workerNanos;
+
+		private DigestFailureException(
+						final IOException cause, final long processedBytes, final long workerNanos) {
+			super(cause.getMessage(), cause);
+			this.processedBytes = Math.max(0, processedBytes);
+			this.workerNanos = Math.max(0, workerNanos);
+		}
+
+		public long processedBytes() {
+			return processedBytes;
+		}
+
+		public long workerNanos() {
+			return workerNanos;
 		}
 	}
 
 	private static final class Worker {
-		private final ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+		private final ByteBuffer buffer;
 		private final MessageDigest digest;
 
 		private Worker() throws NoSuchAlgorithmException {
+			buffer = ByteBuffer.allocate(BUFFER_SIZE);
 			digest = MessageDigest.getInstance(JCA_ALGORITHM);
+		}
+
+		private Worker(final boolean sentinel) {
+			buffer = null;
+			digest = null;
 		}
 	}
 }

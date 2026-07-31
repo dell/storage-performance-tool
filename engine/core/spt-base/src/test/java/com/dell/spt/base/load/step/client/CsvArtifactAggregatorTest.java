@@ -83,6 +83,7 @@ class CsvArtifactAggregatorTest {
 										+ "b,z,1,\r\n"
 										+ "b,a,2,\r\n"
 										+ "b,a,2,\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "3\n");
 
 		new CsvArtifactAggregator(
 						"list-step",
@@ -99,8 +100,72 @@ class CsvArtifactAggregatorTest {
 		final var completion = IntegrityManifestCompletion.validate(
 						manifest, 100, IntegrityInputProvenance.ENGINE_STEP, "list-step");
 		assertEquals(3, completion.sourceRecordCount());
+		assertEquals(3, completion.emittedRecordCount());
 		assertEquals(2, completion.uniqueRecordCount());
 		assertEquals(1, completion.selectedRecordCount());
 		assertFalse(Files.exists(tempDir.resolve("verify-input.node-001.csv")));
+	}
+
+	@Test
+	void discoveryRejectsEmissionCountMismatchWithoutCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "2\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE), List.of(),
+										manifest.toString(), 102, 0, com.dell.spt.base.item.op.OpType.LIST).close());
+
+		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void aggregationCrossesSortChunkBoundaryAndCleansPrivateTemp() throws Exception {
+		final Path systemTemp = Path.of(System.getProperty("java.io.tmpdir"));
+		final long tempDirsBefore;
+		try (final var paths = Files.list(systemTemp)) {
+			tempDirsBefore = paths.filter(path -> path.getFileName().toString().startsWith("spt-integrity-aggregate-")).count();
+		}
+		final Path manifest = tempDir.resolve("verified-large.csv");
+		try (final var writer = Files.newBufferedWriter(manifest)) {
+			writer.write("bucket,key,size,version_id\r\n");
+			for (int i = CsvArtifactAggregator.SORT_CHUNK_RECORDS; i >= 0; i--) {
+				writer.write("b,key-" + String.format(java.util.Locale.ROOT, "%08d", i) + ",1,\r\n");
+			}
+		}
+
+		new CsvArtifactAggregator(
+						"read-step", List.of(FileManager.INSTANCE), List.of(),
+						manifest.toString(), 104, 0, com.dell.spt.base.item.op.OpType.READ).close();
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, 104, IntegrityInputProvenance.ENGINE_STEP, "read-step");
+		assertEquals(CsvArtifactAggregator.SORT_CHUNK_RECORDS + 1L, completion.sourceRecordCount());
+		assertEquals(completion.sourceRecordCount(), completion.uniqueRecordCount());
+		final long tempDirsAfter;
+		try (final var paths = Files.list(systemTemp)) {
+			tempDirsAfter = paths.filter(path -> path.getFileName().toString().startsWith("spt-integrity-aggregate-")).count();
+		}
+		assertEquals(tempDirsBefore, tempDirsAfter);
+	}
+
+	@Test
+	void rejectsConflictingSizesWithoutCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("verified.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,a,1,v1\r\n"
+										+ "b,a,2,v1\r\n");
+
+		assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"read-step", List.of(FileManager.INSTANCE), List.of(),
+										manifest.toString(), 103, 0, com.dell.spt.base.item.op.OpType.READ).close());
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 }
