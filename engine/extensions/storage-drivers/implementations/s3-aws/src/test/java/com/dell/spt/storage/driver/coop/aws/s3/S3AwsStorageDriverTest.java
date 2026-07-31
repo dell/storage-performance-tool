@@ -96,6 +96,17 @@ public class S3AwsStorageDriverTest {
 						Mockito.withSettings().lenient().defaultAnswer(Mockito.CALLS_REAL_METHODS));
 	}
 
+	private static void disableIntegrity(final Config storageConfig) {
+		final Config integrityConfig = mock(Config.class);
+		final Config inputConfig = mock(Config.class);
+		when(storageConfig.configVal("integrity")).thenReturn(integrityConfig);
+		when(integrityConfig.stringVal("mode")).thenReturn("none");
+		when(integrityConfig.stringVal("algorithm")).thenReturn(IntegrityMetadataCodec.ALGORITHM_SHA256);
+		when(integrityConfig.configVal("input")).thenReturn(inputConfig);
+		when(inputConfig.stringVal("provenance")).thenReturn("none");
+		when(inputConfig.stringVal("expectedProducerId")).thenReturn("");
+	}
+
 	private void setBucketName(S3AwsStorageDriver<Item, Operation<Item>> driver, String bucketName) throws Exception {
 		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
 		bucketField.setAccessible(true);
@@ -1747,6 +1758,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromItemOutputPath() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			// storage-net-node-addrs always throws (confuse path mismatch in practice)
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
@@ -1759,6 +1771,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromItemInputPath_whenOutputPathNull() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -1771,6 +1784,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromNodeAddrs_withSlash() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("addr/extra");
 
 			assertEquals("addr", S3AwsStorageDriver.resolveBucketName(config));
@@ -1779,6 +1793,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromNodeAddrs_noSlash() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("justaddr");
 
 			assertEquals("justaddr", S3AwsStorageDriver.resolveBucketName(config));
@@ -1787,6 +1802,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void allSourcesMissing_fallsBackToUsername() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
 
@@ -1798,6 +1814,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void nodeAddrsEmpty_fallsThrough() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("");
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -1809,6 +1826,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void outputPathTooShort_fallsToInputPath() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -2527,6 +2545,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
@@ -2654,6 +2673,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
@@ -2794,6 +2814,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);

@@ -413,15 +413,25 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	protected abstract void applyCopyHeaders(final HttpHeaders httpHeaders, final String srcPath)
 					throws URISyntaxException;
 
+	/** Associates transport-specific attempt state with the leased request channel. */
+	protected void bindRequestChannel(final Channel channel, final O op) {}
+
+	/** Marks transport-specific attempt state eligible for response timeout handling. */
+	protected void onRequestDispatched(final Channel channel, final O op) {}
+
 	@Override
 	protected final void sendRequest(final Channel channel, final O op) {
 		final var nodeAddr = op.nodeAddr();
 		try {
+			if (channel != null) {
+				bindRequestChannel(channel, op);
+			}
 			final var httpRequest = httpRequest(op, nodeAddr);
 			if (channel == null) {
 				return;
 			} else {
 				channel.write(httpRequest).addListener(httpReqSentCallback);
+				onRequestDispatched(channel, op);
 				if (op.integrityMetadata() != null) {
 					markIntegrityRequestDispatched();
 				}

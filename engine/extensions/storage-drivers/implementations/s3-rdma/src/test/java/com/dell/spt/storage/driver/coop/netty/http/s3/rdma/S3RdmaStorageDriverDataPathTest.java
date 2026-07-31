@@ -9,7 +9,9 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import com.github.akurilov.commons.io.Output;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -17,6 +19,8 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -278,7 +282,7 @@ public class S3RdmaStorageDriverDataPathTest {
 	@Test
 	void testReaper_deregistersAllTimedOutOpsOnFakeTransport() throws Exception {
 		// Use 1ms timeout so entries are immediately expired.
-		// Set opResultOut on the mock driver so handleCompleted() doesn't NPE,
+		// Set opResultOut on the mock driver so completion can publish each timeout result,
 		// allowing the reaper to iterate through all entries.
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
 		final var fake = new FakeRdmaTransport(config);
@@ -287,14 +291,20 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var driver = newMockDriver(config, fake);
 		setFieldInHierarchy(driver, "opResultOut", Mockito.mock(Output.class));
 		final var rdmaOps = getRdmaOps(driver);
+		final List<EmbeddedChannel> channels = new ArrayList<>();
 
-		// Register 5 buffers and store contexts
+		// Register 5 buffers and store dispatched, channel-bound contexts
 		for (int i = 0; i < 5; i++) {
 			final ByteBuffer buf = ByteBuffer.allocateDirect(64);
 			final long mrHandle = fake.registerBuffer(buf, 64);
 			final var op = dataOp(OpType.CREATE, THRESHOLD);
 			final var ctx = newRdmaContext("tok" + i, buf, mrHandle, OpType.CREATE, 64);
 			rdmaOps.put(op, ctx);
+			final var channel = new EmbeddedChannel();
+			channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+			invokeBindRequestChannel(driver, channel, op);
+			invokeOnRequestDispatched(driver, channel, op);
+			channels.add(channel);
 		}
 
 		assertEquals(5, fake.getActiveRegistrationCount());
@@ -310,6 +320,7 @@ public class S3RdmaStorageDriverDataPathTest {
 						"Reaper should deregister all timed-out buffers");
 		assertEquals(5, fake.getDeregisterCount());
 		assertTrue(rdmaOps.isEmpty(), "All entries should be removed from rdmaOps");
+		channels.forEach(EmbeddedChannel::finishAndReleaseAll);
 	}
 
 	@Test
@@ -524,6 +535,26 @@ public class S3RdmaStorageDriverDataPathTest {
 						"cleanupRdmaContext", Operation.class);
 		m.setAccessible(true);
 		return (boolean) m.invoke(driver, op);
+	}
+
+	private static void invokeBindRequestChannel(
+					final S3RdmaStorageDriver<?, ?> driver,
+					final EmbeddedChannel channel,
+					final Operation<?> op) throws Exception {
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"bindRequestChannel", io.netty.channel.Channel.class, Operation.class);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op);
+	}
+
+	private static void invokeOnRequestDispatched(
+					final S3RdmaStorageDriver<?, ?> driver,
+					final EmbeddedChannel channel,
+					final Operation<?> op) throws Exception {
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"onRequestDispatched", io.netty.channel.Channel.class, Operation.class);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op);
 	}
 
 	private static void invokeReapTimedOutOps(

@@ -68,6 +68,10 @@ class HttpStorageDriverBaseTest {
 			cfg.val("storage-driver-limit-concurrency", 0);
 			cfg.val("storage-driver-threads", 0);
 			cfg.val("storage-driver-limit-queue-input", 1024);
+			cfg.val("storage-integrity-mode", "none");
+			cfg.val("storage-integrity-algorithm", "sha256");
+			cfg.val("storage-integrity-input-provenance", "none");
+			cfg.val("storage-integrity-input-expectedProducerId", "");
 			// Net
 			cfg.val("storage-net-transport", "nio");
 			cfg.val("storage-net-ssl-enabled", false);

@@ -46,7 +46,9 @@ public final class BucketXmlListingHandler<I extends Item>
 					final ItemFactory<I> itemFactory, final int idRadix) {
 		this.itemsBuffer = itemsBuffer;
 		this.path = path == null ? "" : (path.endsWith("/") ? path : path + "/");
-		this.prefix = prefix == null ? "" : prefix;
+		this.prefix = prefix == null || prefix.isEmpty()
+						? ""
+						: (prefix.startsWith("/") ? prefix.substring(1) : prefix);
 		this.itemFactory = itemFactory;
 		this.idRadix = idRadix;
 	}

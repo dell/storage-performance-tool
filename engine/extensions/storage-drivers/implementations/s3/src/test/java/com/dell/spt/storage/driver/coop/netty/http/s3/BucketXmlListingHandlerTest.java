@@ -44,6 +44,13 @@ final class BucketXmlListingHandlerTest {
 	}
 
 	@Test
+	void canonicalizesLeadingSlashPrefixForReturnedKeys() throws Exception {
+		final var items = parse("benchmark/1z", "/benchmark/", 42);
+		assertEquals(1, items.size());
+		assertEquals(Long.parseLong("1z", RADIX), items.get(0).offset());
+	}
+
+	@Test
 	void rejectsObjectOutsideConfiguredPrefix() {
 		assertThrows(SAXException.class, () -> parse("other/1z", "benchmark/", 42));
 	}

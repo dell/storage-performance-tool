@@ -175,7 +175,12 @@ public class S3StorageDriverTest {
 			final Map<String, Object> configSchema = TreeUtil.reduceForest(configSchemas);
 			final Config config = new BasicConfig("-", configSchema);
 			config.val("load-batch-size", 1024);
+			config.val("storage-driver-type", "s3");
 			config.val("storage-driver-limit-concurrency", 0);
+			config.val("storage-integrity-mode", "none");
+			config.val("storage-integrity-algorithm", "sha256");
+			config.val("storage-integrity-input-provenance", "none");
+			config.val("storage-integrity-input-expectedProducerId", "");
 			config.val("storage-driver-threads", 0);
 			config.val("storage-driver-limit-queue-input", 1024);
 			// Net: use NIO in tests to avoid native epoll dependency

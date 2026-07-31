@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.integrity.IntegrityResponseObserver;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -25,6 +26,11 @@ import io.netty.util.AttributeKey;
 import org.apache.logging.log4j.Level;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -38,11 +44,91 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<ByteBuf> CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"content");
+	private static final AttributeKey<ListResponseSpool> LIST_CONTENT_ATTR_KEY = AttributeKey.newInstance(
+					"spt-list-content");
 	private static final AttributeKey<IntegrityResponseObserver> INTEGRITY_OBSERVER_ATTR_KEY = AttributeKey.newInstance("spt-integrity-observer");
+	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
+	private static final int MAX_LIST_CONTENT_SIZE = 16 * 1024 * 1024;
+	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
+
+	private static final class ListResponseSpool implements AutoCloseable {
+		private final Path path;
+		private OutputStream output;
+		private long size;
+		private boolean closed;
+
+		private ListResponseSpool() throws IOException {
+			path = Files.createTempFile("spt-list-response-", ".xml");
+			try {
+				output = Files.newOutputStream(path);
+			} catch (final IOException e) {
+				Files.deleteIfExists(path);
+				throw e;
+			}
+			ACTIVE_LIST_SPOOLS.incrementAndGet();
+		}
+
+		private void write(final ByteBuf content) throws IOException {
+			final int length = content.readableBytes();
+			if (size + length > MAX_LIST_CONTENT_SIZE) {
+				throw new IOException("LIST response exceeds the bounded 16 MiB parser spool");
+			}
+			content.readBytes(output, length);
+			size += length;
+		}
+
+		private InputStream openInput() throws IOException {
+			closeOutput();
+			return Files.newInputStream(path);
+		}
+
+		private long size() {
+			return size;
+		}
+
+		private void closeOutput() throws IOException {
+			if (output != null) {
+				output.close();
+				output = null;
+			}
+		}
+
+		public void close() throws IOException {
+			if (closed) {
+				return;
+			}
+			closed = true;
+			IOException failure = null;
+			try {
+				closeOutput();
+			} catch (final IOException e) {
+				failure = e;
+			}
+			try {
+				Files.deleteIfExists(path);
+			} catch (final IOException e) {
+				if (failure == null) {
+					failure = e;
+				} else {
+					failure.addSuppressed(e);
+				}
+			} finally {
+				ACTIVE_LIST_SPOOLS.decrementAndGet();
+			}
+			if (failure != null) {
+				throw failure;
+			}
+		}
+	}
+
+	static int activeListSpoolCount() {
+		return ACTIVE_LIST_SPOOLS.get();
+	}
+
 	private final S3StorageDriver<I, O> s3Driver;
 	private final boolean versioningEnabled;
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
@@ -95,7 +181,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						&& op instanceof com.dell.spt.base.item.op.data.DataOperation
 						&& !(op instanceof PartialDataOperation)
 						&& !(op instanceof CompositeDataOperation)) {
-			final Long contentLength = s3Driver.observesIntegrityReadBodyOutOfBand(op)
+			final boolean outOfBand = s3Driver.observesIntegrityReadBodyOutOfBand(op);
+			channel.attr(OUT_OF_BAND_READ_ATTR_KEY).set(outOfBand);
+			final Long contentLength = outOfBand
 							? null
 							: parseContentLength(respHeaders);
 			channel.attr(INTEGRITY_OBSERVER_ATTR_KEY).set(
@@ -119,7 +207,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else if (op instanceof ListOperation) {
 			final ListOperation<?> listOp = (ListOperation<?>) op;
 			markListDataResponseStart(listOp, contentChunk.readableBytes());
-			bufferListContent(channel, contentChunk);
+			bufferListContent(channel, listOp, contentChunk);
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
 		}
@@ -136,6 +224,22 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 		observer.onBody(body);
 		return observer.finish();
+	}
+
+	static void discardOutOfBandIntegrityRead(final Channel channel) {
+		if (channel != null) {
+			channel.attr(INTEGRITY_OBSERVER_ATTR_KEY).getAndSet(null);
+		}
+	}
+
+	static void discardListResponse(final Channel channel) throws IOException {
+		if (channel == null) {
+			return;
+		}
+		final ListResponseSpool spool = channel.attr(LIST_CONTENT_ATTR_KEY).getAndSet(null);
+		if (spool != null) {
+			spool.close();
+		}
 	}
 
 	private static Long parseContentLength(final HttpHeaders headers) {
@@ -160,16 +264,26 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private void bufferListContent(final Channel channel, final ByteBuf contentChunk) {
-		final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
-		contentAttr.compareAndSet(null, Unpooled.buffer(MIN_CONTENT_SIZE));
-		final ByteBuf content = contentAttr.get();
+	private void bufferListContent(
+					final Channel channel, final ListOperation<?> op, final ByteBuf contentChunk) {
+		final Attribute<ListResponseSpool> contentAttr = channel.attr(LIST_CONTENT_ATTR_KEY);
+		ListResponseSpool spool = contentAttr.get();
 		try {
-			content.writeBytes(contentChunk);
-		} catch (final IndexOutOfBoundsException e) {
-			LogUtil.exception(
-							Level.WARN, e, "HTTP content input buffer overflow, expected no more than {} bytes",
-							MAX_CONTENT_SIZE);
+			if (spool == null) {
+				spool = new ListResponseSpool();
+				contentAttr.set(spool);
+			}
+			spool.write(contentChunk);
+		} catch (final IOException e) {
+			contentAttr.set(null);
+			if (spool != null) {
+				try {
+					spool.close();
+				} catch (final IOException cleanupFailure) {
+					e.addSuppressed(cleanupFailure);
+				}
+			}
+			throw recordListFailure(op, "failed to spool bounded LIST response", e);
 		}
 	}
 
@@ -190,7 +304,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected final void handleResponseContentFinish(final Channel channel, final O op) {
-		final boolean outOfBand = s3Driver != null && s3Driver.observesIntegrityReadBodyOutOfBand(op);
+		final boolean outOfBand = Boolean.TRUE.equals(
+						channel.attr(OUT_OF_BAND_READ_ATTR_KEY).getAndSet(null));
 		final Attribute<IntegrityResponseObserver> observerAttr = channel.attr(INTEGRITY_OBSERVER_ATTR_KEY);
 		final IntegrityResponseObserver observer = outOfBand && op.status() == Operation.Status.SUCC
 						? observerAttr.get()
@@ -203,10 +318,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				op.status(Operation.Status.RESP_FAIL_CORRUPT);
 			}
 		}
-		final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
-		final ByteBuf content = contentAttr.get();
-		if (content != null && content.readableBytes() > 0) {
-			if (op instanceof CompositeDataOperation) {
+		if (op instanceof ListOperation) {
+			finishListResponse(channel, (ListOperation<?>) op);
+		} else {
+			final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
+			final ByteBuf content = contentAttr.get();
+			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation) {
 				final CompositeDataOperation mpuOp = (CompositeDataOperation) op;
 				if (!mpuOp.allSubOperationsDone()) {
 					// this is an MPU init response
@@ -219,19 +336,58 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 										"Upload id not found in the following response content:\n{}", contentStr);
 					}
 				}
-			} else if (op instanceof ListOperation) {
-				parseListResponse(content, (ListOperation<?>) op);
+				content.clear();
 			}
-			content.clear();
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	private void finishListResponse(final Channel channel, final ListOperation<?> op) {
+		final ListResponseSpool spool = channel.attr(LIST_CONTENT_ATTR_KEY).getAndSet(null);
+		if (op.status() != Operation.Status.SUCC) {
+			if (spool != null) {
+				try {
+					spool.close();
+				} catch (final IOException e) {
+					throw recordListFailure(op, "failed to clean up LIST response spool", e);
+				}
+			}
+			return;
+		}
+		if (spool == null || spool.size() == 0) {
+			throw recordListFailure(op, "successful LIST response contained no XML document", null);
+		}
+		IntegrityTerminalException failure = null;
+		try {
+			parseListResponse(spool.openInput(), op);
+		} catch (final IntegrityTerminalException e) {
+			failure = e;
+		} catch (final IOException e) {
+			failure = recordListFailure(op, "failed to open LIST response spool", e);
+		}
+		try {
+			spool.close();
+		} catch (final IOException e) {
+			if (failure == null) {
+				failure = recordListFailure(op, "failed to clean up LIST response spool", e);
+			} else {
+				failure.addSuppressed(e);
+			}
+		}
+		if (failure != null) {
+			throw failure;
+		}
 	}
 
 	private void parseListResponse(final ByteBuf content, final ListOperation<?> op) {
 		if (Loggers.MSG.isTraceEnabled()) {
 			Loggers.MSG.trace("LIST raw response={}", content.toString(UTF_8));
 		}
-		try (final var contentStream = new ByteBufInputStream(content.duplicate())) {
+		parseListResponse(new ByteBufInputStream(content.duplicate()), op);
+	}
+
+	private void parseListResponse(final InputStream contentStream, final ListOperation<?> op) {
+		try (contentStream) {
 			var parser = S3StorageDriver.THREAD_LOCAL_XML_PARSER.get();
 			if (parser == null) {
 				parser = SAXParserFactory.newInstance().newSAXParser();
@@ -251,7 +407,18 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 							op.truncated(),
 							op.continuationToken());
 		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "Failed to parse LIST response");
+			throw recordListFailure(op, "failed to parse LIST response", e);
 		}
+	}
+
+	private IntegrityTerminalException recordListFailure(
+					final ListOperation<?> op, final String message, final Throwable cause) {
+		op.status(Operation.Status.RESP_FAIL_CLIENT);
+		final var failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.INPUT, message, cause);
+		if (s3Driver != null) {
+			s3Driver.recordTerminalResponseFailure(failure);
+		}
+		return failure;
 	}
 }

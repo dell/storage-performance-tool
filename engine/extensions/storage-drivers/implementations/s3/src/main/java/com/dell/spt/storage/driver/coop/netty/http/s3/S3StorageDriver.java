@@ -15,8 +15,6 @@ import static io.netty.handler.codec.http.HttpMethod.GET;
 import static io.netty.handler.codec.http.HttpMethod.PUT;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static com.dell.spt.base.item.op.Operation.SLASH;
-
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
@@ -26,6 +24,7 @@ import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
@@ -664,6 +663,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final String prefix,
 					final String delimiter,
 					final int maxKeys) throws IOException {
+		final String canonicalPrefix = sanitizePrefix(prefix);
 		final var nodeAddr = storageNodeAddrs[0];
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -674,19 +674,23 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.setLength(0);
 		uriBuilder.append(bucketPath);
 		appendInitialQuery(uriBuilder, "list-type=2");
-		appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+		appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 		appendQueryParam(uriBuilder, "delimiter", delimiter);
-		appendQueryParam(uriBuilder, "max-keys", Integer.toString(Math.min(Math.max(maxKeys, 1), S3Api.MAX_KEYS_LIMIT)));
+		appendQueryParam(uriBuilder, "max-keys",
+						Integer.toString(Math.min(Math.max(maxKeys, 1), S3Api.MAX_KEYS_LIMIT)));
 		final var uri = uriBuilder.toString();
 		applyAuthHeaders(reqHeaders, HttpMethod.GET, uri, credential);
 		final FullHttpRequest req = new DefaultFullHttpRequest(
-						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER, reqHeaders, EmptyHttpHeaders.INSTANCE);
+						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER,
+						reqHeaders, EmptyHttpHeaders.INSTANCE);
 		try {
 			final var resp = executeHttpRequest(req);
 			try {
 				if (resp == null) {
-					Loggers.MSG.warn("Delimiter probe returned no response (null) for prefix='{}' delimiter='{}'", prefix, delimiter);
-					return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(java.util.Collections.emptyList(), false, false);
+					throw new IOException("S3 LIST delimiter probe returned no response");
+				}
+				if (!HttpStatusClass.SUCCESS.equals(resp.status().codeClass())) {
+					throw new IOException("S3 LIST delimiter probe failed: " + resp.status());
 				}
 				final var content = resp.content();
 				var parser = THREAD_LOCAL_XML_PARSER.get();
@@ -701,7 +705,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					parser.parse(is, handler);
 				}
 				return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
-								java.util.List.copyOf(handler.commonPrefixes()), handler.hasContents(), handler.truncated());
+								java.util.List.copyOf(handler.commonPrefixes()),
+								handler.hasContents(), handler.truncated());
 			} finally {
 				if (resp != null) {
 					resp.release();
@@ -709,14 +714,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+			throw new IOException("S3 LIST delimiter probe interrupted", e);
 		} catch (final SAXException e) {
-			throw new IOException("Failed to parse the S3 object listing", e);
+			throw listInputFailure("Failed to parse the S3 LIST delimiter probe", e);
 		} catch (final ParserConfigurationException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
+			throw listInputFailure("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
+			throw listInputFailure("Failed to connect for S3 LIST delimiter probe", e);
+		} catch (final IOException e) {
+			throw listInputFailure("S3 LIST delimiter probe failed", e);
 		}
-		return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(java.util.Collections.emptyList(), false, false);
 	}
 
 	@Override
@@ -729,8 +736,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final int count,
 					final ListOptions options)
 					throws IOException {
+		final String canonicalPrefix = sanitizePrefix(prefix);
 		final var requestedMax = options.maxKeys() > 0 ? options.maxKeys() : S3Api.MAX_KEYS_LIMIT;
-		final var countLimit = Math.min(Math.max(count, 1), Math.min(requestedMax, S3Api.MAX_KEYS_LIMIT));
+		final var countLimit = Math.min(
+						Math.max(count, 1), Math.min(requestedMax, S3Api.MAX_KEYS_LIMIT));
 		final var nodeAddr = storageNodeAddrs[0];
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -742,36 +751,38 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(path);
 		if (options.includeVersions()) {
 			appendInitialQuery(uriBuilder, "versions");
-			appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+			appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 			appendQueryParam(uriBuilder, "delimiter", options.delimiter());
-			appendQueryParam(uriBuilder, "key-marker", options.keyMarker());
+			appendQueryParam(uriBuilder, "key-marker", sanitizePrefix(options.keyMarker()));
 			appendQueryParam(uriBuilder, "version-id-marker", options.versionIdMarker());
 		} else {
 			appendInitialQuery(uriBuilder, "list-type=2");
-			appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+			appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 			appendQueryParam(uriBuilder, "delimiter", options.delimiter());
 			if (options.continuationToken() != null && !options.continuationToken().isEmpty()) {
 				appendQueryParam(uriBuilder, "continuation-token", options.continuationToken());
 			} else if (options.startAfter() != null && !options.startAfter().isEmpty()) {
-				appendQueryParam(uriBuilder, "start-after", options.startAfter());
+				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(options.startAfter()));
 			} else if (lastPrevItem != null) {
 				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(lastPrevItem.name()));
 			}
 		}
 		appendQueryParam(uriBuilder, "max-keys", Integer.toString(countLimit));
 		final var uri = uriBuilder.toString();
-		applyAuthHeaders(reqHeaders, HttpMethod.GET, path, credential);
+		applyAuthHeaders(reqHeaders, HttpMethod.GET, uri, credential);
 		final FullHttpRequest checkBucketReq = new DefaultFullHttpRequest(
-						HttpVersion.HTTP_1_1,
-						HttpMethod.GET,
-						uri,
-						Unpooled.EMPTY_BUFFER,
-						reqHeaders,
-						EmptyHttpHeaders.INSTANCE);
+						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER,
+						reqHeaders, EmptyHttpHeaders.INSTANCE);
 		final List<I> buff = new ArrayList<>(countLimit);
 		try {
 			final var listResp = executeHttpRequest(checkBucketReq);
 			try {
+				if (listResp == null) {
+					throw new IOException("S3 LIST returned no response");
+				}
+				if (!HttpStatusClass.SUCCESS.equals(listResp.status().codeClass())) {
+					throw new IOException("S3 LIST failed: " + listResp.status());
+				}
 				final var listRespContent = listResp.content();
 				var listRespParser = THREAD_LOCAL_XML_PARSER.get();
 				if (listRespParser == null) {
@@ -780,29 +791,35 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				} else {
 					listRespParser.reset();
 				}
-				final var listingHandler = new BucketXmlListingHandler<>(buff, path, prefix, itemFactory, idRadix);
+				final var listingHandler = new BucketXmlListingHandler<>(
+								buff, path, canonicalPrefix, itemFactory, idRadix);
 				try (final InputStream contentStream = new ByteBufInputStream(listRespContent)) {
 					listRespParser.parse(contentStream, listingHandler);
 				}
-				if (buff.size() == 0) {
+				if (buff.isEmpty()) {
 					throw new EOFException();
 				}
 				if (!listingHandler.isTruncated()) {
 					buff.add(null); // poison
 				}
 			} finally {
-				listResp.release();
+				if (listResp != null) {
+					listResp.release();
+				}
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+			throw new IOException("S3 LIST interrupted", e);
 		} catch (final SAXException e) {
-			throw new IOException("Failed to parse the S3 object listing", e);
+			throw listInputFailure("Failed to parse the S3 object listing", e);
 		} catch (final ParserConfigurationException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
+			throw listInputFailure("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
-		} catch (final NullPointerException e) {
-			LogUtil.exception(Level.WARN, e, "Timeout response");
+			throw listInputFailure("Failed to connect for S3 LIST", e);
+		} catch (final EOFException e) {
+			throw e;
+		} catch (final IOException e) {
+			throw listInputFailure("S3 LIST input failed", e);
 		}
 		return buff;
 	}
@@ -1017,6 +1034,19 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						|| ch == '-' || ch == '_' || ch == '.' || ch == '~';
 	}
 
+	private IOException listInputFailure(final String message, final Throwable cause) {
+		final var failure = cause instanceof IOException
+						? (IOException) cause
+						: new IOException(message, cause);
+		if (integrityMetadataEnabled()) {
+			final var terminal = new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT, message, failure);
+			recordTerminalResponseFailure(terminal);
+			throw terminal;
+		}
+		return failure;
+	}
+
 	private static String normalizeBucketPath(final String path) {
 		if (path == null || path.isEmpty()) {
 			return SLASH;
@@ -1159,6 +1189,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		recordIntegrityReadResult(result);
 	}
 
+	final void recordTerminalResponseFailure(final IntegrityTerminalException failure) {
+		recordTerminalFailure(failure);
+	}
+
 	/** Extension hook for transports which deliver a successful GET body outside HTTP. */
 	protected boolean observesReadBodyOutOfBand(final O op) {
 		return false;
@@ -1178,6 +1212,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				op.status(Operation.Status.RESP_FAIL_CORRUPT);
 			}
 		}
+	}
+
+	protected final void discardOutOfBandIntegrityRead(final Channel channel) {
+		S3ResponseHandler.discardOutOfBandIntegrityRead(channel);
 	}
 
 	HttpRequest initMultipartUploadRequest(final O op, final String nodeAddr) {
@@ -1537,6 +1575,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	public void complete(final Channel channel, final O op) {
+		if (channel != null && op instanceof ListOperation) {
+			try {
+				S3ResponseHandler.discardListResponse(channel);
+			} catch (final IOException e) {
+				final var failure = new IntegrityTerminalException(
+								IntegrityTerminalException.Category.CLEANUP,
+								"failed to clean up aborted LIST response spool",
+								e);
+				recordTerminalFailure(failure);
+				throw failure;
+			}
+		}
 		if (channel != null && op instanceof CompositeDataOperation
 						&& OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeDataOperation) op;
