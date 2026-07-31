@@ -161,11 +161,21 @@ Once the remaining manifest is empty, an idempotent confirmation run normally
 uses `--allow-empty-selection` and should return `0`. Investigate failures before
 using an ordinary item-file deletion scenario to reclaim preserved objects.
 
-Manifest completion records use a two-file commit: SPT flushes and atomically
-publishes the CSV first, then atomically publishes its JSON marker. The marker
-contains version/status, run and producer identity, source/unique/selected
-counts, manifest byte length, and manifest SHA-256. A missing, stale, or
-mismatched marker prevents a dependent engine step from starting.
+Manifest completion records use a crash-durable two-file commit. SPT flushes
+and synchronizes the completed CSV, atomically renames it, and synchronizes the
+containing directory. Only then does it synchronize, atomically rename, and
+directory-sync the JSON marker. The marker contains version/status, run and
+producer identity, source/unique/selected counts, manifest byte length, and
+manifest SHA-256. A missing, staging-only, stale, or mismatched marker prevents
+a dependent engine step from starting.
+
+This guarantee requires a filesystem that honors file and directory fsync and
+same-directory atomic rename semantics. It is supported on the local Linux
+filesystems used by the SPT container when those primitives are provided by the
+host. SPT fails the integrity run rather than weakening publication when a
+primitive is unavailable. Network, clustered, FUSE, and other userspace
+filesystems are crash-durable only when their provider explicitly guarantees
+equivalent server-side persistence semantics.
 
 Distributed engine sources remain under
 `${home_dir}/log/${step_id}/<artifact-stem>.node-NNN.csv`; the validated merge is

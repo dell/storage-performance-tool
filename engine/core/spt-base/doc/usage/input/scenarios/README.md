@@ -563,6 +563,14 @@ terminal step failure after bounded cleanup, preventing a later scenario step
 from consuming partial output. A genuine metadata failure is `FAILED` even if
 an operator stop races with it; a stop without such a failure is `STOPPED`.
 
+Engine-produced manifest handoffs use a crash-durable two-file commit: sync and
+atomically rename the CSV, sync its directory, then repeat those operations for
+the completion JSON. Publication fails closed if the filesystem does not
+support file and directory synchronization or same-directory atomic rename.
+The guarantee therefore applies only where the filesystem provider honors
+those operations, and must not be assumed for network or userspace filesystems
+without an equivalent server-side persistence contract.
+
 Direct-JAR v1 does not define a numeric process exit code matching the Go CLI,
 does not retrieve remote artifacts, and does not generate
 `verify-remaining.csv`. The QA harness owns those tasks and may choose its own
