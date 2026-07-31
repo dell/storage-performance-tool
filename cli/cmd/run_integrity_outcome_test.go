@@ -23,6 +23,29 @@ func TestResolveVerificationRunErrorCorruptionPrecedesOtherFailures(t *testing.T
 	}
 }
 
+func TestResolveVerificationRunErrorObservedCorruptionSurvivesArtifactFailure(t *testing.T) {
+	corrupt := int64(3)
+	for _, outcome := range []autoResultsOutcome{
+		{
+			Tracker:              &portcheck.RunResult{FinalState: constants.StateCompleted},
+			ObservedCorruptCount: &corrupt,
+			ArtifactErr:          errors.New("artifact fetch failed"),
+		},
+		{
+			Tracker:              &portcheck.RunResult{FinalState: constants.StateCompleted},
+			ObservedCorruptCount: &corrupt,
+			FinalizationErr:      errors.New("completion validation failed"),
+		},
+	} {
+		err := resolveVerificationRunError(
+			nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeReadVerify})
+		var exitErr *ExitCodeError
+		if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeIntegrityCorruption {
+			t.Fatalf("error = %#v, want exit %d", err, constants.ExitCodeIntegrityCorruption)
+		}
+	}
+}
+
 func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *testing.T) {
 	params := scenario.Params{WorkloadType: scenario.WorkloadTypeReadVerify}
 	outcome := autoResultsOutcome{

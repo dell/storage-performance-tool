@@ -27,11 +27,14 @@ import (
 )
 
 type identityPreflight struct {
-	identities    map[string]preflight.ImageIdentity
-	errors        map[string]error
-	payloads      map[string]string
-	payloadErrors map[string]error
-	payloadCalls  *atomic.Int64
+	identities      map[string]preflight.ImageIdentity
+	errors          map[string]error
+	payloads        map[string]string
+	payloadErrors   map[string]error
+	payloadCalls    *atomic.Int64
+	runningPayloads map[string]string
+	runningErrors   map[string]error
+	runningCalls    *atomic.Int64
 }
 
 func (f identityPreflight) InspectPayloadIdentity(
@@ -46,6 +49,20 @@ func (f identityPreflight) InspectPayloadIdentity(
 		return "", err
 	}
 	return f.payloads[host.Original], nil
+}
+
+func (f identityPreflight) InspectRunningPayloadIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (string, error) {
+	if f.runningCalls != nil {
+		f.runningCalls.Add(1)
+	}
+	if err := f.runningErrors[host.Original]; err != nil {
+		return "", err
+	}
+	return f.runningPayloads[host.Original], nil
 }
 
 func (f identityPreflight) CheckDocker(context.Context, *hostparse.HostInfo) (string, error) {
@@ -1076,7 +1093,7 @@ func TestDistributedIntegrityImageIdentityRecordsMatchingFleet(t *testing.T) {
 	}
 }
 
-func TestAvailableIntegrityImageIdentityRecordsSingleParticipant(t *testing.T) {
+func TestDistributedIntegrityImageIdentityRecordsSingleRemoteParticipant(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}}
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 	orchestrator.hosts[0].SetStatus(HostStatusReady)
@@ -1089,17 +1106,33 @@ func TestAvailableIntegrityImageIdentityRecordsSingleParticipant(t *testing.T) {
 		recorded = &evidence
 	})
 
-	evidence, err := orchestrator.RecordAvailableIntegrityRuntimeIdentity(
+	evidence, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
 		context.Background(), "repo/spt:test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.Tier != RuntimeIdentityTierAvailableImage || evidence.ImageID != id ||
+	if evidence.Tier != distributedRuntimeIdentityTierImmutableImage || evidence.ImageID != id ||
 		len(evidence.Participants) != 1 {
 		t.Fatalf("unexpected evidence: %+v", evidence)
 	}
 	if recorded == nil || recorded.ImageID != id {
 		t.Fatalf("runtime identity recorder received %+v", recorded)
+	}
+}
+
+func TestDistributedIntegrityImageIdentityFailureStopsSingleRemoteParticipant(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "entry", Original: "entry"}}, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{errors: map[string]error{
+		"entry": errors.New("image identity unavailable"),
+	}}
+
+	_, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test")
+	if err == nil || !strings.Contains(err.Error(), "entry") ||
+		!strings.Contains(err.Error(), "image identity unavailable") {
+		t.Fatalf("single-remote identity error = %v", err)
 	}
 }
 
@@ -1185,6 +1218,71 @@ func TestDistributedIntegrityPayloadUnavailableNamesHost(t *testing.T) {
 	_, err := orchestrator.verifyDistributedIntegrityImageIdentity(context.Background(), "repo/spt:test")
 	if err == nil || !strings.Contains(err.Error(), "payload identity unavailable") || !strings.Contains(err.Error(), "worker") {
 		t.Fatalf("payload identity error = %v", err)
+	}
+}
+
+func TestRunningIntegrityPayloadIdentityUsesStartedContainers(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for i, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+		host.ContainerID = fmt.Sprintf("container-%d", i)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	runningCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities:      map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:        map[string]string{"entry": payload, "worker": payload},
+		runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		runningCalls:    runningCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runningCalls.Load() != 2 {
+		t.Fatalf("running payload probes = %d, want 2", runningCalls.Load())
+	}
+}
+
+func TestRunningIntegrityPayloadIdentityRejectsDriftAndUnavailableEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		running       map[string]string
+		runningErrors map[string]error
+		want          string
+	}{
+		{name: "mutated running payload", running: map[string]string{"entry": strings.Repeat("b", 64), "worker": strings.Repeat("c", 64)}, want: "running payload identity mismatch on worker"},
+		{name: "unavailable running payload", running: map[string]string{"entry": strings.Repeat("b", 64)}, runningErrors: map[string]error{"worker": errors.New("container exited")}, want: "worker: container exited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+			for i, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+				host.ContainerID = fmt.Sprintf("container-%d", i)
+			}
+			id := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities:      map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+				payloads:        map[string]string{"entry": payload, "worker": payload},
+				runningPayloads: tc.running,
+				runningErrors:   tc.runningErrors,
+			}
+			orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+			err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("VerifyRunningIntegrityPayloadIdentity() error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

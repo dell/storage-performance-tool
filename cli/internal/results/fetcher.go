@@ -95,6 +95,8 @@ type Manifest struct {
 
 // IntegritySummary is the stable machine-readable verification outcome embedded in index.json.
 type IntegritySummary struct {
+	Complete                   bool                        `json:"complete"`
+	FinalizationError          string                      `json:"finalization_error,omitempty"`
 	SelectionCount             int64                       `json:"selection_count"`
 	VerificationAttemptedCount int64                       `json:"verification_attempted_count"`
 	VerifiedCount              int64                       `json:"verified_count"`

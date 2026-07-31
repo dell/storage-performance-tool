@@ -25,6 +25,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
@@ -74,13 +75,15 @@ type fetcherAdapter struct {
 
 // autoResultsOutcome preserves terminal, artifact, finalization, and summary outcomes independently.
 type autoResultsOutcome struct {
-	Tracker         *portcheck.RunResult
-	TrackerErr      error
-	ArtifactErr     error
-	Finalization    *integrity.FinalizeOutcome
-	FinalizationErr error
-	SummaryErr      error
-	StepIDs         []string
+	Tracker              *portcheck.RunResult
+	TrackerErr           error
+	ArtifactErr          error
+	Finalization         *integrity.FinalizeOutcome
+	FinalizationErr      error
+	ObservedCorruptCount *int64
+	CorruptionMetricsErr error
+	SummaryErr           error
+	StepIDs              []string
 }
 
 func (f *fetcherAdapter) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
@@ -168,7 +171,11 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 	go func() {
 		outcome := autoResultsOutcome{}
 		defer func() { done <- outcome }()
-		ctx, cancel := context.WithCancel(context.Background())
+		parentCtx := context.Background()
+		if len(integrityOptions) > 0 && integrityOptions[0] != nil && integrityOptions[0].Context != nil {
+			parentCtx = integrityOptions[0].Context
+		}
+		ctx, cancel := context.WithCancel(parentCtx)
 		defer cancel()
 		if progressOut == nil {
 			progressOut = os.Stdout
@@ -361,6 +368,19 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 			writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 		}
 
+		if len(integrityOptions) > 0 && integrityOptions[0] != nil {
+			readStep := verificationReadStepID(integrityOptions[0].Workload, stepIDs)
+			if readStep == "" {
+				outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
+			} else {
+				corrupt, observeErr := integrity.ObserveJSONCorruptCount(baseURL, readStep)
+				outcome.CorruptionMetricsErr = observeErr
+				if observeErr == nil {
+					outcome.ObservedCorruptCount = &corrupt
+				}
+			}
+		}
+
 		if metadata != nil {
 			metadata.ActualStepIDs = append([]string(nil), stepIDs...)
 			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, cachedFleet, cachedDiscovered, stepIDs)
@@ -379,6 +399,12 @@ func startAutoResults(baseURL, label, resultsDir string, expectedStepIDs []strin
 		}
 		if artifactsReady && len(integrityOptions) > 0 && integrityOptions[0] != nil {
 			options := *integrityOptions[0]
+			if outcome.Tracker != nil {
+				options.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
+				for stepID, step := range outcome.Tracker.Steps {
+					options.StepLifecycles[stepID] = string(step.Lifecycle)
+				}
+			}
 			options.ResultsRoot = root
 			options.BaseURL = baseURL
 			options.StepIDs = append([]string(nil), stepIDs...)
@@ -473,12 +499,30 @@ func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOp
 	return options
 }
 
+func verificationReadStepID(workloadName string, stepIDs []string) string {
+	for _, stepID := range stepIDs {
+		if strings.HasSuffix(stepID, "-verify") {
+			return stepID
+		}
+	}
+	if workloadName == workload.ReadVerify && len(stepIDs) > 0 {
+		return stepIDs[len(stepIDs)-1]
+	}
+	if workloadName == workload.WriteVerify && len(stepIDs) > 1 {
+		return stepIDs[1]
+	}
+	return ""
+}
+
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
 	if !scenario.IsIntegrityWorkload(params) {
 		return runErr
 	}
 	corrupt := int64(0)
-	if outcome.Finalization != nil {
+	if outcome.ObservedCorruptCount != nil {
+		corrupt = *outcome.ObservedCorruptCount
+	}
+	if outcome.Finalization != nil && outcome.Finalization.CorruptCount > corrupt {
 		corrupt = outcome.Finalization.CorruptCount
 	}
 	primary := ""
@@ -517,6 +561,9 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 		} else {
 			reasons = append(reasons, fmt.Sprintf("engine terminal state is %s", outcome.Tracker.FinalState))
 		}
+	}
+	if outcome.CorruptionMetricsErr != nil {
+		reasons = append(reasons, "live corruption metrics: "+outcome.CorruptionMetricsErr.Error())
 	}
 	if outcome.ArtifactErr != nil {
 		reasons = append(reasons, "artifact retrieval: "+outcome.ArtifactErr.Error())
@@ -945,6 +992,16 @@ Available workload types:
 		if err := os.WriteFile(scenarioPath, []byte(scenarioContent), 0600); err != nil {
 			return fmt.Errorf("failed to write scenario file: %w", err)
 		}
+		preserveScenario := false
+		defer func() {
+			if preserveScenario || params.KeepScenario {
+				return
+			}
+			if removeErr := os.Remove(scenarioPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				logging.GetLogger().Debug("Failed to clean up generated scenario file",
+					"file", scenarioPath, "error", removeErr.Error())
+			}
+		}()
 
 		// Log scenario content in debug mode
 		logger := logging.GetLogger()
@@ -963,6 +1020,7 @@ Available workload types:
 		// Check if generate-only flag is set
 		generateOnly, _ := cmd.Flags().GetBool("generate-only")
 		if generateOnly {
+			preserveScenario = true
 			fmt.Printf("Generated scenario file: %s\n", scenarioPath)
 			fmt.Printf("\nSelected Options:\n%s\n", formatScenarioParams(params))
 			fmt.Printf("\nScenario content:\n%s\n", scenarioContent)
@@ -1181,6 +1239,7 @@ Available workload types:
 		var integrityOptions *integrity.FinalizeOptions
 		if verificationRun {
 			integrityOptions = buildIntegrityFinalizeOptions(params)
+			integrityOptions.Context = cmd.Context()
 		}
 		var autoResultsDone chan autoResultsOutcome
 		startAutoResultsMonitoring := func() {
@@ -1192,16 +1251,20 @@ Available workload types:
 		autoOutcomeReceived := false
 		waitForAutoResults := func(required bool) bool {
 			if autoResultsDone != nil {
+				if required {
+					select {
+					case autoOutcome = <-autoResultsDone:
+						autoOutcomeReceived = true
+						return true
+					case <-cmd.Context().Done():
+						return false
+					}
+				}
 				select {
 				case autoOutcome = <-autoResultsDone:
 					autoOutcomeReceived = true
 					return true
-				case <-time.After(func() time.Duration {
-					if required {
-						return 2 * time.Minute
-					}
-					return 2 * time.Second
-				}()):
+				case <-time.After(2 * time.Second):
 					return false
 				}
 			}
@@ -1249,7 +1312,7 @@ Available workload types:
 			// Already constructed above (before startAutoResults) so its
 			// FinalizeDiagnosticsAndCleanup could be wired in as a pre-summary hook.
 			orchestrator := multiHostOrchestrator
-			ctx := context.Background()
+			ctx := cmd.Context()
 
 			// Respect force cleanup for preflight conflicts
 			forceMode, _ := cmd.Flags().GetBool("force")
@@ -1267,14 +1330,8 @@ Available workload types:
 				return fmt.Errorf("failed to connect to required hosts: %w", err)
 			}
 			if verificationRun {
-				if len(hostInfos) > 1 {
-					if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(ctx, sptImage); err != nil {
-						return err
-					}
-				} else if _, err := orchestrator.RecordAvailableIntegrityRuntimeIdentity(ctx, sptImage); err != nil {
-					logger.Warn("Unable to record available runtime image evidence",
-						"host", hostInfos[0].Original, "error", err.Error())
-					metadata.RuntimeIdentityError = err.Error()
+				if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(ctx, sptImage); err != nil {
+					return err
 				}
 			}
 			startAutoResultsMonitoring()
@@ -1385,7 +1442,7 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
-	runCmd.Flags().String("prefix", "", "List/read-verify: optional object key prefix to constrain listings")
+	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; list/read-verify: listing constraint")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options

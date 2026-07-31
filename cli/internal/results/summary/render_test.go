@@ -111,12 +111,15 @@ func TestRendererReportsIntegrityDigestCostSeparately(t *testing.T) {
 	report := NewRenderer(RenderOptions{}).FullReport(summary)
 	for _, want := range []string{
 		"Integrity Verification", "selected 4, attempted 4, verified 3, remaining 1, corrupt 1",
+		"Empty selection    false (allowed: false)",
 		"8 objects, 8.00 MiB", "0.500000 s cumulative worker time", "16.000 MiB/s",
 		"0.250000 s (maximum node interval)", "2 full payload passes",
 	} {
 		mustContain(t, report, want)
 	}
 	mustNotContain(t, report, "overhead")
+	compact := NewRenderer(RenderOptions{}).CompactSnippet(summary)
+	mustContain(t, compact, "Integrity empty selection: false (allowed: false)")
 }
 
 func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {

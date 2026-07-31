@@ -11,6 +11,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 // RunSummary represents the aggregated data set used when rendering result summaries.
@@ -235,9 +236,7 @@ func buildEnvironmentSummary(data *RunData) EnvironmentSummary {
 	return env
 }
 
-const (
-	workloadTypeList = "list"
-)
+const workloadTypeList = workloadreg.List
 
 func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	params := data.Params.ScenarioParams
@@ -250,7 +249,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	if workloadType == "" {
 		workloadType = strings.ToLower(strings.TrimSpace(params.WorkloadType))
 	}
-	isList := strings.EqualFold(workloadType, workloadTypeList)
+	isList := strings.EqualFold(workloadType, workloadreg.List)
 	summary := WorkloadSummary{
 		Type:              workloadType,
 		ObjectSizeBytes:   sizeBytes,
@@ -334,7 +333,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 }
 
 func mixedDistributionFromParams(workloadType string, params ScenarioParams) MixedDistribution {
-	if !strings.EqualFold(workloadType, "mixed") && !strings.EqualFold(params.WorkloadType, "mixed") {
+	if !strings.EqualFold(workloadType, workloadreg.Mixed) && !strings.EqualFold(params.WorkloadType, workloadreg.Mixed) {
 		return MixedDistribution{}
 	}
 	if params.GetDistrib == 0 && params.StatDistrib == 0 && params.PutDistrib == 0 && params.DeleteDistrib == 0 {
@@ -360,7 +359,7 @@ func isMixedStep(stepID string, workload WorkloadSummary, totals *MetricsTotals)
 	if strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
 		return true
 	}
-	if strings.EqualFold(workload.Type, "mixed") {
+	if strings.EqualFold(workload.Type, workloadreg.Mixed) {
 		return true
 	}
 	return allKnown

@@ -7,7 +7,23 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
+
+func TestScenarioGeneratorRegistryMatchesWorkloadRegistry(t *testing.T) {
+	for _, spec := range workload.All() {
+		_, hasGenerator := scenarioGenerators[spec.Name]
+		if hasGenerator != spec.Implemented {
+			t.Errorf("workload %q implemented=%t, generator registered=%t", spec.Name, spec.Implemented, hasGenerator)
+		}
+	}
+	for name := range scenarioGenerators {
+		spec, ok := workload.Lookup(name)
+		if !ok || !spec.Implemented {
+			t.Errorf("scenario generator %q is not an implemented registry workload", name)
+		}
+	}
+}
 
 // removed unused helper 'min' (no longer needed)
 

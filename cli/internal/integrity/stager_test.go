@@ -1,11 +1,15 @@
 package integrity
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
@@ -14,7 +18,9 @@ func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 		"b,z,3,\r\n" +
 		"b,\"comma,key\",4,v1\r\n" +
 		"b,z,3,\r\n" +
-		"b,\"line\nkey\",5,\r\n"
+		"b,\"line\nkey\",5,\r\n" +
+		"b,tilde~key,6,\r\n" +
+		"b,雪,7,v雪\r\n"
 	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -34,10 +40,12 @@ func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 4 {
-		t.Fatalf("expected header plus 3 unique rows, got %d", len(records))
+	if len(records) != 6 {
+		t.Fatalf("expected header plus 5 unique rows, got %d", len(records))
 	}
-	if records[1][1] != "comma,key" || records[2][1] != "line\nkey" || records[3][1] != "z" {
+	if records[1][1] != "comma,key" || records[2][1] != "line\nkey" ||
+		records[3][1] != "tilde~key" || records[4][1] != "z" ||
+		records[5][1] != "雪" || records[5][3] != "v雪" {
 		t.Fatalf("records were not sorted/preserved: %#v", records)
 	}
 
@@ -49,15 +57,16 @@ func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.RunID != 123 || got.ProducerID != CLIStagerProducerID || got.SourceRecordCount != 4 || got.SelectedRecordCount != 3 {
+	if got.RunID != 123 || got.ProducerID != CLIStagerProducerID || got.SourceRecordCount != 6 || got.SelectedRecordCount != 5 {
 		t.Fatalf("unexpected completion: %+v", got)
 	}
 }
 
 func TestStageInputManifestRejectsLegacyAndConflictingDuplicates(t *testing.T) {
 	cases := map[string]string{
-		"legacy":   "key,0,1,0/0\n",
-		"conflict": "bucket,key,size,version_id\nb,k,1,v\nb,k,2,v\n",
+		"legacy":        "key,0,1,0/0\n",
+		"conflict":      "bucket,key,size,version_id\nb,k,1,v\nb,k,2,v\n",
+		"malformed csv": "bucket,key,size,version_id\nb,\"unterminated,1,v\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -69,5 +78,148 @@ func TestStageInputManifestRejectsLegacyAndConflictingDuplicates(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestMergeSortedChunksRejectsConflictingSizesAcrossChunks(t *testing.T) {
+	tempDir := t.TempDir()
+	first := filepath.Join(tempDir, "first.csv")
+	second := filepath.Join(tempDir, "second.csv")
+	writeCSVFixture(t, first, [][]string{{"b", "same", "1", "v1"}})
+	writeCSVFixture(t, second, [][]string{{"b", "same", "2", "v1"}})
+
+	merged, _, err := mergeSortedChunksContext(context.Background(), tempDir, []string{first, second})
+	if err == nil {
+		_ = os.Remove(merged)
+		t.Fatal("expected conflicting sizes across chunks to fail")
+	}
+	if merged != "" {
+		t.Fatalf("failed merge published output %q", merged)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(tempDir, ".integrity-sorted-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("failed merge leaked output files: %v", matches)
+	}
+}
+
+func TestMergeSortedChunksUsesBoundedMultiPassFanIn(t *testing.T) {
+	tempDir := t.TempDir()
+	chunks := make([]string, 0, manifestMergeFanIn+1)
+	for i := 0; i <= manifestMergeFanIn; i++ {
+		path := filepath.Join(tempDir, fmt.Sprintf("chunk-%03d.csv", i))
+		writeCSVFixture(t, path, [][]string{{"b", fmt.Sprintf("k-%03d", i), "1", ""}})
+		chunks = append(chunks, path)
+	}
+	merged, count, err := mergeSortedChunksContext(context.Background(), tempDir, chunks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(merged) }()
+	if count != len(chunks) {
+		t.Fatalf("merged count = %d, want %d", count, len(chunks))
+	}
+	file, err := os.Open(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(file).ReadAll()
+	_ = file.Close()
+	if err != nil || len(records) != len(chunks)+1 {
+		t.Fatalf("merged records = %d, err = %v", len(records), err)
+	}
+	matches, err := filepath.Glob(filepath.Join(tempDir, ".integrity-sorted-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0] != merged {
+		t.Fatalf("intermediate merge files were not cleaned: %v", matches)
+	}
+}
+
+func TestValidateCompletionRejectsTrustBoundaryMismatches(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.csv")
+	if err := os.WriteFile(source, []byte("bucket,key,size,version_id\r\nb,k,1,v1\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, manifest, markerPath, err := StageInputManifest(source, 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	if _, err = ValidateCompletion(
+		manifest, markerPath, 77, constants.IntegrityProvenanceCLIStager,
+		CLIStagerProducerID, VerifyInputName); err != nil {
+		t.Fatalf("valid completion rejected: %v", err)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var valid Completion
+	if err = json.Unmarshal(data, &valid); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*Completion){
+		"version":        func(c *Completion) { c.Version++ },
+		"status":         func(c *Completion) { c.Status = "pending" },
+		"run":            func(c *Completion) { c.RunID++ },
+		"producer kind":  func(c *Completion) { c.ProducerKind = constants.IntegrityProvenanceEngineStep },
+		"producer id":    func(c *Completion) { c.ProducerID = "stale" },
+		"artifact":       func(c *Completion) { c.Artifact = WrittenName },
+		"emission count": func(c *Completion) { c.EmittedRecordCount = 0 },
+		"count order":    func(c *Completion) { c.UniqueRecordCount = c.SourceRecordCount + 1 },
+		"row count": func(c *Completion) {
+			c.SourceRecordCount = 0
+			c.EmittedRecordCount = 0
+			c.UniqueRecordCount = 0
+			c.SelectedRecordCount = 0
+		},
+		"bytes":  func(c *Completion) { c.ManifestBytes++ },
+		"digest": func(c *Completion) { c.ManifestSHA256 = "00" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			candidatePath := filepath.Join(t.TempDir(), "candidate.json")
+			encoded, marshalErr := json.Marshal(candidate)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if writeErr := os.WriteFile(candidatePath, encoded, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if _, validateErr := ValidateCompletion(
+				manifest, candidatePath, 77, constants.IntegrityProvenanceCLIStager,
+				CLIStagerProducerID, VerifyInputName); validateErr == nil {
+				t.Fatal("expected completion validation error")
+			}
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	if _, err = ValidateCompletion(
+		manifest, missing, 77, constants.IntegrityProvenanceCLIStager,
+		CLIStagerProducerID, VerifyInputName); err == nil {
+		t.Fatal("expected missing completion to fail")
+	}
+	if err = os.WriteFile(missing+".staging", data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ValidateCompletion(
+		manifest, missing, 77, constants.IntegrityProvenanceCLIStager,
+		CLIStagerProducerID, VerifyInputName); err == nil {
+		t.Fatal("expected an unrenamed completion staging file to be ignored")
+	}
+	malformed := filepath.Join(t.TempDir(), "malformed.json")
+	if err = os.WriteFile(malformed, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ValidateCompletion(
+		manifest, malformed, 77, constants.IntegrityProvenanceCLIStager,
+		CLIStagerProducerID, VerifyInputName); err == nil {
+		t.Fatal("expected malformed completion to fail")
 	}
 }

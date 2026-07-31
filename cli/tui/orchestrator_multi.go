@@ -1775,6 +1775,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 		return fmt.Errorf("host %s API client not initialized", host.Info.Original)
 	}
 	if scenario.IsIntegrityWorkload(params) {
+		if err := m.multiHost.VerifyRunningIntegrityPayloadIdentity(ctx); err != nil {
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+		}
 		if err := host.APIClient.VerifyIntegrityCapability(image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
 		}
@@ -1820,6 +1823,9 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image 
 		return fmt.Errorf("entry node API client not initialized")
 	}
 	if scenario.IsIntegrityWorkload(params) {
+		if err := m.multiHost.VerifyRunningIntegrityPayloadIdentity(ctx); err != nil {
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+		}
 		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapability(image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
 		}
@@ -2135,8 +2141,8 @@ func (o *MultiHostOrchestrator) verifyDistributedIntegrityImageIdentity(
 		return evidence, fmt.Errorf("distributed verification requires an immutable image identity checker")
 	}
 	hosts := o.GetReadyHosts()
-	if len(hosts) < 2 {
-		return evidence, fmt.Errorf("distributed verification image identity requires at least two ready participants")
+	if len(hosts) < 1 {
+		return evidence, fmt.Errorf("remote verification image identity requires at least one ready participant")
 	}
 	type identityResult struct {
 		index    int
@@ -2230,6 +2236,74 @@ func (o *MultiHostOrchestrator) verifyDistributedIntegrityImageIdentity(
 	o.notifyf("Integrity runtime identity: tier=%s image_id=%s payload_sha256=%s participants=%d",
 		evidence.Tier, evidence.ImageID, evidence.PayloadSHA256, len(evidence.Participants))
 	return evidence, nil
+}
+
+// VerifyRunningIntegrityPayloadIdentity rechecks the selected payload tier against the exact
+// containers that will execute the scenario. It must run after start and before API submission.
+func (o *MultiHostOrchestrator) VerifyRunningIntegrityPayloadIdentity(ctx context.Context) error {
+	o.mu.Lock()
+	selectedTier := o.runtimeIdentityTier
+	checker := o.preflight
+	current := o.runtimeIdentityEvidence
+	recorder := o.runtimeIdentityRecorder
+	o.mu.Unlock()
+	if selectedTier != constants.IntegrityRuntimeIdentityTierPayload {
+		return nil
+	}
+	if current == nil || current.PayloadSHA256 == "" {
+		return fmt.Errorf("running payload verification requires prepared immutable-image payload evidence")
+	}
+	runningChecker, ok := checker.(preflight.RunningPayloadIdentityChecker)
+	if !ok {
+		return fmt.Errorf("payload tier requires a running-container payload identity checker")
+	}
+	hosts := o.GetReadyHosts()
+	type payloadResult struct {
+		index  int
+		digest string
+		err    error
+	}
+	results := make(chan payloadResult, len(hosts))
+	for index, host := range hosts {
+		go func(index int, host *HostConnection) {
+			host.mu.Lock()
+			containerID := host.ContainerID
+			host.mu.Unlock()
+			digest, err := runningChecker.InspectRunningPayloadIdentity(ctx, host.Info, containerID)
+			results <- payloadResult{index: index, digest: digest, err: err}
+		}(index, host)
+	}
+	updated := *current
+	updated.Participants = append([]DistributedRuntimeIdentityParticipant(nil), current.Participants...)
+	var failures []error
+	for range hosts {
+		result := <-results
+		if result.err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", hosts[result.index].Info.Original, result.err))
+			continue
+		}
+		if result.digest != current.PayloadSHA256 {
+			failures = append(failures, fmt.Errorf(
+				"running payload identity mismatch on %s: image payload %s, running payload %s",
+				hosts[result.index].Info.Original, current.PayloadSHA256, result.digest))
+			continue
+		}
+		if result.index < len(updated.Participants) {
+			updated.Participants[result.index].PayloadSHA256 = result.digest
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("running integrity payload identity unavailable: %w", errors.Join(failures...))
+	}
+	o.mu.Lock()
+	o.runtimeIdentityEvidence = &updated
+	o.mu.Unlock()
+	if recorder != nil {
+		recorder(updated)
+	}
+	o.notifyf("Integrity running payload identity verified: sha256=%s participants=%d",
+		updated.PayloadSHA256, len(updated.Participants))
+	return nil
 }
 
 // PrepareDistributedIntegrityRuntimeIdentity runs and caches the selected distributed identity

@@ -18,8 +18,10 @@ import (
 
 // ValidateWorkloadType checks if the provided workload type is valid
 func ValidateWorkloadType(workloadType string) error {
-	if _, ok := workload.Lookup(workloadType); !ok {
+	if spec, ok := workload.Lookup(workloadType); !ok {
 		return fmt.Errorf(ErrInvalidWorkloadType, workloadType)
+	} else if !spec.Implemented {
+		return fmt.Errorf(ErrWorkloadNotImplemented, workloadType)
 	}
 	return nil
 }
@@ -177,7 +179,11 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	verification := workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify
 	changed := func(name string) bool {
 		flag := cmd.Flags().Lookup(name)
-		return flag != nil && flag.Changed
+		if flag == nil || !flag.Changed {
+			return false
+		}
+		_, appliedFromEnv := cmd.Annotations[envAppliedAnnotationPrefix+name]
+		return !appliedFromEnv
 	}
 	if !verification {
 		if changed("allow-empty-selection") {

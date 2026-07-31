@@ -1,6 +1,7 @@
 package integrity
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -21,14 +22,14 @@ import (
 
 // WrittenName and the constants in this block are canonical integrity result artifact names.
 const (
-	WrittenName              = "written.csv"
-	WrittenCompletionName    = "written.complete.json"
-	VerifiedName             = "verified.csv"
-	VerifiedCompletionName   = "verified.complete.json"
-	VerifyRemainingName      = "verify-remaining.csv"
-	IntegrityFailuresName    = "integrity.failures.csv"
-	IntegrityPerformanceName = "integrity.performance.csv"
-	MultipartLifecycleName   = "multipart.lifecycle.csv"
+	WrittenName              = constants.ResultsArtifactSuffixWritten
+	WrittenCompletionName    = constants.ResultsArtifactSuffixWrittenCompletion
+	VerifiedName             = constants.ResultsArtifactSuffixVerified
+	VerifiedCompletionName   = constants.ResultsArtifactSuffixVerifiedCompletion
+	VerifyRemainingName      = constants.ResultsArtifactSuffixVerifyRemaining
+	IntegrityFailuresName    = constants.ResultsArtifactSuffixIntegrityFailures
+	IntegrityPerformanceName = constants.ResultsArtifactSuffixIntegrityPerformance
+	MultipartLifecycleName   = constants.ResultsArtifactSuffixMultipartLifecycle
 )
 
 var failureHeader = []string{
@@ -44,6 +45,7 @@ var performanceHeader = []string{
 
 // FinalizeOptions binds the generated step roles and any CLI-staged input to one result run.
 type FinalizeOptions struct {
+	Context             context.Context
 	ResultsRoot         string
 	BaseURL             string
 	Workload            string
@@ -54,6 +56,7 @@ type FinalizeOptions struct {
 	AllowEmptySelection bool
 	MaxConsoleFailures  int
 	Multipart           bool
+	StepLifecycles      map[string]string
 }
 
 // FinalizeOutcome is the integrity-specific machine outcome used by console reporting and exit policy.
@@ -66,6 +69,7 @@ type FinalizeOutcome struct {
 	EmptyAllowed               bool                                `json:"empty_allowed"`
 	RemainingCount             int64                               `json:"remaining_count"`
 	DigestPerformance          results.IntegrityPerformanceSummary `json:"digest_performance"`
+	Complete                   bool                                `json:"complete"`
 	FailureSamples             []FailureSample                     `json:"-"`
 }
 
@@ -84,21 +88,50 @@ type FailureSample struct {
 
 // FinalizeResults promotes role-specific evidence, validates commit records, derives the exact
 // remaining set, combines performance rows, and atomically updates index.json.
-func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
-	var outcome FinalizeOutcome
+func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr error) {
 	if options.Workload != workload.WriteVerify && options.Workload != workload.ReadVerify {
 		return outcome, fmt.Errorf("integrity finalizer does not support workload %q", options.Workload)
 	}
 	if options.RunID <= 0 || options.ResultsRoot == "" {
 		return outcome, fmt.Errorf("integrity finalization requires a positive run id and results root")
 	}
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return outcome, err
+	}
+	reconciled := false
 	manifest, err := readResultsManifest(options.ResultsRoot)
 	if err != nil {
 		return outcome, err
 	}
+	defer func() {
+		for _, name := range []string{
+			WrittenName, WrittenCompletionName, VerifyInputName, VerifyInputCompletionName,
+			VerifiedName, VerifiedCompletionName, VerifyRemainingName, IntegrityFailuresName,
+			IntegrityPerformanceName, MultipartLifecycleName,
+		} {
+			if _, statErr := os.Stat(filepath.Join(options.ResultsRoot, name)); statErr != nil {
+				continue
+			}
+			if addErr := addRunFile(manifest, options.ResultsRoot, name); addErr != nil && finalErr == nil {
+				finalErr = addErr
+			}
+		}
+		outcome.Complete = finalErr == nil && reconciled
+		manifest.Integrity = integritySummary(outcome, finalErr)
+		if writeErr := writeResultsManifest(options.ResultsRoot, manifest); writeErr != nil && finalErr == nil {
+			finalErr = writeErr
+		}
+	}()
 	createStep, listStep, readStep := resolveStepRoles(options.Workload, options.StepIDs, manifest)
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
+	}
+	if options.StepLifecycles[readStep] == "not_started" {
+		return outcome, nil
 	}
 	readCounts, metricsErr := readOperationMetrics(options.ResultsRoot, readStep, "READ")
 	if metricsErr != nil {
@@ -114,7 +147,7 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 
 	inputName := WrittenName
 	inputCompletionName := WrittenCompletionName
-	inputProducerKind := "engine_step"
+	inputProducerKind := constants.IntegrityProvenanceEngineStep
 	inputProducerID := createStep
 	if options.Workload == workload.ReadVerify {
 		inputName = VerifyInputName
@@ -125,7 +158,7 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 	inputPath := filepath.Join(options.ResultsRoot, inputName)
 	inputCompletionPath := filepath.Join(options.ResultsRoot, inputCompletionName)
 	if options.Workload == workload.ReadVerify && options.StagedManifest != "" {
-		inputProducerKind = "cli_stager"
+		inputProducerKind = constants.IntegrityProvenanceCLIStager
 		inputProducerID = CLIStagerProducerID
 		if err = copyAtomic(options.StagedManifest, inputPath); err != nil {
 			return outcome, fmt.Errorf("promote staged verification input: %w", err)
@@ -179,7 +212,7 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 	if err = promoteStepFile(options.ResultsRoot, readStep, VerifiedCompletionName); err != nil {
 		return outcome, err
 	}
-	verifiedCompletion, err := ValidateCompletion(verifiedPath, verifiedCompletionPath, options.RunID, "engine_step", readStep, VerifiedName)
+	verifiedCompletion, err := ValidateCompletion(verifiedPath, verifiedCompletionPath, options.RunID, constants.IntegrityProvenanceEngineStep, readStep, VerifiedName)
 	if err != nil {
 		return outcome, fmt.Errorf("validate %s: %w", VerifiedName, err)
 	}
@@ -205,12 +238,17 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 		return outcome, fmt.Errorf("integrity failure rows %d do not equal CountCorrupt %d", failureCount, outcome.CorruptCount)
 	}
 
-	inputSorted, inputUnique, err := sortManifestBounded(inputPath, options.ResultsRoot)
+	sortTempDir, err := os.MkdirTemp("", "spt-integrity-finalize-*")
+	if err != nil {
+		return outcome, fmt.Errorf("create private manifest sort directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(sortTempDir) }()
+	inputSorted, inputUnique, err := sortManifestBoundedContext(ctx, inputPath, sortTempDir)
 	if err != nil {
 		return outcome, fmt.Errorf("sort %s: %w", inputName, err)
 	}
 	defer func() { _ = os.Remove(inputSorted) }()
-	verifiedSorted, verifiedUnique, err := sortManifestBounded(verifiedPath, options.ResultsRoot)
+	verifiedSorted, verifiedUnique, err := sortManifestBoundedContext(ctx, verifiedPath, sortTempDir)
 	if err != nil {
 		return outcome, fmt.Errorf("sort %s: %w", VerifiedName, err)
 	}
@@ -218,7 +256,7 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 	if inputUnique != inputCompletion.SelectedRecordCount || verifiedUnique != verifiedCompletion.SelectedRecordCount {
 		return outcome, fmt.Errorf("canonical manifest contains duplicate identities inconsistent with its completion record")
 	}
-	remaining, err := subtractSortedManifests(inputSorted, verifiedSorted, filepath.Join(options.ResultsRoot, VerifyRemainingName))
+	remaining, err := subtractSortedManifests(ctx, inputSorted, verifiedSorted, filepath.Join(options.ResultsRoot, VerifyRemainingName))
 	if err != nil {
 		return outcome, err
 	}
@@ -230,6 +268,9 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 			outcome.SelectionCount, outcome.VerificationAttemptedCount, outcome.VerifiedCount)
 	}
 
+	if err = ctx.Err(); err != nil {
+		return outcome, err
+	}
 	performanceSteps := []string{readStep}
 	if options.Workload == workload.WriteVerify {
 		performanceSteps = []string{createStep, readStep}
@@ -244,27 +285,26 @@ func FinalizeResults(options FinalizeOptions) (FinalizeOutcome, error) {
 		}
 	}
 
-	for _, name := range []string{inputName, inputCompletionName, VerifiedName, VerifiedCompletionName,
-		VerifyRemainingName, IntegrityFailuresName, IntegrityPerformanceName} {
-		if err = addRunFile(manifest, options.ResultsRoot, name); err != nil {
-			return outcome, err
-		}
-	}
-	if options.Multipart {
-		if err = addRunFile(manifest, options.ResultsRoot, MultipartLifecycleName); err != nil {
-			return outcome, err
-		}
-	}
-	manifest.Integrity = &results.IntegritySummary{
-		SelectionCount: outcome.SelectionCount, VerificationAttemptedCount: outcome.VerificationAttemptedCount,
-		VerifiedCount: outcome.VerifiedCount, CorruptCount: outcome.CorruptCount, RemainingCount: outcome.RemainingCount,
-		EmptySelection: outcome.EmptySelection, EmptyAllowed: outcome.EmptyAllowed,
-		DigestPerformance: outcome.DigestPerformance,
-	}
-	if err = writeResultsManifest(options.ResultsRoot, manifest); err != nil {
-		return outcome, err
-	}
+	reconciled = true
 	return outcome, nil
+}
+
+func integritySummary(outcome FinalizeOutcome, finalErr error) *results.IntegritySummary {
+	summary := &results.IntegritySummary{
+		Complete:                   outcome.Complete,
+		SelectionCount:             outcome.SelectionCount,
+		VerificationAttemptedCount: outcome.VerificationAttemptedCount,
+		VerifiedCount:              outcome.VerifiedCount,
+		CorruptCount:               outcome.CorruptCount,
+		RemainingCount:             outcome.RemainingCount,
+		EmptySelection:             outcome.EmptySelection,
+		EmptyAllowed:               outcome.EmptyAllowed,
+		DigestPerformance:          outcome.DigestPerformance,
+	}
+	if finalErr != nil {
+		summary.FinalizationError = finalErr.Error()
+	}
+	return summary
 }
 
 func resolveStepRoles(workloadName string, configured []string, manifest *results.Manifest) (create, list, read string) {
@@ -333,25 +373,19 @@ func copyAtomic(source, destination string) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	if _, err = io.Copy(tmp, in); err == nil {
-		err = tmp.Close()
-	} else {
+	if _, err = io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
-	}
-	if err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err = os.Chmod(tmpPath, 0o600); err == nil {
-		err = os.Rename(tmpPath, destination)
-	}
+	err = closeAndPublishTempFile(tmp, tmpPath, destination)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 	}
 	return err
 }
 
-func subtractSortedManifests(inputPath, verifiedPath, destination string) (int, error) {
+func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, destination string) (int, error) {
 	input, err := openSortedManifest(inputPath)
 	if err != nil {
 		return 0, err
@@ -379,6 +413,10 @@ func subtractSortedManifests(inputPath, verifiedPath, destination string) (int, 
 	right, rightErr := verified.next()
 	remaining := 0
 	for leftErr == nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = ctxErr
+			break
+		}
 		if errors.Is(rightErr, io.EOF) || left.compare(right) < 0 {
 			if err = writer.Write(left.fields()); err != nil {
 				break
@@ -411,14 +449,10 @@ func subtractSortedManifests(inputPath, verifiedPath, destination string) (int, 
 	if err == nil {
 		err = writer.Error()
 	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
 	if err == nil {
-		err = os.Chmod(tmpPath, 0o600)
-	}
-	if err == nil {
-		err = os.Rename(tmpPath, destination)
+		err = closeAndPublishTempFile(tmp, tmpPath, destination)
+	} else {
+		_ = tmp.Close()
 	}
 	if err != nil {
 		_ = os.Remove(tmpPath)
@@ -511,8 +545,11 @@ func readOperationMetrics(root, step, opType string) (operationCounts, error) {
 	defer func() { _ = file.Close() }()
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll()
-	if err != nil || len(records) < 2 {
+	if err != nil {
 		return counts, fmt.Errorf("parse %s metrics: %w", opType, err)
+	}
+	if len(records) < 2 {
+		return counts, fmt.Errorf("%s metrics contain no data rows", opType)
 	}
 	columns := make(map[string]int, len(records[0]))
 	for i, name := range records[0] {
@@ -532,8 +569,11 @@ func readOperationMetrics(root, step, opType string) (operationCounts, error) {
 		values := []*int64{&counts.success, &counts.failure, &counts.corrupt}
 		for i, column := range []string{"CountSucc", "CountFail", "CountCorrupt"} {
 			value, parseErr := strconv.ParseInt(row[columns[column]], 10, 64)
-			if parseErr != nil || value < 0 {
+			if parseErr != nil {
 				return counts, fmt.Errorf("parse %s row %d: %w", column, rowIndex+2, parseErr)
+			}
+			if value < 0 {
+				return counts, fmt.Errorf("%s row %d has negative value %d", column, rowIndex+2, value)
 			}
 			*values[i] += value
 		}
@@ -547,12 +587,13 @@ func readOperationMetrics(root, step, opType string) (operationCounts, error) {
 	return counts, nil
 }
 
-func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
+// ObserveJSONCorruptCount reads the required corruption count from an engine metrics endpoint.
+func ObserveJSONCorruptCount(baseURL, readStep string) (int64, error) {
 	for _, endpoint := range []string{"/metrics/fleet/json", "/metrics/json"} {
 		url := strings.TrimSuffix(baseURL, "/") + endpoint
 		response, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
 		if err != nil {
-			return fmt.Errorf("fetch required corruption metrics from %s: %w", endpoint, err)
+			return 0, fmt.Errorf("fetch required corruption metrics from %s: %w", endpoint, err)
 		}
 		if response.StatusCode == http.StatusNotFound {
 			_ = response.Body.Close()
@@ -560,7 +601,7 @@ func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
 		}
 		if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
-			return fmt.Errorf("required corruption metrics endpoint %s returned HTTP %d", endpoint, response.StatusCode)
+			return 0, fmt.Errorf("required corruption metrics endpoint %s returned HTTP %d", endpoint, response.StatusCode)
 		}
 		var rows []struct {
 			StepID     string `json:"step_id"`
@@ -572,7 +613,7 @@ func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
 		decodeErr := json.NewDecoder(response.Body).Decode(&rows)
 		_ = response.Body.Close()
 		if decodeErr != nil {
-			return fmt.Errorf("decode required corruption metrics from %s: %w", endpoint, decodeErr)
+			return 0, fmt.Errorf("decode required corruption metrics from %s: %w", endpoint, decodeErr)
 		}
 		var observed int64
 		matched := false
@@ -582,7 +623,7 @@ func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
 			}
 			matched = true
 			if row.Operations.CorruptCount == nil {
-				return fmt.Errorf("verification JSON metrics missing operations.corrupt_count for step %s", readStep)
+				return 0, fmt.Errorf("verification JSON metrics missing operations.corrupt_count for step %s", readStep)
 			}
 			observed += *row.Operations.CorruptCount
 		}
@@ -591,14 +632,25 @@ func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
 			if endpoint == "/metrics/fleet/json" {
 				continue
 			}
-			return fmt.Errorf("verification JSON metrics contain no READ row for step %s", readStep)
+			return 0, fmt.Errorf("verification JSON metrics contain no READ row for step %s", readStep)
 		}
-		if observed != expected {
-			return fmt.Errorf("JSON corruption count %d does not match CountCorrupt %d", observed, expected)
+		if observed < 0 {
+			return 0, fmt.Errorf("verification JSON metrics contain a negative corruption count")
 		}
-		return nil
+		return observed, nil
 	}
-	return fmt.Errorf("verification JSON metrics are unavailable")
+	return 0, fmt.Errorf("verification JSON metrics are unavailable")
+}
+
+func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
+	observed, err := ObserveJSONCorruptCount(baseURL, readStep)
+	if err != nil {
+		return err
+	}
+	if observed != expected {
+		return fmt.Errorf("JSON corruption count %d does not match CountCorrupt %d", observed, expected)
+	}
+	return nil
 }
 
 func combinePerformance(root string, steps []string) (results.IntegrityPerformanceSummary, error) {
@@ -677,14 +729,10 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 	if err == nil {
 		err = writer.Error()
 	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
 	if err == nil {
-		err = os.Chmod(tmpPath, 0o600)
-	}
-	if err == nil {
-		err = os.Rename(tmpPath, destination)
+		err = closeAndPublishTempFile(tmp, tmpPath, destination)
+	} else {
+		_ = tmp.Close()
 	}
 	if err != nil {
 		_ = os.Remove(tmpPath)
@@ -853,14 +901,16 @@ func writeResultsManifest(root string, manifest *results.Manifest) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	if _, err = tmp.Write(append(data, '\n')); err == nil {
-		err = tmp.Close()
-	} else {
+	if _, err = tmp.Write(append(data, '\n')); err != nil {
 		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
 	}
-	if err == nil {
-		err = os.Rename(tmpPath, filepath.Join(root, constants.ResultsManifestFileName))
-	}
+	err = closeAndPublishTempFile(
+		tmp,
+		tmpPath,
+		filepath.Join(root, constants.ResultsManifestFileName),
+	)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 	}

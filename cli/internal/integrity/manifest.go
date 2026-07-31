@@ -2,6 +2,7 @@ package integrity
 
 import (
 	"container/heap"
+	"context"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
@@ -16,7 +17,10 @@ import (
 	"strings"
 )
 
-const manifestSortChunkRecords = 64 * 1024
+const (
+	manifestSortChunkRecords = 64 * 1024
+	manifestMergeFanIn       = 64
+)
 
 func (r ManifestRecord) compare(other ManifestRecord) int {
 	if value := strings.Compare(r.bucket, other.bucket); value != 0 {
@@ -73,7 +77,8 @@ func ValidateCompletion(manifestPath, completionPath string, runID int64, produc
 	if marker.Artifact != artifact || filepath.Base(manifestPath) != artifact {
 		return marker, fmt.Errorf("completion artifact %q does not match %q", marker.Artifact, artifact)
 	}
-	if marker.SourceRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
+	if marker.SourceRecordCount < 0 || marker.EmittedRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
+		marker.SourceRecordCount != marker.EmittedRecordCount ||
 		marker.SourceRecordCount < marker.UniqueRecordCount || marker.UniqueRecordCount < marker.SelectedRecordCount {
 		return marker, fmt.Errorf("completion record counts are inconsistent")
 	}
@@ -137,6 +142,13 @@ func validateCanonicalManifest(path string) (int, error) {
 // sortManifestBounded external-sorts and de-duplicates a canonical manifest without retaining the
 // complete selection in memory. Conflicting sizes for one identity are rejected.
 func sortManifestBounded(path, tempDir string) (sortedPath string, uniqueCount int, err error) {
+	return sortManifestBoundedContext(context.Background(), path, tempDir)
+}
+
+func sortManifestBoundedContext(ctx context.Context, path, tempDir string) (sortedPath string, uniqueCount int, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	file, err := os.Open(path) // #nosec G304 -- result path selected by the caller
 	if err != nil {
 		return "", 0, err
@@ -162,8 +174,14 @@ func sortManifestBounded(path, tempDir string) (sortedPath string, uniqueCount i
 
 	recordNumber := 1
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
 		batch := make([]ManifestRecord, 0, manifestSortChunkRecords)
 		for len(batch) < manifestSortChunkRecords {
+			if err := ctx.Err(); err != nil {
+				return "", 0, err
+			}
 			fields, readErr := reader.Read()
 			if errors.Is(readErr, io.EOF) {
 				break
@@ -191,7 +209,7 @@ func sortManifestBounded(path, tempDir string) (sortedPath string, uniqueCount i
 			break
 		}
 	}
-	return mergeSortedChunks(tempDir, chunks)
+	return mergeSortedChunksContext(ctx, tempDir, chunks)
 }
 
 func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) {
@@ -256,7 +274,40 @@ func (h *mergeHeap) Pop() any {
 	return last
 }
 
-func mergeSortedChunks(tempDir string, chunks []string) (string, int, error) {
+func mergeSortedChunksContext(ctx context.Context, tempDir string, chunks []string) (string, int, error) {
+	working := append([]string(nil), chunks...)
+	var intermediates []string
+	cleanup := func() {
+		for _, path := range intermediates {
+			_ = os.Remove(path)
+		}
+	}
+	for len(working) > manifestMergeFanIn {
+		next := make([]string, 0, (len(working)+manifestMergeFanIn-1)/manifestMergeFanIn)
+		for start := 0; start < len(working); start += manifestMergeFanIn {
+			end := start + manifestMergeFanIn
+			if end > len(working) {
+				end = len(working)
+			}
+			merged, _, mergeErr := mergeSortedChunkGroupContext(ctx, tempDir, working[start:end], false)
+			if mergeErr != nil {
+				cleanup()
+				return "", 0, mergeErr
+			}
+			intermediates = append(intermediates, merged)
+			next = append(next, merged)
+		}
+		working = next
+	}
+	result, count, err := mergeSortedChunkGroupContext(ctx, tempDir, working, true)
+	cleanup()
+	return result, count, err
+}
+
+func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []string, includeHeader bool) (string, int, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	out, err := os.CreateTemp(tempDir, ".integrity-sorted-*")
 	if err != nil {
 		return "", 0, err
@@ -270,9 +321,11 @@ func mergeSortedChunks(tempDir string, chunks []string) (string, int, error) {
 	}()
 	writer := csv.NewWriter(out)
 	writer.UseCRLF = true
-	if err = writer.Write(canonicalHeader); err != nil {
-		_ = out.Close()
-		return "", 0, err
+	if includeHeader {
+		if err = writer.Write(canonicalHeader); err != nil {
+			_ = out.Close()
+			return "", 0, err
+		}
 	}
 
 	sources := make([]mergeSource, 0, len(chunks))
@@ -285,6 +338,10 @@ func mergeSortedChunks(tempDir string, chunks []string) (string, int, error) {
 	heap.Init(queue)
 	for _, chunk := range chunks {
 		file, openErr := os.Open(chunk) // #nosec G304 -- private temporary path
+		if err := ctx.Err(); err != nil {
+			_ = out.Close()
+			return "", 0, err
+		}
 		if openErr != nil {
 			_ = out.Close()
 			return "", 0, openErr
@@ -303,6 +360,10 @@ func mergeSortedChunks(tempDir string, chunks []string) (string, int, error) {
 	count := 0
 	var prior *ManifestRecord
 	for queue.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			_ = out.Close()
+			return "", 0, err
+		}
 		item := heap.Pop(queue).(mergeItem)
 		if prior != nil && prior.compare(item.record) == 0 {
 			if prior.size != item.record.size {

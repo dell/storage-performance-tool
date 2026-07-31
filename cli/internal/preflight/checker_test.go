@@ -128,6 +128,30 @@ func TestPreflightInspectPayloadIdentity(t *testing.T) {
 	}
 }
 
+func TestPreflightInspectRunningPayloadIdentity(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	host := testHost()
+	host.IsLocal = true
+	digest := strings.Repeat("c", 64)
+	cmd := strings.Join([]string{
+		constants.DockerCommand, constants.DockerCmdExec, "container-123", "sh", "-c", integrityPayloadHashScript,
+	}, " ")
+	mock.SetCommandSuccess(cmd, digest+"  -")
+
+	got, err := NewCheckerWithExecutor(mock).InspectRunningPayloadIdentity(
+		context.Background(), host, "container-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != digest {
+		t.Fatalf("running payload digest = %q, want %q", got, digest)
+	}
+	if _, err := NewCheckerWithExecutor(mock).InspectRunningPayloadIdentity(
+		context.Background(), host, ""); err == nil {
+		t.Fatal("expected an empty running container ID to fail")
+	}
+}
+
 func TestPreflightInspectPayloadIdentityQuotesRemoteScriptAndRejectsBadEvidence(t *testing.T) {
 	mock := command.NewMockCommandExecutor()
 	host := testHost()

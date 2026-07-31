@@ -47,6 +47,11 @@ type PayloadIdentityChecker interface {
 	InspectPayloadIdentity(ctx context.Context, host *hostparse.HostInfo, image string) (string, error)
 }
 
+// RunningPayloadIdentityChecker measures the payload of the actual started engine container.
+type RunningPayloadIdentityChecker interface {
+	InspectRunningPayloadIdentity(ctx context.Context, host *hostparse.HostInfo, containerID string) (string, error)
+}
+
 // DefaultChecker implements Checker using the command-layer (SSH/local)
 type DefaultChecker struct {
 	exec command.CommandExecutor
@@ -199,6 +204,38 @@ func (c *DefaultChecker) InspectPayloadIdentity(
 	digest := strings.ToLower(fields[0])
 	if _, err := hex.DecodeString(digest); err != nil {
 		return "", fmt.Errorf("inspect payload identity on %s returned invalid SHA-256 evidence", host.Original)
+	}
+	return digest, nil
+}
+
+// InspectRunningPayloadIdentity hashes the payload in the actual container selected for a run.
+func (c *DefaultChecker) InspectRunningPayloadIdentity(
+	ctx context.Context,
+	host *hostparse.HostInfo,
+	containerID string,
+) (string, error) {
+	if strings.TrimSpace(containerID) == "" {
+		return "", fmt.Errorf("running payload identity requires a container ID on %s", host.Original)
+	}
+	tctx, cancel := withTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	defer cancel()
+	scriptArg := integrityPayloadHashScript
+	if host != nil && !host.IsLocal {
+		scriptArg = quoteRemoteShellArg(scriptArg)
+	}
+	stdout, stderr, err := c.exec.ExecuteCommand(tctx, host, []string{
+		constants.DockerCommand, constants.DockerCmdExec, containerID, "sh", "-c", scriptArg,
+	})
+	if err != nil {
+		return "", fmt.Errorf("inspect running payload identity on %s: %w (stderr: %s)", host.Original, err, stderr)
+	}
+	fields := strings.Fields(stdout)
+	if len(fields) == 0 || len(fields[0]) != 64 {
+		return "", fmt.Errorf("inspect running payload identity on %s returned invalid SHA-256 evidence", host.Original)
+	}
+	digest := strings.ToLower(fields[0])
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", fmt.Errorf("inspect running payload identity on %s returned invalid SHA-256 evidence", host.Original)
 	}
 	return digest, nil
 }

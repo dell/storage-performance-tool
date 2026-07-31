@@ -10,6 +10,7 @@ const (
 	DockerCommand    = "docker"
 	DockerCmdPull    = "pull"
 	DockerCmdRun     = "run"
+	DockerCmdExec    = "exec"
 	DockerCmdPS      = "ps"
 	DockerCmdRM      = "rm"
 	DockerCmdLogs    = "logs"

@@ -33,9 +33,10 @@ func TestValidateWorkloadType(t *testing.T) {
 			wantErr:      false,
 		},
 		{
-			name:         "valid delete workload",
+			name:         "unimplemented delete workload",
 			workloadType: "delete",
-			wantErr:      false,
+			wantErr:      true,
+			errContains:  "not yet implemented",
 		},
 		{
 			name:         "valid list workload",
@@ -489,6 +490,18 @@ func TestValidateIntegrityRuntimeIdentityTier(t *testing.T) {
 	}
 	if err := validateIntegrityWorkloadFlags(newCommand("payload", true), WorkloadTypeWrite); err == nil {
 		t.Fatal("identity tier on ordinary workload should fail")
+	}
+
+	for _, ordinary := range []string{WorkloadTypeWrite, WorkloadTypeRead, WorkloadTypeList, WorkloadTypeMixed, WorkloadTypeMock, WorkloadTypeTables} {
+		cmd := newCommand("payload", true)
+		markEnvApplied(cmd, flagIntegrityRuntimeIdentityTier, "payload")
+		if err := cmd.Flags().Set("integrity-max-console-failures", "5"); err != nil {
+			t.Fatal(err)
+		}
+		markEnvApplied(cmd, "integrity-max-console-failures", "5")
+		if err := validateIntegrityWorkloadFlags(cmd, ordinary); err != nil {
+			t.Errorf("environment integrity defaults rejected ordinary %s workload: %v", ordinary, err)
+		}
 	}
 }
 

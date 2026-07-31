@@ -220,6 +220,8 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	r.writeBullet(b, "Selection", fmt.Sprintf("selected %d, attempted %d, verified %d, remaining %d, corrupt %d",
 		integrity.SelectionCount, integrity.VerificationAttemptedCount, integrity.VerifiedCount,
 		integrity.RemainingCount, integrity.CorruptCount))
+	r.writeBullet(b, "Empty selection", fmt.Sprintf("%t (allowed: %t)",
+		integrity.EmptySelection, integrity.EmptyAllowed))
 	r.writeBullet(b, "Digest work", fmt.Sprintf("%d objects, %s", digest.Objects, formatBytesHuman(digest.Bytes)))
 	r.writeBullet(b, "Digest worker time", fmt.Sprintf("%.6f s cumulative worker time", digest.HashWorkerSeconds))
 	r.writeBullet(b, "Mean worker rate", fmt.Sprintf("%.3f MiB/s", digest.MeanWorkerHashMiBPerSecond))
@@ -238,6 +240,7 @@ func (r *Renderer) renderCompactIntegrity(b *strings.Builder, summary *RunSummar
 	d := i.DigestPerformance
 	fmt.Fprintf(b, "Integrity: selected %d, attempted %d, verified %d, remaining %d, corrupt %d\n",
 		i.SelectionCount, i.VerificationAttemptedCount, i.VerifiedCount, i.RemainingCount, i.CorruptCount)
+	fmt.Fprintf(b, "Integrity empty selection: %t (allowed: %t)\n", i.EmptySelection, i.EmptyAllowed)
 	fmt.Fprintf(b, "Digest work: %d objects, %s, %.6f cumulative worker seconds, %.3f MiB/s mean worker rate",
 		d.Objects, formatBytesHuman(d.Bytes), d.HashWorkerSeconds, d.MeanWorkerHashMiBPerSecond)
 	if d.InitialWriteDelaySecondsMaxNode != nil {

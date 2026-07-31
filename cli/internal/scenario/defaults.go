@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"gopkg.in/yaml.v3"
 )
 
@@ -155,7 +156,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 
 	// Configure based on workload type
 	switch params.WorkloadType {
-	case "mock":
+	case workload.Mock:
 		// For mock workloads, use dummy-mock driver
 		config.Storage.Driver = DriverConfig{
 			Type: "dummy-mock",
@@ -164,7 +165,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 		}
 
-	case "tables":
+	case workload.Tables:
 		// For tables workloads, endpoint/auth are configured identically to S3 workloads.
 		// The s3-tables driver extends S3StorageDriver and uses the same net config.
 		authVersion := params.AuthVersion
@@ -214,7 +215,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}
 
-	case "write", "read", "write-verify", "read-verify", "mixed", "delete", "list":
+	case workload.Write, workload.Read, workload.WriteVerify, workload.ReadVerify, workload.Mixed, workload.Delete, workload.List:
 		// For S3 workloads, parse one or more endpoints and configure accordingly
 		authVersion := params.AuthVersion
 		if authVersion == 0 {

@@ -8,10 +8,11 @@ package constants
 // dotted schema paths the CLI requires an integrity-capable engine to declare. They mirror the
 // nested `storage.integrity` subtree in the engine base config schema.
 const (
-	IntegrityModePath            = "storage.integrity.mode"
-	IntegrityAlgorithmPath       = "storage.integrity.algorithm"
-	IntegrityInputProvenancePath = "storage.integrity.input.provenance"
-	IntegrityInputProducerIDPath = "storage.integrity.input.expectedProducerId"
+	IntegrityModePath              = "storage.integrity.mode"
+	IntegrityAlgorithmPath         = "storage.integrity.algorithm"
+	IntegrityInputProvenancePath   = "storage.integrity.input.provenance"
+	IntegrityInputProducerIDPath   = "storage.integrity.input.expectedProducerId"
+	IntegritySelectionMaxCountPath = "storage.integrity.selection.maxCount"
 )
 
 // RequiredIntegritySchemaPaths is the exact set an engine must declare before the CLI will submit
@@ -22,6 +23,7 @@ var RequiredIntegritySchemaPaths = []string{
 	IntegrityAlgorithmPath,
 	IntegrityInputProvenancePath,
 	IntegrityInputProducerIDPath,
+	IntegritySelectionMaxCountPath,
 }
 
 // Integrity mode values.
