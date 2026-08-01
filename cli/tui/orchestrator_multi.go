@@ -136,6 +136,16 @@ type DistributedRuntimeIdentityParticipant struct {
 	PayloadSHA256 string   `json:"payloadSha256,omitempty"`
 }
 
+func runtimeIdentityHostKey(info *hostparse.HostInfo) string {
+	if info == nil {
+		return ""
+	}
+	if host := strings.TrimSpace(info.Host); host != "" {
+		return host
+	}
+	return strings.TrimSpace(info.Original)
+}
+
 // NewMultiHostOrchestrator creates a new multi-host orchestrator
 func NewMultiHostOrchestrator(hostInfos []*hostparse.HostInfo, minHosts int) *MultiHostOrchestrator {
 	return NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, RMIConfig{
@@ -1745,6 +1755,16 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	if host.DockerManager == nil {
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 	}
+	runtimeImage := image
+	if scenario.IsIntegrityWorkload(params) {
+		evidence, identityErr := m.multiHost.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
+		if identityErr != nil {
+			return identityErr
+		}
+		// Bind container creation to the immutable ID that preflight inspected;
+		// never resolve the caller's possibly mutable tag a second time.
+		runtimeImage = evidence.ImageID
+	}
 
 	if m.onStatusUpdate != nil {
 		m.onStatusUpdate(&TestStatus{
@@ -1758,7 +1778,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 
 	m.multiHost.scenarioContent = string(scenarioContent)
 
-	if err := m.multiHost.StartContainers(ctx, image, startupArgs); err != nil {
+	if err := m.multiHost.StartContainers(ctx, runtimeImage, startupArgs); err != nil {
 		return err
 	}
 	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
@@ -2073,47 +2093,6 @@ const (
 	RuntimeIdentityTierAvailableImage = "available_image"
 )
 
-// RecordAvailableIntegrityRuntimeIdentity records the immutable image evidence available on a
-// single ready participant. Unlike PrepareDistributedIntegrityRuntimeIdentity, this is evidence
-// capture only: it does not claim or require a cross-host equality proof.
-func (o *MultiHostOrchestrator) RecordAvailableIntegrityRuntimeIdentity(
-	ctx context.Context,
-	image string,
-) (DistributedRuntimeIdentityEvidence, error) {
-	evidence := DistributedRuntimeIdentityEvidence{
-		Tier:           RuntimeIdentityTierAvailableImage,
-		ImageReference: image,
-	}
-	o.mu.Lock()
-	checker := o.preflight
-	recorder := o.runtimeIdentityRecorder
-	o.mu.Unlock()
-	identityChecker, ok := checker.(preflight.ImageIdentityChecker)
-	if !ok {
-		return evidence, fmt.Errorf("runtime image evidence requires an image identity checker")
-	}
-	hosts := o.GetReadyHosts()
-	if len(hosts) != 1 {
-		return evidence, fmt.Errorf("available runtime image evidence requires exactly one ready participant, got %d", len(hosts))
-	}
-	identity, err := identityChecker.InspectImageIdentity(ctx, hosts[0].Info, image)
-	if err != nil {
-		return evidence, err
-	}
-	evidence.ImageID = identity.ID
-	evidence.Participants = []DistributedRuntimeIdentityParticipant{{
-		Host:        hosts[0].Info.Original,
-		ImageID:     identity.ID,
-		RepoDigests: append([]string(nil), identity.RepoDigests...),
-	}}
-	if recorder != nil {
-		recorder(evidence)
-	}
-	o.notifyf("Integrity runtime identity: tier=%s image_id=%s participants=1",
-		evidence.Tier, evidence.ImageID)
-	return evidence, nil
-}
-
 func (o *MultiHostOrchestrator) verifyDistributedIntegrityImageIdentity(
 	ctx context.Context,
 	image string,
@@ -2172,7 +2151,7 @@ func (o *MultiHostOrchestrator) verifyDistributedIntegrityImageIdentity(
 	evidence.ImageID = identities[0].ID
 	for index, identity := range identities {
 		evidence.Participants = append(evidence.Participants, DistributedRuntimeIdentityParticipant{
-			Host:        hosts[index].Info.Original,
+			Host:        runtimeIdentityHostKey(hosts[index].Info),
 			ImageID:     identity.ID,
 			RepoDigests: append([]string(nil), identity.RepoDigests...),
 		})
@@ -2244,8 +2223,14 @@ func (o *MultiHostOrchestrator) VerifyRunningIntegrityPayloadIdentity(ctx contex
 	o.mu.Lock()
 	selectedTier := o.runtimeIdentityTier
 	checker := o.preflight
-	current := o.runtimeIdentityEvidence
 	recorder := o.runtimeIdentityRecorder
+	var current *DistributedRuntimeIdentityEvidence
+	if o.runtimeIdentityEvidence != nil {
+		snapshot := *o.runtimeIdentityEvidence
+		snapshot.Participants = append(
+			[]DistributedRuntimeIdentityParticipant(nil), o.runtimeIdentityEvidence.Participants...)
+		current = &snapshot
+	}
 	o.mu.Unlock()
 	if selectedTier != constants.IntegrityRuntimeIdentityTierPayload {
 		return nil
@@ -2257,43 +2242,106 @@ func (o *MultiHostOrchestrator) VerifyRunningIntegrityPayloadIdentity(ctx contex
 	if !ok {
 		return fmt.Errorf("payload tier requires a running-container payload identity checker")
 	}
+	preparedByHost := make(map[string]DistributedRuntimeIdentityParticipant, len(current.Participants))
+	for _, participant := range current.Participants {
+		hostKey := strings.TrimSpace(participant.Host)
+		if hostKey == "" {
+			return fmt.Errorf("prepared runtime identity evidence contains an empty participant host")
+		}
+		if _, duplicate := preparedByHost[hostKey]; duplicate {
+			return fmt.Errorf("prepared runtime identity evidence contains duplicate host %q", hostKey)
+		}
+		if participant.ImageID != current.ImageID {
+			return fmt.Errorf(
+				"prepared runtime identity for %s uses image %s, expected %s",
+				hostKey, participant.ImageID, current.ImageID)
+		}
+		preparedByHost[hostKey] = participant
+	}
+
 	hosts := o.GetReadyHosts()
+	if len(hosts) == 0 {
+		return fmt.Errorf("running payload verification found no running participants")
+	}
+	type runningParticipant struct {
+		host        *HostConnection
+		hostKey     string
+		label       string
+		containerID string
+		prepared    DistributedRuntimeIdentityParticipant
+	}
+	running := make([]runningParticipant, 0, len(hosts))
+	seenRunning := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		hostKey := runtimeIdentityHostKey(host.Info)
+		label := hostKey
+		if host.Info != nil && strings.TrimSpace(host.Info.Original) != "" {
+			label = host.Info.Original
+		}
+		if hostKey == "" {
+			return fmt.Errorf("running payload verification found a participant without host identity")
+		}
+		if _, duplicate := seenRunning[hostKey]; duplicate {
+			return fmt.Errorf("running payload verification found duplicate host %q", hostKey)
+		}
+		seenRunning[hostKey] = struct{}{}
+		prepared, expected := preparedByHost[hostKey]
+		if !expected {
+			return fmt.Errorf("running participant %s was not present in prepared runtime identity evidence", label)
+		}
+		host.mu.Lock()
+		containerID := host.ContainerID
+		host.mu.Unlock()
+		if strings.TrimSpace(containerID) == "" {
+			return fmt.Errorf("running participant %s has no container identity", label)
+		}
+		running = append(running, runningParticipant{
+			host: host, hostKey: hostKey, label: label, containerID: containerID, prepared: prepared,
+		})
+	}
+
 	type payloadResult struct {
-		index  int
-		digest string
-		err    error
+		hostKey string
+		label   string
+		digest  string
+		err     error
 	}
-	results := make(chan payloadResult, len(hosts))
-	for index, host := range hosts {
-		go func(index int, host *HostConnection) {
-			host.mu.Lock()
-			containerID := host.ContainerID
-			host.mu.Unlock()
-			digest, err := runningChecker.InspectRunningPayloadIdentity(ctx, host.Info, containerID)
-			results <- payloadResult{index: index, digest: digest, err: err}
-		}(index, host)
+	results := make(chan payloadResult, len(running))
+	for _, participant := range running {
+		go func(participant runningParticipant) {
+			digest, err := runningChecker.InspectRunningPayloadIdentity(
+				ctx, participant.host.Info, participant.containerID)
+			results <- payloadResult{
+				hostKey: participant.hostKey, label: participant.label, digest: digest, err: err,
+			}
+		}(participant)
 	}
-	updated := *current
-	updated.Participants = append([]DistributedRuntimeIdentityParticipant(nil), current.Participants...)
+	digestsByHost := make(map[string]string, len(running))
 	var failures []error
-	for range hosts {
+	for range running {
 		result := <-results
 		if result.err != nil {
-			failures = append(failures, fmt.Errorf("%s: %w", hosts[result.index].Info.Original, result.err))
+			failures = append(failures, fmt.Errorf("%s: %w", result.label, result.err))
 			continue
 		}
 		if result.digest != current.PayloadSHA256 {
 			failures = append(failures, fmt.Errorf(
 				"running payload identity mismatch on %s: image payload %s, running payload %s",
-				hosts[result.index].Info.Original, current.PayloadSHA256, result.digest))
+				result.label, current.PayloadSHA256, result.digest))
 			continue
 		}
-		if result.index < len(updated.Participants) {
-			updated.Participants[result.index].PayloadSHA256 = result.digest
-		}
+		digestsByHost[result.hostKey] = result.digest
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("running integrity payload identity unavailable: %w", errors.Join(failures...))
+	}
+	updated := *current
+	updated.Participants = make([]DistributedRuntimeIdentityParticipant, 0, len(running))
+	for _, actual := range running {
+		participant := actual.prepared
+		participant.RepoDigests = append([]string(nil), participant.RepoDigests...)
+		participant.PayloadSHA256 = digestsByHost[actual.hostKey]
+		updated.Participants = append(updated.Participants, participant)
 	}
 	o.mu.Lock()
 	o.runtimeIdentityEvidence = &updated

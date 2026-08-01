@@ -163,7 +163,8 @@ func (c *DefaultChecker) InspectImageIdentity(
 	return identity, nil
 }
 
-const integrityPayloadHashScript = "set -eu; cd /opt/spt; find . -type f -printf '%P\\0' | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum"
+const integrityPayloadHashScript = "set -eu; cd " + constants.IntegrityPayloadRoot +
+	"; find . -type f -printf '%P\\0' | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum"
 
 // InspectPayloadIdentity starts the already-resolved image without network or writable rootfs,
 // hashes each regular file under /opt/spt in canonical relative-path order, and returns the hash

@@ -1360,6 +1360,9 @@ func TestMultiHostIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *testing
 	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
 	orchestrator.SetAPIPort(port)
 	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"qa-client-01": {ID: "sha256:" + strings.Repeat("a", 64)},
+	}}
 	mockDocker := NewMockDockerManager()
 	orchestrator.hosts[0].DockerManager = mockDocker
 	wrapper := NewMultiHostTestOrchestrator(orchestrator)
@@ -1497,6 +1500,11 @@ func newSingleHostReplayAPIServer(t *testing.T, postedScenario, postedDefaults *
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"n0"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
+				`"input":{"provenance":"string","expectedProducerId":"string"},` +
+				`"selection":{"maxCount":"long"}}}}`))
 		case "/run":
 			if r.Method == http.MethodHead {
 				w.WriteHeader(http.StatusNoContent)
@@ -1948,4 +1956,197 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 			t.Fatalf("worker should be inactive in baseline for LIST runs")
 		}
 	}
+}
+
+func TestSingleRemoteIntegrityStartsVerifiedImmutableImageID(t *testing.T) {
+	var postedScenario, postedDefaults string
+	server := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer server.Close()
+	host, port := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	verifiedID := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"qa-client-01": {ID: verifiedID},
+	}}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const mutableTag = "repo/spt:mutable"
+	if err := wrapper.StartTestWithContent(
+		ctx,
+		mutableTag,
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := mockDocker.GetContainerCalls()
+	if len(calls) != 1 {
+		t.Fatalf("container starts = %d, want 1", len(calls))
+	}
+	if calls[0].Image != verifiedID {
+		t.Fatalf("container image = %q, want verified immutable ID %q (tag was %q)",
+			calls[0].Image, verifiedID, mutableTag)
+	}
+	if postedScenario == "" {
+		t.Fatal("verified single-remote scenario was not posted")
+	}
+}
+
+func TestSingleRemoteIntegrityIdentityFailureStopsBeforeContainerAndScenario(t *testing.T) {
+	var postedScenario, postedDefaults string
+	server := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer server.Close()
+	host, port := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	orchestrator.preflight = identityPreflight{errors: map[string]error{
+		"qa-client-01": errors.New("mutable tag no longer resolves to prepared image"),
+	}}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err := wrapper.StartTestWithContent(
+		context.Background(),
+		"repo/spt:mutable",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "qa-client-01") {
+		t.Fatalf("identity error = %v, want host-specific failure", err)
+	}
+	if len(mockDocker.GetContainerCalls()) != 0 {
+		t.Fatal("identity failure started a container")
+	}
+	if postedScenario != "" {
+		t.Fatal("identity failure posted the scenario")
+	}
+}
+
+func TestRunningPayloadEvidenceRecordsExactStartedParticipantSetByHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "dropped", Original: "dropped"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	runningCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "dropped": {ID: imageID}, "worker": {ID: imageID},
+		},
+		payloads: map[string]string{
+			"entry": payload, "dropped": payload, "worker": payload,
+		},
+		runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		runningCalls:    runningCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+	var recorded DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = evidence
+	})
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].ContainerID = "entry-container"
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusRunning)
+	orchestrator.hosts[2].ContainerID = "worker-container"
+
+	if err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runningCalls.Load() != 2 {
+		t.Fatalf("running payload probes = %d, want 2", runningCalls.Load())
+	}
+	if len(recorded.Participants) != 2 || recorded.Participants[0].Host != "entry" ||
+		recorded.Participants[1].Host != "worker" {
+		t.Fatalf("running participant evidence = %+v, want exact entry/worker set", recorded.Participants)
+	}
+	for _, participant := range recorded.Participants {
+		if participant.PayloadSHA256 != payload || participant.ImageID != imageID {
+			t.Fatalf("incomplete running participant evidence: %+v", participant)
+		}
+	}
+}
+
+func TestRunningPayloadEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T) {
+	newPrepared := func(t *testing.T) (*MultiHostOrchestrator, string) {
+		t.Helper()
+		hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+		orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+		for index, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusReady)
+			host.ContainerID = fmt.Sprintf("container-%d", index)
+		}
+		imageID := "sha256:" + strings.Repeat("a", 64)
+		payload := strings.Repeat("b", 64)
+		orchestrator.preflight = identityPreflight{
+			identities:      map[string]preflight.ImageIdentity{"entry": {ID: imageID}, "worker": {ID: imageID}},
+			payloads:        map[string]string{"entry": payload, "worker": payload},
+			runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		}
+		orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+		if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+			context.Background(), "repo/spt:test"); err != nil {
+			t.Fatal(err)
+		}
+		return orchestrator, payload
+	}
+
+	t.Run("no running participants", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusFailed)
+		}
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "no running participants") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
+
+	t.Run("unexpected running host", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		orchestrator.hosts[1].Info.Host = "replacement"
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "not present in prepared") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
+
+	t.Run("duplicate prepared host", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		orchestrator.mu.Lock()
+		orchestrator.runtimeIdentityEvidence.Participants[1].Host =
+			orchestrator.runtimeIdentityEvidence.Participants[0].Host
+		orchestrator.mu.Unlock()
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "duplicate host") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
 }
