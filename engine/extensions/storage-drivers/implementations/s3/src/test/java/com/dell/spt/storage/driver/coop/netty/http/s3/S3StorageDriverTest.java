@@ -302,7 +302,11 @@ public class S3StorageDriverTest {
 		private ConnectException requestFailure;
 
 		TestS3Driver(Config cfg) throws Exception {
-			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
+			this(cfg, false);
+		}
+
+		TestS3Driver(final Config cfg, final boolean verify) throws Exception {
+			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true), cfg.configVal("storage"), verify, cfg.intVal("load-batch-size"));
 		}
 
 		void enqueueResponse(FullHttpResponse resp) {
@@ -657,7 +661,7 @@ public class S3StorageDriverTest {
 						"<ListBucketResult><Contents><Key>prefix/1</Key><Size>1</Size></Contents>");
 		for (final String xml : invalidPages) {
 			final var driver = new TestS3Driver(
-							baseConfig(false, 2, false, null, "127.0.0.1"));
+							baseConfig(false, 2, false, null, "127.0.0.1"), true);
 			try {
 				driver.enqueueResponse(new DefaultFullHttpResponse(
 								HttpVersion.HTTP_1_1,
@@ -679,9 +683,33 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void ordinaryListRetainsRetryableFailureSemantics() throws Exception {
+		final var driver = new TestS3Driver(
+						baseConfig(false, 2, false, null, "127.0.0.1"), false);
+		try {
+			driver.enqueueResponse(new DefaultFullHttpResponse(
+							HttpVersion.HTTP_1_1,
+							HttpResponseStatus.OK,
+							Unpooled.copiedBuffer(
+											"<ListBucketResult><Contents><Key>prefix/not-an-id</Key>"
+															+ "<Size>1</Size></Contents><IsTruncated>false</IsTruncated>"
+															+ "</ListBucketResult>",
+											StandardCharsets.UTF_8)));
+
+			final var failure = assertThrows(
+							IOException.class,
+							() -> driver.list(
+											new ItemFactoryImpl<>(), "/bucket", "prefix/", 36, null, 10));
+			assertFalse(failure instanceof TerminalItemInputException);
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
 	void deterministicListConnectionFailureIsTerminalInput() throws Exception {
 		final var driver = new TestS3Driver(
-						baseConfig(false, 2, false, null, "127.0.0.1"));
+						baseConfig(false, 2, false, null, "127.0.0.1"), true);
 		driver.failRequestsForTest(new ConnectException("injected connection loss"));
 		try {
 			final var failure = assertThrows(

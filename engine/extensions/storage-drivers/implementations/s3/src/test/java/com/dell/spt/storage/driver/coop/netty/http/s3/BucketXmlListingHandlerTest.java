@@ -8,7 +8,7 @@ import com.dell.spt.base.item.DataItemFactoryImpl;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import javax.xml.parsers.SAXParserFactory;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.xml.sax.SAXException;
 
@@ -16,6 +16,11 @@ final class BucketXmlListingHandlerTest {
 
 	private static final String BUCKET_PATH = "/bucket";
 	private static final int RADIX = Character.MAX_RADIX;
+
+	@AfterEach
+	void clearParser() {
+		S3XmlParser.clearThreadLocalForTest();
+	}
 
 	@Test
 	void parsesGeneratedLeafAfterFlatPrefix() throws Exception {
@@ -85,6 +90,22 @@ final class BucketXmlListingHandlerTest {
 	}
 
 	@Test
+	void rejectsRecognizedFieldsAtTheWrongHierarchyWithoutPublishingPartialItems() {
+		final var invalidPages = java.util.List.of(
+						"<ListBucketResult><Wrapper><Contents><Key>benchmark/1</Key><Size>1</Size></Contents></Wrapper><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Owner><Key>benchmark/1</Key></Owner><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Key>benchmark/1</Key><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Key>benchmark/1</Key><Size>1</Size><IsTruncated>false</IsTruncated></Contents></ListBucketResult>");
+		for (final String xml : invalidPages) {
+			final var items = new ArrayList<DataItem>();
+			final var handler = new BucketXmlListingHandler<>(
+							items, BUCKET_PATH, "benchmark/", new DataItemFactoryImpl<>(), RADIX);
+			assertThrows(Exception.class, () -> parseXml(xml, handler), xml);
+			assertEquals(0, items.size(), xml);
+		}
+	}
+
+	@Test
 	void rejectsInvalidSizeRootTruncationAndMalformedDocument() {
 		final var invalidPages = java.util.List.of(
 						"<Error><Code>Denied</Code></Error>",
@@ -120,8 +141,7 @@ final class BucketXmlListingHandlerTest {
 
 	private static void parseXml(final String xml, final BucketXmlListingHandler<DataItem> handler)
 					throws Exception {
-		SAXParserFactory.newInstance()
-						.newSAXParser()
-						.parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)), handler);
+		S3XmlParser.parse(
+						new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)), handler);
 	}
 }

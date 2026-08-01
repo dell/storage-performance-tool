@@ -10,18 +10,14 @@ import com.dell.spt.base.storage.driver.ListOptions;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import javax.xml.parsers.SAXParserFactory;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 final class ListObjectsXmlHandlerTest {
 
-	private SAXParserFactory parserFactory;
-
-	@BeforeEach
-	void setUp() {
-		parserFactory = SAXParserFactory.newInstance();
-		parserFactory.setNamespaceAware(false);
+	@AfterEach
+	void clearParser() {
+		S3XmlParser.clearThreadLocalForTest();
 	}
 
 	@Test
@@ -31,9 +27,8 @@ final class ListObjectsXmlHandlerTest {
 		op.options(ListOptions.builder().fetchMetadata(true).build());
 
 		final var handler = new ListObjectsXmlHandler(op, false, true);
-		parserFactory
-						.newSAXParser()
-						.parse(new ByteArrayInputStream(LIST_V2_RESPONSE.getBytes(StandardCharsets.UTF_8)), handler);
+		S3XmlParser.parse(
+						new ByteArrayInputStream(LIST_V2_RESPONSE.getBytes(StandardCharsets.UTF_8)), handler);
 
 		assertEquals(2, op.objectsListed());
 		assertEquals(579L, op.bytesListed());
@@ -52,9 +47,8 @@ final class ListObjectsXmlHandlerTest {
 		op.options(ListOptions.builder().fetchMetadata(true).includeVersions(true).build());
 
 		final var handler = new ListObjectsXmlHandler(op, true, true);
-		parserFactory
-						.newSAXParser()
-						.parse(new ByteArrayInputStream(LIST_VERSIONS_RESPONSE.getBytes(StandardCharsets.UTF_8)), handler);
+		S3XmlParser.parse(
+						new ByteArrayInputStream(LIST_VERSIONS_RESPONSE.getBytes(StandardCharsets.UTF_8)), handler);
 
 		assertEquals(2, op.objectsListed());
 		assertEquals(42L, op.bytesListed());
@@ -89,6 +83,12 @@ final class ListObjectsXmlHandlerTest {
 		final var invalidPages = List.of(
 						"<Error><Code>AccessDenied</Code></Error>",
 						"<Other><IsTruncated>false</IsTruncated></Other>",
+						"<ListBucketResult><Wrapper><Contents><Key>k</Key><Size>1</Size></Contents></Wrapper><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Owner><Key>k</Key></Owner><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Key>k</Key><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Key>k</Key><Size>1</Size><IsTruncated>false</IsTruncated></Contents></ListBucketResult>",
+						"<ListBucketResult><Wrapper><NextContinuationToken>token</NextContinuationToken></Wrapper><IsTruncated>true</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><IsTruncated>false</IsTruncated><NextKeyMarker>wrong-kind</NextKeyMarker></ListBucketResult>",
 						"<ListBucketResult><Contents><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
 						"<ListBucketResult><Contents><Key>k</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
 						"<ListBucketResult><Contents><Key>k</Key><Size>-1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
@@ -136,7 +136,7 @@ final class ListObjectsXmlHandlerTest {
 					final boolean includeVersions)
 					throws Exception {
 		final var handler = new ListObjectsXmlHandler(op, includeVersions, true);
-		parserFactory.newSAXParser().parse(
+		S3XmlParser.parse(
 						new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)), handler);
 	}
 

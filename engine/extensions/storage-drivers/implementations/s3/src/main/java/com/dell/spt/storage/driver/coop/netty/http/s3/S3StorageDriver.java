@@ -95,7 +95,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
-import javax.xml.parsers.SAXParserFactory;
 import org.apache.logging.log4j.Level;
 import org.xml.sax.SAXException;
 
@@ -694,16 +693,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					throw new IOException("S3 LIST delimiter probe failed: " + resp.status());
 				}
 				final var content = resp.content();
-				var parser = THREAD_LOCAL_XML_PARSER.get();
-				if (parser == null) {
-					parser = SAXParserFactory.newInstance().newSAXParser();
-					THREAD_LOCAL_XML_PARSER.set(parser);
-				} else {
-					parser.reset();
-				}
 				final var handler = new CommonPrefixesXmlHandler();
 				try (final InputStream is = new ByteBufInputStream(content)) {
-					parser.parse(is, handler);
+					S3XmlParser.parse(is, handler);
 				}
 				return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
 								java.util.List.copyOf(handler.commonPrefixes()),
@@ -785,17 +777,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					throw new IOException("S3 LIST failed: " + listResp.status());
 				}
 				final var listRespContent = listResp.content();
-				var listRespParser = THREAD_LOCAL_XML_PARSER.get();
-				if (listRespParser == null) {
-					listRespParser = SAXParserFactory.newInstance().newSAXParser();
-					THREAD_LOCAL_XML_PARSER.set(listRespParser);
-				} else {
-					listRespParser.reset();
-				}
 				final var listingHandler = new BucketXmlListingHandler<>(
 								buff, path, canonicalPrefix, itemFactory, idRadix);
 				try (final InputStream contentStream = new ByteBufInputStream(listRespContent)) {
-					listRespParser.parse(contentStream, listingHandler);
+					S3XmlParser.parse(contentStream, listingHandler);
 				}
 				if (buff.isEmpty()) {
 					throw new EOFException();
@@ -1048,9 +1033,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return failure;
 	}
 
-	private static TerminalItemInputException deterministicListInputFailure(
+	private IOException deterministicListInputFailure(
 					final String message, final Throwable cause) {
-		return new TerminalItemInputException(message, cause);
+		if (verifyFlag) {
+			return new TerminalItemInputException(message, cause);
+		}
+		return cause instanceof IOException
+						? (IOException) cause
+						: new IOException(message, cause);
 	}
 
 	private static String normalizeBucketPath(final String path) {

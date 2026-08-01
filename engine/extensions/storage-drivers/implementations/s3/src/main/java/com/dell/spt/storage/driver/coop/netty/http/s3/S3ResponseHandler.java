@@ -34,7 +34,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import javax.xml.parsers.SAXParserFactory;
 
 /**
 Created by andrey on 25.11.16.
@@ -418,17 +417,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private void parseListDocument(final InputStream contentStream, final ListOperation<?> op)
 					throws Exception {
-		var parser = S3StorageDriver.THREAD_LOCAL_XML_PARSER.get();
-		if (parser == null) {
-			parser = SAXParserFactory.newInstance().newSAXParser();
-			S3StorageDriver.THREAD_LOCAL_XML_PARSER.set(parser);
-		} else {
-			parser.reset();
-		}
 		final var options = op.options();
 		final var handler = new ListObjectsXmlHandler(
 						op, options.includeVersions(), options.fetchMetadata());
-		parser.parse(contentStream, handler);
+		S3XmlParser.parse(contentStream, handler);
 		final var driverId = driver != null ? driver.toString() : "s3";
 		Loggers.MSG.trace(
 						"{}: parsed LIST page objects={} bytes={} truncated={} token={}",

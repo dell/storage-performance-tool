@@ -2,7 +2,9 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
@@ -22,9 +24,11 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	private final boolean fetchMetadata;
 	private final StringBuilder text = new StringBuilder();
 	private final List<PageEntry> pageEntries = new ArrayList<>();
+	private final Deque<String> elementStack = new ArrayDeque<>();
 
 	private boolean documentElementSeen;
 	private boolean rootClosed;
+	private String activeScalar;
 	private EntryKind currentEntry;
 	private boolean currentKeySeen;
 	private boolean currentSizeSeen;
@@ -50,6 +54,8 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	public void startDocument() {
 		documentElementSeen = false;
 		rootClosed = false;
+		activeScalar = null;
+		elementStack.clear();
 		currentEntry = null;
 		pageEntries.clear();
 		truncationSeen = false;
@@ -69,79 +75,152 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 					final String qName,
 					final Attributes attributes)
 					throws SAXException {
+		if (activeScalar != null) {
+			throw new SAXException(
+							"Nested element " + qName + " is invalid inside S3 LIST field " + activeScalar);
+		}
 		text.setLength(0);
-		if (!documentElementSeen) {
+		if (elementStack.isEmpty()) {
+			if (documentElementSeen) {
+				throw new SAXException("S3 LIST result contains content after its root element");
+			}
 			documentElementSeen = true;
-			final String expectedRoot = includeVersions
-							? S3Api.QNAME_LIST_VERSIONS_RESULT
-							: S3Api.QNAME_LIST_BUCKET_RESULT;
+			final String expectedRoot = expectedRoot();
 			if (!expectedRoot.equals(qName)) {
 				throw new SAXException("Expected S3 " + expectedRoot + " root but found " + qName);
 			}
+			elementStack.push(qName);
 			return;
+		}
+		if (rootClosed) {
+			throw new SAXException("S3 LIST result contains content after its root element");
+		}
+		final String parent = elementStack.peek();
+		if (S3Api.QNAME_LIST_BUCKET_RESULT.equals(qName)
+						|| S3Api.QNAME_LIST_VERSIONS_RESULT.equals(qName)) {
+			throw new SAXException("Nested S3 LIST result root " + qName);
 		}
 		switch (qName) {
 		case S3Api.QNAME_ITEM:
+			requireDirectChild(qName, parent, expectedRoot());
 			startEntry(EntryKind.CONTENT);
 			break;
 		case S3Api.QNAME_VERSION_ENTRY:
 			if (!includeVersions) {
 				throw new SAXException("Version entry is invalid in ListBucketResult");
 			}
+			requireDirectChild(qName, parent, expectedRoot());
 			startEntry(EntryKind.VERSION);
 			break;
 		case S3Api.QNAME_DELETE_MARKER:
 			if (!includeVersions) {
 				throw new SAXException("DeleteMarker entry is invalid in ListBucketResult");
 			}
+			requireDirectChild(qName, parent, expectedRoot());
 			startEntry(EntryKind.DELETE_MARKER);
 			break;
 		case S3Api.QNAME_ITEM_ID:
-			if (currentEntry != null) {
-				if (currentKeySeen) {
-					throw new SAXException("Duplicate Key in S3 LIST entry");
-				}
-				currentKeySeen = true;
+			requireEntryChild(qName, parent);
+			if (currentKeySeen) {
+				throw new SAXException("Duplicate Key in S3 LIST entry");
 			}
+			currentKeySeen = true;
+			activeScalar = qName;
 			break;
 		case S3Api.QNAME_ITEM_SIZE:
-			if (currentEntry != null) {
-				if (currentEntry == EntryKind.DELETE_MARKER) {
-					throw new SAXException("DeleteMarker must not contain Size");
-				}
-				if (currentSizeSeen) {
-					throw new SAXException("Duplicate Size in S3 LIST entry");
-				}
-				currentSizeSeen = true;
+			requireEntryChild(qName, parent);
+			if (currentEntry == EntryKind.DELETE_MARKER) {
+				throw new SAXException("DeleteMarker must not contain Size");
 			}
+			if (currentSizeSeen) {
+				throw new SAXException("Duplicate Size in S3 LIST entry");
+			}
+			currentSizeSeen = true;
+			activeScalar = qName;
 			break;
 		case S3Api.QNAME_IS_TRUNCATED:
+			requireRootChild(qName, parent);
 			if (truncationSeen) {
 				throw new SAXException("Duplicate IsTruncated in S3 LIST result");
 			}
 			truncationSeen = true;
+			activeScalar = qName;
 			break;
 		case S3Api.QNAME_NEXT_CONTINUATION_TOKEN:
+			if (includeVersions) {
+				throw new SAXException("NextContinuationToken is invalid in ListVersionsResult");
+			}
+			requireRootChild(qName, parent);
 			if (nextContinuationTokenSeen) {
 				throw new SAXException("Duplicate NextContinuationToken in S3 LIST result");
 			}
 			nextContinuationTokenSeen = true;
+			activeScalar = qName;
 			break;
 		case S3Api.QNAME_NEXT_KEY_MARKER:
+			if (!includeVersions) {
+				throw new SAXException("NextKeyMarker is invalid in ListBucketResult");
+			}
+			requireRootChild(qName, parent);
 			if (nextKeyMarkerSeen) {
 				throw new SAXException("Duplicate NextKeyMarker in S3 LIST result");
 			}
 			nextKeyMarkerSeen = true;
+			activeScalar = qName;
 			break;
 		case S3Api.QNAME_NEXT_VERSION_ID_MARKER:
+			if (!includeVersions) {
+				throw new SAXException("NextVersionIdMarker is invalid in ListBucketResult");
+			}
+			requireRootChild(qName, parent);
 			if (nextVersionIdMarkerSeen) {
 				throw new SAXException("Duplicate NextVersionIdMarker in S3 LIST result");
 			}
 			nextVersionIdMarkerSeen = true;
+			activeScalar = qName;
 			break;
 		default:
 			break;
 		}
+		elementStack.push(qName);
+	}
+
+	private String expectedRoot() {
+		return includeVersions
+						? S3Api.QNAME_LIST_VERSIONS_RESULT
+						: S3Api.QNAME_LIST_BUCKET_RESULT;
+	}
+
+	private void requireRootChild(final String child, final String parent) throws SAXException {
+		requireDirectChild(child, parent, expectedRoot());
+		if (currentEntry != null) {
+			throw new SAXException(child + " is invalid inside an S3 LIST entry");
+		}
+	}
+
+	private void requireEntryChild(final String child, final String parent) throws SAXException {
+		if (currentEntry == null) {
+			throw new SAXException(child + " is invalid outside an S3 LIST entry");
+		}
+		requireDirectChild(child, parent, entryElement(currentEntry));
+	}
+
+	private static void requireDirectChild(
+					final String child, final String actualParent, final String expectedParent)
+					throws SAXException {
+		if (!expectedParent.equals(actualParent)) {
+			throw new SAXException(
+							child + " must be a direct child of " + expectedParent
+											+ ", found parent " + actualParent);
+		}
+	}
+
+	private static String entryElement(final EntryKind kind) {
+		return switch (kind) {
+		case CONTENT -> S3Api.QNAME_ITEM;
+		case VERSION -> S3Api.QNAME_VERSION_ENTRY;
+		case DELETE_MARKER -> S3Api.QNAME_DELETE_MARKER;
+		};
 	}
 
 	private void startEntry(final EntryKind kind) throws SAXException {
@@ -166,16 +245,15 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	@Override
 	public void endElement(final String uri, final String localName, final String qName)
 					throws SAXException {
+		if (elementStack.isEmpty() || !qName.equals(elementStack.peek())) {
+			throw new SAXException("Mismatched S3 LIST element close: " + qName);
+		}
 		switch (qName) {
 		case S3Api.QNAME_ITEM_ID:
-			if (currentEntry != null) {
-				currentKey = exactValue();
-			}
+			currentKey = exactValue();
 			break;
 		case S3Api.QNAME_ITEM_SIZE:
-			if (currentEntry != null) {
-				currentSize = parseSize(grammarValue());
-			}
+			currentSize = parseSize(grammarValue());
 			break;
 		case S3Api.QNAME_IS_TRUNCATED:
 			truncated = parseBoolean(grammarValue());
@@ -200,10 +278,17 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 			break;
 		case S3Api.QNAME_LIST_BUCKET_RESULT:
 		case S3Api.QNAME_LIST_VERSIONS_RESULT:
+			if (elementStack.size() != 1 || !expectedRoot().equals(qName)) {
+				throw new SAXException("S3 LIST root closed at an invalid hierarchy position");
+			}
 			rootClosed = true;
 			break;
 		default:
 			break;
+		}
+		elementStack.pop();
+		if (qName.equals(activeScalar)) {
+			activeScalar = null;
 		}
 		text.setLength(0);
 	}
@@ -226,6 +311,9 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	public void endDocument() throws SAXException {
 		if (!documentElementSeen || !rootClosed) {
 			throw new SAXException("S3 LIST result has no complete expected root element");
+		}
+		if (!elementStack.isEmpty()) {
+			throw new SAXException("S3 LIST result ended with unclosed elements");
 		}
 		if (currentEntry != null) {
 			throw new SAXException("S3 LIST result ended inside an object entry");
