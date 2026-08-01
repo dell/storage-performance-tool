@@ -28,6 +28,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
@@ -811,15 +812,15 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			throwUnchecked(e);
 			throw new IOException("S3 LIST interrupted", e);
 		} catch (final SAXException e) {
-			throw listInputFailure("Failed to parse the S3 object listing", e);
+			throw deterministicListInputFailure("Failed to parse the S3 object listing", e);
 		} catch (final ParserConfigurationException e) {
-			throw listInputFailure("Failed to initialize the S3 LIST response parser", e);
+			throw deterministicListInputFailure("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			throw listInputFailure("Failed to connect for S3 LIST", e);
+			throw deterministicListInputFailure("Failed to connect for S3 LIST", e);
 		} catch (final EOFException e) {
 			throw e;
 		} catch (final IOException e) {
-			throw listInputFailure("S3 LIST input failed", e);
+			throw deterministicListInputFailure("S3 LIST input failed", e);
 		}
 		return buff;
 	}
@@ -1045,6 +1046,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			throw terminal;
 		}
 		return failure;
+	}
+
+	private static TerminalItemInputException deterministicListInputFailure(
+					final String message, final Throwable cause) {
+		return new TerminalItemInputException(message, cause);
 	}
 
 	private static String normalizeBucketPath(final String path) {

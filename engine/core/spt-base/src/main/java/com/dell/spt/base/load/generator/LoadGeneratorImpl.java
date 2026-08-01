@@ -6,6 +6,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
@@ -402,6 +403,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			final var terminal = IntegrityTerminalException.find(e);
 			if (terminal != null) {
 				throw terminal;
+			}
+			if (e instanceof TerminalItemInputException) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 			}
 			LogUtil.exception(Level.WARN, e, "Failed to read the next load-generator items");
 			return null;

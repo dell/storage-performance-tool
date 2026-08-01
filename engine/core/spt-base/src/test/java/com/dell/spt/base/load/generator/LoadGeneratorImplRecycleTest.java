@@ -5,13 +5,19 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.io.StorageItemInput;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -384,6 +390,32 @@ class LoadGeneratorImplRecycleTest {
 			assertSame(failure, typedGenerator.terminalFailure());
 		} finally {
 			typedGenerator.close();
+		}
+
+		final StorageDriver<DataItem, DataOperation<DataItem>> listingDriver = mock(StorageDriver.class);
+		final var listingFailure = new TerminalItemInputException(
+						"failed deterministic S3 listing", new IOException("truncated XML"));
+		doThrow(listingFailure).when(listingDriver).list(
+						any(), anyString(), anyString(), anyInt(), nullable(DataItem.class),
+						anyInt(), any(ListOptions.class));
+		final Input<DataItem> storageListingInput = new StorageItemInput<>(
+						listingDriver,
+						BATCH_SIZE,
+						new DataItemFactoryImpl<>(),
+						"/bucket",
+						"prefix/",
+						36);
+		final var listingGenerator = new LoadGeneratorImpl<>(
+						storageListingInput, opsBuilder, List.of(), output,
+						BATCH_SIZE, 0, 1000, false, false);
+		try {
+			final var terminal = assertThrows(
+							IntegrityTerminalException.class, listingGenerator::doWork);
+			assertEquals(IntegrityTerminalException.Category.INPUT, terminal.category());
+			assertSame(listingFailure, terminal.getCause());
+			assertSame(terminal, listingGenerator.terminalFailure());
+		} finally {
+			listingGenerator.close();
 		}
 
 		final Input<DataItem> ordinaryInput = mock(Input.class);

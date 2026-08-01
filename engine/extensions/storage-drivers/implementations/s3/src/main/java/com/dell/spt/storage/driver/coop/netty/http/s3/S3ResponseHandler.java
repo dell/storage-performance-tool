@@ -50,7 +50,6 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
-	private static final int MAX_LIST_CONTENT_SIZE = 16 * 1024 * 1024;
 	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
@@ -74,7 +73,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 		private void write(final ByteBuf content) throws IOException {
 			final int length = content.readableBytes();
-			if (size + length > MAX_LIST_CONTENT_SIZE) {
+			if (size + length > S3Api.MAX_LIST_RESPONSE_SPOOL_BYTES) {
 				throw new IOException("LIST response exceeds the bounded 16 MiB parser spool");
 			}
 			content.readBytes(output, length);
@@ -207,7 +206,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else if (op instanceof ListOperation) {
 			final ListOperation<?> listOp = (ListOperation<?>) op;
 			markListDataResponseStart(listOp, contentChunk.readableBytes());
-			bufferListContent(channel, listOp, contentChunk);
+			if (integrityListDiscovery()) {
+				bufferListContent(channel, listOp, contentChunk);
+			} else {
+				handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
+			}
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
 		}
@@ -319,7 +322,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			}
 		}
 		if (op instanceof ListOperation) {
-			finishListResponse(channel, (ListOperation<?>) op);
+			if (integrityListDiscovery()) {
+				finishListResponse(channel, (ListOperation<?>) op);
+			} else {
+				finishOrdinaryListResponse(channel, (ListOperation<?>) op);
+			}
 		} else {
 			final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
 			final ByteBuf content = contentAttr.get();
@@ -359,7 +366,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 		IntegrityTerminalException failure = null;
 		try {
-			parseListResponse(spool.openInput(), op);
+			parseIntegrityListResponse(spool.openInput(), op);
 		} catch (final IntegrityTerminalException e) {
 			failure = e;
 		} catch (final IOException e) {
@@ -379,36 +386,57 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private void parseListResponse(final ByteBuf content, final ListOperation<?> op) {
-		if (Loggers.MSG.isTraceEnabled()) {
-			Loggers.MSG.trace("LIST raw response={}", content.toString(UTF_8));
-		}
-		parseListResponse(new ByteBufInputStream(content.duplicate()), op);
+	private boolean integrityListDiscovery() {
+		return s3Driver != null && s3Driver.integrityMetadataEnabledForResponse();
 	}
 
-	private void parseListResponse(final InputStream contentStream, final ListOperation<?> op) {
-		try (contentStream) {
-			var parser = S3StorageDriver.THREAD_LOCAL_XML_PARSER.get();
-			if (parser == null) {
-				parser = SAXParserFactory.newInstance().newSAXParser();
-				S3StorageDriver.THREAD_LOCAL_XML_PARSER.set(parser);
-			} else {
-				parser.reset();
+	private void finishOrdinaryListResponse(final Channel channel, final ListOperation<?> op) {
+		final ByteBuf content = channel.attr(CONTENT_ATTR_KEY).get();
+		if (content == null || !content.isReadable()) {
+			return;
+		}
+		if (op.status() == Operation.Status.SUCC) {
+			if (Loggers.MSG.isTraceEnabled()) {
+				Loggers.MSG.trace("LIST raw response={}", content.toString(UTF_8));
 			}
-			final var options = op.options();
-			final var handler = new ListObjectsXmlHandler(op, options.includeVersions(), options.fetchMetadata());
-			parser.parse(contentStream, handler);
-			final var driverId = driver != null ? driver.toString() : "s3";
-			Loggers.MSG.trace(
-							"{}: parsed LIST page objects={} bytes={} truncated={} token={}",
-							driverId,
-							op.objectsListed(),
-							op.bytesListed(),
-							op.truncated(),
-							op.continuationToken());
+			try (final var contentStream = new ByteBufInputStream(content.duplicate())) {
+				parseListDocument(contentStream, op);
+			} catch (final Exception e) {
+				LogUtil.exception(Level.WARN, e, "Failed to parse LIST response");
+			}
+		}
+		content.clear();
+	}
+
+	private void parseIntegrityListResponse(final InputStream contentStream, final ListOperation<?> op) {
+		try (contentStream) {
+			parseListDocument(contentStream, op);
 		} catch (final Exception e) {
 			throw recordListFailure(op, "failed to parse LIST response", e);
 		}
+	}
+
+	private void parseListDocument(final InputStream contentStream, final ListOperation<?> op)
+					throws Exception {
+		var parser = S3StorageDriver.THREAD_LOCAL_XML_PARSER.get();
+		if (parser == null) {
+			parser = SAXParserFactory.newInstance().newSAXParser();
+			S3StorageDriver.THREAD_LOCAL_XML_PARSER.set(parser);
+		} else {
+			parser.reset();
+		}
+		final var options = op.options();
+		final var handler = new ListObjectsXmlHandler(
+						op, options.includeVersions(), options.fetchMetadata());
+		parser.parse(contentStream, handler);
+		final var driverId = driver != null ? driver.toString() : "s3";
+		Loggers.MSG.trace(
+						"{}: parsed LIST page objects={} bytes={} truncated={} token={}",
+						driverId,
+						op.objectsListed(),
+						op.bytesListed(),
+						op.truncated(),
+						op.continuationToken());
 	}
 
 	private IntegrityTerminalException recordListFailure(

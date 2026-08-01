@@ -2,15 +2,9 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
-import com.dell.spt.base.logging.LogUtil;
-import com.dell.spt.base.logging.Loggers;
-
-import org.apache.logging.log4j.Level;
-
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
-
 import java.util.List;
 
 /**
@@ -19,15 +13,18 @@ Created by andrey on 02.12.16.
 public final class BucketXmlListingHandler<I extends Item>
 				extends DefaultHandler implements S3XmlListingHandler {
 
-	private int count = 0;
 	private boolean isInsideItem = false;
 	private boolean itIsItemId = false;
 	private boolean itIsItemSize = false;
 	private boolean itIsTruncateFlag = false;
 	private boolean isTruncatedFlag = false;
-	private String oid = null, strSize = null;
-	private long offset;
-	private I nextItem;
+	private boolean documentElementSeen;
+	private boolean itemIdSeen;
+	private boolean itemSizeSeen;
+	private boolean truncateFlagSeen;
+	private final StringBuilder oid = new StringBuilder();
+	private final StringBuilder strSize = new StringBuilder();
+	private final StringBuilder truncateFlag = new StringBuilder();
 
 	private final List<I> itemsBuffer;
 	private final String path;
@@ -56,10 +53,41 @@ public final class BucketXmlListingHandler<I extends Item>
 	@Override
 	public final void startElement(
 					final String uri, final String localName, final String qName, Attributes attrs) throws SAXException {
-		isInsideItem = isInsideItem || S3Api.QNAME_ITEM.equals(qName);
-		itIsItemId = isInsideItem && S3Api.QNAME_ITEM_ID.equals(qName);
-		itIsItemSize = isInsideItem && S3Api.QNAME_ITEM_SIZE.equals(qName);
-		itIsTruncateFlag = S3Api.QNAME_IS_TRUNCATED.equals(qName);
+		if (!documentElementSeen) {
+			documentElementSeen = true;
+			if (!S3Api.QNAME_LIST_BUCKET_RESULT.equals(qName)) {
+				throw new SAXException("Expected S3 ListBucketResult root but found " + qName);
+			}
+		}
+		if (S3Api.QNAME_ITEM.equals(qName)) {
+			if (isInsideItem) {
+				throw new SAXException("Nested S3 Contents entry");
+			}
+			isInsideItem = true;
+			itemIdSeen = false;
+			itemSizeSeen = false;
+			oid.setLength(0);
+			strSize.setLength(0);
+		} else if (isInsideItem && S3Api.QNAME_ITEM_ID.equals(qName)) {
+			if (itemIdSeen) {
+				throw new SAXException("Duplicate Key in S3 Contents entry");
+			}
+			itemIdSeen = true;
+			itIsItemId = true;
+		} else if (isInsideItem && S3Api.QNAME_ITEM_SIZE.equals(qName)) {
+			if (itemSizeSeen) {
+				throw new SAXException("Duplicate Size in S3 Contents entry");
+			}
+			itemSizeSeen = true;
+			itIsItemSize = true;
+		} else if (S3Api.QNAME_IS_TRUNCATED.equals(qName)) {
+			if (truncateFlagSeen) {
+				throw new SAXException("Duplicate IsTruncated in S3 listing");
+			}
+			truncateFlagSeen = true;
+			truncateFlag.setLength(0);
+			itIsTruncateFlag = true;
+		}
 		super.startElement(uri, localName, qName, attrs);
 	}
 
@@ -68,38 +96,45 @@ public final class BucketXmlListingHandler<I extends Item>
 	public final void endElement(
 					final String uri, final String localName, final String qName) throws SAXException {
 
-		itIsItemId = itIsItemId && !S3Api.QNAME_ITEM_ID.equals(qName);
-		itIsItemSize = itIsItemSize && !S3Api.QNAME_ITEM_SIZE.equals(qName);
-		itIsTruncateFlag = itIsTruncateFlag && !S3Api.QNAME_IS_TRUNCATED.equals(qName);
+		if (itIsItemId && S3Api.QNAME_ITEM_ID.equals(qName)) {
+			itIsItemId = false;
+		}
+		if (itIsItemSize && S3Api.QNAME_ITEM_SIZE.equals(qName)) {
+			itIsItemSize = false;
+		}
+		if (itIsTruncateFlag && S3Api.QNAME_IS_TRUNCATED.equals(qName)) {
+			itIsTruncateFlag = false;
+			final String value = truncateFlag.toString().trim();
+			if (!"true".equals(value) && !"false".equals(value)) {
+				throw new SAXException("Invalid IsTruncated value: " + value);
+			}
+			isTruncatedFlag = Boolean.parseBoolean(value);
+		}
 
 		if (isInsideItem && S3Api.QNAME_ITEM.equals(qName)) {
 			isInsideItem = false;
-
-			long size = -1;
-
-			if (strSize != null && strSize.length() > 0) {
-				try {
-					size = Long.parseLong(strSize);
-				} catch (final NumberFormatException e) {
-					LogUtil.exception(
-									Level.WARN, e, "Data object size should be a 64 bit number");
-				}
-			} else {
-				Loggers.ERR.trace("No \"{}\" element or empty", S3Api.QNAME_ITEM_SIZE);
+			if (!itemIdSeen || oid.length() == 0) {
+				throw new SAXException("S3 Contents entry is missing a nonempty Key");
 			}
-
-			if (oid != null && oid.length() > 0 && size > -1) {
-				try {
-					offset = Long.parseLong(generatedItemId(oid), idRadix);
-				} catch (final NumberFormatException e) {
-					throw new SAXException("Failed to parse the generated item id from object key \"" + oid + "\"", e);
-				}
-				nextItem = itemFactory.getItem(path + oid, offset, size);
-				itemsBuffer.add(nextItem);
-				count++;
-			} else {
-				Loggers.ERR.trace("Invalid object id ({}) or size ({})", oid, strSize);
+			if (!itemSizeSeen) {
+				throw new SAXException("S3 Contents entry is missing Size for key \"" + oid + "\"");
 			}
+			final long size;
+			try {
+				size = Long.parseLong(strSize.toString().trim());
+			} catch (final NumberFormatException e) {
+				throw new SAXException("Invalid object size for key \"" + oid + "\"", e);
+			}
+			if (size < 0) {
+				throw new SAXException("Negative object size for key \"" + oid + "\"");
+			}
+			final long offset;
+			try {
+				offset = Long.parseLong(generatedItemId(oid.toString()), idRadix);
+			} catch (final NumberFormatException e) {
+				throw new SAXException("Failed to parse the generated item id from object key \"" + oid + "\"", e);
+			}
+			itemsBuffer.add(itemFactory.getItem(path + oid, offset, size));
 		}
 
 		super.endElement(uri, localName, qName);
@@ -128,13 +163,27 @@ public final class BucketXmlListingHandler<I extends Item>
 	public final void characters(final char buff[], final int start, final int length)
 					throws SAXException {
 		if (itIsItemId) {
-			oid = new String(buff, start, length);
+			oid.append(buff, start, length);
 		} else if (itIsItemSize) {
-			strSize = new String(buff, start, length);
+			strSize.append(buff, start, length);
 		} else if (itIsTruncateFlag) {
-			isTruncatedFlag = Boolean.parseBoolean(new String(buff, start, length));
+			truncateFlag.append(buff, start, length);
 		}
 		super.characters(buff, start, length);
+	}
+
+	@Override
+	public void endDocument() throws SAXException {
+		if (!documentElementSeen) {
+			throw new SAXException("S3 listing has no document element");
+		}
+		if (isInsideItem) {
+			throw new SAXException("S3 listing ended inside a Contents entry");
+		}
+		if (!truncateFlagSeen) {
+			throw new SAXException("S3 listing is missing IsTruncated");
+		}
+		super.endDocument();
 	}
 
 	@Override

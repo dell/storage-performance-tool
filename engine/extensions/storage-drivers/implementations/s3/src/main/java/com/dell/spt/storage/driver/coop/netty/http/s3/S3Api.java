@@ -74,6 +74,9 @@ public interface S3Api {
 	String TAGGING_FOOTER = "\t</TagSet>\n</Tagging>\n";
 
 	int MAX_KEYS_LIMIT = 1000;
+	int MAX_LIST_RESPONSE_SPOOL_BYTES = 16 * 1024 * 1024;
+	String QNAME_LIST_BUCKET_RESULT = "ListBucketResult";
+	String QNAME_LIST_VERSIONS_RESULT = "ListVersionsResult";
 	String QNAME_ITEM = "Contents";
 	String QNAME_ITEM_ID = "Key";
 	String QNAME_ITEM_SIZE = "Size";

@@ -9,6 +9,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.item.ItemImpl;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
@@ -57,6 +58,7 @@ import org.mockito.Mockito;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.ConnectException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -151,7 +153,7 @@ public class S3StorageDriverTest {
 	// ---------- Helpers for full driver-based tests ----------
 	private static final Credential TEST_CRED = Credential.getInstance("user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 
-	private static Config baseConfig(boolean versioning, int authVersion, boolean checksumEnabled, String checksumAlg, String host) {
+	static Config baseConfig(boolean versioning, int authVersion, boolean checksumEnabled, String checksumAlg, String host) {
 		try {
 			final List<Map<String, Object>> configSchemas = Extension
 							.load(Thread.currentThread().getContextClassLoader())
@@ -292,11 +294,12 @@ public class S3StorageDriverTest {
 		return Base64.getEncoder().encodeToString(checksumBytes);
 	}
 
-	private static class TestS3Driver extends S3StorageDriver<Item, Operation<Item>> {
+	static class TestS3Driver extends S3StorageDriver<Item, Operation<Item>> {
 		private final Queue<FullHttpRequest> requests = new ConcurrentLinkedQueue<>();
 		private final ArrayDeque<FullHttpResponse> stubResponses = new ArrayDeque<>();
 		private boolean suppressCompletion;
 		private boolean outOfBandReadBody;
+		private ConnectException requestFailure;
 
 		TestS3Driver(Config cfg) throws Exception {
 			super("test-s3", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
@@ -331,6 +334,10 @@ public class S3StorageDriverTest {
 			outOfBandReadBody = true;
 		}
 
+		void failRequestsForTest(final ConnectException failure) {
+			requestFailure = failure;
+		}
+
 		void finishOutOfBandReadForTest(
 						final Channel channel, final Operation<Item> op, final ByteBuffer body) {
 			finishOutOfBandIntegrityRead(channel, op, body);
@@ -349,8 +356,12 @@ public class S3StorageDriverTest {
 		}
 
 		@Override
-		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest) {
+		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest)
+						throws ConnectException {
 			requests.add(httpRequest);
+			if (requestFailure != null) {
+				throw requestFailure;
+			}
 			FullHttpResponse next = stubResponses.poll();
 			if (next != null) {
 				return next;
@@ -634,6 +645,53 @@ public class S3StorageDriverTest {
 		assertEquals("/bucketL/a1", ((ItemImpl) items.get(0)).name());
 		assertEquals("/bucketL/a2", ((ItemImpl) items.get(1)).name());
 		assertNull(items.get(2));
+	}
+
+	@Test
+	void deterministicListRejectsInvalidProducerEvidenceTerminally() throws Exception {
+		final var invalidPages = List.of(
+						"<ListBucketResult><Contents><Key>prefix/not-an-id</Key><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Key>outside/1</Key><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Key>prefix/1</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+						"<ListBucketResult><Contents><Key>prefix/1</Key><Size>1</Size></Contents>");
+		for (final String xml : invalidPages) {
+			final var driver = new TestS3Driver(
+							baseConfig(false, 2, false, null, "127.0.0.1"));
+			try {
+				driver.enqueueResponse(new DefaultFullHttpResponse(
+								HttpVersion.HTTP_1_1,
+								HttpResponseStatus.OK,
+								Unpooled.copiedBuffer(xml, StandardCharsets.UTF_8)));
+				assertThrows(
+								TerminalItemInputException.class,
+								() -> driver.list(
+												new ItemFactoryImpl<>(),
+												"/bucket",
+												"prefix/",
+												36,
+												null,
+												10));
+			} finally {
+				driver.close();
+			}
+		}
+	}
+
+	@Test
+	void deterministicListConnectionFailureIsTerminalInput() throws Exception {
+		final var driver = new TestS3Driver(
+						baseConfig(false, 2, false, null, "127.0.0.1"));
+		driver.failRequestsForTest(new ConnectException("injected connection loss"));
+		try {
+			final var failure = assertThrows(
+							TerminalItemInputException.class,
+							() -> driver.list(
+											new ItemFactoryImpl<>(), "/bucket", "prefix/", 36, null, 10));
+			assertInstanceOf(ConnectException.class, failure.getCause());
+		} finally {
+			driver.close();
+		}
 	}
 
 	@Test
@@ -1996,7 +2054,7 @@ public class S3StorageDriverTest {
 		assertNull(deleteOp.get(S3Api.KEY_UPLOAD_ID), "DELETE op should not get upload ID");
 	}
 
-	private static Config metadataConfig(final boolean versioning) {
+	static Config metadataConfig(final boolean versioning) {
 		final Config config = baseConfig(
 						versioning, 4, false, null, "s3.us-east-1.amazonaws.com:443");
 		config.val("storage-integrity-mode", "metadata");
