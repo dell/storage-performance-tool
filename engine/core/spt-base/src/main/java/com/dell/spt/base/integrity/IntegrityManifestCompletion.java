@@ -77,6 +77,13 @@ public record IntegrityManifestCompletion(
     }
 
     public void publish(final Path manifest) throws IOException {
+		publish(manifest, null);
+	}
+
+	void publish(
+				final Path manifest,
+				final CrashDurableFilePublisher.Operations testOperations)
+				throws IOException {
         final Path marker = completionPath(manifest);
         if (Files.exists(marker)) {
             throw new IOException("refusing to replace existing completion record " + marker);
@@ -87,7 +94,11 @@ public record IntegrityManifestCompletion(
         boolean committed = false;
         try {
             JSON.writerWithDefaultPrettyPrinter().writeValue(staging.toFile(), this);
-            atomicMove(staging, marker);
+			if (testOperations == null) {
+				atomicMove(staging, marker);
+			} else {
+				CrashDurableFilePublisher.publish(staging, marker, testOperations);
+			}
             committed = true;
         } finally {
             if (!committed) {

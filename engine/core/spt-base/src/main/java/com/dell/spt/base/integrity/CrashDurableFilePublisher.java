@@ -113,6 +113,13 @@ public final class CrashDurableFilePublisher {
 		operations.createLinkNoReplace(normalizedStaging, normalizedTarget);
 		try {
 			operations.delete(normalizedStaging);
+		} catch (final IOException e) {
+			throw new IOException(
+							"published " + normalizedTarget
+											+ " but failed to remove its staging name; durable state is indeterminate",
+							e);
+		}
+		try {
 			operations.syncDirectory(targetParent);
 		} catch (final IOException e) {
 			throw new IOException(

@@ -6,9 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -133,7 +135,65 @@ class CrashDurableFilePublisherTest {
 						() -> CrashDurableFilePublisher.publish(staging, target, operations));
 
 		assertTrue(failure.getMessage().contains("durable state is indeterminate"));
+		assertTrue(failure.getMessage().contains("failed to remove its staging name"));
 		assertEquals(3, operations.events.size());
+	}
+
+	@Test
+	void manifestThenMarkerPairFailsClosedAtEveryDurabilityBoundary() throws Exception {
+		for (int failAt = 1; failAt <= 8; failAt++) {
+			final Path caseDir = Files.createDirectory(tempDir.resolve("fault-" + failAt));
+			final Path staging = caseDir.resolve(".written.csv.staging");
+			final Path manifest = caseDir.resolve("written.csv");
+			Files.writeString(staging, "bucket,key,size,version_id\n");
+			final FaultInjectingOperations operations = new FaultInjectingOperations(failAt);
+
+			assertThrows(
+							IOException.class,
+							() -> publishEvidencePair(staging, manifest, "create-step", operations),
+							"fault boundary " + failAt);
+
+			final boolean manifestPublished = Files.isRegularFile(manifest);
+			final boolean markerPublished = Files.isRegularFile(
+							IntegrityManifestCompletion.completionPath(manifest));
+			assertFalse(markerPublished && !manifestPublished, "marker without manifest at boundary " + failAt);
+			assertEquals(failAt >= 3, manifestPublished, "manifest state at boundary " + failAt);
+			assertEquals(failAt >= 7, markerPublished, "marker state at boundary " + failAt);
+		}
+	}
+
+	@Test
+	void concurrentEvidencePairsHaveExactlyOneCompleteWinner() throws Exception {
+		final Path first = tempDir.resolve(".first-pair.staging");
+		final Path second = tempDir.resolve(".second-pair.staging");
+		final Path manifest = tempDir.resolve("written.csv");
+		Files.writeString(first, "bucket,key,size,version_id\nb,first,1,v1\n");
+		Files.writeString(second, "bucket,key,size,version_id\nb,second,1,v2\n");
+		final CountDownLatch ready = new CountDownLatch(2);
+		final CountDownLatch start = new CountDownLatch(1);
+		final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+		final AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+		final Thread firstPublisher = evidencePairThread(
+						first, manifest, "first-create", ready, start, firstFailure);
+		final Thread secondPublisher = evidencePairThread(
+						second, manifest, "second-create", ready, start, secondFailure);
+
+		firstPublisher.start();
+		secondPublisher.start();
+		ready.await();
+		start.countDown();
+		firstPublisher.join();
+		secondPublisher.join();
+
+		final boolean firstWon = firstFailure.get() == null;
+		final boolean secondWon = secondFailure.get() == null;
+		assertTrue(firstWon ^ secondWon);
+		assertTrue(Files.isRegularFile(manifest));
+		assertTrue(Files.isRegularFile(IntegrityManifestCompletion.completionPath(manifest)));
+		final String winner = firstWon ? "first-create" : "second-create";
+		IntegrityManifestCompletion.validate(
+						manifest, 991, IntegrityInputProvenance.ENGINE_STEP, winner);
+		assertTrue(Files.readString(manifest).contains(firstWon ? "first" : "second"));
 	}
 
 	@Test
@@ -165,6 +225,100 @@ class CrashDurableFilePublisherTest {
 				failure.set(e);
 			}
 		});
+	}
+
+	private static Thread evidencePairThread(
+					final Path staging,
+					final Path manifest,
+					final String producer,
+					final CountDownLatch ready,
+					final CountDownLatch start,
+					final AtomicReference<Throwable> failure) {
+		return new Thread(() -> {
+			try {
+				ready.countDown();
+				start.await();
+				publishEvidencePair(staging, manifest, producer, null);
+			} catch (final Throwable e) {
+				failure.set(e);
+			}
+		});
+	}
+
+	private static void publishEvidencePair(
+					final Path staging,
+					final Path manifest,
+					final String producer,
+					final CrashDurableFilePublisher.Operations operations)
+					throws IOException {
+		if (operations == null) {
+			CrashDurableFilePublisher.publish(staging, manifest);
+		} else {
+			CrashDurableFilePublisher.publish(staging, manifest, operations);
+		}
+		final long recordCount;
+		try (final var lines = Files.lines(manifest)) {
+			recordCount = Math.max(0, lines.count() - 1);
+		}
+		final IntegrityManifestCompletion completion = IntegrityManifestCompletion.create(
+						manifest,
+						991,
+						IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+						producer,
+						recordCount,
+						recordCount,
+						recordCount);
+		if (operations == null) {
+			completion.publish(manifest);
+		} else {
+			completion.publish(manifest, operations);
+		}
+	}
+
+	private static final class FaultInjectingOperations
+					implements CrashDurableFilePublisher.Operations {
+
+		private final int failAt;
+		private int call;
+
+		private FaultInjectingOperations(final int failAt) {
+			this.failAt = failAt;
+		}
+
+		@Override
+		public void syncFile(final Path path) throws IOException {
+			beforeOperation();
+			try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+				channel.force(true);
+			}
+		}
+
+		@Override
+		public void createLinkNoReplace(final Path source, final Path target) throws IOException {
+			beforeOperation();
+			Files.createLink(target, source);
+		}
+
+		@Override
+		public void delete(final Path path) throws IOException {
+			beforeOperation();
+			Files.delete(path);
+		}
+
+		@Override
+		public void syncDirectory(final Path path) throws IOException {
+			beforeOperation();
+			try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+				channel.force(true);
+			}
+		}
+
+		private void beforeOperation() throws IOException {
+			call++;
+			if (call == failAt) {
+				throw new IOException("injected durability boundary " + failAt);
+			}
+		}
 	}
 
 	private static final class RecordingOperations
