@@ -50,7 +50,6 @@ final class S3XmlParser {
 					throws IOException, ParserConfigurationException, SAXException {
 		final SAXParser parser = acquire();
 		final var reader = parser.getXMLReader();
-		applyRequiredControls(parser);
 		reader.setContentHandler(handler);
 		reader.setDTDHandler(handler);
 		reader.setErrorHandler(handler);
@@ -74,6 +73,8 @@ final class S3XmlParser {
 				throw parserConfigurationFailure("S3 XML parser reset is unsupported", e);
 			}
 		}
+		// reset() may restore provider defaults, so this is the single mandatory
+		// post-acquisition point for reapplying every fail-closed control.
 		applyRequiredControls(parser);
 		return parser;
 	}
