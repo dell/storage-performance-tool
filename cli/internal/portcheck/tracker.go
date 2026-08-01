@@ -25,10 +25,17 @@ type RunTracker struct {
 	UnavailableTimeout   time.Duration
 	StableConfirmations  int // consecutive confirmations for a step file to be considered stable
 	Clock                Clock
+	ExpectedRunID        int64
 	lastJSONTimestamp    int64
 	seenActive           bool
 	Debug                bool
 	RequireTerminalState bool
+}
+
+// SetExpectedRunID binds status and metrics evidence to one preallocated run.
+// A zero value retains the legacy unbound behavior for non-verification callers.
+func (t *RunTracker) SetExpectedRunID(runID int64) {
+	t.ExpectedRunID = runID
 }
 
 // NewRunTracker constructs a tracker with sensible defaults.
@@ -288,11 +295,19 @@ func populateStepLifecycles(final *RunResult, stepState map[string]*stepProbe, s
 func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal, available bool) {
 	// New contract: rely on /status only and retain its structured terminal cause.
 	if status, err := t.Client.getStatusDetail(ctx); err == nil {
+		if t.ExpectedRunID > 0 && status.RunID != t.ExpectedRunID {
+			// The endpoint is healthy, but it is describing an idle node or a
+			// retained prior run. Do not let that evidence arm or finish this run.
+			return terminalStatus{}, false, true
+		}
 		switch status.State {
 		case constants.StateRunning:
 			t.seenActive = true
 			return status, false, true
 		case constants.StateStarting, constants.StateInitializing:
+			// A matching structured startup state proves that the submitted run
+			// exists even before it has emitted operations or step files.
+			t.seenActive = true
 			return status, false, true
 		case constants.StateIdle:
 			return status, t.seenActive, true
@@ -316,6 +331,20 @@ func (t *RunTracker) checkIdle(ctx context.Context) (bool, bool, bool) {
 			return true, t.seenActive, true
 		}
 		return false, false, false
+	}
+	if t.ExpectedRunID > 0 {
+		matching := steps[:0]
+		for _, step := range steps {
+			if int64(step.RunID) == t.ExpectedRunID {
+				matching = append(matching, step)
+			}
+		}
+		steps = matching
+		if len(steps) == 0 {
+			// A healthy endpoint containing only another run's retained metrics
+			// is availability, not activity or an idle signal for this run.
+			return true, false, true
+		}
 	}
 	t.seenActive = true
 	// Aggregate across steps

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +30,7 @@ type fakeRunTracker struct {
 	debugCalled bool
 	debugValue  bool
 	result      *portcheck.RunResult
+	runID       int64
 }
 
 func (f *fakeRunTracker) WaitForCompletion(ctx context.Context, expected []string) (*portcheck.RunResult, error) {
@@ -49,6 +52,8 @@ func (f *fakeRunTracker) SetDebug(debug bool) {
 	f.debugValue = debug
 }
 
+func (f *fakeRunTracker) SetExpectedRunID(runID int64) { f.runID = runID }
+
 type cancelAwareRunTracker struct {
 	exited chan struct{}
 }
@@ -60,6 +65,8 @@ func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []strin
 }
 
 func (*cancelAwareRunTracker) SetDebug(bool) {}
+
+func (*cancelAwareRunTracker) SetExpectedRunID(int64) {}
 
 type fakeFetcher struct {
 	mu        sync.Mutex
@@ -151,7 +158,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
 
 	// Fleet endpoint unavailable (older engine)
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
 	// Stale IDs from a prior aborted run (timestamp .367), current run has timestamp .368.
 	staleIDs := []string{
@@ -169,7 +176,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	// return both sets (as the prior container's /metrics/json keeps accumulating).
 	var discoverCallCount int
 	var discoverMu sync.Mutex
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		discoverMu.Lock()
 		discoverCallCount++
 		n := discoverCallCount
@@ -217,6 +224,202 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	}
 }
 
+func TestAutoResultsLaunchGateRejectsAllPreSubmissionEvidence(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	t.Cleanup(func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	})
+
+	const expectedRunID = int64(17)
+	stepID := "mt-001-current-verify"
+	tracker := &fakeRunTracker{result: &portcheck.RunResult{
+		FinalState: constants.StateCompleted, RunID: expectedRunID,
+	}}
+	var trackerCreates atomic.Int32
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		trackerCreates.Add(1)
+		return tracker
+	}
+	var discoveries atomic.Int32
+	discoverStepIDsFunc = func(_ context.Context, _ string, runID int64) ([]string, error) {
+		discoveries.Add(1)
+		if runID != expectedRunID {
+			t.Errorf("node discovery run ID = %d", runID)
+		}
+		return []string{stepID}, nil
+	}
+	discoverFleetStepIDsFunc = func(_ context.Context, _ string, runID int64) ([]string, error) {
+		discoveries.Add(1)
+		if runID != expectedRunID {
+			t.Errorf("fleet discovery run ID = %d", runID)
+		}
+		return nil, nil
+	}
+	var fetches atomic.Int32
+	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
+		return &fakeFetcher{output: output, onFetch: func(_ string, _ []string) error {
+			fetches.Add(1)
+			return nil
+		}}
+	}
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+	var shutdowns atomic.Int32
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+		shutdowns.Add(1)
+		return nil
+	}
+
+	monitor := startAutoResultsMonitor(
+		context.Background(), "http://example", "mt", t.TempDir(), []string{stepID}, expectedRunID,
+		false, nil, "9999", true, 1, "", nil, io.Discard, io.Discard, "", nil,
+	)
+	time.Sleep(75 * time.Millisecond)
+	if trackerCreates.Load() != 0 || discoveries.Load() != 0 || fetches.Load() != 0 || shutdowns.Load() != 0 {
+		t.Fatalf("pre-arm effects tracker=%d discovery=%d fetch=%d shutdown=%d",
+			trackerCreates.Load(), discoveries.Load(), fetches.Load(), shutdowns.Load())
+	}
+	monitor.Arm()
+	select {
+	case outcome := <-monitor.done:
+		if outcome.TrackerErr != nil || outcome.Tracker == nil || outcome.Tracker.RunID != expectedRunID {
+			t.Fatalf("armed outcome = %+v", outcome)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("armed monitor did not complete")
+	}
+	if tracker.runID != expectedRunID || fetches.Load() != 1 || shutdowns.Load() != 1 {
+		t.Fatalf("armed effects tracker run=%d fetch=%d shutdown=%d",
+			tracker.runID, fetches.Load(), shutdowns.Load())
+	}
+}
+
+func TestAutoResultsBindsLingeringEngineAndFleetEvidenceToArmedRun(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	t.Cleanup(func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	})
+
+	const expectedRunID = int64(17)
+	var requestCount atomic.Int32
+	var statusCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		switch call := statusCalls.Add(1); {
+		case call == 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "IDLE", "run_id": 16, "step_id": "prior-verify",
+			})
+		case call < 8:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "STARTING", "run_id": expectedRunID, "step_id": "runtime-create",
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "COMPLETED", "run_id": expectedRunID, "step_id": "runtime-verify",
+			})
+		}
+	})
+	metrics := []map[string]any{
+		{
+			"run_id": 16, "step_id": "prior-verify", "timestamp": 1000, "terminal": true,
+			"operations": map[string]any{"success_rate_last": 0},
+			"bandwidth":  map[string]any{"bytes_rate_last": 0},
+		},
+		{
+			"run_id": expectedRunID, "step_id": "runtime-create", "timestamp": 2000,
+			"operations": map[string]any{"success_rate_last": 1},
+			"bandwidth":  map[string]any{"bytes_rate_last": 0},
+		},
+		{
+			"run_id": expectedRunID, "step_id": "runtime-verify", "timestamp": 2001,
+			"operations": map[string]any{"success_rate_last": 0},
+			"bandwidth":  map[string]any{"bytes_rate_last": 0},
+		},
+	}
+	for _, endpoint := range []string{"/metrics/json", "/metrics/fleet/json"} {
+		mux.HandleFunc(endpoint, func(w http.ResponseWriter, _ *http.Request) {
+			requestCount.Add(1)
+			_ = json.NewEncoder(w).Encode(metrics)
+		})
+	}
+	mux.HandleFunc("/logs/", func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker {
+		tracker := portcheck.NewRunTracker(baseURL)
+		tracker.PollInterval = 2 * time.Millisecond
+		tracker.IdleGrace = time.Millisecond
+		tracker.StartupTimeout = 20 * time.Millisecond
+		tracker.UnavailableTimeout = 50 * time.Millisecond
+		return &runTrackerAdapter{RunTracker: tracker}
+	}
+	discoverStepIDsFunc = results.DiscoverStepIDsForRunContext
+	discoverFleetStepIDsFunc = results.DiscoverFleetStepIDsForRunContext
+	fetcher := &fakeFetcher{}
+	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
+		fetcher.output = output
+		return fetcher
+	}
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+
+	monitor := startAutoResultsMonitor(
+		context.Background(), server.URL, "mt", t.TempDir(),
+		[]string{"expected-create", "expected-verify"}, expectedRunID,
+		false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil,
+	)
+	time.Sleep(25 * time.Millisecond)
+	if got := requestCount.Load(); got != 0 {
+		t.Fatalf("pre-arm engine requests = %d, want 0", got)
+	}
+	monitor.Arm()
+	select {
+	case outcome := <-monitor.done:
+		if outcome.TrackerErr != nil || outcome.Tracker == nil {
+			t.Fatalf("monitor outcome = %+v", outcome)
+		}
+		if outcome.Tracker.RunID != expectedRunID || outcome.Tracker.FinalState != constants.StateCompleted {
+			t.Fatalf("terminal tracker result = %+v", outcome.Tracker)
+		}
+		for _, stale := range []string{"prior-verify"} {
+			for _, stepID := range outcome.StepIDs {
+				if stepID == stale {
+					t.Fatalf("stale step %q reached result processing: %v", stale, outcome.StepIDs)
+				}
+			}
+		}
+		if len(outcome.StepIDs) < 2 || outcome.StepIDs[0] != "runtime-create" || outcome.StepIDs[1] != "runtime-verify" {
+			t.Fatalf("runtime fleet IDs did not lead result processing: %v", outcome.StepIDs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("armed current-run monitor did not complete")
+	}
+}
+
 // TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet verifies that when expectedStepIDs is
 // provided, the fetcher receives only those IDs — even if the background discovery poller returns
 // additional IDs (e.g. from a different run) alongside the expected ones. Discovered IDs that are
@@ -246,11 +449,11 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 
 	// Fleet endpoint unavailable (older engine)
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
 	// Discovery returns the expected ID mixed in with a foreign one from another run.
 	discoverCalls := 0
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		discoverCalls++
 		return []string{"foreign-step-other-run", "expected-create"}, nil
 	}
@@ -345,10 +548,10 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	}
 
 	// Node-local /metrics/json returns nothing useful in distributed mode
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
 	// Fleet endpoint returns the engine's actual step IDs
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		return fleetIDs, nil
 	}
 
@@ -413,12 +616,12 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 	}
 
 	// Node-local returns matching IDs (non-distributed mode)
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		return expectedIDs, nil
 	}
 
 	// Fleet endpoint unavailable (404)
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
 	fetcher := &fakeFetcher{}
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
@@ -473,10 +676,10 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
 
 	stepID := "mt-001-20260506.204108.064-write"
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		return []string{stepID}, nil
 	}
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
 	traceSrcDir := t.TempDir()
 	traceFile := filepath.Join(traceSrcDir, "spt-20260506.204108.064.trace.log")
@@ -567,8 +770,8 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 
 	stepID := "mt-001-20260604.195722.504-mixed"
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
@@ -660,8 +863,8 @@ func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T
 	newRunTrackerFunc = func(string) autoResultsRunTracker {
 		return &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateFailed}}
 	}
-	discoverStepIDsFunc = func(context.Context, string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(string, string) autoResultsFetcher {
 		return &fakeFetcher{err: errors.New("truncated integrity artifact")}
 	}
@@ -742,8 +945,8 @@ func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) 
 
 	stepID := "mt-001-20260604.195722.504-mixed"
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
-	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
@@ -780,8 +983,8 @@ func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
 
 	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
 	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
-	discoverStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
-	discoverFleetStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
 	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -840,11 +1043,11 @@ func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *te
 			t.Errorf("%s cleanup deadline remaining = %s", stage, remaining)
 		}
 	}
-	discoverStepIDsFunc = func(ctx context.Context, _ string) ([]string, error) {
+	discoverStepIDsFunc = func(ctx context.Context, _ string, _ int64) ([]string, error) {
 		assertCleanupContext("discovery", ctx)
 		return []string{stepID}, nil
 	}
-	discoverFleetStepIDsFunc = func(ctx context.Context, _ string) ([]string, error) {
+	discoverFleetStepIDsFunc = func(ctx context.Context, _ string, _ int64) ([]string, error) {
 		assertCleanupContext("fleet discovery", ctx)
 		return nil, nil
 	}

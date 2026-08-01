@@ -269,6 +269,7 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 		}
 		return fmt.Errorf("failed to start test via API: %w", err)
 	}
+	params.NotifyLaunchSubmitted()
 
 	logging.LogInfo("orchestrator", "test started successfully", "runID", runID)
 	if o.onOutput != nil {

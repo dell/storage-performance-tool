@@ -220,21 +220,23 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				prepareCalls++
 				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
 			}
-			startLocalHeadlessRunFunc = func(string, string, scenario.Params, headless.HeadlessOptions) error {
+			startLocalHeadlessRunFunc = func(_ string, _ string, params scenario.Params, _ headless.HeadlessOptions) error {
 				localCalls++
+				params.NotifyLaunchSubmitted()
 				return nil
 			}
 			startMultiHostHeadlessRunFunc = func(
-				*tui.MultiHostOrchestrator, string, string, scenario.Params, headless.HeadlessOptions,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, params scenario.Params, _ headless.HeadlessOptions,
 			) error {
 				multiCalls++
+				params.NotifyLaunchSubmitted()
 				return nil
 			}
 			startAutoResultsFunc = func(
-				ctx context.Context, _ string, _ string, _ string, _ []string, _ bool, _ []*hostparse.HostInfo,
+				ctx context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
 				_ string, _ bool, _ int, _ string, _ *runMetadata, _ io.Writer, _ io.Writer, _ string,
 				_ func(context.Context), _ ...*integrity.FinalizeOptions,
-			) chan autoResultsOutcome {
+			) *autoResultsMonitor {
 				autoResultsCalls++
 				autoResultsContext = ctx
 				outcomes := make(chan autoResultsOutcome, 1)
@@ -242,7 +244,7 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 					Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
 					Finalization: &integrity.FinalizeOutcome{Complete: true},
 				}
-				return outcomes
+				return &autoResultsMonitor{done: outcomes, armed: make(chan struct{})}
 			}
 
 			if err := runCmd.RunE(runCmd, []string{test.workload}); err != nil {

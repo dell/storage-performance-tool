@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -328,14 +329,41 @@ func (c *SptAPIClient) WaitForLinger(ctx context.Context, linger time.Duration) 
 
 // jsonMetricsStep mirrors minimal fields of /metrics/json for idle detection.
 type jsonMetricsStep struct {
-	Timestamp  int64 `json:"timestamp"`
-	Terminal   bool  `json:"terminal"`
+	RunID      flexibleInt64 `json:"run_id"`
+	StepID     string        `json:"step_id"`
+	Timestamp  int64         `json:"timestamp"`
+	Terminal   bool          `json:"terminal"`
 	Operations struct {
 		SuccessRateLast float64 `json:"success_rate_last"`
 	} `json:"operations"`
 	Bandwidth struct {
 		BytesRateLast float64 `json:"bytes_rate_last"`
 	} `json:"bandwidth"`
+}
+
+// flexibleInt64 accepts the engine's string run_id as well as numeric fixtures.
+type flexibleInt64 int64
+
+func (value *flexibleInt64) UnmarshalJSON(data []byte) error {
+	var number int64
+	if err := json.Unmarshal(data, &number); err == nil {
+		*value = flexibleInt64(number)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	if strings.TrimSpace(text) == "" {
+		*value = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid run_id %q: %w", text, err)
+	}
+	*value = flexibleInt64(parsed)
+	return nil
 }
 
 // getMetricsJSON fetches /metrics/json and decodes into steps.

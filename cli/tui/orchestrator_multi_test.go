@@ -960,6 +960,8 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB"}
+	var launchSubmitted atomic.Bool
+	params.SetLaunchSubmittedCallback(func() { launchSubmitted.Store(true) })
 
 	err := wrapper.StartTest(ctx, "test-image", params)
 	if err != nil {
@@ -996,6 +998,9 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	}
 	if postedScenario == "" {
 		t.Fatal("expected generated scenario to be posted to /run")
+	}
+	if !launchSubmitted.Load() {
+		t.Fatal("expected successful single-host POST to notify launch submission")
 	}
 	if !strings.Contains(postedDefaults, "dummy-mock") {
 		t.Fatalf("expected generated defaults to include mock driver, got:\n%s", postedDefaults)
@@ -1918,6 +1923,8 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeList, Threads: 2, Bucket: "demo", Endpoint: "http://minio:9000"}
+	var launchSubmitted atomic.Bool
+	params.SetLaunchSubmittedCallback(func() { launchSubmitted.Store(true) })
 	if err := wrapper.StartTest(ctx, "test-image", params); err != nil {
 		t.Fatalf("StartTest(list) returned error: %v", err)
 	}
@@ -1947,6 +1954,9 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	// API-based run should have been initiated
 	if !runStarted.Load() {
 		t.Fatalf("expected run to be started via /run API on primary")
+	}
+	if !launchSubmitted.Load() {
+		t.Fatal("expected successful LIST POST to notify launch submission")
 	}
 
 	// Baseline should show both nodes present with worker inactive
@@ -2271,4 +2281,195 @@ func TestRunningPayloadEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T
 			t.Fatalf("coverage error = %v", err)
 		}
 	})
+}
+
+func TestFinalizeDiagnosticsCanceledWaiterDoesNotBlockBehindFirstCaller(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	orchestrator.SetResultsRoot(t.TempDir())
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	host := orchestrator.hosts[0]
+	host.SetStatus(HostStatusRunning)
+	host.ContainerID = "container-1"
+	host.SetManaged(true)
+	host.DockerManager = &blockingDiagnosticsDockerManager{
+		MockDockerManager: NewMockDockerManager(),
+		host:              "host1",
+		started:           started,
+		release:           release,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first finalizer did not enter diagnostics")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	err := orchestrator.FinalizeDiagnosticsAndCleanup(canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("canceled waiter blocked for %s behind first caller", elapsed)
+	}
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first finalizer did not return after release")
+	}
+}
+
+func TestRunningIntegrityIdentityRejectsParticipantCountBelowMinimum(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker-1", Original: "worker-1"},
+		{Host: "worker-2", Original: "worker-2"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry": {ID: imageID}, "worker-1": {ID: imageID}, "worker-2": {ID: imageID},
+	}}
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusFailed)
+
+	err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "below min-hosts 2") {
+		t.Fatalf("quorum error = %v, want min-hosts rejection", err)
+	}
+	if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 3 {
+		t.Fatalf("failed gate rewrote evidence to %d participants", got)
+	}
+}
+
+func TestRunningIntegrityIdentityRejectsUnavailableLockedParticipantForEveryTier(t *testing.T) {
+	for _, tier := range []string{
+		constants.IntegrityRuntimeIdentityTierImage,
+		constants.IntegrityRuntimeIdentityTierPayload,
+	} {
+		t.Run(tier, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{
+				{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+			}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities: map[string]preflight.ImageIdentity{
+					"entry": {ID: imageID}, "worker": {ID: imageID},
+				},
+				payloads: map[string]string{"entry": payload, "worker": payload},
+			}
+			orchestrator.SetIntegrityRuntimeIdentityTier(tier)
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+				context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+			orchestrator.executionParticipantKeys = []string{"entry", "worker"}
+			orchestrator.hosts[0].SetStatus(HostStatusRunning)
+			orchestrator.hosts[0].APIClient = &SptAPIClient{}
+			orchestrator.hosts[1].SetStatus(HostStatusFailed)
+
+			err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "worker is not running") {
+				t.Fatalf("locked participant error = %v", err)
+			}
+			if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 2 {
+				t.Fatalf("failed gate rewrote evidence to %d participants", got)
+			}
+		})
+	}
+}
+
+func TestEntryAPIRunRejectsAPIFailedLockedWorkerBeforeScenarioPostForEveryTier(t *testing.T) {
+	for _, tier := range []string{
+		constants.IntegrityRuntimeIdentityTierImage,
+		constants.IntegrityRuntimeIdentityTierPayload,
+	} {
+		t.Run(tier, func(t *testing.T) {
+			var runPosts atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/ready":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+				case "/run":
+					if r.Method == http.MethodPost {
+						runPosts.Add(1)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			entryHost, apiPort := splitServerHostPort(t, server.URL)
+
+			orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+				{Host: entryHost, Original: "entry"},
+				{Host: "worker.invalid", Original: "worker"},
+			}, 2)
+			orchestrator.SetAPIPort(apiPort)
+			orchestrator.SetIntegrityRuntimeIdentityTier(tier)
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities: map[string]preflight.ImageIdentity{
+					"entry": {ID: imageID}, "worker": {ID: imageID},
+				},
+				payloads:        map[string]string{"entry": payload, "worker": payload},
+				runningPayloads: map[string]string{"entry": payload, "worker": payload},
+			}
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+				context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+
+			// This is the exact set already supplied to the entry node's RMI topology.
+			// Losing the worker's API proof cannot silently shrink that execution set.
+			orchestrator.executionParticipantKeys = []string{entryHost, "worker.invalid"}
+			orchestrator.hosts[0].ContainerID = "entry-container"
+			orchestrator.hosts[0].SetStatus(HostStatusRunning)
+			orchestrator.hosts[1].ContainerID = "worker-container"
+			orchestrator.hosts[1].SetStatus(HostStatusFailed)
+
+			wrapper := NewMultiHostTestOrchestrator(orchestrator)
+			err := wrapper.startEntryAPIRun(
+				context.Background(), "repo/spt:test",
+				scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+				[]byte(`CreateLoad.config({}).run(); ReadLoad.config({}).run();`), nil,
+				"Distributed verification",
+			)
+			if err == nil || !strings.Contains(err.Error(), "worker is not running") {
+				t.Fatalf("entry API gate error = %v", err)
+			}
+			if got := runPosts.Load(); got != 0 {
+				t.Fatalf("/run POST count = %d, want 0", got)
+			}
+			if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 2 {
+				t.Fatalf("failed gate rewrote evidence to %d participants", got)
+			}
+		})
+	}
 }

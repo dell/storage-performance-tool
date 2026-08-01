@@ -247,6 +247,22 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 		},
 		{
+			name: "Write verify workload summarizes isolation prefix",
+			params: scenario.ScenarioParams{
+				WorkloadType: WorkloadTypeWriteVerify,
+				Endpoint:     "http://s3.example.com",
+				Endpoints:    []string{"http://s3.example.com"},
+				Bucket:       "qualification",
+				Prefix:       "verify/run-42/",
+				ObjectSize:   "1MiB",
+			},
+			expected: []string{
+				"Workload Type: write-verify",
+				"Prefix: verify/run-42/",
+				"Object Size: 1MiB",
+			},
+		},
+		{
 			name: "Write with part-size shows multipart info",
 			params: scenario.ScenarioParams{
 				WorkloadType: "write",
@@ -304,8 +320,10 @@ func TestFormatScenarioParams(t *testing.T) {
 			// Note: strings.Split includes an empty string after the last \n
 			if tt.params.WorkloadType != "mock" {
 				expectedLineCount := 12 // Baseline for non-mock workloads (includes auth version)
-				if tt.params.WorkloadType == WorkloadTypeList {
-					expectedLineCount++ // Prefix line for list workloads
+				if tt.params.WorkloadType == WorkloadTypeList ||
+					tt.params.WorkloadType == WorkloadTypeReadVerify ||
+					tt.params.WorkloadType == WorkloadTypeWriteVerify {
+					expectedLineCount++ // Prefix line for list and verification workloads
 				}
 				if tt.params.WorkloadType == WorkloadTypeRead {
 					expectedLineCount++ // Seed Objects line for read workloads

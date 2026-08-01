@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -151,21 +152,25 @@ func TestApplyPrefixShardsAllowsSeededReadAndMixedCreate(t *testing.T) {
 }
 
 func TestIntegrityCostNotices(t *testing.T) {
+	const (
+		multipartNotice = "Integrity notice: each multipart object is fully pre-hashed before multipart initiation."
+		checksumNotice  = "Integrity notice: the selected transport checksum requires an additional payload digest pass; see integrity.performance.csv."
+	)
 	tests := []struct {
 		name   string
 		params scenario.Params
-		want   int
+		want   []string
 	}{
 		{name: "ordinary write", params: scenario.Params{WorkloadType: WorkloadTypeWrite, PartSize: "5MiB", Checksum: "crc32c"}},
 		{name: "reused sha256", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumSHA256}},
-		{name: "separate checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumCRC32C}, want: 1},
-		{name: "multipart only", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB"}, want: 1},
-		{name: "multipart checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB", Checksum: scenario.ChecksumSHA256}, want: 2},
+		{name: "separate checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumCRC32C}, want: []string{checksumNotice}},
+		{name: "multipart only", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB"}, want: []string{multipartNotice}},
+		{name: "multipart checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB", Checksum: scenario.ChecksumSHA256}, want: []string{multipartNotice, checksumNotice}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := len(integrityCostNotices(tt.params)); got != tt.want {
-				t.Fatalf("len(integrityCostNotices()) = %d, want %d", got, tt.want)
+			if got := integrityCostNotices(tt.params); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("integrityCostNotices() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}

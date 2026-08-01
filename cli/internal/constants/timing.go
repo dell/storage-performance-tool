@@ -20,6 +20,9 @@ const (
 	AutoResultsDiscoveryInterval    = 500 * time.Millisecond // Step discovery polling interval
 	AutoResultsShutdownTimeout      = 30 * time.Second       // Graceful API shutdown request budget
 	AutoResultsShutdownSettleDelay  = 1 * time.Second        // Artifact settle delay before shutdown
+	AutoResultsOptionalWaitTimeout  = 2 * time.Second        // Optional wait for a background results pass
+	ResultsDiscoveryHTTPTimeout     = 5 * time.Second        // Step-identity discovery request timeout
+	IntegrityMetricsHTTPTimeout     = 10 * time.Second       // Required corruption-metrics request timeout
 
 	// Container lifecycle timeouts
 	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown

@@ -1089,8 +1089,16 @@ func (dm *DockerManager) processDockerOutput(data []byte) DockerStreamResult {
 
 // Cleanup stops and removes the container
 func (dm *DockerManager) Cleanup() error {
+	return dm.CleanupContext(dm.ctx)
+}
+
+// CleanupContext stops and removes the container within the caller's budget.
+func (dm *DockerManager) CleanupContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if dm.remote != nil {
-		return dm.remote.Cleanup()
+		return dm.remote.CleanupContext(ctx)
 	}
 	defer dm.cleanupNodeLogDir()
 	defer dm.cleanupDiagnosticsDir()
@@ -1105,7 +1113,7 @@ func (dm *DockerManager) Cleanup() error {
 	if dm.diagnosticsDir != "" {
 		timeout = dockerDiagnosticsStopTimeoutSeconds
 	}
-	err := dm.client.ContainerStop(dm.ctx, dm.containerID, container.StopOptions{
+	err := dm.client.ContainerStop(ctx, dm.containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
 	if err != nil && !isContainerAlreadyStoppedOrGone(err) {
@@ -1119,7 +1127,7 @@ func (dm *DockerManager) Cleanup() error {
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
 	if dm.diagnosticsDir != "" && !dm.diagnosticsDone {
-		record, err := dm.collectDiagnostics(dm.ctx)
+		record, err := dm.collectDiagnostics(ctx)
 		if record != nil {
 			diagnosticsRecords = append(diagnosticsRecords, *record)
 		}
@@ -1130,7 +1138,7 @@ func (dm *DockerManager) Cleanup() error {
 	}
 
 	// Remove the container
-	err = dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{
+	err = dm.client.ContainerRemove(ctx, dm.containerID, container.RemoveOptions{
 		Force: true,
 	})
 	if err != nil && !isNoSuchContainer(err) {

@@ -99,16 +99,17 @@ type MultiHostOrchestrator struct {
 	// If nil, messages are printed to stdout as before.
 	notifier func(string)
 
-	// Guards FinalizeDiagnosticsAndCleanup so it only runs once regardless of
-	// which trigger reaches it first (the auto-results pre-summary hook, or
-	// a caller-side timeout fallback) — see FinalizeDiagnosticsAndCleanup.
+	// Starts FinalizeDiagnosticsAndCleanup once. Each caller waits on
+	// finalizeDone with its own context rather than blocking inside sync.Once.
 	finalizeOnce sync.Once
+	finalizeDone chan struct{}
 	finalizeErr  error
 
 	runtimeIdentityRecorder  func(DistributedRuntimeIdentityEvidence)
 	runtimeIdentityTier      string
 	runtimeIdentityReference string
 	runtimeIdentityEvidence  *DistributedRuntimeIdentityEvidence
+	executionParticipantKeys []string
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -738,13 +739,16 @@ func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Dura
 
 // cleanupManagedContainersAfterStartFailure removes containers immediately when no workload was
 // submitted. There is no run to shut down or linger window to preserve in this path.
-func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure() error {
+func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var cleanupErrors []error
 	for _, host := range o.hosts {
 		if host == nil || !host.IsManaged() || host.DockerManager == nil {
 			continue
 		}
-		if err := host.DockerManager.Cleanup(); err != nil {
+		if err := cleanupDockerWithinContext(ctx, host.DockerManager); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, err))
 		}
 		host.SetStatus(HostStatusStopped)
@@ -753,11 +757,32 @@ func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure() erro
 	return errors.Join(cleanupErrors...)
 }
 
-// StopAllContainers stops all running containers
-func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
+type contextDockerCleaner interface {
+	CleanupContext(context.Context) error
+}
+
+func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
+	if cleaner, ok := manager.(contextDockerCleaner); ok {
+		return cleaner.CleanupContext(ctx)
+	}
+	done := make(chan error, 1)
+	go func() { done <- manager.Cleanup() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// StopAllContainers stops all managed containers within the caller's budget.
+func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	runningHosts := make([]*HostConnection, 0)
 	for _, host := range o.hosts {
-		if host.GetStatus() == HostStatusRunning && host.DockerManager != nil && host.IsManaged() {
+		if host != nil && host.DockerManager != nil && host.IsManaged() && host.ContainerID != "" {
 			runningHosts = append(runningHosts, host)
 		}
 	}
@@ -768,12 +793,18 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 
 	o.notifyf("🛑 Stopping containers on %d host(s)...", len(runningHosts))
 
+	type stopResult struct {
+		record *diagnosticsRecord
+		err    error
+	}
 	var wg sync.WaitGroup
-	recordsCh := make(chan diagnosticsRecord, len(runningHosts))
+	resultsCh := make(chan stopResult, len(runningHosts))
 	for _, host := range runningHosts {
 		wg.Add(1)
 		go func(h *HostConnection) {
 			defer wg.Done()
+			result := stopResult{}
+			defer func() { resultsCh <- result }()
 
 			if !h.IsManaged() {
 				return
@@ -787,17 +818,28 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 			// Try graceful API shutdown first if API client is available
 			if h.APIClient != nil {
 				labelPrefix := h.Info.Original
-				h.APIClient.LogReadySnapshot("pre-shutdown/" + labelPrefix)
-				if err := h.APIClient.Shutdown(); err != nil {
+				h.APIClient.LogReadySnapshotContext(ctx, "pre-shutdown/"+labelPrefix)
+				if err := h.APIClient.ShutdownContext(ctx); err != nil {
 					logging.LogError("docker-multi", "graceful API shutdown failed, using container stop",
 						err,
 						"host", h.Info.Original)
 				}
 				// Wait for linger window best-effort
-				_ = h.APIClient.WaitForLinger(constants.APILingerDefault)
-				// Give it a moment to shut down gracefully
-				time.Sleep(constants.ContainerShutdownGrace)
-				h.APIClient.LogReadySnapshot("post-shutdown/" + labelPrefix)
+				_ = h.APIClient.WaitForLingerContext(ctx, constants.APILingerDefault)
+				grace := time.NewTimer(constants.ContainerShutdownGrace)
+				select {
+				case <-ctx.Done():
+					if !grace.Stop() {
+						select {
+						case <-grace.C:
+						default:
+						}
+					}
+					result.err = ctx.Err()
+					return
+				case <-grace.C:
+				}
+				h.APIClient.LogReadySnapshotContext(ctx, "post-shutdown/"+labelPrefix)
 			}
 
 			// Stop the container - need to use the underlying Docker client
@@ -810,13 +852,14 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 				return
 			}
 
-			err := h.DockerManager.Cleanup()
+			err := cleanupDockerWithinContext(ctx, h.DockerManager)
 			if collector, ok := h.DockerManager.(diagnosticsCollector); ok {
 				if record := collector.diagnosticsRecord(); record != nil {
-					recordsCh <- *record
+					result.record = record
 				}
 			}
 			if err != nil {
+				result.err = fmt.Errorf("%s: %w", h.Info.Original, err)
 				logging.LogError("docker-multi", "container stop failed",
 					fmt.Errorf("host %s container %s: %w", h.Info.Original, containerID, err),
 					"host", h.Info.Original,
@@ -833,20 +876,38 @@ func (o *MultiHostOrchestrator) StopAllContainers(_ context.Context) error {
 		}(host)
 	}
 
-	wg.Wait()
-	close(recordsCh)
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	var records []diagnosticsRecord
-	for record := range recordsCh {
-		records = append(records, record)
+	var stopErrors []error
+	for range runningHosts {
+		result := <-resultsCh
+		if result.record != nil {
+			records = append(records, *result.record)
+		}
+		if result.err != nil {
+			stopErrors = append(stopErrors, result.err)
+		}
 	}
 	if err := writeDiagnosticsAggregateManifest(o.resultsRoot, records); err != nil {
-		logging.LogWarn("docker-multi", "failed to write diagnostics manifest", "error", err.Error())
+		stopErrors = append(stopErrors, err)
 	}
-	return nil
+	return errors.Join(stopErrors...)
 }
 
 // CollectDiagnostics copies diagnostics from all managed hosts into the run results directory.
 func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	type diagnosticsResult struct {
 		host   string
 		record *diagnosticsRecord
@@ -883,12 +944,21 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 		}(host, collector)
 	}
 
-	wg.Wait()
-	close(resultsCh)
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	var records []diagnosticsRecord
 	var errs []error
-	for result := range resultsCh {
+	for pending := len(resultsCh); pending > 0; pending-- {
+		result := <-resultsCh
 		if result.record != nil {
 			records = append(records, *result.record)
 		}
@@ -914,18 +984,27 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 // could otherwise race a caller-side timeout fallback trying to do the same
 // cleanup concurrently.
 //
-// Safe to call more than once, including concurrently, from different
-// triggers (e.g. once from the auto-results pre-summary hook, once from a
-// timeout fallback if the hook is still running when the wait expires): only
-// the first call does the work; every call — first or not — blocks until
-// that single execution finishes and observes the same result.
+// Safe to call more than once, including concurrently. Work starts once, while
+// each waiter remains independently cancellable.
 func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	o.finalizeOnce.Do(func() {
-		diagErr := o.CollectDiagnostics(ctx)
-		stopErr := o.StopAllContainers(ctx)
-		o.finalizeErr = errors.Join(diagErr, stopErr)
+		o.finalizeDone = make(chan struct{})
+		go func() {
+			diagErr := o.CollectDiagnostics(ctx)
+			stopErr := o.StopAllContainers(ctx)
+			o.finalizeErr = errors.Join(diagErr, stopErr)
+			close(o.finalizeDone)
+		}()
 	})
-	return o.finalizeErr
+	select {
+	case <-o.finalizeDone:
+		return o.finalizeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // GetHostCount returns the total number of hosts
@@ -1637,6 +1716,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 			if serr != nil {
 				return fmt.Errorf("failed to start LIST via entry node API: %w", serr)
 			}
+			params.NotifyLaunchSubmitted()
 			if m.onOutput != nil {
 				m.onOutput(fmt.Sprintf("LIST started on primary with run ID: %s", runID))
 			}
@@ -1796,10 +1876,10 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
-			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 		if err := host.APIClient.VerifyIntegrityCapability(image); err != nil {
-			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
 	host.APIClient.LogReadySnapshot("pre-start")
@@ -1811,6 +1891,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	if err != nil {
 		return fmt.Errorf("failed to start test via host API: %w", err)
 	}
+	params.NotifyLaunchSubmitted()
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("Single-host test started with run ID: %s", runID))
 	}
@@ -1844,10 +1925,10 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image 
 	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
-			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapability(image); err != nil {
-			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure())
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
 	if m.onOutput != nil {
@@ -1857,6 +1938,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image 
 	if err != nil {
 		return fmt.Errorf("failed to start test via entry node API: %w", err)
 	}
+	params.NotifyLaunchSubmitted()
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("%s started with run ID: %s", runLabel, runID))
 	}
@@ -2228,6 +2310,8 @@ type runningIntegrityParticipant struct {
 func reconcileRunningIntegrityParticipants(
 	current *DistributedRuntimeIdentityEvidence,
 	hosts []*HostConnection,
+	executionParticipantKeys []string,
+	minHosts int,
 ) ([]runningIntegrityParticipant, error) {
 	preparedByHost := make(map[string]DistributedRuntimeIdentityParticipant, len(current.Participants))
 	for _, participant := range current.Participants {
@@ -2246,22 +2330,52 @@ func reconcileRunningIntegrityParticipants(
 		preparedByHost[hostKey] = participant
 	}
 
-	running := make([]runningIntegrityParticipant, 0, len(hosts))
-	seenRunning := make(map[string]struct{}, len(hosts))
+	hostsByKey := make(map[string]*HostConnection, len(hosts))
 	for _, host := range hosts {
-		if host == nil || host.GetStatus() != HostStatusRunning {
+		if host == nil {
 			continue
 		}
 		hostKey := runtimeIdentityHostKey(host.Info)
+		if hostKey == "" {
+			return nil, fmt.Errorf("running identity verification found a participant without host identity")
+		}
+		if _, duplicate := hostsByKey[hostKey]; duplicate {
+			return nil, fmt.Errorf("running identity verification found duplicate host %q", hostKey)
+		}
+		hostsByKey[hostKey] = host
+	}
+
+	lockedTopology := len(executionParticipantKeys) > 0
+	participantKeys := append([]string(nil), executionParticipantKeys...)
+	if !lockedTopology {
+		for _, host := range hosts {
+			if host != nil && host.GetStatus() == HostStatusRunning {
+				participantKeys = append(participantKeys, runtimeIdentityHostKey(host.Info))
+			}
+		}
+	}
+	if len(participantKeys) == 0 {
+		return nil, fmt.Errorf("running identity verification found no running participants")
+	}
+	if len(participantKeys) < minHosts {
+		return nil, fmt.Errorf(
+			"running identity verification found %d participants, below min-hosts %d",
+			len(participantKeys), minHosts)
+	}
+
+	running := make([]runningIntegrityParticipant, 0, len(participantKeys))
+	seenRunning := make(map[string]struct{}, len(participantKeys))
+	for _, hostKey := range participantKeys {
+		host := hostsByKey[hostKey]
+		if host == nil {
+			return nil, fmt.Errorf("configured execution participant %q is unavailable", hostKey)
+		}
 		label := hostKey
 		if host.Info != nil && strings.TrimSpace(host.Info.Original) != "" {
 			label = host.Info.Original
 		}
-		if hostKey == "" {
-			return nil, fmt.Errorf("running identity verification found a participant without host identity")
-		}
 		if _, duplicate := seenRunning[hostKey]; duplicate {
-			return nil, fmt.Errorf("running identity verification found duplicate host %q", hostKey)
+			return nil, fmt.Errorf("execution topology contains duplicate host %q", hostKey)
 		}
 		seenRunning[hostKey] = struct{}{}
 		prepared, expected := preparedByHost[hostKey]
@@ -2271,13 +2385,18 @@ func reconcileRunningIntegrityParticipants(
 		}
 		host.mu.Lock()
 		containerID := host.ContainerID
+		status := host.Status
+		apiClient := host.APIClient
 		host.mu.Unlock()
+		if status != HostStatusRunning {
+			return nil, fmt.Errorf("configured execution participant %s is not running (status=%s)", label, status)
+		}
+		if lockedTopology && apiClient == nil {
+			return nil, fmt.Errorf("configured execution participant %s has no ready API proof", label)
+		}
 		running = append(running, runningIntegrityParticipant{
 			host: host, hostKey: hostKey, label: label, containerID: containerID, prepared: prepared,
 		})
-	}
-	if len(running) == 0 {
-		return nil, fmt.Errorf("running identity verification found no running participants")
 	}
 	return running, nil
 }
@@ -2297,6 +2416,8 @@ func (o *MultiHostOrchestrator) VerifyRunningIntegrityRuntimeIdentity(ctx contex
 			[]DistributedRuntimeIdentityParticipant(nil), o.runtimeIdentityEvidence.Participants...)
 		current = &snapshot
 	}
+	executionParticipantKeys := append([]string(nil), o.executionParticipantKeys...)
+	minHosts := o.minHosts
 	o.mu.Unlock()
 	if selectedTier != "" && selectedTier != constants.IntegrityRuntimeIdentityTierImage &&
 		selectedTier != constants.IntegrityRuntimeIdentityTierPayload {
@@ -2305,7 +2426,8 @@ func (o *MultiHostOrchestrator) VerifyRunningIntegrityRuntimeIdentity(ctx contex
 	if current == nil || current.ImageID == "" {
 		return fmt.Errorf("running identity verification requires prepared immutable-image evidence")
 	}
-	running, err := reconcileRunningIntegrityParticipants(current, o.hosts)
+	running, err := reconcileRunningIntegrityParticipants(
+		current, o.hosts, executionParticipantKeys, minHosts)
 	if err != nil {
 		return err
 	}
@@ -2436,6 +2558,9 @@ func (o *MultiHostOrchestrator) StartDistributedTest(ctx context.Context, image 
 // StartDistributedTestWithContent starts the RMI entry/worker topology with
 // caller-provided scenario content for later API submission.
 func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent []byte) error {
+	o.mu.Lock()
+	o.executionParticipantKeys = nil
+	o.mu.Unlock()
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
@@ -2540,7 +2665,13 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 
 		// 4. Wait for RMI registries to be ready
 		logging.LogInfo("orchestrator", "waiting for RMI registries to be ready")
-		if err := o.waitForAllWorkersReady(workerNodes, constants.RMIReadinessTimeout); err != nil {
+		startedWorkers := make([]*HostConnection, 0, activeWorkers)
+		for _, worker := range workerNodes {
+			if worker.GetStatus() == HostStatusRunning {
+				startedWorkers = append(startedWorkers, worker)
+			}
+		}
+		if err := o.waitForAllWorkersReady(startedWorkers, constants.RMIReadinessTimeout); err != nil {
 			return fmt.Errorf("workers not ready for RMI: %w", err)
 		}
 	}
@@ -2558,6 +2689,12 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	if err := o.startEntryNode(entryNode, activeWorkers, params, startupArgs); err != nil {
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
+	executionParticipants := make([]string, 0, 1+len(activeWorkers))
+	executionParticipants = append(executionParticipants, runtimeIdentityHostKey(entryNode.Info))
+	for _, worker := range activeWorkers {
+		executionParticipants = append(executionParticipants, runtimeIdentityHostKey(worker.Info))
+	}
+	o.executionParticipantKeys = executionParticipants
 
 	logging.LogInfo("orchestrator", "distributed test started successfully",
 		"entry_node", entryNode.Info.Host,

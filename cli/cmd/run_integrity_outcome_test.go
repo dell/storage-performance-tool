@@ -64,6 +64,29 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	}
 }
 
+func TestResolveVerificationRunErrorEmptySelectionDiagnosticNamesWorkload(t *testing.T) {
+	base := autoResultsOutcome{
+		Tracker: &portcheck.RunResult{FinalState: constants.StateCompleted},
+		Finalization: &integrity.FinalizeOutcome{
+			Complete:       true,
+			EmptySelection: true,
+		},
+	}
+	for _, test := range []struct {
+		workload string
+		want     string
+	}{
+		{workload: scenario.WorkloadTypeReadVerify, want: "read-verify requires --allow-empty-selection"},
+		{workload: scenario.WorkloadTypeWriteVerify, want: "write-verify produced no objects eligible for verification"},
+	} {
+		err := resolveVerificationRunError(
+			nil, base, true, scenario.Params{WorkloadType: test.workload})
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("%s diagnostic = %v, want containing %q", test.workload, err, test.want)
+		}
+	}
+}
+
 func TestResolveVerificationRunErrorRejectsIncompleteFinalizationOutcome(t *testing.T) {
 	outcome := autoResultsOutcome{
 		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},

@@ -127,7 +127,8 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			finalErr = writeErr
 		}
 	}()
-	createStep, listStep, readStep := resolveStepRoles(options.Workload, options.StepIDs, manifest)
+	roles := ResolveStepRoles(options.Workload, options.StepIDs, manifest)
+	createStep, listStep, readStep := roles.Create, roles.List, roles.Read
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
 	}
@@ -312,39 +313,51 @@ func integritySummary(outcome FinalizeOutcome, finalErr error) *results.Integrit
 	return summary
 }
 
-func resolveStepRoles(workloadName string, configured []string, manifest *results.Manifest) (create, list, read string) {
+// StepRoles names the producer and verification steps selected from ordered evidence.
+type StepRoles struct {
+	Create string
+	List   string
+	Read   string
+}
+
+// ResolveStepRoles preserves the first nonempty match for each role. Callers
+// place runtime-discovered IDs before generated and manifest-appended IDs.
+func ResolveStepRoles(workloadName string, configured []string, manifest *results.Manifest) StepRoles {
 	ids := append([]string(nil), configured...)
-	for _, step := range manifest.Steps {
-		if !contains(ids, step.StepID) {
-			ids = append(ids, step.StepID)
+	if manifest != nil {
+		for _, step := range manifest.Steps {
+			if !contains(ids, step.StepID) {
+				ids = append(ids, step.StepID)
+			}
 		}
 	}
+	roles := StepRoles{}
 	for _, id := range ids {
 		switch {
-		case strings.HasSuffix(id, "-create"):
-			create = id
-		case strings.HasSuffix(id, "-list"):
-			list = id
-		case strings.HasSuffix(id, "-verify"):
-			read = id
+		case roles.Create == "" && strings.HasSuffix(id, "-create"):
+			roles.Create = id
+		case roles.List == "" && strings.HasSuffix(id, "-list"):
+			roles.List = id
+		case roles.Read == "" && strings.HasSuffix(id, "-verify"):
+			roles.Read = id
 		}
 	}
 	if workloadName == workload.WriteVerify {
-		if create == "" && len(configured) > 0 {
-			create = configured[0]
+		if roles.Create == "" && len(configured) > 0 {
+			roles.Create = configured[0]
 		}
-		if read == "" && len(configured) > 1 {
-			read = configured[1]
+		if roles.Read == "" && len(configured) > 1 {
+			roles.Read = configured[1]
 		}
 	} else {
-		if read == "" && len(configured) > 0 {
-			read = configured[len(configured)-1]
+		if roles.Read == "" && len(configured) > 0 {
+			roles.Read = configured[len(configured)-1]
 		}
-		if list == "" && len(configured) > 1 {
-			list = configured[0]
+		if roles.List == "" && len(configured) > 1 {
+			roles.List = configured[0]
 		}
 	}
-	return create, list, read
+	return roles
 }
 
 func contains(values []string, value string) bool {
@@ -374,10 +387,11 @@ const (
 	completionPairManifestOnly
 	completionPairMarkerOnly
 	completionPairPresent
-	// completionPromotionMaxStateTransitions bounds retries when another publisher changes the
-	// manifest/marker pair between observations.
-	completionPromotionMaxStateTransitions = 6
 )
+
+// completionPromotionMaxStateTransitions bounds retries when another publisher changes the
+// manifest/marker pair between observations.
+const completionPromotionMaxStateTransitions = 6
 
 func promoteCompletionPair(
 	sourceManifestPath, sourceCompletionPath string,
@@ -755,7 +769,7 @@ func ObserveJSONCorruptCountContext(ctx context.Context, baseURL, readStep strin
 		if err != nil {
 			return 0, fmt.Errorf("create required corruption metrics request for %s: %w", endpoint, err)
 		}
-		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+		response, err := (&http.Client{Timeout: constants.IntegrityMetricsHTTPTimeout}).Do(request)
 		if err != nil {
 			return 0, fmt.Errorf("fetch required corruption metrics from %s: %w", endpoint, err)
 		}

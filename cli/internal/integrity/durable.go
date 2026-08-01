@@ -37,6 +37,10 @@ func (osDurablePublicationOperations) rename(source, destination string) error {
 	return os.Rename(source, destination)
 }
 
+func (osDurablePublicationOperations) renameNoReplace(source, destination string) error {
+	return renameNoReplace(source, destination)
+}
+
 func (osDurablePublicationOperations) syncDirectory(path string) error {
 	directory, err := os.Open(path) // #nosec G304 -- internally resolved publication directory
 	if err != nil {
@@ -47,6 +51,20 @@ func (osDurablePublicationOperations) syncDirectory(path string) error {
 }
 
 var durableOSOperations durablePublicationOperations = osDurablePublicationOperations{}
+
+type durableNoReplaceOperations interface {
+	renameNoReplace(source, destination string) error
+}
+
+func renameNoReplaceWithOperations(
+	operations durablePublicationOperations,
+	source, destination string,
+) error {
+	if noReplace, ok := operations.(durableNoReplaceOperations); ok {
+		return noReplace.renameNoReplace(source, destination)
+	}
+	return renameNoReplace(source, destination)
+}
 
 func durableRenameWithOperations(source, destination string, operations durablePublicationOperations) error {
 	destinationDirectory, err := durablePublicationDirectory(source, destination)
@@ -69,7 +87,7 @@ func durableRenameNoReplace(source, destination string) error {
 	if err = durableOSOperations.syncFile(source); err != nil {
 		return fmt.Errorf("synchronize publication file %s: %w", filepath.Base(source), err)
 	}
-	if err = renameNoReplace(source, destination); err != nil {
+	if err = renameNoReplaceWithOperations(durableOSOperations, source, destination); err != nil {
 		return fmt.Errorf("atomically publish %s without replacement: %w", filepath.Base(destination), err)
 	}
 	if err = durableOSOperations.syncDirectory(destinationDirectory); err != nil {
@@ -92,7 +110,7 @@ func durableRenameNoReplaceOrMatch(source, destination string) error {
 	if err = durableOSOperations.syncFile(source); err != nil {
 		return fmt.Errorf("synchronize publication file %s: %w", filepath.Base(source), err)
 	}
-	if err = renameNoReplace(source, destination); err == nil {
+	if err = renameNoReplaceWithOperations(durableOSOperations, source, destination); err == nil {
 		if err = durableOSOperations.syncDirectory(destinationDirectory); err != nil {
 			return fmt.Errorf(
 				"published %s but failed to synchronize its directory; durable state is indeterminate: %w",

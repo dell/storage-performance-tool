@@ -217,9 +217,8 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	if maxFailures < 0 {
 		return errors.New("--integrity-max-console-failures must be >= 0")
 	}
-	allowEmpty, _ := cmd.Flags().GetBool("allow-empty-selection")
 	if workloadType == WorkloadTypeWriteVerify {
-		if allowEmpty {
+		if changed("allow-empty-selection") {
 			return errors.New("--allow-empty-selection is valid only for read-verify")
 		}
 		if items, _ := cmd.Flags().GetString("items-file"); items != "" {
@@ -242,7 +241,9 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		"object-data-dedupable", "seed-objects", "create-prefix", flagPrefixShards,
 	}
 	for _, name := range unsupported {
-		if changed(name) {
+		// Applicability is based on the effective configuration, irrespective
+		// of whether Cobra received it from argv, OS environment, or .env.
+		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+name, workloadType)
 		}
 	}

@@ -52,6 +52,7 @@ var resolvePortConflictFunc = portcheck.ResolvePortConflict
 type autoResultsRunTracker interface {
 	WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error)
 	SetDebug(bool)
+	SetExpectedRunID(int64)
 }
 
 type runTrackerAdapter struct {
@@ -87,6 +88,32 @@ type autoResultsOutcome struct {
 	StepIDs              []string
 }
 
+// autoResultsMonitor separates monitor construction from the launch boundary.
+// No engine evidence is consumed until Arm is called.
+type autoResultsMonitor struct {
+	done    chan autoResultsOutcome
+	armed   chan struct{}
+	armAck  chan struct{}
+	armOnce sync.Once
+	cancel  context.CancelFunc
+}
+
+func (m *autoResultsMonitor) Arm() {
+	if m == nil {
+		return
+	}
+	m.armOnce.Do(func() { close(m.armed) })
+	if m.armAck != nil {
+		<-m.armAck
+	}
+}
+
+func (m *autoResultsMonitor) Cancel() {
+	if m != nil && m.cancel != nil {
+		m.cancel()
+	}
+}
+
 func (f *fetcherAdapter) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
 	return f.Fetcher.FetchArtifactsForSteps(ctx, stepIDs)
 }
@@ -108,9 +135,9 @@ var (
 	}
 	startLocalHeadlessRunFunc     = headless.StartHeadlessModeWithParams
 	startMultiHostHeadlessRunFunc = headless.StartHeadlessModeWithOrchestrator
-	startAutoResultsFunc          = startAutoResults
-	discoverStepIDsFunc           = results.DiscoverStepIDsContext
-	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsContext
+	startAutoResultsFunc          = startAutoResultsMonitor
+	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
+	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -191,14 +218,21 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 // After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
 // preSummaryHook, if non-nil, runs after shutdown completes but before the run
 // summary is generated — see its call site below for why that ordering matters.
-func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) chan autoResultsOutcome {
+func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, expectedRunID int64, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) *autoResultsMonitor {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	monitorCtx, cancel := context.WithCancel(parentCtx)
 	done := make(chan autoResultsOutcome, 1)
+	monitor := &autoResultsMonitor{
+		done: done, armed: make(chan struct{}), armAck: make(chan struct{}), cancel: cancel,
+	}
 	go func() {
 		outcome := autoResultsOutcome{}
-		defer func() { done <- outcome }()
-		if parentCtx == nil {
-			parentCtx = context.Background()
-		}
+		defer func() {
+			done <- outcome
+			cancel()
+		}()
 		if progressOut == nil {
 			progressOut = os.Stdout
 		}
@@ -232,7 +266,18 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 				metadata.ScenarioStoredPath = storedPath
 			}
 		}
+		select {
+		case <-monitor.armed:
+			close(monitor.armAck)
+			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
+		case <-monitorCtx.Done():
+			close(monitor.armAck)
+			outcome.TrackerErr = monitorCtx.Err()
+			return
+		}
+		parentCtx = monitorCtx
 		tracker := newRunTrackerFunc(baseURL)
+		tracker.SetExpectedRunID(expectedRunID)
 		if len(integrityOptions) > 0 && integrityOptions[0] != nil {
 			if terminalTracker, ok := tracker.(interface{ SetRequireTerminalState(bool) }); ok {
 				terminalTracker.SetRequireTerminalState(true)
@@ -263,7 +308,7 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 				case <-parentCtx.Done():
 					return
 				case <-ticker.C:
-					if ids, err := discoverStepIDsFunc(parentCtx, baseURL); err == nil && len(ids) > 0 {
+					if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
 						mu.Lock()
 						updated := false
 						for _, id := range ids {
@@ -284,7 +329,7 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 						}
 					}
 					// Also poll fleet endpoint for distributed step IDs
-					if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL); err == nil && len(fids) > 0 {
+					if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
 						mu.Lock()
 						updated := false
 						for _, id := range fids {
@@ -326,13 +371,13 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 		pollWG.Wait()
 		postCtx := parentCtx
 		cleanupCancel := func() {}
-		if parentCtx.Err() != nil {
+		if parentCtx.Err() != nil || outcome.TrackerErr != nil {
 			postCtx, cleanupCancel = context.WithTimeout(
 				context.WithoutCancel(parentCtx), constants.AutoResultsCancelCleanupTimeout)
 		}
 		defer cleanupCancel()
 		// One final fleet discovery after completion (may not have been picked up during polling)
-		if fids, err := discoverFleetStepIDsFunc(postCtx, baseURL); err == nil && len(fids) > 0 {
+		if fids, err := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
 			mu.Lock()
 			for _, id := range fids {
 				if id == "" {
@@ -348,11 +393,8 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 		}
 		writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
 
-		// Discover step IDs from JSON metrics.
-		// When we have expectedStepIDs (parsed from the scenario), only keep discovered IDs that
-		// belong to this run. The discovery poller may have accumulated IDs from a prior run's
-		// lingering container (which keeps /metrics/json alive during its API linger window), so
-		// we intersect rather than union to prevent stale IDs from reaching FetchArtifactsForSteps.
+		// Discover step IDs from metrics already filtered to expectedRunID. Fleet
+		// IDs lead because distributed runtime IDs may differ from generated IDs.
 		mu.Lock()
 		cachedDiscovered := append([]string(nil), discovered...)
 		cachedFleet := append([]string(nil), fleetDiscovered...)
@@ -364,23 +406,19 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 			}
 			filtered := cachedDiscovered[:0:0]
 			for _, id := range cachedDiscovered {
-				if _, ok := expectedSet[id]; ok {
+				if _, expected := expectedSet[id]; expected {
 					filtered = append(filtered, id)
 				}
 			}
 			cachedDiscovered = filtered
 		}
-		// Fleet-discovered IDs bypass the stale-ID intersection filter because they
-		// represent the engine's actual runtime step IDs (which may differ from
-		// CLI-generated expected IDs in distributed/multi-host mode due to timestamp
-		// reassignment). Fleet IDs go first so they take precedence when present.
 		stepIDs := uniqueStepIDs(cachedFleet, expectedStepIDs, cachedDiscovered)
 		var discoverErr error
 		if len(stepIDs) == 0 {
 			var fallback []string
-			fallback, discoverErr = discoverStepIDsFunc(postCtx, baseURL)
+			fallback, discoverErr = discoverStepIDsFunc(postCtx, baseURL, expectedRunID)
 			// Also try fleet endpoint as fallback
-			fleetFallback, _ := discoverFleetStepIDsFunc(postCtx, baseURL)
+			fleetFallback, _ := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID)
 			stepIDs = uniqueStepIDs(fleetFallback, stepIDs, fallback)
 		}
 		outcome.StepIDs = append([]string(nil), stepIDs...)
@@ -520,7 +558,23 @@ func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir stri
 			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
 	}()
-	return done
+	return monitor
+}
+
+// startAutoResults preserves the pre-existing, immediately armed test/helper contract.
+// Command orchestration uses startAutoResultsMonitor so it can arm at launch.
+func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) chan autoResultsOutcome {
+	expectedRunID := int64(0)
+	if len(integrityOptions) > 0 && integrityOptions[0] != nil {
+		expectedRunID = integrityOptions[0].RunID
+	}
+	monitor := startAutoResultsMonitor(
+		parentCtx, baseURL, label, resultsDir, expectedStepIDs, expectedRunID, debug,
+		allHosts, apiPort, shutdownOn, lingerSec, scenarioPath, metadata, progressOut,
+		summaryOut, traceFile, preSummaryHook, integrityOptions...,
+	)
+	monitor.Arm()
+	return monitor.done
 }
 
 func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOptions {
@@ -543,18 +597,7 @@ func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOp
 }
 
 func verificationReadStepID(workloadName string, stepIDs []string) string {
-	for _, stepID := range stepIDs {
-		if strings.HasSuffix(stepID, "-verify") {
-			return stepID
-		}
-	}
-	if workloadName == workload.ReadVerify && len(stepIDs) > 0 {
-		return stepIDs[len(stepIDs)-1]
-	}
-	if workloadName == workload.WriteVerify && len(stepIDs) > 1 {
-		return stepIDs[1]
-	}
-	return ""
+	return integrity.ResolveStepRoles(workloadName, stepIDs, nil).Read
 }
 
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
@@ -621,7 +664,11 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 			reasons = append(reasons, "integrity result finalization is incomplete")
 		}
 		if outcome.Finalization.EmptySelection && !outcome.Finalization.EmptyAllowed {
-			reasons = append(reasons, "verification selected zero objects; read-verify requires --allow-empty-selection for a clean empty set")
+			if params.WorkloadType == workload.ReadVerify {
+				reasons = append(reasons, "verification selected zero objects; read-verify requires --allow-empty-selection for a clean empty set")
+			} else {
+				reasons = append(reasons, "write-verify produced no objects eligible for verification")
+			}
 		}
 	}
 	if outcome.SummaryErr != nil {
@@ -1287,21 +1334,21 @@ Available workload types:
 		var integrityOptions *integrity.FinalizeOptions
 		if verificationRun {
 			integrityOptions = buildIntegrityFinalizeOptions(params)
-			integrityOptions.Context = runContext
 		}
-		var autoResultsDone chan autoResultsOutcome
+		var autoMonitor *autoResultsMonitor
 		startAutoResultsMonitoring := func() {
-			if resultsOpts.AutoResults && autoResultsDone == nil {
-				autoResultsDone = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
+			if resultsOpts.AutoResults && autoMonitor == nil {
+				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
+				params.SetLaunchSubmittedCallback(autoMonitor.Arm)
 			}
 		}
 		var autoOutcome autoResultsOutcome
 		autoOutcomeReceived := false
 		waitForAutoResults := func(required bool) bool {
-			if autoResultsDone != nil {
+			if autoMonitor != nil {
 				if required {
 					select {
-					case autoOutcome = <-autoResultsDone:
+					case autoOutcome = <-autoMonitor.done:
 						autoOutcomeReceived = true
 						return true
 					case <-runContext.Done():
@@ -1310,7 +1357,7 @@ Available workload types:
 						cleanupTimer := time.NewTimer(constants.AutoResultsCancelCleanupTimeout)
 						defer cleanupTimer.Stop()
 						select {
-						case autoOutcome = <-autoResultsDone:
+						case autoOutcome = <-autoMonitor.done:
 							autoOutcomeReceived = true
 						case <-cleanupTimer.C:
 							logger.Warn("Timed out waiting for auto-results cancellation cleanup")
@@ -1319,10 +1366,10 @@ Available workload types:
 					}
 				}
 				select {
-				case autoOutcome = <-autoResultsDone:
+				case autoOutcome = <-autoMonitor.done:
 					autoOutcomeReceived = true
 					return true
-				case <-time.After(2 * time.Second):
+				case <-time.After(constants.AutoResultsOptionalWaitTimeout):
 					return false
 				}
 			}
@@ -1406,6 +1453,9 @@ Available workload types:
 				}
 
 				err := startMultiHostHeadlessRunFunc(orchestrator, sptImage, scenarioPath, params, options)
+				if err != nil && autoMonitor != nil {
+					autoMonitor.Cancel()
+				}
 				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
 				if autoTerminated {
 					finalizeTraceArtifact()
@@ -1423,13 +1473,7 @@ Available workload types:
 					finalizeMultiHost(runContext)
 				}
 				if !autoResultsComplete && delegateShutdownToAutoResults {
-					// The pre-summary hook may still be running (e.g. a slow
-					// diagnostics copy) — finalizeMultiHost/
-					// FinalizeDiagnosticsAndCleanup is safe to call concurrently
-					// with it and will simply wait for that single execution
-					// rather than duplicating it.
-					logger.Warn("Timed out waiting for auto-results; forcing diagnostics collection and container cleanup")
-					finalizeMultiHost(runContext)
+					logger.Warn("Timed out waiting for auto-results cancellation cleanup; existing cleanup continues within its own budget")
 				}
 				finalizeTraceArtifact()
 				return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
@@ -1439,6 +1483,9 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
+				if err != nil && autoMonitor != nil {
+					autoMonitor.Cancel()
+				}
 				autoResultsComplete := waitForAutoResults(verificationRun)
 				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
 					finalizeMultiHost(runContext)
@@ -1447,6 +1494,9 @@ Available workload types:
 				return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 			}
 			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
+			if err != nil && autoMonitor != nil {
+				autoMonitor.Cancel()
+			}
 			autoResultsComplete := waitForAutoResults(verificationRun)
 			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
 				finalizeMultiHost(runContext)
@@ -1470,6 +1520,9 @@ Available workload types:
 			}
 
 			err := startLocalHeadlessRunFunc(sptImage, scenarioPath, params, options)
+			if err != nil && autoMonitor != nil {
+				autoMonitor.Cancel()
+			}
 			waitForAutoResults(verificationRun)
 			finalizeTraceArtifact()
 			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
@@ -1482,6 +1535,9 @@ Available workload types:
 			err = tui.StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
 		} else {
 			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, setSummarySink, traceOpts.Path, traceOpts.Append)
+		}
+		if err != nil && autoMonitor != nil {
+			autoMonitor.Cancel()
 		}
 		waitForAutoResults(verificationRun)
 		finalizeTraceArtifact()
@@ -2171,7 +2227,9 @@ func appendS3DisplayLines(lines []string, params scenario.Params) []string {
 		lines = append(lines, "Bucket: (not set)")
 	}
 
-	if params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
+	if params.WorkloadType == WorkloadTypeList ||
+		params.WorkloadType == WorkloadTypeReadVerify ||
+		params.WorkloadType == WorkloadTypeWriteVerify {
 		if params.Prefix != "" {
 			lines = append(lines, fmt.Sprintf("Prefix: %s", params.Prefix))
 		} else {

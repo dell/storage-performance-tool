@@ -3,9 +3,11 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +21,69 @@ func withTempDir(t *testing.T, fn func(dir string)) {
 	}
 	defer os.Chdir(cwd)
 	fn(dir)
+}
+
+func TestReadVerifyRejectsUnsupportedDotEnvDefaultsBeforeExecution(t *testing.T) {
+	tests := []struct {
+		name   string
+		envKey string
+		value  string
+		flag   string
+	}{
+		{name: "part size", envKey: constants.EnvPartSize, value: "5MiB", flag: "part-size"},
+		{name: "compressibility", envKey: constants.EnvObjectDataCompressibility, value: "25", flag: "object-data-compressibility"},
+		{name: "dedupable", envKey: constants.EnvObjectDataDedupable, value: "false", flag: "object-data-dedupable"},
+	}
+	allKeys := []string{
+		constants.EnvPartSize,
+		constants.EnvObjectDataCompressibility,
+		constants.EnvObjectDataDedupable,
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			type previousEnv struct {
+				value string
+				set   bool
+			}
+			previous := make(map[string]previousEnv, len(allKeys))
+			for _, key := range allKeys {
+				value, set := os.LookupEnv(key)
+				previous[key] = previousEnv{value: value, set: set}
+				_ = os.Unsetenv(key)
+			}
+			t.Cleanup(func() {
+				for _, key := range allKeys {
+					if prior := previous[key]; prior.set {
+						_ = os.Setenv(key, prior.value)
+					} else {
+						_ = os.Unsetenv(key)
+					}
+				}
+			})
+
+			withTempDir(t, func(dir string) {
+				if err := os.WriteFile(
+					filepath.Join(dir, ".env"),
+					[]byte(test.envKey+"="+test.value+"\n"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+				config.ResetDotEnvLoadedForTests()
+				if loaded := config.LoadDotEnv(); len(loaded.Errors) > 0 {
+					t.Fatalf("load .env: %v", loaded.Errors)
+				}
+				cmd := newIntegrityValidationCommand(t)
+				if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+					t.Fatal(err)
+				}
+				err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
+				if err == nil || !strings.Contains(err.Error(), "--"+test.flag) {
+					t.Fatalf(".env validation error = %v, want --%s rejection", err, test.flag)
+				}
+			})
+		})
+	}
 }
 
 func Test_TopLevelCommands_InvokeDotEnvLoader(t *testing.T) {

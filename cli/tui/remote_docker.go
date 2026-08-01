@@ -26,6 +26,8 @@ import (
 const (
 	remoteRemoveRecursiveFlag = "-rf"
 	remoteChmodCommand        = "chmod"
+	remoteCleanupTimeout      = 10 * time.Second
+	remoteDiagnosticsSlack    = 30 * time.Second
 )
 
 // RemoteDockerManager implements DockerInterface by executing docker CLI via SSH
@@ -570,12 +572,20 @@ func (m *RemoteDockerManager) gracefulStopForDiagnostics(ctx context.Context) er
 
 // Cleanup force-removes the last started container (if any)
 func (m *RemoteDockerManager) Cleanup() error {
-	timeout := 10 * time.Second
+	timeout := remoteCleanupTimeout
 	if m.diagnosticsDir != "" {
-		timeout = time.Duration(dockerDiagnosticsStopTimeoutSeconds+30) * time.Second
+		timeout = time.Duration(dockerDiagnosticsStopTimeoutSeconds)*time.Second + remoteDiagnosticsSlack
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return m.CleanupContext(ctx)
+}
+
+// CleanupContext force-removes the last container and staging within the caller's budget.
+func (m *RemoteDockerManager) CleanupContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
 	if m.containerID != "" {

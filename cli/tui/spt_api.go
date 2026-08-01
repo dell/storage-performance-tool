@@ -6,6 +6,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -311,8 +312,17 @@ func (c *SptAPIClient) StartTest(scenario, defaults []byte) (string, error) {
 
 // GetStatus retrieves the current test status
 func (c *SptAPIClient) GetStatus() (*TestStatus, error) {
+	return c.GetStatusContext(context.Background())
+}
+
+// GetStatusContext retrieves status within the caller's cancellation budget.
+func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error) {
 	// Try the /status endpoint first
-	resp, err := c.httpClient.Get(c.baseURL + "/status")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create status request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -634,8 +644,16 @@ func parseSampleTimestamp(raw string) (time.Time, error) {
 }
 
 func (c *SptAPIClient) probeReady() (bool, readinessResponse, []byte, int, error) {
+	return c.probeReadyContext(context.Background())
+}
+
+func (c *SptAPIClient) probeReadyContext(ctx context.Context) (bool, readinessResponse, []byte, int, error) {
 	var info readinessResponse
-	resp, err := c.httpClient.Get(c.baseURL + "/ready")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/ready", nil)
+	if err != nil {
+		return false, info, nil, 0, err
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return false, info, nil, 0, err
 	}
@@ -725,10 +743,15 @@ func (c *SptAPIClient) logRunServletStatus() {
 
 // LogReadySnapshot emits a single-line readiness snapshot using the /ready endpoint.
 func (c *SptAPIClient) LogReadySnapshot(label string) {
+	c.LogReadySnapshotContext(context.Background(), label)
+}
+
+// LogReadySnapshotContext emits a readiness snapshot within the caller's cancellation budget.
+func (c *SptAPIClient) LogReadySnapshotContext(ctx context.Context, label string) {
 	if c == nil {
 		return
 	}
-	ready, info, _, statusCode, err := c.probeReady()
+	ready, info, _, statusCode, err := c.probeReadyContext(ctx)
 	if err != nil {
 		logging.LogDebug("spt-api", "ready snapshot failed",
 			"label", label,
@@ -755,7 +778,12 @@ func (c *SptAPIClient) LogReadySnapshot(label string) {
 
 // Shutdown requests a graceful node shutdown via /shutdown.
 func (c *SptAPIClient) Shutdown() error {
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/shutdown", nil)
+	return c.ShutdownContext(context.Background())
+}
+
+// ShutdownContext requests graceful shutdown within the caller's cancellation budget.
+func (c *SptAPIClient) ShutdownContext(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/shutdown", nil)
 	if err != nil {
 		return fmt.Errorf("failed to create shutdown request: %w", err)
 	}
@@ -773,13 +801,21 @@ func (c *SptAPIClient) Shutdown() error {
 
 // WaitForLinger waits for /status to keep returning a terminal state for the given duration.
 func (c *SptAPIClient) WaitForLinger(linger time.Duration) error {
+	return c.WaitForLingerContext(context.Background(), linger)
+}
+
+// WaitForLingerContext observes terminal status within the caller's cancellation budget.
+func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Duration) error {
 	if linger <= 0 {
 		return nil
 	}
 	deadline := time.Now().Add(linger)
 	sawTerminal := false
 	for time.Now().Before(deadline) {
-		st, err := c.GetStatus()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		st, err := c.GetStatusContext(ctx)
 		if err != nil {
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
@@ -789,7 +825,18 @@ func (c *SptAPIClient) WaitForLinger(linger time.Duration) error {
 		default:
 			return fmt.Errorf("non-terminal state during linger: %s", st.State)
 		}
-		time.Sleep(200 * time.Millisecond)
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	if !sawTerminal {
 		return fmt.Errorf("no terminal status observed during linger")

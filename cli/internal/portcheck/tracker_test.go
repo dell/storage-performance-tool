@@ -357,6 +357,85 @@ func TestRunTrackerDoesNotCapHealthyLongRunningWork(t *testing.T) {
 	}
 }
 
+func TestRunTrackerMatchingStartingStateCountsAsCurrentRunActivity(t *testing.T) {
+	const expectedRunID = int64(17)
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if statusCalls.Add(1) < 10 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "STARTING", "run_id": expectedRunID, "step_id": "current-step",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "COMPLETED", "run_id": expectedRunID, "step_id": "current-step",
+		})
+	}))
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.ExpectedRunID = expectedRunID
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.StartupTimeout = 5 * time.Millisecond
+	tracker.RequireTerminalState = true
+	result, err := tracker.WaitForCompletion(context.Background(), []string{"current-step"})
+	if err != nil {
+		t.Fatalf("matching STARTING run hit startup timeout: %v", err)
+	}
+	if result.RunID != expectedRunID || result.FinalState != "COMPLETED" {
+		t.Fatalf("terminal result = %+v", result)
+	}
+}
+
+func TestRunTrackerIgnoresRetainedPriorRunUntilExpectedRunTransitions(t *testing.T) {
+	const expectedRunID = int64(17)
+	var statusCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		switch call := statusCalls.Add(1); {
+		case call < 4:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "IDLE", "run_id": 16, "step_id": "prior-step",
+			})
+		case call < 7:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "STARTING", "run_id": expectedRunID, "step_id": "current-step",
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "COMPLETED", "run_id": expectedRunID, "step_id": "current-step",
+			})
+		}
+	})
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"run_id": "16", "step_id": "prior-step", "timestamp": 1000, "terminal": true,
+			"operations": map[string]any{"success_rate_last": 0},
+			"bandwidth":  map[string]any{"bytes_rate_last": 0},
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.ExpectedRunID = expectedRunID
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.IdleGrace = time.Millisecond
+	tracker.StartupTimeout = time.Second
+	tracker.RequireTerminalState = true
+	result, err := tracker.WaitForCompletion(context.Background(), []string{"current-step"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsedIdle || result.RunID != expectedRunID || result.FinalState != "COMPLETED" {
+		t.Fatalf("prior-run evidence terminated tracking: %+v", result)
+	}
+}
+
 func TestRunTrackerCancellationPreservesPartialLifecycle(t *testing.T) {
 	tracker := NewRunTracker("http://127.0.0.1:1")
 	ctx, cancel := context.WithCancel(context.Background())

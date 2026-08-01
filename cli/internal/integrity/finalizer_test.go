@@ -108,6 +108,53 @@ func TestFinalizeWriteVerifyPromotesValidatesAndDerivesRemaining(t *testing.T) {
 	}
 }
 
+func TestResolveStepRolesPreservesOrderedFirstMatchAcrossEvidenceSources(t *testing.T) {
+	tests := []struct {
+		name       string
+		workload   string
+		configured []string
+		manifest   []string
+		want       StepRoles
+	}{
+		{
+			name: "runtime write roles precede generated and manifest roles", workload: workload.WriteVerify,
+			configured: []string{
+				"mt-001-runtime-create", "mt-002-runtime-verify",
+				"mt-001-expected-create", "mt-002-expected-verify",
+			},
+			manifest: []string{"mt-001-manifest-create", "mt-002-manifest-verify"},
+			want:     StepRoles{Create: "mt-001-runtime-create", Read: "mt-002-runtime-verify"},
+		},
+		{
+			name: "expected-only write roles", workload: workload.WriteVerify,
+			configured: []string{"mt-001-expected-create", "mt-002-expected-verify"},
+			want:       StepRoles{Create: "mt-001-expected-create", Read: "mt-002-expected-verify"},
+		},
+		{
+			name: "runtime read discovery roles precede manifest", workload: workload.ReadVerify,
+			configured: []string{"mt-001-runtime-list", "mt-002-runtime-verify"},
+			manifest:   []string{"mt-001-manifest-list", "mt-002-manifest-verify"},
+			want:       StepRoles{List: "mt-001-runtime-list", Read: "mt-002-runtime-verify"},
+		},
+		{
+			name: "staged read has only verify role", workload: workload.ReadVerify,
+			configured: []string{"mt-001-runtime-verify"},
+			want:       StepRoles{Read: "mt-001-runtime-verify"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := &results.Manifest{}
+			for _, stepID := range test.manifest {
+				manifest.Steps = append(manifest.Steps, results.StepManifest{StepID: stepID})
+			}
+			if got := ResolveStepRoles(test.workload, test.configured, manifest); got != test.want {
+				t.Fatalf("ResolveStepRoles() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFinalizeNotStartedReadRecordsIncompleteLifecycleWithoutMissingArtifactNoise(t *testing.T) {
 	root := t.TempDir()
 	readStep := "mt-001-verify"
@@ -423,9 +470,10 @@ func TestFinalizeResultsRetryRejectsConflictingDeterministicArtifact(t *testing.
 func TestFinalizeResultsRecoversAfterDirectorySyncFailsPostPublication(t *testing.T) {
 	options := prepareRetryableWriteVerifyFixture(t, 553)
 	originalOperations := durableOSOperations
-	// Each completion pair uses three directory barriers: manifest, marker, and recovered pair.
-	// The seventh barrier is the first later deterministic artifact, integrity.failures.csv.
-	faulting := &failNthDirectorySyncOperations{failAt: 7, base: osDurablePublicationOperations{}}
+	faulting := &failDirectorySyncAfterPublishingOperations{
+		targetName: IntegrityFailuresName,
+		base:       osDurablePublicationOperations{},
+	}
 	durableOSOperations = faulting
 	t.Cleanup(func() { durableOSOperations = originalOperations })
 
@@ -433,8 +481,8 @@ func TestFinalizeResultsRecoversAfterDirectorySyncFailsPostPublication(t *testin
 	if err == nil || !strings.Contains(err.Error(), "durable state is indeterminate") {
 		t.Fatalf("first FinalizeResults() = (%+v, %v), want injected post-publication failure", first, err)
 	}
-	if faulting.syncDirectoryCount != 8 {
-		t.Fatalf("directory sync attempts = %d, want artifact failure plus index update", faulting.syncDirectoryCount)
+	if !faulting.triggered {
+		t.Fatal("integrity.failures.csv directory-sync fault did not trigger")
 	}
 	if _, statErr := os.Stat(filepath.Join(options.ResultsRoot, IntegrityFailuresName)); statErr != nil {
 		t.Fatalf("published artifact was not visible after indeterminate sync failure: %v", statErr)
@@ -727,23 +775,35 @@ func readArtifactBytes(t *testing.T, root string, names []string) map[string][]b
 	return artifacts
 }
 
-type failNthDirectorySyncOperations struct {
-	failAt             int
-	syncDirectoryCount int
-	base               osDurablePublicationOperations
+type failDirectorySyncAfterPublishingOperations struct {
+	targetName   string
+	failNextSync bool
+	triggered    bool
+	base         osDurablePublicationOperations
 }
 
-func (operations *failNthDirectorySyncOperations) syncFile(path string) error {
+func (operations *failDirectorySyncAfterPublishingOperations) syncFile(path string) error {
 	return operations.base.syncFile(path)
 }
 
-func (operations *failNthDirectorySyncOperations) rename(source, destination string) error {
+func (operations *failDirectorySyncAfterPublishingOperations) rename(source, destination string) error {
 	return operations.base.rename(source, destination)
 }
 
-func (operations *failNthDirectorySyncOperations) syncDirectory(path string) error {
-	operations.syncDirectoryCount++
-	if operations.syncDirectoryCount == operations.failAt {
+func (operations *failDirectorySyncAfterPublishingOperations) renameNoReplace(source, destination string) error {
+	if err := operations.base.renameNoReplace(source, destination); err != nil {
+		return err
+	}
+	if filepath.Base(destination) == operations.targetName {
+		operations.failNextSync = true
+	}
+	return nil
+}
+
+func (operations *failDirectorySyncAfterPublishingOperations) syncDirectory(path string) error {
+	if operations.failNextSync {
+		operations.failNextSync = false
+		operations.triggered = true
 		return fmt.Errorf("injected directory synchronization failure")
 	}
 	return operations.base.syncDirectory(path)
@@ -793,14 +853,10 @@ func writeCommittedFixture(t *testing.T, root, step, artifact string, runID int6
 	if err != nil {
 		t.Fatal(err)
 	}
-	completionName := stringsTrimSuffix(artifact, ".csv") + ".complete.json"
+	completionName := strings.TrimSuffix(artifact, ".csv") + ".complete.json"
 	if err = os.WriteFile(filepath.Join(root, step+"."+completionName), markerData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func stringsTrimSuffix(value, suffix string) string {
-	return value[:len(value)-len(suffix)]
 }
 
 func writeCSVFixture(t *testing.T, path string, records [][]string) {

@@ -527,6 +527,7 @@ func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
 	}{
 		{name: "read allow empty", workload: WorkloadTypeReadVerify, flag: "allow-empty-selection", value: "true"},
 		{name: "write rejects allow empty", workload: WorkloadTypeWriteVerify, flag: "allow-empty-selection", value: "true", wantErr: true, errContains: "valid only for read-verify"},
+		{name: "write rejects explicit false allow empty", workload: WorkloadTypeWriteVerify, flag: "allow-empty-selection", value: "false", wantErr: true, errContains: "valid only for read-verify"},
 		{name: "read requires auto results", workload: WorkloadTypeReadVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
 		{name: "write requires auto results", workload: WorkloadTypeWriteVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
 		{name: "read accepts items file", workload: WorkloadTypeReadVerify, flag: "items-file", value: "items.csv"},
@@ -641,6 +642,32 @@ func TestValidateReadVerifyRejectsUnsupportedOptions(t *testing.T) {
 			err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
 			if err == nil || !strings.Contains(err.Error(), "not supported for read-verify workload") {
 				t.Fatalf("option --%s validation error = %v", option.name, err)
+			}
+		})
+	}
+}
+
+func TestValidateReadVerifyRejectsEffectiveOSEnvironmentOptions(t *testing.T) {
+	tests := []struct {
+		name   string
+		envKey string
+		value  string
+		flag   string
+	}{
+		{name: "part size", envKey: constants.EnvPartSize, value: "5MiB", flag: "part-size"},
+		{name: "compressibility", envKey: constants.EnvObjectDataCompressibility, value: "25", flag: "object-data-compressibility"},
+		{name: "dedupable", envKey: constants.EnvObjectDataDedupable, value: "false", flag: "object-data-dedupable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newIntegrityValidationCommand(t)
+			t.Setenv(test.envKey, test.value)
+			if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+				t.Fatal(err)
+			}
+			err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
+			if err == nil || !strings.Contains(err.Error(), "--"+test.flag) {
+				t.Fatalf("effective environment validation error = %v, want --%s rejection", err, test.flag)
 			}
 		})
 	}
