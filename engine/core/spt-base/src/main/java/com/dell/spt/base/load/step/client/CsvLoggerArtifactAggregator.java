@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -88,7 +89,7 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 		final Path staging = Files.createTempFile(parent, "." + artifactName, ".staging");
 		try (final CSVPrinter printer = new CSVPrinter(
 						Files.newBufferedWriter(staging, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
-						CSVFormat.RFC4180)) {
+						IntegrityCsvFormat.RFC4180_LF)) {
 			printer.printRecord(expectedHeader);
 			for (final Path source : nodeSources) {
 				copyRecords(source, printer);

@@ -96,7 +96,6 @@ func stageInputManifestWithOperations(
 		return "", "", "", fmt.Errorf("create staged input: %w", err)
 	}
 	writer := csv.NewWriter(raw)
-	writer.UseCRLF = true
 	writeErr := writer.Write(canonicalHeader)
 	sourceCount := 0
 	for writeErr == nil {

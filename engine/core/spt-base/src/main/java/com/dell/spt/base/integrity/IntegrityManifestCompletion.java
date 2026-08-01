@@ -13,7 +13,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
-/** Identity-bound completion record for a canonical integrity manifest. */
+/**
+ * Identity-bound completion record for a canonical integrity manifest.
+ *
+ * <p>Version 1 is a closed schema: unknown members and trailing JSON values are rejected.
+ */
 public record IntegrityManifestCompletion(
                 int version,
                 String status,
@@ -33,6 +37,7 @@ public record IntegrityManifestCompletion(
     public static final String PRODUCER_CLI_STAGER = "cli_stager";
 
     private static final ObjectMapper JSON = new ObjectMapper()
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     public static Path emissionCountPath(final Path manifest) {

@@ -1,3 +1,5 @@
+//go:build linux
+
 package integrity
 
 import (
@@ -60,6 +62,27 @@ func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 	}
 	if got.RunID != 123 || got.ProducerID != CLIStagerProducerID || got.SourceRecordCount != 6 || got.SelectedRecordCount != 5 {
 		t.Fatalf("unexpected completion: %+v", got)
+	}
+}
+
+func TestStageInputManifestEmitsExactSharedLFBytes(t *testing.T) {
+	fixture := filepath.Join(sharedCompletionFixtureDir(t, "nonempty"), VerifyInputName)
+	dir, manifest, _, err := StageInputManifest(fixture, 124)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	expected, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(expected) {
+		t.Fatalf("staged manifest bytes = %q, want shared fixture %q", actual, expected)
 	}
 }
 
@@ -276,6 +299,7 @@ func TestValidateCompletionRequiresExactlyOneJSONDocument(t *testing.T) {
 		{name: "trailing garbage", file: "trailing-garbage.json", wantErr: true},
 		{name: "concatenated object", file: "concatenated-object.json", wantErr: true},
 		{name: "truncated object", file: "truncated.json", wantErr: true},
+		{name: "unknown field", file: "unknown-field.json", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := ValidateCompletion(

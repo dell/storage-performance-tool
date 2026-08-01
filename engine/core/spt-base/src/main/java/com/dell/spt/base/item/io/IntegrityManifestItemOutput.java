@@ -4,6 +4,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.WRITE;
 
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.io.file.FileOutput;
@@ -12,7 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 
 /** Canonical manifest source writer that seeds its header at construction. */
@@ -26,7 +26,7 @@ public final class IntegrityManifestItemOutput
 		this.manifestPath = manifestPath;
 		printer = new CSVPrinter(
 						Files.newBufferedWriter(manifestPath, StandardCharsets.UTF_8, CREATE_NEW, WRITE),
-						CSVFormat.RFC4180);
+						IntegrityCsvFormat.RFC4180_LF);
 		printer.printRecord(IntegrityManifestItemInput.HEADER);
 		printer.flush();
 	}

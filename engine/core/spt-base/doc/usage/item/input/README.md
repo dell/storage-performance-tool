@@ -131,6 +131,8 @@ Identity for de-duplication and resumability is `(bucket,key,version_id)`.
 Quoted keys, including embedded newlines, are supported. A file without the
 exact header continues through the legacy item-file reader, preserving existing
 QA formats for current-version reads.
+Engine integrity writers use UTF-8 and LF (`\n`) record separators for canonical
+output. Readers continue to accept valid RFC 4180 input using LF or CRLF.
 
 Engine-produced `written.csv`, discovery-produced `verify-input.csv`, and
 verification-produced `verified.csv` have matching `*.complete.json` records.
@@ -138,7 +140,8 @@ The marker is published only after its CSV and binds version/status, positive
 `run_id`, producer kind and ID, source/unique/selected counts, byte length, and
 SHA-256. `engine_step` provenance requires the exact producing step ID;
 `cli_stager` requires `spt-cli-items-stager-v1`. A missing, malformed, stale, or
-mismatched marker prevents dependent I/O.
+mismatched marker prevents dependent I/O. Completion v1 is a closed schema:
+unknown JSON members and trailing JSON values are rejected.
 
 LIST discovery streams complete object entries into per-node sources, merges
 RFC 4180 records in stable node order, de-duplicates shard overlap, applies the

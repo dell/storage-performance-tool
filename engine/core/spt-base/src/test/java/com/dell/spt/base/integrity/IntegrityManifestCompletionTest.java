@@ -115,7 +115,8 @@ class IntegrityManifestCompletionTest {
 		for (final String file : new String[]{
 				"trailing-garbage.json",
 				"concatenated-object.json",
-				"truncated.json"
+				"truncated.json",
+				"unknown-field.json"
 		}) {
 			final Path caseDir = Files.createDirectory(tempDir.resolve(file));
 			final Path manifest = caseDir.resolve("verify-input.csv");

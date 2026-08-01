@@ -9,7 +9,6 @@ import java.io.StringWriter;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
-import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 
 /** Canonical RFC 4180 rows for logger-backed integrity artifacts. */
@@ -171,13 +170,13 @@ public final class IntegrityCsvArtifacts {
 
 	private static String record(final Object... values) {
 		final var output = new StringWriter();
-		try (final var printer = new CSVPrinter(output, CSVFormat.RFC4180)) {
+		try (final var printer = new CSVPrinter(output, IntegrityCsvFormat.RFC4180_LF)) {
 			printer.printRecord(values);
 		} catch (final IOException e) {
 			throw new IllegalStateException("failed to format integrity CSV record", e);
 		}
 		final String value = output.toString();
-		return value.endsWith("\r\n") ? value.substring(0, value.length() - 2) : value;
+		return value.endsWith("\n") ? value.substring(0, value.length() - 1) : value;
 	}
 
 	public enum Kind {

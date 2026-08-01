@@ -1,3 +1,5 @@
+//go:build linux
+
 package integrity
 
 import (
@@ -7,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -336,6 +339,20 @@ func TestValidateJSONCorruptCountRequiresFieldAndMatchesCSV(t *testing.T) {
 	}
 }
 
+func TestObserveJSONCorruptCountHonorsCanceledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("canceled corruption-metrics request reached the server")
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ObserveJSONCorruptCountContext(ctx, server.URL, "read-step")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ObserveJSONCorruptCountContext() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestFinalizeResultsHonorsCanceledContextBeforeArtifactWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -348,6 +365,85 @@ func TestFinalizeResultsHonorsCanceledContextBeforeArtifactWork(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "index.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("canceled finalization unexpectedly created index.json: %v", statErr)
+	}
+}
+
+func TestFinalizeResultsRetryReusesEveryMatchingDeterministicArtifact(t *testing.T) {
+	options := prepareRetryableWriteVerifyFixture(t, 551)
+
+	first, err := FinalizeResults(options)
+	if err != nil || !first.Complete {
+		t.Fatalf("first FinalizeResults() = (%+v, %v), want complete", first, err)
+	}
+	artifactNames := []string{
+		WrittenName, WrittenCompletionName, VerifiedName, VerifiedCompletionName,
+		IntegrityFailuresName, VerifyRemainingName, IntegrityPerformanceName,
+	}
+	before := readArtifactBytes(t, options.ResultsRoot, artifactNames)
+
+	second, err := FinalizeResults(options)
+	if err != nil || !second.Complete {
+		t.Fatalf("retry FinalizeResults() = (%+v, %v), want complete", second, err)
+	}
+	for name, expected := range before {
+		actual, readErr := os.ReadFile(filepath.Join(options.ResultsRoot, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(actual) != string(expected) {
+			t.Errorf("retry changed deterministic artifact %s", name)
+		}
+	}
+}
+
+func TestFinalizeResultsRetryRejectsConflictingDeterministicArtifact(t *testing.T) {
+	options := prepareRetryableWriteVerifyFixture(t, 552)
+	if outcome, err := FinalizeResults(options); err != nil || !outcome.Complete {
+		t.Fatalf("first FinalizeResults() = (%+v, %v), want complete", outcome, err)
+	}
+	destination := filepath.Join(options.ResultsRoot, IntegrityFailuresName)
+	conflicting := []byte("conflicting canonical evidence\n")
+	if err := os.WriteFile(destination, conflicting, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := FinalizeResults(options)
+	if err == nil || !strings.Contains(err.Error(), "differs from current derivation") {
+		t.Fatalf("retry error = %v, want conflicting deterministic artifact rejection", err)
+	}
+	after, readErr := os.ReadFile(destination)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(conflicting) {
+		t.Fatalf("conflicting destination was replaced with %q", after)
+	}
+}
+
+func TestFinalizeResultsRecoversAfterDirectorySyncFailsPostPublication(t *testing.T) {
+	options := prepareRetryableWriteVerifyFixture(t, 553)
+	originalOperations := durableOSOperations
+	// Each completion pair uses three directory barriers: manifest, marker, and recovered pair.
+	// The seventh barrier is the first later deterministic artifact, integrity.failures.csv.
+	faulting := &failNthDirectorySyncOperations{failAt: 7, base: osDurablePublicationOperations{}}
+	durableOSOperations = faulting
+	t.Cleanup(func() { durableOSOperations = originalOperations })
+
+	first, err := FinalizeResults(options)
+	if err == nil || !strings.Contains(err.Error(), "durable state is indeterminate") {
+		t.Fatalf("first FinalizeResults() = (%+v, %v), want injected post-publication failure", first, err)
+	}
+	if faulting.syncDirectoryCount != 8 {
+		t.Fatalf("directory sync attempts = %d, want artifact failure plus index update", faulting.syncDirectoryCount)
+	}
+	if _, statErr := os.Stat(filepath.Join(options.ResultsRoot, IntegrityFailuresName)); statErr != nil {
+		t.Fatalf("published artifact was not visible after indeterminate sync failure: %v", statErr)
+	}
+
+	durableOSOperations = originalOperations
+	second, err := FinalizeResults(options)
+	if err != nil || !second.Complete {
+		t.Fatalf("retry FinalizeResults() = (%+v, %v), want complete recovery", second, err)
 	}
 }
 
@@ -587,6 +683,70 @@ func committedPairFixture(
 	writeCommittedFixture(t, root, sourcePrefix, VerifiedName, runID, producer, records)
 	return filepath.Join(root, sourcePrefix+"."+VerifiedName),
 		filepath.Join(root, sourcePrefix+"."+VerifiedCompletionName)
+}
+
+func prepareRetryableWriteVerifyFixture(t *testing.T, runID int64) FinalizeOptions {
+	t.Helper()
+	root := t.TempDir()
+	createStep, readStep := "mt-001-create", "mt-002-verify"
+	writeResultsIndex(t, root, createStep, readStep)
+	records := [][]string{canonicalHeader, {"b", "key", "1", ""}}
+	writeCommittedFixture(t, root, createStep, WrittenName, runID, createStep, records)
+	writeCommittedFixture(t, root, readStep, VerifiedName, runID, readStep, records)
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityFailuresName), [][]string{failureHeader})
+	writeCSVFixture(t, filepath.Join(root, createStep+"."+IntegrityPerformanceName), [][]string{
+		performanceHeader,
+		{"n0", createStep, "s3", "write_prehash", "sha256", "1", "1", "0.1", "0.0000095367431640625", "0.1", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityPerformanceName), [][]string{
+		performanceHeader,
+		{"n0", readStep, "s3", "read_verify", "sha256", "1", "1", "0.1", "0.0000095367431640625", "", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, createStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, {"CREATE", "1", "0", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, {"READ", "1", "0", "0"},
+	})
+	return FinalizeOptions{
+		ResultsRoot: root, Workload: workload.WriteVerify, RunID: runID,
+		StepIDs: []string{createStep, readStep},
+	}
+}
+
+func readArtifactBytes(t *testing.T, root string, names []string) map[string][]byte {
+	t.Helper()
+	artifacts := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts[name] = data
+	}
+	return artifacts
+}
+
+type failNthDirectorySyncOperations struct {
+	failAt             int
+	syncDirectoryCount int
+	base               osDurablePublicationOperations
+}
+
+func (operations *failNthDirectorySyncOperations) syncFile(path string) error {
+	return operations.base.syncFile(path)
+}
+
+func (operations *failNthDirectorySyncOperations) rename(source, destination string) error {
+	return operations.base.rename(source, destination)
+}
+
+func (operations *failNthDirectorySyncOperations) syncDirectory(path string) error {
+	operations.syncDirectoryCount++
+	if operations.syncDirectoryCount == operations.failAt {
+		return fmt.Errorf("injected directory synchronization failure")
+	}
+	return operations.base.syncDirectory(path)
 }
 
 func copyFixtureFile(t *testing.T, source, destination string) {

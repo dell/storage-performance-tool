@@ -1,8 +1,10 @@
 package integrity
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -77,6 +79,94 @@ func durableRenameNoReplace(source, destination string) error {
 		)
 	}
 	return nil
+}
+
+// durableRenameNoReplaceOrMatch publishes a deterministic non-pair artifact. A prior destination
+// is accepted only when its bytes exactly match the newly derived staging file; the existing file
+// and directory are then resynchronized so a retry can resolve an earlier indeterminate result.
+func durableRenameNoReplaceOrMatch(source, destination string) error {
+	destinationDirectory, err := durablePublicationDirectory(source, destination)
+	if err != nil {
+		return err
+	}
+	if err = durableOSOperations.syncFile(source); err != nil {
+		return fmt.Errorf("synchronize publication file %s: %w", filepath.Base(source), err)
+	}
+	if err = renameNoReplace(source, destination); err == nil {
+		if err = durableOSOperations.syncDirectory(destinationDirectory); err != nil {
+			return fmt.Errorf(
+				"published %s but failed to synchronize its directory; durable state is indeterminate: %w",
+				filepath.Base(destination), err,
+			)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("atomically publish %s without replacement: %w", filepath.Base(destination), err)
+	}
+
+	equal, compareErr := filesEqual(source, destination)
+	if compareErr != nil {
+		return fmt.Errorf("compare existing deterministic artifact %s: %w", filepath.Base(destination), compareErr)
+	}
+	if !equal {
+		return fmt.Errorf("existing deterministic artifact %s differs from current derivation: %w",
+			filepath.Base(destination), os.ErrExist)
+	}
+	if err = durableOSOperations.syncFile(destination); err != nil {
+		return fmt.Errorf("synchronize existing deterministic artifact %s: %w", filepath.Base(destination), err)
+	}
+	if err = os.Remove(source); err != nil {
+		return fmt.Errorf("remove matching publication staging file %s: %w", filepath.Base(source), err)
+	}
+	if err = durableOSOperations.syncDirectory(destinationDirectory); err != nil {
+		return fmt.Errorf("synchronize recovered deterministic artifact directory for %s: %w",
+			filepath.Base(destination), err)
+	}
+	return nil
+}
+
+const deterministicArtifactCompareBufferSize = 64 * 1024
+
+func filesEqual(leftPath, rightPath string) (bool, error) {
+	leftInfo, err := os.Stat(leftPath)
+	if err != nil {
+		return false, err
+	}
+	rightInfo, err := os.Stat(rightPath)
+	if err != nil {
+		return false, err
+	}
+	if leftInfo.Size() != rightInfo.Size() {
+		return false, nil
+	}
+	left, err := os.Open(leftPath) // #nosec G304 -- internally resolved staging path
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = left.Close() }()
+	right, err := os.Open(rightPath) // #nosec G304 -- internally resolved canonical path
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = right.Close() }()
+	leftBuffer := make([]byte, deterministicArtifactCompareBufferSize)
+	rightBuffer := make([]byte, deterministicArtifactCompareBufferSize)
+	for {
+		leftCount, leftErr := io.ReadFull(left, leftBuffer)
+		rightCount, rightErr := io.ReadFull(right, rightBuffer)
+		if leftCount != rightCount || !bytes.Equal(leftBuffer[:leftCount], rightBuffer[:rightCount]) {
+			return false, nil
+		}
+		if errors.Is(leftErr, io.EOF) && errors.Is(rightErr, io.EOF) {
+			return true, nil
+		}
+		if errors.Is(leftErr, io.ErrUnexpectedEOF) && errors.Is(rightErr, io.ErrUnexpectedEOF) {
+			return true, nil
+		}
+		if leftErr != nil || rightErr != nil {
+			return false, errors.Join(leftErr, rightErr)
+		}
+	}
 }
 
 func durablePublicationDirectory(source, destination string) (string, error) {
@@ -155,6 +245,21 @@ func closeAndPublishTempFileNoReplace(
 		return fmt.Errorf("close publication staging file: %w", err)
 	}
 	return durableRenameNoReplace(tempPath, destination)
+}
+
+func closeAndPublishTempFileNoReplaceOrMatch(
+	tempFile *os.File,
+	tempPath string,
+	destination string,
+) error {
+	if err := tempFile.Chmod(durableArtifactFileMode); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("set publication permissions: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("close publication staging file: %w", err)
+	}
+	return durableRenameNoReplaceOrMatch(tempPath, destination)
 }
 
 func writeFileDurableAtomicWithOperations(

@@ -1,3 +1,5 @@
+//go:build linux
+
 package integrity
 
 import (
@@ -8,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWriteFileDurableAtomicRealFilesystemCanary(t *testing.T) {
@@ -64,6 +68,76 @@ func TestDurableRenameNoReplacePreservesExistingDestination(t *testing.T) {
 	}
 	if string(sourceContent) != "new" {
 		t.Fatalf("failed publication changed staging content to %q", sourceContent)
+	}
+}
+
+func TestUnsupportedNoReplaceProviderErrorNamesResultsDirectoryAndContract(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "run-42", "verified.csv")
+	for _, cause := range []error{unix.EINVAL, unix.ENOSYS, unix.EOPNOTSUPP} {
+		err := unsupportedNoReplaceProviderError(destination, cause)
+		for _, detail := range []string{
+			filepath.Dir(destination), "filesystem/provider", "renameat2(RENAME_NOREPLACE)",
+			"crash-durable integrity publication contract",
+		} {
+			if !strings.Contains(err.Error(), detail) {
+				t.Errorf("diagnostic %q does not contain %q", err, detail)
+			}
+		}
+		if !errors.Is(err, cause) {
+			t.Errorf("diagnostic %q does not preserve %v", err, cause)
+		}
+	}
+}
+
+func TestDurableRenameNoReplaceOrMatchRecoversMatchingDestination(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, ".manifest.staging")
+	destination := filepath.Join(directory, "manifest.csv")
+	for _, path := range []string{source, destination} {
+		if err := os.WriteFile(path, []byte("same"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := durableRenameNoReplaceOrMatch(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("matching staging source was not removed: %v", err)
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "same" {
+		t.Fatalf("matching destination changed to %q", content)
+	}
+}
+
+func TestDurableRenameNoReplaceOrMatchRejectsConflictingDestination(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, ".manifest.staging")
+	destination := filepath.Join(directory, "manifest.csv")
+	if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := durableRenameNoReplaceOrMatch(source, destination)
+	if err == nil || !errors.Is(err, os.ErrExist) ||
+		!strings.Contains(err.Error(), "differs from current derivation") {
+		t.Fatalf("durableRenameNoReplaceOrMatch() error = %v, want conflict", err)
+	}
+	for path, expected := range map[string]string{source: "new", destination: "existing"} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(content) != expected {
+			t.Errorf("%s content = %q, want %q", path, content, expected)
+		}
 	}
 }
 

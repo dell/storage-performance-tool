@@ -93,6 +93,7 @@ func readCompletionRecord(completionPath string) (Completion, error) {
 	}
 	defer func() { _ = markerFile.Close() }()
 	decoder := json.NewDecoder(markerFile)
+	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(&marker); err != nil {
 		return marker, fmt.Errorf("decode completion record: %w", err)
 	}
@@ -272,7 +273,6 @@ func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) 
 	}
 	path := file.Name()
 	writer := csv.NewWriter(file)
-	writer.UseCRLF = true
 	var prior *ManifestRecord
 	for i := range records {
 		record := records[i]
@@ -373,7 +373,6 @@ func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []
 		}
 	}()
 	writer := csv.NewWriter(out)
-	writer.UseCRLF = true
 	if includeHeader {
 		if err = writer.Write(canonicalHeader); err != nil {
 			_ = out.Close()

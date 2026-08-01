@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
-	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -132,7 +131,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
 	}
-	if options.StepLifecycles[readStep] == string(portcheck.StepLifecycleNotStarted) {
+	if options.StepLifecycles[readStep] == string(results.StepLifecycleNotStarted) {
 		return outcome, nil
 	}
 	readCounts, metricsErr := readOperationMetrics(options.ResultsRoot, readStep, "READ")
@@ -362,7 +361,7 @@ func promoteStepFile(root, step, name string) error {
 		return fmt.Errorf("cannot promote %s without a producing step", name)
 	}
 	source := filepath.Join(root, step+"."+name)
-	if err := copyAtomic(source, filepath.Join(root, name)); err != nil {
+	if err := copyAtomicOrMatch(source, filepath.Join(root, name)); err != nil {
 		return fmt.Errorf("promote %s from step %s: %w", name, step, err)
 	}
 	return nil
@@ -375,7 +374,9 @@ const (
 	completionPairManifestOnly
 	completionPairMarkerOnly
 	completionPairPresent
-	completionPromotionStateAttempts = 6
+	// completionPromotionMaxStateTransitions bounds retries when another publisher changes the
+	// manifest/marker pair between observations.
+	completionPromotionMaxStateTransitions = 6
 )
 
 func promoteCompletionPair(
@@ -392,7 +393,7 @@ func promoteCompletionPair(
 		return fmt.Errorf("validate source completion pair: %w", err)
 	}
 
-	for attempt := 0; attempt < completionPromotionStateAttempts; attempt++ {
+	for attempt := 0; attempt < completionPromotionMaxStateTransitions; attempt++ {
 		state, stateErr := inspectCompletionPairState(
 			destinationManifestPath, destinationCompletionPath,
 		)
@@ -503,6 +504,17 @@ func synchronizeExistingCompletionPair(manifestPath, completionPath string) erro
 }
 
 func copyAtomic(source, destination string) error {
+	return copyAtomicWithPublisher(source, destination, closeAndPublishTempFileNoReplace)
+}
+
+func copyAtomicOrMatch(source, destination string) error {
+	return copyAtomicWithPublisher(source, destination, closeAndPublishTempFileNoReplaceOrMatch)
+}
+
+func copyAtomicWithPublisher(
+	source, destination string,
+	publish func(*os.File, string, string) error,
+) error {
 	in, err := os.Open(source) // #nosec G304 -- internally resolved result/staging path
 	if err != nil {
 		return err
@@ -518,7 +530,7 @@ func copyAtomic(source, destination string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
+	err = publish(tmp, tmpPath, destination)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 	}
@@ -543,7 +555,6 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 	}
 	tmpPath := tmp.Name()
 	writer := csv.NewWriter(tmp)
-	writer.UseCRLF = true
 	if err = writer.Write(canonicalHeader); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
@@ -594,7 +605,7 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 		err = writer.Error()
 	}
 	if err == nil {
-		err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
+		err = closeAndPublishTempFileNoReplaceOrMatch(tmp, tmpPath, destination)
 	} else {
 		_ = tmp.Close()
 	}
@@ -733,9 +744,18 @@ func readOperationMetrics(root, step, opType string) (operationCounts, error) {
 
 // ObserveJSONCorruptCount reads the required corruption count from an engine metrics endpoint.
 func ObserveJSONCorruptCount(baseURL, readStep string) (int64, error) {
+	return ObserveJSONCorruptCountContext(context.Background(), baseURL, readStep)
+}
+
+// ObserveJSONCorruptCountContext reads the required corruption count with caller cancellation.
+func ObserveJSONCorruptCountContext(ctx context.Context, baseURL, readStep string) (int64, error) {
 	for _, endpoint := range []string{"/metrics/fleet/json", "/metrics/json"} {
 		url := strings.TrimSuffix(baseURL, "/") + endpoint
-		response, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return 0, fmt.Errorf("create required corruption metrics request for %s: %w", endpoint, err)
+		}
+		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
 		if err != nil {
 			return 0, fmt.Errorf("fetch required corruption metrics from %s: %w", endpoint, err)
 		}
@@ -806,7 +826,6 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 	}
 	tmpPath := tmp.Name()
 	writer := csv.NewWriter(tmp)
-	writer.UseCRLF = true
 	if err = writer.Write(performanceHeader); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
@@ -874,7 +893,7 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 		err = writer.Error()
 	}
 	if err == nil {
-		err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
+		err = closeAndPublishTempFileNoReplaceOrMatch(tmp, tmpPath, destination)
 	} else {
 		_ = tmp.Close()
 	}

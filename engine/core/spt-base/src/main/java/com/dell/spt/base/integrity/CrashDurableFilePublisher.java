@@ -2,10 +2,9 @@ package com.dell.spt.base.integrity;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
-import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
@@ -13,10 +12,11 @@ import java.util.Objects;
  * Publishes integrity evidence with file and directory synchronization.
  *
  * <p>The durability guarantee requires a filesystem/provider that honors {@link FileChannel#force}
- * for regular files and directories and supports an atomic move within one directory. Publication
- * fails closed when any of those operations is unsupported. In particular, callers must not assume
- * this contract on network or userspace filesystems whose server-side persistence semantics do not
- * honor those operations.
+ * for regular files and directories and supports hard links within one directory. Publication
+ * fails closed when any of those operations is unsupported. The final name is created as a hard
+ * link so publication never replaces an existing artifact. Callers must not assume this contract
+ * on network or userspace filesystems whose server-side persistence semantics do not honor those
+ * operations.
  */
 public final class CrashDurableFilePublisher {
 
@@ -24,7 +24,9 @@ public final class CrashDurableFilePublisher {
 
 		void syncFile(Path path) throws IOException;
 
-		void atomicMove(Path source, Path target) throws IOException;
+		void createLinkNoReplace(Path source, Path target) throws IOException;
+
+		void delete(Path path) throws IOException;
 
 		void syncDirectory(Path path) throws IOException;
 	}
@@ -41,12 +43,20 @@ public final class CrashDurableFilePublisher {
 		}
 
 		@Override
-		public void atomicMove(final Path source, final Path target) throws IOException {
+		public void createLinkNoReplace(final Path source, final Path target) throws IOException {
 			try {
-				Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
-			} catch (final AtomicMoveNotSupportedException | UnsupportedOperationException e) {
-				throw new IOException("atomic publication is not supported for " + target, e);
+				Files.createLink(target, source);
+			} catch (final FileAlreadyExistsException e) {
+				throw e;
+			} catch (final UnsupportedOperationException e) {
+				throw new IOException(
+								"atomic no-replace hard-link publication is not supported for " + target, e);
 			}
+		}
+
+		@Override
+		public void delete(final Path path) throws IOException {
+			Files.delete(path);
 		}
 
 		@Override
@@ -75,8 +85,9 @@ public final class CrashDurableFilePublisher {
 	}
 
 	/**
-	 * Synchronizes a complete staging file, atomically moves it to its final name, and synchronizes
-	 * the containing directory. The source and target must be in the same directory.
+	 * Synchronizes a complete staging file, atomically creates its final name without replacement,
+	 * removes the staging name, and synchronizes the containing directory. The source and target
+	 * must be in the same directory on a filesystem that supports hard links.
 	 *
 	 * @param staging the complete staging file
 	 * @param target the final published name
@@ -99,8 +110,9 @@ public final class CrashDurableFilePublisher {
 											+ staging + " -> " + target);
 		}
 		operations.syncFile(normalizedStaging);
-		operations.atomicMove(normalizedStaging, normalizedTarget);
+		operations.createLinkNoReplace(normalizedStaging, normalizedTarget);
 		try {
+			operations.delete(normalizedStaging);
 			operations.syncDirectory(targetParent);
 		} catch (final IOException e) {
 			throw new IOException(

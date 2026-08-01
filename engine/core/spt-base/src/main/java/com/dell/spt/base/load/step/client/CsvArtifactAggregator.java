@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
@@ -352,7 +353,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		boolean success = false;
 		try (CSVPrinter printer = new CSVPrinter(
 						Files.newBufferedWriter(chunk, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
-						CSVFormat.RFC4180)) {
+						IntegrityCsvFormat.RFC4180_LF)) {
 			ManifestRecord prior = null;
 			for (final ManifestRecord record : records) {
 				if (prior != null && RECORD_ORDER.compare(prior, record) == 0) {
@@ -401,7 +402,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		});
 		try (CSVPrinter printer = new CSVPrinter(
 						Files.newBufferedWriter(target, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
-						CSVFormat.RFC4180)) {
+						IntegrityCsvFormat.RFC4180_LF)) {
 			if (includeHeader) {
 				printer.printRecord(IntegrityManifestItemInput.HEADER);
 			}

@@ -3,6 +3,7 @@ package com.dell.spt.base.item.io;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.integrity.CrashDurableFilePublisher;
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
@@ -18,7 +19,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
-import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 
 /** Writes successful operation results in the canonical integrity-manifest format. */
@@ -47,7 +47,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 										StandardCharsets.UTF_8,
 										StandardOpenOption.CREATE_NEW,
 										StandardOpenOption.WRITE),
-						CSVFormat.RFC4180);
+						IntegrityCsvFormat.RFC4180_LF);
 		printer.printRecord(IntegrityManifestItemInput.HEADER);
 		printer.flush();
 	}
@@ -137,7 +137,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		try {
 			Files.writeString(
 							staging,
-							Long.toString(emittedRecordCount) + System.lineSeparator(),
+							Long.toString(emittedRecordCount) + "\n",
 							StandardCharsets.US_ASCII,
 							StandardOpenOption.TRUNCATE_EXISTING);
 			IntegrityManifestCompletion.atomicMove(staging, countPath);

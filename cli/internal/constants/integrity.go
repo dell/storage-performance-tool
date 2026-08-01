@@ -28,7 +28,6 @@ var RequiredIntegritySchemaPaths = []string{
 
 // Integrity mode values.
 const (
-	IntegrityModeNone        = "none"
 	IntegrityModeMetadata    = "metadata"
 	IntegrityAlgorithmSHA256 = "sha256"
 )
@@ -46,7 +45,6 @@ const (
 	IntegrityProvenanceNone       = "none"
 	IntegrityProvenanceEngineStep = "engine_step"
 	IntegrityProvenanceCLIStager  = "cli_stager"
-	IntegrityProvenanceExternal   = "external"
 )
 
 // IntegrityCLIStagerProducerID is the stable producer identity the CLI records when it stages an

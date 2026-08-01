@@ -102,6 +102,10 @@ bucket,key,size,version_id
 `key` is the complete object key. `size` is a nonnegative byte count. A blank
 `version_id` means the current version; a value requests that exact version.
 Record identity is `(bucket,key,version_id)`.
+SPT emits canonical integrity CSV records with UTF-8 encoding and LF (`\n`)
+record separators on every platform. Readers accept valid RFC 4180 input with
+either LF or CRLF separators, but completion byte lengths and digests bind the
+exact bytes that were published.
 
 ## Completion, empty selections, and exit status
 
@@ -162,21 +166,23 @@ uses `--allow-empty-selection` and should return `0`. Investigate failures befor
 using an ordinary item-file deletion scenario to reclaim preserved objects.
 
 Manifest completion records use a crash-durable two-file commit. SPT flushes
-and synchronizes the completed CSV, atomically renames it, and synchronizes the
-containing directory. Only then does it synchronize, atomically rename, and
-directory-sync the JSON marker. The marker contains version/status, run and
-producer identity, source/unique/selected counts, manifest byte length, and
-manifest SHA-256. A missing, staging-only, stale, or mismatched marker prevents
-a dependent engine step from starting.
+and synchronizes each completed file, atomically creates its final name without
+replacing an existing name, and synchronizes the containing directory. The CSV
+is committed before its JSON marker. The marker contains exactly these v1
+members: `version`, `status`, `run_id`, `producer_kind`, `producer_id`,
+`artifact`, `source_record_count`, `unique_record_count`,
+`selected_record_count`, `manifest_bytes`, and `manifest_sha256`. Unknown
+members are rejected. A missing, staging-only, stale, or mismatched marker
+prevents a dependent engine step from starting.
 The marker must contain exactly one JSON object plus optional trailing
-whitespace. CLI promotion never replaces an existing canonical name. A retry
+whitespace. Publication never replaces an existing canonical name. A retry
 may reuse a fully validated matching pair or complete a matching manifest-only
 state by publishing its marker. A mismatched pair or manifest, or a marker
 without its manifest, fails closed. Uncommitted marker-staging files are ignored
 as commit evidence and retained for diagnosis.
 
 This guarantee requires a filesystem that honors file and directory fsync and
-same-directory atomic rename semantics. It is supported on the local Linux
+same-directory atomic no-replace publication semantics. It is supported on the local Linux
 filesystems used by the SPT container when those primitives are provided by the
 host. SPT fails the integrity run rather than weakening publication when a
 primitive is unavailable. Network, clustered, FUSE, and other userspace
