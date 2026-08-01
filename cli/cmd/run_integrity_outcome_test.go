@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -50,7 +51,7 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	params := scenario.Params{WorkloadType: scenario.WorkloadTypeReadVerify}
 	outcome := autoResultsOutcome{
 		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
-		Finalization: &integrity.FinalizeOutcome{EmptySelection: true},
+		Finalization: &integrity.FinalizeOutcome{Complete: true, EmptySelection: true},
 	}
 	err := resolveVerificationRunError(nil, outcome, true, params)
 	var exitErr *ExitCodeError
@@ -60,6 +61,20 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	outcome.Finalization.EmptyAllowed = true
 	if err = resolveVerificationRunError(nil, outcome, true, params); err != nil {
 		t.Fatalf("explicit clean empty selection should pass: %v", err)
+	}
+}
+
+func TestResolveVerificationRunErrorRejectsIncompleteFinalizationOutcome(t *testing.T) {
+	outcome := autoResultsOutcome{
+		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+		Finalization: &integrity.FinalizeOutcome{},
+	}
+	err := resolveVerificationRunError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+		!strings.Contains(exitErr.Error(), "finalization is incomplete") {
+		t.Fatalf("error = %#v, want explicit incomplete-finalization exit 1", err)
 	}
 }
 

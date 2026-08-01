@@ -254,6 +254,53 @@ func TestRunTrackerUnavailableReturnsWithinLivenessDeadline(t *testing.T) {
 	}
 }
 
+func TestRunTrackerExpectedStepErrorResponsesDoNotCountAsAvailability(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, http.StatusText(status), status)
+			}))
+			defer server.Close()
+
+			tracker := NewRunTracker(server.URL)
+			tracker.PollInterval = 2 * time.Millisecond
+			tracker.UnavailableTimeout = 15 * time.Millisecond
+			tracker.StartupTimeout = time.Second
+			result, err := tracker.WaitForCompletion(context.Background(), []string{"expected-step"})
+			if err == nil || !strings.Contains(err.Error(), "completion tracker unavailable") {
+				t.Fatalf("WaitForCompletion error = %v, want tracker-unavailable error", err)
+			}
+			if result == nil || result.Steps["expected-step"].Lifecycle != StepLifecyclePlanned {
+				t.Fatalf("partial result = %#v, want planned expected step", result)
+			}
+		})
+	}
+}
+
+func TestRunTrackerIdleAndEmptyMetricsHitStartupDeadline(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"state": "IDLE"})
+	})
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]any{})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.StartupTimeout = 15 * time.Millisecond
+	tracker.UnavailableTimeout = time.Second
+	result, err := tracker.WaitForCompletion(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "no run activity") {
+		t.Fatalf("WaitForCompletion error = %v, want startup deadline error", err)
+	}
+	if result == nil || result.FinalState != "IDLE" || result.UsedIdle {
+		t.Fatalf("partial result = %#v, want nonterminal pre-activity IDLE", result)
+	}
+}
+
 func TestRunTrackerAPIDisappearsAfterActivity(t *testing.T) {
 	var statusCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

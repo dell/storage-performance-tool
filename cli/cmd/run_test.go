@@ -3,12 +3,17 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"testing"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
+	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
 
 func TestDeriveBaseURLSingleHost(t *testing.T) {
@@ -146,4 +151,137 @@ func TestRunCmdSingleRemoteHostUsesOrchestratorAndSkipsControllerPortCheck(t *te
 	if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
 		t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
 	}
+}
+
+func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
+	type routeContextKey struct{}
+	tests := []struct {
+		name        string
+		workload    string
+		hosts       string
+		minHosts    string
+		shutdown    string
+		wantLocal   int
+		wantMulti   int
+		wantConnect int
+		wantPrepare int
+		wantPort    int
+	}{
+		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1},
+		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1},
+		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1},
+		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			for name, value := range map[string]string{
+				"test-hosts": test.hosts, "min-hosts": test.minHosts,
+				"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+				"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+				"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+				"shutdown-on-complete": test.shutdown, "generate-only": "false", "items-file": "",
+			} {
+				setGlobalRunFlagForTest(t, name, value)
+			}
+			runContext := context.WithValue(context.Background(), routeContextKey{}, test.name)
+			previousContext := runCmd.Context()
+			runCmd.SetContext(runContext)
+			t.Cleanup(func() { runCmd.SetContext(previousContext) })
+
+			previousPort := resolvePortConflictFunc
+			previousConnect := connectMultiHostOrchestratorFunc
+			previousPrepare := prepareDistributedIntegrityRuntimeIdentityFunc
+			previousLocal := startLocalHeadlessRunFunc
+			previousMulti := startMultiHostHeadlessRunFunc
+			previousAutoResults := startAutoResultsFunc
+			t.Cleanup(func() {
+				resolvePortConflictFunc = previousPort
+				connectMultiHostOrchestratorFunc = previousConnect
+				prepareDistributedIntegrityRuntimeIdentityFunc = previousPrepare
+				startLocalHeadlessRunFunc = previousLocal
+				startMultiHostHeadlessRunFunc = previousMulti
+				startAutoResultsFunc = previousAutoResults
+			})
+
+			var portCalls, connectCalls, prepareCalls, localCalls, multiCalls, autoResultsCalls int
+			var autoResultsContext context.Context
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				portCalls++
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+				connectCalls++
+				return nil
+			}
+			prepareDistributedIntegrityRuntimeIdentityFunc = func(
+				context.Context, *tui.MultiHostOrchestrator, string,
+			) (tui.DistributedRuntimeIdentityEvidence, error) {
+				prepareCalls++
+				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
+			}
+			startLocalHeadlessRunFunc = func(string, string, scenario.Params, headless.HeadlessOptions) error {
+				localCalls++
+				return nil
+			}
+			startMultiHostHeadlessRunFunc = func(
+				*tui.MultiHostOrchestrator, string, string, scenario.Params, headless.HeadlessOptions,
+			) error {
+				multiCalls++
+				return nil
+			}
+			startAutoResultsFunc = func(
+				ctx context.Context, _ string, _ string, _ string, _ []string, _ bool, _ []*hostparse.HostInfo,
+				_ string, _ bool, _ int, _ string, _ *runMetadata, _ io.Writer, _ io.Writer, _ string,
+				_ func(context.Context), _ ...*integrity.FinalizeOptions,
+			) chan autoResultsOutcome {
+				autoResultsCalls++
+				autoResultsContext = ctx
+				outcomes := make(chan autoResultsOutcome, 1)
+				outcomes <- autoResultsOutcome{
+					Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+					Finalization: &integrity.FinalizeOutcome{Complete: true},
+				}
+				return outcomes
+			}
+
+			if err := runCmd.RunE(runCmd, []string{test.workload}); err != nil {
+				t.Fatalf("RunE() error = %v", err)
+			}
+			if localCalls != test.wantLocal || multiCalls != test.wantMulti ||
+				connectCalls != test.wantConnect || prepareCalls != test.wantPrepare ||
+				portCalls != test.wantPort || autoResultsCalls != 1 {
+				t.Fatalf(
+					"route calls local=%d multi=%d connect=%d prepare=%d port=%d auto-results=%d",
+					localCalls, multiCalls, connectCalls, prepareCalls, portCalls, autoResultsCalls,
+				)
+			}
+			if autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name {
+				t.Fatalf("auto-results context = %#v, want command context marker %q", autoResultsContext, test.name)
+			}
+			if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
+				t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
+			}
+		})
+	}
+}
+
+func setGlobalRunFlagForTest(t *testing.T, name, value string) {
+	t.Helper()
+	flag := runCmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("run flag %q not found", name)
+	}
+	previousValue := flag.Value.String()
+	previousChanged := flag.Changed
+	if err := flag.Value.Set(value); err != nil {
+		t.Fatalf("set %s=%q: %v", name, value, err)
+	}
+	flag.Changed = true
+	t.Cleanup(func() {
+		if err := flag.Value.Set(previousValue); err != nil {
+			t.Errorf("restore %s=%q: %v", name, previousValue, err)
+		}
+		flag.Changed = previousChanged
+	})
 }

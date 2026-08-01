@@ -62,18 +62,22 @@ func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []strin
 func (*cancelAwareRunTracker) SetDebug(bool) {}
 
 type fakeFetcher struct {
-	mu       sync.Mutex
-	stepIDs  []string
-	baseURL  string
-	output   string
-	manifest *results.Manifest
-	err      error
-	onFetch  func(output string, stepIDs []string) error
+	mu        sync.Mutex
+	stepIDs   []string
+	baseURL   string
+	output    string
+	manifest  *results.Manifest
+	err       error
+	onFetch   func(output string, stepIDs []string) error
+	onContext func(context.Context)
 }
 
 func (f *fakeFetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.onContext != nil {
+		f.onContext(ctx)
+	}
 	f.stepIDs = append([]string(nil), stepIDs...)
 	if f.onFetch != nil {
 		if err := f.onFetch(f.output, stepIDs); err != nil {
@@ -147,7 +151,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
 
 	// Fleet endpoint unavailable (older engine)
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 
 	// Stale IDs from a prior aborted run (timestamp .367), current run has timestamp .368.
 	staleIDs := []string{
@@ -165,7 +169,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	// return both sets (as the prior container's /metrics/json keeps accumulating).
 	var discoverCallCount int
 	var discoverMu sync.Mutex
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
 		discoverMu.Lock()
 		discoverCallCount++
 		n := discoverCallCount
@@ -188,7 +192,7 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -242,11 +246,11 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 
 	// Fleet endpoint unavailable (older engine)
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 
 	// Discovery returns the expected ID mixed in with a foreign one from another run.
 	discoverCalls := 0
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
 		discoverCalls++
 		return []string{"foreign-step-other-run", "expected-create"}, nil
 	}
@@ -270,7 +274,7 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, []string{"expected-create"}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -341,10 +345,10 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	}
 
 	// Node-local /metrics/json returns nothing useful in distributed mode
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 
 	// Fleet endpoint returns the engine's actual step IDs
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) {
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
 		return fleetIDs, nil
 	}
 
@@ -357,7 +361,7 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -409,12 +413,12 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 	}
 
 	// Node-local returns matching IDs (non-distributed mode)
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
 		return expectedIDs, nil
 	}
 
 	// Fleet endpoint unavailable (404)
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 
 	fetcher := &fakeFetcher{}
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
@@ -425,7 +429,7 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -469,10 +473,10 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return tracker }
 
 	stepID := "mt-001-20260506.204108.064-write"
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) {
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) {
 		return []string{stepID}, nil
 	}
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 
 	traceSrcDir := t.TempDir()
 	traceFile := filepath.Join(traceSrcDir, "spt-20260506.204108.064.trace.log")
@@ -512,7 +516,7 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults("http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile, nil)
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile, nil)
 
 	select {
 	case <-done:
@@ -563,8 +567,8 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 
 	stepID := "mt-001-20260604.195722.504-mixed"
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
@@ -578,11 +582,12 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 
 	events := &eventWriter{}
 	var hookCalled int32
-	preSummaryHook := func() {
+	preSummaryHook := func(context.Context) {
 		atomic.AddInt32(&hookCalled, 1)
 		_, _ = events.Write([]byte("PRE-SUMMARY HOOK RAN\n"))
 	}
 	done := startAutoResults(
+		context.Background(),
 		"http://example",
 		"mt",
 		t.TempDir(),
@@ -655,8 +660,8 @@ func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T
 	newRunTrackerFunc = func(string) autoResultsRunTracker {
 		return &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateFailed}}
 	}
-	discoverStepIDsFunc = func(string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(context.Context, string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(string, string) autoResultsFetcher {
 		return &fakeFetcher{err: errors.New("truncated integrity artifact")}
 	}
@@ -673,6 +678,7 @@ func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T
 	}
 
 	done := startAutoResults(
+		context.Background(),
 		"http://example", "mt", t.TempDir(), []string{stepID}, false, nil, "9999", true, 1,
 		"", nil, io.Discard, io.Discard, "", nil,
 	)
@@ -736,18 +742,18 @@ func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) 
 
 	stepID := "mt-001-20260604.195722.504-mixed"
 	newRunTrackerFunc = func(baseURL string) autoResultsRunTracker { return &fakeRunTracker{} }
-	discoverStepIDsFunc = func(baseURL string) ([]string, error) { return []string{stepID}, nil }
-	discoverFleetStepIDsFunc = func(baseURL string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return []string{stepID}, nil }
+	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string) ([]string, error) { return nil, nil }
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	var hookCalled int32
-	preSummaryHook := func() { atomic.AddInt32(&hookCalled, 1) }
+	preSummaryHook := func(context.Context) { atomic.AddInt32(&hookCalled, 1) }
 
 	// shutdownOn = false
-	done := startAutoResults("http://example", "mt", t.TempDir(), []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", preSummaryHook)
+	done := startAutoResults(context.Background(), "http://example", "mt", t.TempDir(), []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", preSummaryHook)
 
 	select {
 	case <-done:
@@ -774,14 +780,15 @@ func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
 
 	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
 	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
-	discoverStepIDsFunc = func(string) ([]string, error) { return nil, nil }
-	discoverFleetStepIDsFunc = func(string) ([]string, error) { return nil, nil }
+	discoverStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(context.Context, string) ([]string, error) { return nil, nil }
 	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := startAutoResults(
+		ctx,
 		"http://127.0.0.1:1", "mt", t.TempDir(), nil, false, nil, "", false, 0, "", nil,
-		io.Discard, io.Discard, "", nil, &integrity.FinalizeOptions{Context: ctx})
+		io.Discard, io.Discard, "", nil, &integrity.FinalizeOptions{})
 	cancel()
 
 	select {
@@ -796,5 +803,91 @@ func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
 	case <-tracker.exited:
 	default:
 		t.Fatal("tracker worker had not exited when auto-results completed")
+	}
+}
+
+func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	}()
+
+	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
+	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
+	stepID := "mt-001-verify"
+	assertCleanupContext := func(stage string, ctx context.Context) {
+		t.Helper()
+		if err := ctx.Err(); err != nil {
+			t.Errorf("%s context is already canceled: %v", stage, err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("%s context has no cleanup deadline", stage)
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > constants.AutoResultsCancelCleanupTimeout {
+			t.Errorf("%s cleanup deadline remaining = %s", stage, remaining)
+		}
+	}
+	discoverStepIDsFunc = func(ctx context.Context, _ string) ([]string, error) {
+		assertCleanupContext("discovery", ctx)
+		return []string{stepID}, nil
+	}
+	discoverFleetStepIDsFunc = func(ctx context.Context, _ string) ([]string, error) {
+		assertCleanupContext("fleet discovery", ctx)
+		return nil, nil
+	}
+	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{output: outputDir, onFetch: func(_ string, _ []string) error {
+			return nil
+		}, onContext: func(ctx context.Context) { assertCleanupContext("artifact fetch", ctx) }}
+	}
+	var shutdownCalled int32
+	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool) error {
+		assertCleanupContext("shutdown", ctx)
+		atomic.AddInt32(&shutdownCalled, 1)
+		return nil
+	}
+	var summaryCalled int32
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) error {
+		assertCleanupContext("summary", ctx)
+		atomic.AddInt32(&summaryCalled, 1)
+		return nil
+	}
+	var hookCalled int32
+	hook := func(ctx context.Context) {
+		assertCleanupContext("pre-summary hook", ctx)
+		atomic.AddInt32(&hookCalled, 1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startAutoResults(
+		ctx, "http://127.0.0.1:1", "mt", t.TempDir(), []string{stepID}, false, nil, "9999",
+		true, 1, "", nil, io.Discard, io.Discard, "", hook)
+	cancel()
+
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.TrackerErr, context.Canceled) {
+			t.Fatalf("tracker error = %v, want context.Canceled", outcome.TrackerErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-results cleanup did not finish within its bounded budget")
+	}
+	if atomic.LoadInt32(&shutdownCalled) != 1 || atomic.LoadInt32(&hookCalled) != 1 ||
+		atomic.LoadInt32(&summaryCalled) != 1 {
+		t.Fatalf("cleanup calls shutdown=%d hook=%d summary=%d, want all 1",
+			shutdownCalled, hookCalled, summaryCalled)
 	}
 }

@@ -217,6 +217,10 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	integrity := summary.Integrity
 	digest := integrity.DigestPerformance
 	fmt.Fprintf(b, "Integrity Verification\n")
+	r.writeBullet(b, "Finalization", map[bool]string{true: "complete", false: "incomplete"}[integrity.Complete])
+	if integrity.FinalizationError != "" {
+		r.writeBullet(b, "Finalization error", integrity.FinalizationError)
+	}
 	r.writeBullet(b, "Selection", fmt.Sprintf("selected %d, attempted %d, verified %d, remaining %d, corrupt %d",
 		integrity.SelectionCount, integrity.VerificationAttemptedCount, integrity.VerifiedCount,
 		integrity.RemainingCount, integrity.CorruptCount))
@@ -238,6 +242,10 @@ func (r *Renderer) renderCompactIntegrity(b *strings.Builder, summary *RunSummar
 	}
 	i := summary.Integrity
 	d := i.DigestPerformance
+	fmt.Fprintf(b, "Integrity finalization: %s\n", map[bool]string{true: "complete", false: "incomplete"}[i.Complete])
+	if i.FinalizationError != "" {
+		fmt.Fprintf(b, "Integrity finalization error: %s\n", i.FinalizationError)
+	}
 	fmt.Fprintf(b, "Integrity: selected %d, attempted %d, verified %d, remaining %d, corrupt %d\n",
 		i.SelectionCount, i.VerificationAttemptedCount, i.VerifiedCount, i.RemainingCount, i.CorruptCount)
 	fmt.Fprintf(b, "Integrity empty selection: %t (allowed: %t)\n", i.EmptySelection, i.EmptyAllowed)

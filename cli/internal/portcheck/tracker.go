@@ -12,6 +12,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
 // RunTracker polls the Spt API to detect run and step completion.
@@ -20,6 +21,7 @@ type RunTracker struct {
 	HTTPClient           *http.Client
 	PollInterval         time.Duration
 	IdleGrace            time.Duration
+	StartupTimeout       time.Duration
 	UnavailableTimeout   time.Duration
 	StableConfirmations  int // consecutive confirmations for a step file to be considered stable
 	Clock                Clock
@@ -35,24 +37,25 @@ func NewRunTracker(baseURL string) *RunTracker {
 	return &RunTracker{
 		Client:              api,
 		HTTPClient:          &http.Client{Timeout: DefaultHTTPTimeout},
-		PollInterval:        500 * time.Millisecond,
-		IdleGrace:           20 * time.Second,
+		PollInterval:        constants.AutoResultsTrackerPollInterval,
+		IdleGrace:           constants.AutoResultsTrackerIdleGrace,
+		StartupTimeout:      constants.AutoResultsStartupTimeout,
 		UnavailableTimeout:  constants.AutoResultsUnavailableTimeout,
-		StableConfirmations: 2,
+		StableConfirmations: constants.AutoResultsTrackerStableConfirmations,
 		Clock:               api.Clock,
 	}
 }
 
-// StepLifecycle is the stable artifact-requiredness state for one planned step.
-type StepLifecycle string
+// StepLifecycle remains an alias for compatibility with existing tracker consumers.
+type StepLifecycle = results.StepLifecycle
 
 // StepLifecyclePlanned and the constants in this block define stable per-step lifecycle states.
 const (
-	StepLifecyclePlanned    StepLifecycle = "planned"
-	StepLifecycleStarted    StepLifecycle = "started"
-	StepLifecycleCompleted  StepLifecycle = "completed"
-	StepLifecycleFailed     StepLifecycle = "failed"
-	StepLifecycleNotStarted StepLifecycle = "not_started"
+	StepLifecyclePlanned    = results.StepLifecyclePlanned
+	StepLifecycleStarted    = results.StepLifecycleStarted
+	StepLifecycleCompleted  = results.StepLifecycleCompleted
+	StepLifecycleFailed     = results.StepLifecycleFailed
+	StepLifecycleNotStarted = results.StepLifecycleNotStarted
 )
 
 // StepCompletion represents lifecycle and completion info for one step.
@@ -100,6 +103,9 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 
 	idleSince := time.Time{}
 	unavailableSince := time.Time{}
+	startupSince := t.Clock.Now()
+	t.seenActive = false
+	t.lastJSONTimestamp = 0
 	final := &RunResult{Steps: make(map[string]StepCompletion, len(stepIDs))}
 
 	for {
@@ -146,6 +152,7 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 				logging.LogDebug("tracker", "probe error", "stepId", id, "error", err.Error())
 			}
 			if done && size > 0 {
+				t.seenActive = true
 				st.started = true
 				if st.okCount == 0 {
 					st.seenSize = size
@@ -222,6 +229,20 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			}
 		}
 
+		// Before the engine has exposed real activity, healthy but empty APIs do
+		// not prove that a run ever started. Bound that distinct startup state
+		// without imposing any duration cap after the run is active.
+		if !t.seenActive && !terminal {
+			startupTimeout := t.StartupTimeout
+			if startupTimeout <= 0 {
+				startupTimeout = constants.AutoResultsStartupTimeout
+			}
+			if t.Clock.Now().Sub(startupSince) >= startupTimeout {
+				return populateStepLifecycles(final, stepState, stepIDs), fmt.Errorf(
+					"completion tracker observed no run activity for %s", startupTimeout)
+			}
+		}
+
 		// Exit conditions
 		if terminal || (len(stepState) > 0 && allDone && (!t.RequireTerminalState ||
 			(final.FinalState != constants.StateRunning && final.FinalState != constants.StateStarting &&
@@ -268,15 +289,17 @@ func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, 
 	// New contract: rely on /status only and retain its structured terminal cause.
 	if status, err := t.Client.getStatusDetail(ctx); err == nil {
 		switch status.State {
-		case constants.StateRunning, constants.StateStarting, constants.StateInitializing:
+		case constants.StateRunning:
 			t.seenActive = true
+			return status, false, true
+		case constants.StateStarting, constants.StateInitializing:
 			return status, false, true
 		case constants.StateIdle:
 			return status, t.seenActive, true
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
 			return status, true, true
 		default:
-			return status, false, true
+			return status, false, false
 		}
 	}
 	return terminalStatus{}, false, false
@@ -294,6 +317,7 @@ func (t *RunTracker) checkIdle(ctx context.Context) (bool, bool, bool) {
 		}
 		return false, false, false
 	}
+	t.seenActive = true
 	// Aggregate across steps
 	var maxTS int64
 	var sumRates float64
@@ -337,7 +361,7 @@ func (t *RunTracker) probeStepFile(ctx context.Context, stepID string) (bool, in
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, 0, "", true, nil
+		return false, 0, "", false, nil
 	}
 	// Parse Content-Length and Last-Modified headers
 	var size int64

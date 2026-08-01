@@ -1,6 +1,7 @@
 package results
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +15,12 @@ import (
 // may NOT include the correct step IDs in multi-host distributed runs.
 // For distributed runs, prefer DiscoverFleetStepIDs.
 func DiscoverStepIDs(baseURL string) ([]string, error) {
-	return discoverStepIDsFromPath(baseURL, "/metrics/json")
+	return DiscoverStepIDsContext(context.Background(), baseURL)
+}
+
+// DiscoverStepIDsContext is DiscoverStepIDs with caller cancellation and deadlines.
+func DiscoverStepIDsContext(ctx context.Context, baseURL string) ([]string, error) {
+	return discoverStepIDsFromPath(ctx, baseURL, "/metrics/json")
 }
 
 // DiscoverFleetStepIDs fetches /metrics/fleet/json and returns unique step IDs
@@ -26,14 +32,24 @@ func DiscoverStepIDs(baseURL string) ([]string, error) {
 // Returns (nil, nil) if the fleet endpoint is unavailable (404) so callers can
 // fall back gracefully.
 func DiscoverFleetStepIDs(baseURL string) ([]string, error) {
-	return discoverStepIDsFromPath(baseURL, "/metrics/fleet/json")
+	return DiscoverFleetStepIDsContext(context.Background(), baseURL)
+}
+
+// DiscoverFleetStepIDsContext is DiscoverFleetStepIDs with caller cancellation and deadlines.
+func DiscoverFleetStepIDsContext(ctx context.Context, baseURL string) ([]string, error) {
+	return discoverStepIDsFromPath(ctx, baseURL, "/metrics/fleet/json")
 }
 
 // discoverStepIDsFromPath is the shared implementation for both node and fleet
 // step-ID discovery endpoints.
-func discoverStepIDsFromPath(baseURL, metricsPath string) ([]string, error) {
+func discoverStepIDsFromPath(ctx context.Context, baseURL, metricsPath string) ([]string, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + metricsPath)
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+metricsPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create %s request: %w", metricsPath, err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", metricsPath, err)
 	}

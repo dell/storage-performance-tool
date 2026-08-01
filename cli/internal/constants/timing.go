@@ -9,10 +9,17 @@ import "time"
 // Timeout constants for various operations
 const (
 	// API and connection timeouts
-	APIPollingTimeout             = 500 * time.Millisecond // Timeout for API polling requests
-	APIReadinessTimeout           = 30 * time.Second       // Timeout for waiting for APIs to be ready
-	PortCheckTimeout              = 2 * time.Second        // Timeout for checking if a port is open
-	AutoResultsUnavailableTimeout = 2 * time.Minute        // Maximum continuous loss of all completion-tracker API signals
+	APIPollingTimeout               = 500 * time.Millisecond // Timeout for API polling requests
+	APIReadinessTimeout             = 30 * time.Second       // Timeout for waiting for APIs to be ready
+	PortCheckTimeout                = 2 * time.Second        // Timeout for checking if a port is open
+	AutoResultsTrackerPollInterval  = 500 * time.Millisecond // Completion-tracker polling interval
+	AutoResultsTrackerIdleGrace     = 20 * time.Second       // Stable idle duration required for fallback completion
+	AutoResultsStartupTimeout       = 2 * time.Minute        // Maximum time to observe the first real run activity
+	AutoResultsUnavailableTimeout   = 2 * time.Minute        // Maximum continuous loss of all completion-tracker API signals
+	AutoResultsCancelCleanupTimeout = 15 * time.Second       // Best-effort evidence and shutdown budget after cancellation
+	AutoResultsDiscoveryInterval    = 500 * time.Millisecond // Step discovery polling interval
+	AutoResultsShutdownTimeout      = 30 * time.Second       // Graceful API shutdown request budget
+	AutoResultsShutdownSettleDelay  = 1 * time.Second        // Artifact settle delay before shutdown
 
 	// Container lifecycle timeouts
 	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown
@@ -36,3 +43,7 @@ const (
 	// Health monitoring
 	MetricsHealthTimeout = 30 * time.Second // Timeout for metrics health monitoring
 )
+
+// AutoResultsTrackerStableConfirmations is the number of unchanged successful
+// probes required before a step artifact is considered complete.
+const AutoResultsTrackerStableConfirmations = 2
