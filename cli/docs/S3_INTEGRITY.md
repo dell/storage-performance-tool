@@ -168,6 +168,12 @@ directory-sync the JSON marker. The marker contains version/status, run and
 producer identity, source/unique/selected counts, manifest byte length, and
 manifest SHA-256. A missing, staging-only, stale, or mismatched marker prevents
 a dependent engine step from starting.
+The marker must contain exactly one JSON object plus optional trailing
+whitespace. CLI promotion never replaces an existing canonical name. A retry
+may reuse a fully validated matching pair or complete a matching manifest-only
+state by publishing its marker. A mismatched pair or manifest, or a marker
+without its manifest, fails closed. Uncommitted marker-staging files are ignored
+as commit evidence and retained for diagnosis.
 
 This guarantee requires a filesystem that honors file and directory fsync and
 same-directory atomic rename semantics. It is supported on the local Linux
@@ -175,7 +181,11 @@ filesystems used by the SPT container when those primitives are provided by the
 host. SPT fails the integrity run rather than weakening publication when a
 primitive is unavailable. Network, clustered, FUSE, and other userspace
 filesystems are crash-durable only when their provider explicitly guarantees
-equivalent server-side persistence semantics.
+equivalent server-side persistence semantics. Phase 1 verification requires the
+Linux CLI. Other platforms, including Windows, reject `write-verify` and
+`read-verify` before item staging, scenario generation, or results evidence is
+created because they cannot establish the required persistence contract.
+Ordinary workloads remain supported on those platforms.
 
 Distributed engine sources remain under
 `${home_dir}/log/${step_id}/<artifact-stem>.node-NNN.csv`; the validated merge is
@@ -233,13 +243,19 @@ image with no network and a read-only root filesystem, hashes the regular files
 under `/opt/spt` in canonical relative-path order, and records the hash for
 every participant.
 
-Local and single-remote verification runs do not perform a cross-host equality
-gate. They record the available immutable image ID and repository digests in
-`spt_run_params.json`; an inspection failure is recorded there as evidence
-unavailability rather than being presented as a distributed proof.
+Local and single-remote verification runs do not claim a cross-host equality
+proof. A single-remote run nevertheless requires immutable image inspection
+before startup and launches the container by that verified image ID, not by a
+second resolution of the requested tag. Selecting the `payload` tier on one
+remote participant additionally hashes the prepared image payload and rechecks
+the exact running container before scenario submission. Any required remote
+inspection failure is fatal. A local run records the available image evidence
+or its collection error in `spt_run_params.json`.
 
 ## Version 1 boundaries
 
+- Verification commands require the Linux CLI; Windows fails preflight before
+  evidence creation because its required directory-durability primitive is unavailable.
 - SHA-256 metadata and complete-object GET only; range verification is out of scope.
 - Generated object content for writes; file-backed write payloads are out of scope.
 - Isolated, unversioned prefixes are the normal discovery contract. Exact
