@@ -261,6 +261,9 @@ public class TestConfigBuilder {
 		integrityInput.put("provenance", "none");
 		integrityInput.put("expectedProducerId", "");
 		integrity.put("input", integrityInput);
+		Map<String, Object> integritySelection = new HashMap<>();
+		integritySelection.put("maxCount", 0L);
+		integrity.put("selection", integritySelection);
 		storage.put("integrity", integrity);
 
 		storage.put("namespace", "");

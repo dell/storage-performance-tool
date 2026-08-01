@@ -89,6 +89,9 @@ class IntegrityConfigParserTest {
 		final var missingProvenance = metadataStep("read");
 		missingProvenance.val("storage-integrity-input-provenance", "none");
 		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(missingProvenance));
+		final var negativeSelection = metadataStep("list");
+		negativeSelection.val("storage-integrity-selection-maxCount", -1L);
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(negativeSelection));
 	}
 
 	@Test

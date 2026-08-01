@@ -5,11 +5,20 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.load.step.client.CsvArtifactAggregator;
+import com.dell.spt.base.load.step.file.FileManager;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.script.ScriptEngine;
 import javax.script.ScriptException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class RunImplIntegrityTest {
+	@TempDir
+	Path tempDir;
 
 	@Test
 	void typedTerminalCauseSurvivesRuntimeWrapper() throws Exception {
@@ -43,6 +52,30 @@ class RunImplIntegrityTest {
 		final var engine = mock(ScriptEngine.class);
 		when(engine.eval("scenario")).thenThrow(new ScriptException("ordinary failure"));
 		assertDoesNotThrow(() -> new RunImpl("", "scenario", engine, 14L).run());
+	}
+
+	@Test
+	void zeroSuccessfulWritesStopScenarioBeforeReadCallback() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\n");
+		final var writeAggregation = new CsvArtifactAggregator(
+						"create-step", List.of(FileManager.INSTANCE), List.of(),
+						manifest.toString(), 16L, 0);
+		final var readEntered = new AtomicBoolean();
+		final var engine = mock(ScriptEngine.class);
+		when(engine.eval("write-then-read")).thenAnswer(invocation -> {
+			writeAggregation.close();
+			readEntered.set(true);
+			return null;
+		});
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new RunImpl("", "write-then-read", engine, 16L).run());
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("zero successful objects"));
+		assertFalse(readEntered.get(), "READ callback ran after terminal zero-write evidence");
 	}
 
 	@Test

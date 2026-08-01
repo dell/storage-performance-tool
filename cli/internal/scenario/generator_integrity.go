@@ -12,6 +12,9 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
 		return "", fmt.Errorf("write-verify requires a positive run id")
 	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("write-verify object count must be non-negative")
+	}
 	ts := resolveTimestamp(params)
 	createID := formatStepID(1, ts, stepOpCreate)
 	readID := formatStepID(2, ts, "verify")
@@ -19,7 +22,7 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	count := params.ObjectCount
 	if count <= 0 && strings.TrimSpace(params.Duration) == "" {
-		count = 1000
+		count = defaultIntegrityObjectCount
 	}
 	duration := ""
 	if count <= 0 {
@@ -67,6 +70,9 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 func GenerateReadVerifyScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
 		return "", fmt.Errorf("read-verify requires a positive run id")
+	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("read-verify object count must be non-negative")
 	}
 	ts := resolveTimestamp(params)
 	driver := resolveStorageDriverType(params.S3Driver)

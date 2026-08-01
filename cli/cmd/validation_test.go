@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -260,6 +261,12 @@ func TestValidateDurationOrCount(t *testing.T) {
 			wantErr:     true,
 			errContains: "cannot specify both --object-count and --duration",
 		},
+		{
+			name:        "negative object count",
+			objectCount: -1,
+			wantErr:     true,
+			errContains: "--object-count must be >= 0",
+		},
 	}
 
 	for _, tt := range tests {
@@ -363,6 +370,17 @@ func TestValidateReadShuffleFlags(t *testing.T) {
 			errContains: "--shuffle flag is not supported for write workload",
 		},
 		{
+			name:         "read-verify workload rejects shuffle flag",
+			workloadType: WorkloadTypeReadVerify,
+			setup: func(t *testing.T, cmd *cobra.Command) {
+				if err := cmd.Flags().Set(flagReadShuffle, "true"); err != nil {
+					t.Fatalf("set shuffle: %v", err)
+				}
+			},
+			wantErr:     true,
+			errContains: "--shuffle flag is not supported for read-verify workload",
+		},
+		{
 			name:         "delete workload rejects shuffle flag",
 			workloadType: WorkloadTypeDelete,
 			setup: func(t *testing.T, cmd *cobra.Command) {
@@ -450,6 +468,7 @@ func TestValidateReadPhasePauseFlag(t *testing.T) {
 		{name: "read positive", workloadType: WorkloadTypeRead, seconds: "30"},
 		{name: "read zero", workloadType: WorkloadTypeRead, seconds: "0", wantErr: true},
 		{name: "write unsupported", workloadType: WorkloadTypeWrite, seconds: "30", wantErr: true},
+		{name: "read-verify unsupported", workloadType: WorkloadTypeReadVerify, seconds: "30", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -461,6 +480,167 @@ func TestValidateReadPhasePauseFlag(t *testing.T) {
 			err := validateReadPhasePauseFlag(cmd, tt.workloadType)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validateReadPhasePauseFlag() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func newIntegrityValidationCommand(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Annotations: map[string]string{}}
+	cmd.Flags().String("endpoint", "http://s3.example.com", "")
+	cmd.Flags().StringSlice("endpoints", nil, "")
+	cmd.Flags().String("access-key", "access", "")
+	cmd.Flags().String("secret-key", "secret", "")
+	cmd.Flags().String("bucket", "bucket", "")
+	cmd.Flags().Int("auth-version", 4, "")
+	cmd.Flags().Int("object-count", 0, "")
+	cmd.Flags().Bool("allow-empty-selection", false, "")
+	cmd.Flags().Int("integrity-max-console-failures", 20, "")
+	cmd.Flags().Bool("auto-results", true, "")
+	cmd.Flags().String("items-file", "", "")
+	cmd.Flags().StringArray(flagEngineOverride, nil, "")
+	cmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "")
+	cmd.Flags().String("duration", "", "")
+	cmd.Flags().String("part-size", "", "")
+	cmd.Flags().Int("mpu-concurrent-objects", 0, "")
+	cmd.Flags().Int("mpu-concurrent-parts", 0, "")
+	cmd.Flags().Bool("cleanup", false, "")
+	cmd.Flags().Bool("save-items", false, "")
+	cmd.Flags().String("object-size", "", "")
+	cmd.Flags().Float64("object-data-compressibility", 0, "")
+	cmd.Flags().Bool("object-data-dedupable", true, "")
+	cmd.Flags().Int("seed-objects", 2500, "")
+	cmd.Flags().Bool("create-prefix", false, "")
+	cmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "")
+	return cmd
+}
+
+func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
+	tests := []struct {
+		name        string
+		workload    string
+		flag        string
+		value       string
+		wantErr     bool
+		errContains string
+	}{
+		{name: "read allow empty", workload: WorkloadTypeReadVerify, flag: "allow-empty-selection", value: "true"},
+		{name: "write rejects allow empty", workload: WorkloadTypeWriteVerify, flag: "allow-empty-selection", value: "true", wantErr: true, errContains: "valid only for read-verify"},
+		{name: "read requires auto results", workload: WorkloadTypeReadVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
+		{name: "write requires auto results", workload: WorkloadTypeWriteVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
+		{name: "read accepts items file", workload: WorkloadTypeReadVerify, flag: "items-file", value: "items.csv"},
+		{name: "write rejects items file", workload: WorkloadTypeWriteVerify, flag: "items-file", value: "items.csv", wantErr: true, errContains: "not supported for write-verify"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newIntegrityValidationCommand(t)
+			if err := cmd.Flags().Set(test.flag, test.value); err != nil {
+				t.Fatal(err)
+			}
+			err := validateIntegrityWorkloadFlags(cmd, test.workload)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validation error = %v, wantErr %t", err, test.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), test.errContains) {
+				t.Fatalf("validation error = %q, want containing %q", err, test.errContains)
+			}
+		})
+	}
+}
+
+func TestIntegrityCommandValidationStopsBeforeExecutionSideEffects(t *testing.T) {
+	tests := []struct {
+		name     string
+		workload string
+		args     []string
+	}{
+		{name: "auto results disabled", workload: WorkloadTypeReadVerify, args: []string{"--auto-results=false"}},
+		{name: "write items file", workload: WorkloadTypeWriteVerify, args: []string{"--items-file=items.csv"}},
+		{name: "excluded copy override", workload: WorkloadTypeReadVerify, args: []string{"--engine-override=load.op.type=copy"}},
+		{name: "unsupported duration", workload: WorkloadTypeReadVerify, args: []string{"--duration=1m"}},
+		{name: "negative object count", workload: WorkloadTypeWriteVerify, args: []string{"--object-count=-1"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newIntegrityValidationCommand(t)
+			cmd.Use = "run <type>"
+			cmd.Args = cobra.ExactArgs(1)
+			cmd.SilenceUsage = true
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.PreRunE = ValidateRunCommand
+			var schemaProbes, scenarioPosts, objectIOStarts int
+			cmd.RunE = func(*cobra.Command, []string) error {
+				schemaProbes++
+				scenarioPosts++
+				objectIOStarts++
+				return nil
+			}
+			cmd.SetArgs(append([]string{test.workload}, test.args...))
+
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("incompatible verification command unexpectedly passed validation")
+			}
+			if schemaProbes != 0 || scenarioPosts != 0 || objectIOStarts != 0 {
+				t.Fatalf("rejected command crossed execution boundary: schema=%d post=%d io=%d",
+					schemaProbes, scenarioPosts, objectIOStarts)
+			}
+		})
+	}
+}
+
+func TestValidateIntegrityRejectsExcludedEngineOverrides(t *testing.T) {
+	for _, override := range []string{
+		"item.data.input.file=payload.bin",
+		"item.input.file=copy.csv",
+		"item.data.ranges.concat=0-1",
+		"item.data.ranges.random=1",
+		"item.data.ranges.fixed=0-1",
+		"load.op.recycle.mode=true",
+		"load.op.recycle.content.update=true",
+		"load.op.type=update",
+		"item-data-ranges-random=1",
+	} {
+		t.Run(strings.ReplaceAll(override, "/", "_"), func(t *testing.T) {
+			cmd := newIntegrityValidationCommand(t)
+			if err := cmd.Flags().Set(flagEngineOverride, override); err != nil {
+				t.Fatal(err)
+			}
+			err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
+			if err == nil || !strings.Contains(err.Error(), "excluded from verification workloads") {
+				t.Fatalf("override %q validation error = %v", override, err)
+			}
+		})
+	}
+}
+
+func TestValidateReadVerifyRejectsUnsupportedOptions(t *testing.T) {
+	for _, option := range []struct {
+		name  string
+		value string
+	}{
+		{name: "duration", value: "1m"},
+		{name: "part-size", value: "5MiB"},
+		{name: "mpu-concurrent-objects", value: "1"},
+		{name: "mpu-concurrent-parts", value: "1"},
+		{name: "cleanup", value: "true"},
+		{name: "save-items", value: "true"},
+		{name: "object-size", value: "1MiB"},
+		{name: "object-data-compressibility", value: "10"},
+		{name: "object-data-dedupable", value: "false"},
+		{name: "seed-objects", value: "1"},
+		{name: "create-prefix", value: "true"},
+		{name: flagPrefixShards, value: "1"},
+	} {
+		t.Run(option.name, func(t *testing.T) {
+			cmd := newIntegrityValidationCommand(t)
+			if err := cmd.Flags().Set(option.name, option.value); err != nil {
+				t.Fatal(err)
+			}
+			err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
+			if err == nil || !strings.Contains(err.Error(), "not supported for read-verify workload") {
+				t.Fatalf("option --%s validation error = %v", option.name, err)
 			}
 		})
 	}

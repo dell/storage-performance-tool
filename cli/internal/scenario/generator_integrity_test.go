@@ -89,6 +89,55 @@ func TestGenerateWriteVerifyPrefixIsAppliedOnlyAtCreateAndCleanupUsesVerifiedMan
 	}
 }
 
+func TestGenerateDurationWriteVerifyTransitionsToOneFiniteManifestRead(t *testing.T) {
+	got, err := GenerateWriteVerifyScenario(Params{
+		WorkloadType: WorkloadTypeWriteVerify, RunID: 45, Bucket: "bucket",
+		ObjectSize: "1MiB", Duration: "30s", Threads: 2,
+		BaseTimestamp: "20260730.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := parseGeneratedScenarioConfigs(t, got)
+	if len(configs) != 2 {
+		t.Fatalf("duration write-verify configs = %d, want CREATE and READ", len(configs))
+	}
+	if count := generatedConfigValue(t, configs[0], "load", "op", "limit", "count"); count != float64(0) {
+		t.Fatalf("duration CREATE count = %#v, want 0", count)
+	}
+	if duration := generatedConfigValue(t, configs[0], "load", "step", "limit", "time"); duration != "30s" {
+		t.Fatalf("duration CREATE time = %#v, want 30s", duration)
+	}
+	if input := generatedConfigValue(t, configs[1], "item", "input", "file"); input != "writtenFile" {
+		t.Fatalf("verification READ input = %#v, want writtenFile", input)
+	}
+	load := configs[1]["load"].(map[string]any)
+	op := load["op"].(map[string]any)
+	if recycle, ok := op["recycle"]; ok {
+		t.Fatalf("verification READ must be finite, recycle = %#v", recycle)
+	}
+}
+
+func TestIntegrityScenarioGeneratorsRejectNegativeObjectCounts(t *testing.T) {
+	for _, generate := range []struct {
+		name string
+		fn   func(Params) (string, error)
+	}{
+		{name: "write-verify", fn: GenerateWriteVerifyScenario},
+		{name: "read-verify", fn: GenerateReadVerifyScenario},
+	} {
+		t.Run(generate.name, func(t *testing.T) {
+			_, err := generate.fn(Params{
+				WorkloadType: generate.name, RunID: 46, Bucket: "bucket",
+				ObjectCount: -1, Threads: 1,
+			})
+			if err == nil || !strings.Contains(err.Error(), "non-negative") {
+				t.Fatalf("negative count error = %v", err)
+			}
+		})
+	}
+}
+
 func TestGenerateReadVerifyScenarioDiscoveryAndStagedInput(t *testing.T) {
 	discovery, err := GenerateReadVerifyScenario(Params{
 		WorkloadType: WorkloadTypeReadVerify, RunID: 9, Bucket: "b", Prefix: "p/",

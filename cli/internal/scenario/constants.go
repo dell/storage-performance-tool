@@ -48,6 +48,7 @@ const (
 	loadOpTypeList        = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
+	defaultIntegrityObjectCount     = 1000
 
 	listStepSuffix             = "list"
 	listNamingRadix            = 36

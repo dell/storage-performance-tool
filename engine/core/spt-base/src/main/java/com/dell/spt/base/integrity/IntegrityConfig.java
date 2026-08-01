@@ -83,6 +83,14 @@ public record IntegrityConfig(
 		if (!integrity.enabled()) {
 			return integrity;
 		}
+		final long selectionMaxCount = stepConfig
+					.configVal("storage")
+					.configVal("integrity")
+					.configVal("selection")
+					.longVal("maxCount");
+		if (selectionMaxCount < 0) {
+			throw excluded("storage.integrity.selection.maxCount must be non-negative");
+		}
 		requireSupportedDriver(stepConfig.stringVal("storage-driver-type"));
 		final String opType = normalize(stepConfig.stringVal("load-op-type"));
 		if ("update".equals(opType)) {

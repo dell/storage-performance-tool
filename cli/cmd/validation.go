@@ -63,6 +63,9 @@ func ValidateS3Flags(cmd *cobra.Command, workloadType string) error {
 func ValidateDurationOrCount(cmd *cobra.Command) error {
 	objectCount, _ := cmd.Flags().GetInt("object-count")
 	duration, _ := cmd.Flags().GetString("duration")
+	if objectCount < 0 {
+		return errors.New("--object-count must be >= 0")
+	}
 
 	// Only error if BOTH are specified - it's OK if neither is specified (will default to 100 objects)
 	if objectCount != 0 && duration != "" {
@@ -226,8 +229,7 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
 		path, value, _ := strings.Cut(override, "=")
 		normalized := strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
-		if normalized == "item.data.input.file" || normalized == "load.op.recycle.mode" ||
-			normalized == "load.op.recycle.content.update" {
+		if _, excluded := integrityExcludedEngineOverridePaths[normalized]; excluded {
 			return fmt.Errorf("engine override %q is excluded from verification workloads", path+"="+value)
 		}
 	}
@@ -237,7 +239,7 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	unsupported := []string{
 		"duration", "part-size", "mpu-concurrent-objects", "mpu-concurrent-parts",
 		"cleanup", "save-items", "object-size", "object-data-compressibility",
-		"object-data-dedupable", "seed-objects", flagPrefixShards,
+		"object-data-dedupable", "seed-objects", "create-prefix", flagPrefixShards,
 	}
 	for _, name := range unsupported {
 		if changed(name) {
@@ -245,6 +247,17 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		}
 	}
 	return nil
+}
+
+var integrityExcludedEngineOverridePaths = map[string]struct{}{
+	"item.data.input.file":           {},
+	"item.input.file":                {},
+	"item.data.ranges.concat":        {},
+	"item.data.ranges.random":        {},
+	"item.data.ranges.fixed":         {},
+	"load.op.recycle.mode":           {},
+	"load.op.recycle.content.update": {},
+	"load.op.type":                   {},
 }
 
 func mustStringArrayFlag(cmd *cobra.Command, name string) []string {
