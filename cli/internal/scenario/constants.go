@@ -1,6 +1,9 @@
 package scenario
 
-import "github.com/dell/storage-performance-tool/cli/internal/workload"
+import (
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
+)
 
 const (
 	workloadTypeWrite       = workload.Write
@@ -33,15 +36,16 @@ const (
 	// ChecksumSHA1 selects SHA-1 checksum validation.
 	ChecksumSHA1 = "sha1"
 	// ChecksumSHA256 selects SHA-256 checksum validation.
-	ChecksumSHA256 = "sha256"
+	ChecksumSHA256 = constants.IntegrityAlgorithmSHA256
 	// ChecksumCRC64NVME selects CRC64-NVME checksum validation.
 	ChecksumCRC64NVME = "crc64-nvme"
 
-	itemTypeData         = "data"
-	itemTypePath         = "path"
-	itemNamingTypeRandom = "random"
-	loadOpTypeNoop       = "noop"
-	loadOpTypeList       = "list"
+	itemTypeData          = "data"
+	itemTypePath          = "path"
+	itemNamingTypeRandom  = "random"
+	integrityModeMetadata = constants.IntegrityModeMetadata
+	loadOpTypeNoop        = "noop"
+	loadOpTypeList        = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
 

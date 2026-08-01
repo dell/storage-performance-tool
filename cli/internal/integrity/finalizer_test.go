@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -299,13 +300,14 @@ func TestFinalizeRejectsNonCanonicalVerifiedCompletionCounts(t *testing.T) {
 		{"READ", "1", "0", "0"},
 	})
 
-	if _, err = FinalizeResults(FinalizeOptions{
+	_, err = FinalizeResults(FinalizeOptions{
 		ResultsRoot: root,
 		Workload:    workload.WriteVerify,
 		RunID:       505,
 		StepIDs:     []string{createStep, readStep},
-	}); err == nil {
-		t.Fatal("expected noncanonical verified completion counts to fail")
+	})
+	if err == nil || !strings.Contains(err.Error(), "verified.csv completion counts must match for READ output") {
+		t.Fatalf("error = %v, want READ-output completion-count rejection", err)
 	}
 }
 
@@ -349,6 +351,255 @@ func TestFinalizeResultsHonorsCanceledContextBeforeArtifactWork(t *testing.T) {
 	}
 }
 
+func TestSubtractSortedManifestsReportsVerifiedParseError(t *testing.T) {
+	root := t.TempDir()
+	inputPath := filepath.Join(root, "input.csv")
+	verifiedPath := filepath.Join(root, "verified.csv")
+	destination := filepath.Join(root, VerifyRemainingName)
+	writeCSVFixture(t, inputPath, [][]string{canonicalHeader, {"b", "a", "1", ""}})
+	if err := os.WriteFile(
+		verifiedPath,
+		[]byte("bucket,key,size,version_id\r\nb,\"unterminated"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := subtractSortedManifests(context.Background(), inputPath, verifiedPath, destination)
+	if err == nil || !strings.Contains(err.Error(), "parse verified manifest") {
+		t.Fatalf("subtractSortedManifests() error = %v, want verified parse diagnostic", err)
+	}
+	if _, statErr := os.Stat(destination); !os.IsNotExist(statErr) {
+		t.Fatalf("malformed verified input published remaining evidence: %v", statErr)
+	}
+}
+
+func TestPromoteCompletionPairReusesMatchingPair(t *testing.T) {
+	sourceManifest, sourceMarker := committedPairFixture(
+		t, 601, "read-step", [][]string{canonicalHeader, {"b", "a", "1", ""}},
+	)
+	destinationRoot := t.TempDir()
+	destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+	destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+
+	promote := func() error {
+		return promoteCompletionPair(
+			sourceManifest, sourceMarker,
+			destinationManifest, destinationMarker,
+			601, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+		)
+	}
+	if err := promote(); err != nil {
+		t.Fatal(err)
+	}
+	beforeManifest, err := os.ReadFile(destinationManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMarker, err := os.ReadFile(destinationMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = promote(); err != nil {
+		t.Fatalf("matching canonical pair was not recoverable: %v", err)
+	}
+	afterManifest, _ := os.ReadFile(destinationManifest)
+	afterMarker, _ := os.ReadFile(destinationMarker)
+	if string(afterManifest) != string(beforeManifest) || string(afterMarker) != string(beforeMarker) {
+		t.Fatal("matching canonical pair was replaced")
+	}
+}
+
+func TestPromoteCompletionPairRejectsConflictingExistingPair(t *testing.T) {
+	firstManifest, firstMarker := committedPairFixture(
+		t, 602, "read-step", [][]string{canonicalHeader, {"b", "first", "1", ""}},
+	)
+	secondManifest, secondMarker := committedPairFixture(
+		t, 602, "read-step", [][]string{canonicalHeader, {"b", "second", "2", ""}},
+	)
+	destinationRoot := t.TempDir()
+	destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+	destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+	if err := promoteCompletionPair(
+		firstManifest, firstMarker,
+		destinationManifest, destinationMarker,
+		602, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+	); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(destinationManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = promoteCompletionPair(
+		secondManifest, secondMarker,
+		destinationManifest, destinationMarker,
+		602, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match source") {
+		t.Fatalf("conflicting pair error = %v", err)
+	}
+	after, readErr := os.ReadFile(destinationManifest)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(original) {
+		t.Fatal("conflicting publication replaced the canonical manifest")
+	}
+}
+
+func TestPromoteCompletionPairRecoversMatchingManifestOnlyAndIgnoresStagingMarker(t *testing.T) {
+	sourceManifest, sourceMarker := committedPairFixture(
+		t, 603, "read-step", [][]string{canonicalHeader, {"b", "a", "1", ""}},
+	)
+	destinationRoot := t.TempDir()
+	destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+	destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+	copyFixtureFile(t, sourceManifest, destinationManifest)
+	stagingMarker := destinationMarker + ".staging"
+	if err := os.WriteFile(stagingMarker, []byte("interrupted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := promoteCompletionPair(
+		sourceManifest, sourceMarker,
+		destinationManifest, destinationMarker,
+		603, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateCompletion(
+		destinationManifest, destinationMarker,
+		603, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+	); err != nil {
+		t.Fatalf("recovered pair is invalid: %v", err)
+	}
+	if _, err := os.Stat(stagingMarker); err != nil {
+		t.Fatalf("uncommitted marker staging evidence was not preserved: %v", err)
+	}
+}
+
+func TestPromoteCompletionPairRejectsMismatchedManifestOnlyAndMarkerOnly(t *testing.T) {
+	sourceManifest, sourceMarker := committedPairFixture(
+		t, 604, "read-step", [][]string{canonicalHeader, {"b", "expected", "1", ""}},
+	)
+	otherManifest, _ := committedPairFixture(
+		t, 604, "read-step", [][]string{canonicalHeader, {"b", "stale", "2", ""}},
+	)
+	t.Run("mismatched manifest only", func(t *testing.T) {
+		destinationRoot := t.TempDir()
+		destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+		destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+		copyFixtureFile(t, otherManifest, destinationManifest)
+		err := promoteCompletionPair(
+			sourceManifest, sourceMarker,
+			destinationManifest, destinationMarker,
+			604, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+		)
+		if err == nil || !strings.Contains(err.Error(), "conflicts with source completion") {
+			t.Fatalf("mismatched manifest-only error = %v", err)
+		}
+		if _, statErr := os.Stat(destinationMarker); !os.IsNotExist(statErr) {
+			t.Fatalf("marker was published beside conflicting manifest: %v", statErr)
+		}
+	})
+	t.Run("marker only", func(t *testing.T) {
+		destinationRoot := t.TempDir()
+		destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+		destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+		copyFixtureFile(t, sourceMarker, destinationMarker)
+		err := promoteCompletionPair(
+			sourceManifest, sourceMarker,
+			destinationManifest, destinationMarker,
+			604, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+		)
+		if err == nil || !strings.Contains(err.Error(), "exists without manifest") {
+			t.Fatalf("marker-only error = %v", err)
+		}
+		if _, statErr := os.Stat(destinationManifest); !os.IsNotExist(statErr) {
+			t.Fatalf("manifest was published beside an orphan marker: %v", statErr)
+		}
+	})
+}
+
+func TestPromoteCompletionPairConcurrentPublishNeverOverwritesWinner(t *testing.T) {
+	firstManifest, firstMarker := committedPairFixture(
+		t, 605, "read-step", [][]string{canonicalHeader, {"b", "first", "1", ""}},
+	)
+	secondManifest, secondMarker := committedPairFixture(
+		t, 605, "read-step", [][]string{canonicalHeader, {"b", "second", "2", ""}},
+	)
+	destinationRoot := t.TempDir()
+	destinationManifest := filepath.Join(destinationRoot, VerifiedName)
+	destinationMarker := filepath.Join(destinationRoot, VerifiedCompletionName)
+	type sourcePair struct {
+		manifest string
+		marker   string
+	}
+	sources := []sourcePair{
+		{manifest: firstManifest, marker: firstMarker},
+		{manifest: secondManifest, marker: secondMarker},
+	}
+	start := make(chan struct{})
+	errs := make(chan error, len(sources))
+	var workers sync.WaitGroup
+	for _, source := range sources {
+		workers.Add(1)
+		go func(source sourcePair) {
+			defer workers.Done()
+			<-start
+			errs <- promoteCompletionPair(
+				source.manifest, source.marker,
+				destinationManifest, destinationMarker,
+				605, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+			)
+		}(source)
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent publication successes = %d, want exactly one", successes)
+	}
+	if _, err := ValidateCompletion(
+		destinationManifest, destinationMarker,
+		605, constants.IntegrityProvenanceEngineStep, "read-step", VerifiedName,
+	); err != nil {
+		t.Fatalf("winning canonical pair is invalid: %v", err)
+	}
+}
+
+func committedPairFixture(
+	t *testing.T,
+	runID int64,
+	producer string,
+	records [][]string,
+) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	const sourcePrefix = "source"
+	writeCommittedFixture(t, root, sourcePrefix, VerifiedName, runID, producer, records)
+	return filepath.Join(root, sourcePrefix+"."+VerifiedName),
+		filepath.Join(root, sourcePrefix+"."+VerifiedCompletionName)
+}
+
+func copyFixtureFile(t *testing.T, source, destination string) {
+	t.Helper()
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(destination, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeResultsIndex(t *testing.T, root string, steps ...string) {
 	t.Helper()
 	manifest := results.Manifest{}
@@ -375,7 +626,7 @@ func writeCommittedFixture(t *testing.T, root, step, artifact string, runID int6
 	digest := sha256.Sum256(data)
 	marker := Completion{
 		Version: 1, Status: "complete", RunID: runID, ProducerKind: "engine_step", ProducerID: producer,
-		Artifact: artifact, SourceRecordCount: len(records) - 1, EmittedRecordCount: len(records) - 1, UniqueRecordCount: len(records) - 1,
+		Artifact: artifact, SourceRecordCount: len(records) - 1, UniqueRecordCount: len(records) - 1,
 		SelectedRecordCount: len(records) - 1, ManifestBytes: int64(len(data)), ManifestSHA256: hex.EncodeToString(digest[:]),
 	}
 	markerData, err := json.Marshal(marker)

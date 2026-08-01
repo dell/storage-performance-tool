@@ -52,40 +52,93 @@ func parseManifestRecord(fields []string, recordNumber int) (ManifestRecord, err
 
 // ValidateCompletion verifies the two-file commit record and the complete canonical manifest.
 func ValidateCompletion(manifestPath, completionPath string, runID int64, producerKind, producerID, artifact string) (Completion, error) {
+	return validateCompletion(
+		manifestPath, completionPath, runID, producerKind, producerID, artifact, true,
+	)
+}
+
+func validateCompletionForPromotion(
+	manifestPath, completionPath string,
+	runID int64,
+	producerKind, producerID, artifact string,
+) (Completion, error) {
+	return validateCompletion(
+		manifestPath, completionPath, runID, producerKind, producerID, artifact, false,
+	)
+}
+
+func validateCompletion(
+	manifestPath, completionPath string,
+	runID int64,
+	producerKind, producerID, artifact string,
+	requireCanonicalManifestName bool,
+) (Completion, error) {
+	var marker Completion
+	marker, err := readCompletionRecord(completionPath)
+	if err != nil {
+		return marker, err
+	}
+	err = validateCompletionRecord(
+		manifestPath, marker, runID, producerKind, producerID, artifact,
+		requireCanonicalManifestName,
+	)
+	return marker, err
+}
+
+func readCompletionRecord(completionPath string) (Completion, error) {
 	var marker Completion
 	markerFile, err := os.Open(completionPath) // #nosec G304 -- result/staging path selected by the caller
 	if err != nil {
 		return marker, fmt.Errorf("open completion record: %w", err)
 	}
+	defer func() { _ = markerFile.Close() }()
 	decoder := json.NewDecoder(markerFile)
 	if err = decoder.Decode(&marker); err != nil {
-		_ = markerFile.Close()
 		return marker, fmt.Errorf("decode completion record: %w", err)
+	}
+	var trailing any
+	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return marker, fmt.Errorf("decode completion record: multiple JSON values are not allowed")
+		}
+		return marker, fmt.Errorf("decode completion record trailing data: %w", err)
 	}
 	if err = markerFile.Close(); err != nil {
 		return marker, fmt.Errorf("close completion record: %w", err)
 	}
+	return marker, nil
+}
+
+func validateCompletionRecord(
+	manifestPath string,
+	marker Completion,
+	runID int64,
+	producerKind, producerID, artifact string,
+	requireCanonicalManifestName bool,
+) error {
 	if marker.Version != 1 || marker.Status != "complete" {
-		return marker, fmt.Errorf("completion record has unsupported version/status %d/%q", marker.Version, marker.Status)
+		return fmt.Errorf("completion record has unsupported version/status %d/%q", marker.Version, marker.Status)
 	}
 	if runID <= 0 || marker.RunID != runID {
-		return marker, fmt.Errorf("completion run_id %d does not match expected %d", marker.RunID, runID)
+		return fmt.Errorf("completion run_id %d does not match expected %d", marker.RunID, runID)
 	}
 	if marker.ProducerKind != producerKind || marker.ProducerID != producerID {
-		return marker, fmt.Errorf("completion producer %q/%q does not match expected %q/%q", marker.ProducerKind, marker.ProducerID, producerKind, producerID)
+		return fmt.Errorf("completion producer %q/%q does not match expected %q/%q", marker.ProducerKind, marker.ProducerID, producerKind, producerID)
 	}
-	if marker.Artifact != artifact || filepath.Base(manifestPath) != artifact {
-		return marker, fmt.Errorf("completion artifact %q does not match %q", marker.Artifact, artifact)
+	if marker.Artifact != artifact {
+		return fmt.Errorf("completion artifact %q does not match %q", marker.Artifact, artifact)
 	}
-	if marker.SourceRecordCount < 0 || marker.EmittedRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
-		marker.SourceRecordCount != marker.EmittedRecordCount ||
+	if requireCanonicalManifestName && filepath.Base(manifestPath) != artifact {
+		return fmt.Errorf("committed manifest filename %q does not match artifact %q", filepath.Base(manifestPath), artifact)
+	}
+	if marker.SourceRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
 		marker.SourceRecordCount < marker.UniqueRecordCount || marker.UniqueRecordCount < marker.SelectedRecordCount {
-		return marker, fmt.Errorf("completion record counts are inconsistent")
+		return fmt.Errorf("completion record counts are inconsistent")
 	}
 
 	manifest, err := os.Open(manifestPath) // #nosec G304 -- result/staging path selected by the caller
 	if err != nil {
-		return marker, fmt.Errorf("open committed manifest: %w", err)
+		return fmt.Errorf("open committed manifest: %w", err)
 	}
 	hasher := sha256.New()
 	bytesRead, err := io.Copy(hasher, manifest)
@@ -93,22 +146,22 @@ func ValidateCompletion(manifestPath, completionPath string, runID int64, produc
 		err = closeErr
 	}
 	if err != nil {
-		return marker, fmt.Errorf("hash committed manifest: %w", err)
+		return fmt.Errorf("hash committed manifest: %w", err)
 	}
 	actualDigest := hex.EncodeToString(hasher.Sum(nil))
 	if marker.ManifestBytes != bytesRead || marker.ManifestSHA256 != actualDigest ||
 		len(marker.ManifestSHA256) != sha256.Size*2 || marker.ManifestSHA256 != strings.ToLower(marker.ManifestSHA256) {
-		return marker, fmt.Errorf("completion length/digest does not match committed manifest")
+		return fmt.Errorf("completion length/digest does not match committed manifest")
 	}
 
 	count, err := validateCanonicalManifest(manifestPath)
 	if err != nil {
-		return marker, err
+		return err
 	}
 	if count != marker.SelectedRecordCount {
-		return marker, fmt.Errorf("manifest has %d records but completion selected_record_count is %d", count, marker.SelectedRecordCount)
+		return fmt.Errorf("manifest has %d records but completion selected_record_count is %d", count, marker.SelectedRecordCount)
 	}
-	return marker, nil
+	return nil
 }
 
 func validateCanonicalManifest(path string) (int, error) {

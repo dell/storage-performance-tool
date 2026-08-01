@@ -36,6 +36,37 @@ func TestWriteFileDurableAtomicRealFilesystemCanary(t *testing.T) {
 	}
 }
 
+func TestDurableRenameNoReplacePreservesExistingDestination(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, ".manifest.staging")
+	destination := filepath.Join(directory, "manifest.csv")
+	if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := durableRenameNoReplace(source, destination)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("durableRenameNoReplace() error = %v, want existing-destination error", err)
+	}
+	content, readErr := os.ReadFile(destination)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != "existing" {
+		t.Fatalf("existing destination was replaced with %q", content)
+	}
+	sourceContent, readErr := os.ReadFile(source)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(sourceContent) != "new" {
+		t.Fatalf("failed publication changed staging content to %q", sourceContent)
+	}
+}
+
 func TestDurableRenameOrdersFileSyncRenameAndDirectorySync(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, ".manifest.staging")

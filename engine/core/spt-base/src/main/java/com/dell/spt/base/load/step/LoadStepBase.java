@@ -252,9 +252,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			return;
 		}
 		final OpType opType = OpType.valueOf(config.stringVal("load-op-type").toUpperCase());
-		final String driverType = config.stringVal("storage-driver-type");
 		for (final var artifact : IntegrityCsvArtifacts.applicableHeaders(
-						opType, driverType, true, multipartEnabled())) {
+						opType, true, multipartEnabled())) {
 			switch (artifact.kind()) {
 			case FAILURES -> Loggers.INTEGRITY_FAILURES.info(artifact.header());
 			case PERFORMANCE -> Loggers.INTEGRITY_PERFORMANCE.info(artifact.header());

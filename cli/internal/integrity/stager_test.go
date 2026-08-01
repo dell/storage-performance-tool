@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -162,28 +163,34 @@ func TestValidateCompletionRejectsTrustBoundaryMismatches(t *testing.T) {
 	if err = json.Unmarshal(data, &valid); err != nil {
 		t.Fatal(err)
 	}
-	cases := map[string]func(*Completion){
-		"version":        func(c *Completion) { c.Version++ },
-		"status":         func(c *Completion) { c.Status = "pending" },
-		"run":            func(c *Completion) { c.RunID++ },
-		"producer kind":  func(c *Completion) { c.ProducerKind = constants.IntegrityProvenanceEngineStep },
-		"producer id":    func(c *Completion) { c.ProducerID = "stale" },
-		"artifact":       func(c *Completion) { c.Artifact = WrittenName },
-		"emission count": func(c *Completion) { c.EmittedRecordCount = 0 },
-		"count order":    func(c *Completion) { c.UniqueRecordCount = c.SourceRecordCount + 1 },
-		"row count": func(c *Completion) {
+	cases := []struct {
+		name       string
+		mutate     func(*Completion)
+		wantDetail string
+	}{
+		{name: "version", mutate: func(c *Completion) { c.Version++ }, wantDetail: "unsupported version/status"},
+		{name: "status", mutate: func(c *Completion) { c.Status = "pending" }, wantDetail: "unsupported version/status"},
+		{name: "run", mutate: func(c *Completion) { c.RunID++ }, wantDetail: "completion run_id"},
+		{name: "producer kind", mutate: func(c *Completion) {
+			c.ProducerKind = constants.IntegrityProvenanceEngineStep
+		}, wantDetail: "completion producer"},
+		{name: "producer id", mutate: func(c *Completion) { c.ProducerID = "stale" }, wantDetail: "completion producer"},
+		{name: "artifact", mutate: func(c *Completion) { c.Artifact = WrittenName }, wantDetail: "completion artifact"},
+		{name: "count order", mutate: func(c *Completion) {
+			c.UniqueRecordCount = c.SourceRecordCount + 1
+		}, wantDetail: "counts are inconsistent"},
+		{name: "row count", mutate: func(c *Completion) {
 			c.SourceRecordCount = 0
-			c.EmittedRecordCount = 0
 			c.UniqueRecordCount = 0
 			c.SelectedRecordCount = 0
-		},
-		"bytes":  func(c *Completion) { c.ManifestBytes++ },
-		"digest": func(c *Completion) { c.ManifestSHA256 = "00" },
+		}, wantDetail: "manifest has 1 records"},
+		{name: "bytes", mutate: func(c *Completion) { c.ManifestBytes++ }, wantDetail: "length/digest"},
+		{name: "digest", mutate: func(c *Completion) { c.ManifestSHA256 = "00" }, wantDetail: "length/digest"},
 	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
 			candidate := valid
-			mutate(&candidate)
+			test.mutate(&candidate)
 			candidatePath := filepath.Join(t.TempDir(), "candidate.json")
 			encoded, marshalErr := json.Marshal(candidate)
 			if marshalErr != nil {
@@ -194,8 +201,9 @@ func TestValidateCompletionRejectsTrustBoundaryMismatches(t *testing.T) {
 			}
 			if _, validateErr := ValidateCompletion(
 				manifest, candidatePath, 77, constants.IntegrityProvenanceCLIStager,
-				CLIStagerProducerID, VerifyInputName); validateErr == nil {
-				t.Fatal("expected completion validation error")
+				CLIStagerProducerID, VerifyInputName,
+			); validateErr == nil || !strings.Contains(validateErr.Error(), test.wantDetail) {
+				t.Fatalf("validation error = %v, want detail %q", validateErr, test.wantDetail)
 			}
 		})
 	}
@@ -221,5 +229,85 @@ func TestValidateCompletionRejectsTrustBoundaryMismatches(t *testing.T) {
 		manifest, malformed, 77, constants.IntegrityProvenanceCLIStager,
 		CLIStagerProducerID, VerifyInputName); err == nil {
 		t.Fatal("expected malformed completion to fail")
+	}
+}
+
+func TestValidateCompletionAcceptsSharedPublicV1Fixtures(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{name: "nonempty", count: 1},
+		{name: "empty", count: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := sharedCompletionFixtureDir(t, tc.name)
+			markerPath := filepath.Join(dir, "verify-input.complete.json")
+			markerBytes, err := os.ReadFile(markerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(markerBytes), "emitted_record_count") {
+				t.Fatal("public v1 fixture contains internal emission-count evidence")
+			}
+			marker, err := ValidateCompletion(
+				filepath.Join(dir, "verify-input.csv"), markerPath, 1722369600000,
+				constants.IntegrityProvenanceEngineStep,
+				"mt-001-20260730.120000.000-list", VerifyInputName)
+			if err != nil {
+				t.Fatalf("shared %s fixture rejected: %v", tc.name, err)
+			}
+			if marker.SelectedRecordCount != tc.count {
+				t.Fatalf("selected_record_count = %d, want %d", marker.SelectedRecordCount, tc.count)
+			}
+		})
+	}
+}
+
+func TestValidateCompletionRequiresExactlyOneJSONDocument(t *testing.T) {
+	fixtureRoot := filepath.Dir(sharedCompletionFixtureDir(t, "nonempty"))
+	manifestPath := filepath.Join(fixtureRoot, "nonempty", VerifyInputName)
+	for _, test := range []struct {
+		name    string
+		file    string
+		wantErr bool
+	}{
+		{name: "trailing whitespace", file: "valid-whitespace.json"},
+		{name: "trailing garbage", file: "trailing-garbage.json", wantErr: true},
+		{name: "concatenated object", file: "concatenated-object.json", wantErr: true},
+		{name: "truncated object", file: "truncated.json", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ValidateCompletion(
+				manifestPath,
+				filepath.Join(fixtureRoot, "markers", test.file),
+				1722369600000,
+				constants.IntegrityProvenanceEngineStep,
+				"mt-001-20260730.120000.000-list",
+				VerifyInputName,
+			)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidateCompletion() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func sharedCompletionFixtureDir(t *testing.T, variant string) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		candidate := filepath.Join(dir, "testdata", "integrity", "completion-v1", variant)
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("shared completion fixture %q not found", variant)
+		}
+		dir = parent
 	}
 }

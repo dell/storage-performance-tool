@@ -2,6 +2,7 @@ package com.dell.spt.base.integrity;
 
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,7 +22,6 @@ public record IntegrityManifestCompletion(
                 @JsonProperty("producer_id") String producerId,
                 String artifact,
                 @JsonProperty("source_record_count") long sourceRecordCount,
-                @JsonProperty("emitted_record_count") long emittedRecordCount,
                 @JsonProperty("unique_record_count") long uniqueRecordCount,
                 @JsonProperty("selected_record_count") long selectedRecordCount,
                 @JsonProperty("manifest_bytes") long manifestBytes,
@@ -32,7 +32,8 @@ public record IntegrityManifestCompletion(
     public static final String PRODUCER_ENGINE_STEP = "engine_step";
     public static final String PRODUCER_CLI_STAGER = "cli_stager";
 
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper()
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     public static Path emissionCountPath(final Path manifest) {
         return manifest.resolveSibling(manifest.getFileName() + ".emitted.count");
@@ -54,22 +55,8 @@ public record IntegrityManifestCompletion(
                     final long uniqueCount,
                     final long selectedCount)
                     throws IOException {
-        return create(
-                        manifest, runId, producerKind, producerId, sourceCount, sourceCount, uniqueCount, selectedCount);
-    }
-
-    public static IntegrityManifestCompletion create(
-                    final Path manifest,
-                    final long runId,
-                    final String producerKind,
-                    final String producerId,
-                    final long sourceCount,
-                    final long emittedCount,
-                    final long uniqueCount,
-                    final long selectedCount)
-                    throws IOException {
         requirePositiveRunId(runId);
-        validateCounts(sourceCount, emittedCount, uniqueCount, selectedCount);
+        validateCounts(sourceCount, uniqueCount, selectedCount);
         return new IntegrityManifestCompletion(
                         VERSION,
                         STATUS_COMPLETE,
@@ -78,7 +65,6 @@ public record IntegrityManifestCompletion(
                         requireText(producerId, "producer_id"),
                         manifest.getFileName().toString(),
                         sourceCount,
-                        emittedCount,
                         uniqueCount,
                         selectedCount,
                         Files.size(manifest),
@@ -123,7 +109,7 @@ public record IntegrityManifestCompletion(
             throw new IOException("integrity input completion record is missing: " + marker);
         }
         final IntegrityManifestCompletion record = JSON.readValue(marker.toFile(), IntegrityManifestCompletion.class);
-        validateCounts(record.sourceRecordCount, record.emittedRecordCount, record.uniqueRecordCount, record.selectedRecordCount);
+        validateCounts(record.sourceRecordCount, record.uniqueRecordCount, record.selectedRecordCount);
         final String expectedKind = switch (provenance) {
             case ENGINE_STEP -> PRODUCER_ENGINE_STEP;
             case CLI_STAGER -> PRODUCER_CLI_STAGER;
@@ -179,16 +165,11 @@ public record IntegrityManifestCompletion(
     }
 
     private static void validateCounts(
-                    final long sourceCount,
-                    final long emittedCount,
-                    final long uniqueCount,
-                    final long selectedCount)
+                    final long sourceCount, final long uniqueCount, final long selectedCount)
                     throws IOException {
-        if (sourceCount < 0 || emittedCount < 0 || uniqueCount < 0 || selectedCount < 0
-                        || sourceCount != emittedCount
+        if (sourceCount < 0 || uniqueCount < 0 || selectedCount < 0
                         || sourceCount < uniqueCount || uniqueCount < selectedCount) {
-            throw new IOException(
-                            "completion counts must satisfy emitted = source >= unique >= selected >= 0");
+            throw new IOException("completion counts must satisfy source >= unique >= selected >= 0");
         }
     }
 

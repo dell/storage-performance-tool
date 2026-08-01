@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -130,7 +132,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
 	}
-	if options.StepLifecycles[readStep] == "not_started" {
+	if options.StepLifecycles[readStep] == string(portcheck.StepLifecycleNotStarted) {
 		return outcome, nil
 	}
 	readCounts, metricsErr := readOperationMetrics(options.ResultsRoot, readStep, "READ")
@@ -157,15 +159,13 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 
 	inputPath := filepath.Join(options.ResultsRoot, inputName)
 	inputCompletionPath := filepath.Join(options.ResultsRoot, inputCompletionName)
+	var inputSourcePath, inputSourceCompletionPath, inputPromotionSource string
 	if options.Workload == workload.ReadVerify && options.StagedManifest != "" {
 		inputProducerKind = constants.IntegrityProvenanceCLIStager
 		inputProducerID = CLIStagerProducerID
-		if err = copyAtomic(options.StagedManifest, inputPath); err != nil {
-			return outcome, fmt.Errorf("promote staged verification input: %w", err)
-		}
-		if err = copyAtomic(options.StagedCompletion, inputCompletionPath); err != nil {
-			return outcome, fmt.Errorf("promote staged verification completion: %w", err)
-		}
+		inputSourcePath = options.StagedManifest
+		inputSourceCompletionPath = options.StagedCompletion
+		inputPromotionSource = "staged verification input"
 	} else {
 		producerStep := createStep
 		if options.Workload == workload.ReadVerify {
@@ -174,12 +174,16 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 		if producerStep == "" {
 			return outcome, fmt.Errorf("verification input producer step could not be identified")
 		}
-		if err = promoteStepFile(options.ResultsRoot, producerStep, inputName); err != nil {
-			return outcome, err
-		}
-		if err = promoteStepFile(options.ResultsRoot, producerStep, inputCompletionName); err != nil {
-			return outcome, err
-		}
+		inputSourcePath = filepath.Join(options.ResultsRoot, producerStep+"."+inputName)
+		inputSourceCompletionPath = filepath.Join(options.ResultsRoot, producerStep+"."+inputCompletionName)
+		inputPromotionSource = fmt.Sprintf("%s from step %s", inputName, producerStep)
+	}
+	if err = promoteCompletionPair(
+		inputSourcePath, inputSourceCompletionPath,
+		inputPath, inputCompletionPath,
+		options.RunID, inputProducerKind, inputProducerID, inputName,
+	); err != nil {
+		return outcome, fmt.Errorf("promote %s: %w", inputPromotionSource, err)
 	}
 	inputCompletion, err := ValidateCompletion(inputPath, inputCompletionPath, options.RunID, inputProducerKind, inputProducerID, inputName)
 	if err != nil {
@@ -206,11 +210,13 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 
 	verifiedPath := filepath.Join(options.ResultsRoot, VerifiedName)
 	verifiedCompletionPath := filepath.Join(options.ResultsRoot, VerifiedCompletionName)
-	if err = promoteStepFile(options.ResultsRoot, readStep, VerifiedName); err != nil {
-		return outcome, err
-	}
-	if err = promoteStepFile(options.ResultsRoot, readStep, VerifiedCompletionName); err != nil {
-		return outcome, err
+	if err = promoteCompletionPair(
+		filepath.Join(options.ResultsRoot, readStep+"."+VerifiedName),
+		filepath.Join(options.ResultsRoot, readStep+"."+VerifiedCompletionName),
+		verifiedPath, verifiedCompletionPath,
+		options.RunID, constants.IntegrityProvenanceEngineStep, readStep, VerifiedName,
+	); err != nil {
+		return outcome, fmt.Errorf("promote %s from step %s: %w", VerifiedName, readStep, err)
 	}
 	verifiedCompletion, err := ValidateCompletion(verifiedPath, verifiedCompletionPath, options.RunID, constants.IntegrityProvenanceEngineStep, readStep, VerifiedName)
 	if err != nil {
@@ -362,6 +368,140 @@ func promoteStepFile(root, step, name string) error {
 	return nil
 }
 
+type completionPairState uint8
+
+const (
+	completionPairAbsent completionPairState = iota
+	completionPairManifestOnly
+	completionPairMarkerOnly
+	completionPairPresent
+	completionPromotionStateAttempts = 6
+)
+
+func promoteCompletionPair(
+	sourceManifestPath, sourceCompletionPath string,
+	destinationManifestPath, destinationCompletionPath string,
+	runID int64,
+	producerKind, producerID, artifact string,
+) error {
+	sourceRecord, err := validateCompletionForPromotion(
+		sourceManifestPath, sourceCompletionPath,
+		runID, producerKind, producerID, artifact,
+	)
+	if err != nil {
+		return fmt.Errorf("validate source completion pair: %w", err)
+	}
+
+	for attempt := 0; attempt < completionPromotionStateAttempts; attempt++ {
+		state, stateErr := inspectCompletionPairState(
+			destinationManifestPath, destinationCompletionPath,
+		)
+		if stateErr != nil {
+			return stateErr
+		}
+		switch state {
+		case completionPairAbsent:
+			if err = copyAtomic(sourceManifestPath, destinationManifestPath); err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					continue
+				}
+				return fmt.Errorf("publish canonical manifest: %w", err)
+			}
+		case completionPairManifestOnly:
+			if err = validateCompletionRecord(
+				destinationManifestPath, sourceRecord,
+				runID, producerKind, producerID, artifact, true,
+			); err != nil {
+				return fmt.Errorf("existing canonical manifest conflicts with source completion: %w", err)
+			}
+			if err = durableOSOperations.syncFile(destinationManifestPath); err != nil {
+				return fmt.Errorf("synchronize recovered canonical manifest: %w", err)
+			}
+			if err = copyAtomic(sourceCompletionPath, destinationCompletionPath); err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					continue
+				}
+				return fmt.Errorf("publish canonical completion record: %w", err)
+			}
+		case completionPairMarkerOnly:
+			return fmt.Errorf(
+				"canonical completion record %s exists without manifest %s",
+				filepath.Base(destinationCompletionPath),
+				filepath.Base(destinationManifestPath),
+			)
+		case completionPairPresent:
+			existingRecord, validateErr := ValidateCompletion(
+				destinationManifestPath, destinationCompletionPath,
+				runID, producerKind, producerID, artifact,
+			)
+			if validateErr != nil {
+				return fmt.Errorf("existing canonical completion pair conflicts with source: %w", validateErr)
+			}
+			if existingRecord != sourceRecord {
+				return fmt.Errorf("existing canonical completion record does not match source record")
+			}
+			if err = synchronizeExistingCompletionPair(
+				destinationManifestPath, destinationCompletionPath,
+			); err != nil {
+				return err
+			}
+			return nil
+		default:
+			return fmt.Errorf("unknown completion pair state %d", state)
+		}
+	}
+	return fmt.Errorf("canonical completion pair changed repeatedly during publication")
+}
+
+func inspectCompletionPairState(manifestPath, completionPath string) (completionPairState, error) {
+	manifestExists, err := artifactExists(manifestPath)
+	if err != nil {
+		return completionPairAbsent, fmt.Errorf("inspect canonical manifest: %w", err)
+	}
+	completionExists, err := artifactExists(completionPath)
+	if err != nil {
+		return completionPairAbsent, fmt.Errorf("inspect canonical completion record: %w", err)
+	}
+	switch {
+	case manifestExists && completionExists:
+		return completionPairPresent, nil
+	case manifestExists:
+		return completionPairManifestOnly, nil
+	case completionExists:
+		return completionPairMarkerOnly, nil
+	default:
+		return completionPairAbsent, nil
+	}
+}
+
+func artifactExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+func synchronizeExistingCompletionPair(manifestPath, completionPath string) error {
+	if err := durableOSOperations.syncFile(manifestPath); err != nil {
+		return fmt.Errorf("synchronize existing canonical manifest: %w", err)
+	}
+	if err := durableOSOperations.syncFile(completionPath); err != nil {
+		return fmt.Errorf("synchronize existing canonical completion record: %w", err)
+	}
+	directory, err := durablePublicationDirectory(manifestPath, completionPath)
+	if err != nil {
+		return err
+	}
+	if err = durableOSOperations.syncDirectory(directory); err != nil {
+		return fmt.Errorf("synchronize existing canonical completion pair directory: %w", err)
+	}
+	return nil
+}
+
 func copyAtomic(source, destination string) error {
 	in, err := os.Open(source) // #nosec G304 -- internally resolved result/staging path
 	if err != nil {
@@ -378,7 +518,7 @@ func copyAtomic(source, destination string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	err = closeAndPublishTempFile(tmp, tmpPath, destination)
+	err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 	}
@@ -417,6 +557,10 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 			err = ctxErr
 			break
 		}
+		if rightErr != nil && !errors.Is(rightErr, io.EOF) {
+			err = fmt.Errorf("parse verified manifest: %w", rightErr)
+			break
+		}
 		if errors.Is(rightErr, io.EOF) || left.compare(right) < 0 {
 			if err = writer.Write(left.fields()); err != nil {
 				break
@@ -450,7 +594,7 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 		err = writer.Error()
 	}
 	if err == nil {
-		err = closeAndPublishTempFile(tmp, tmpPath, destination)
+		err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
 	} else {
 		_ = tmp.Close()
 	}
@@ -730,7 +874,7 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 		err = writer.Error()
 	}
 	if err == nil {
-		err = closeAndPublishTempFile(tmp, tmpPath, destination)
+		err = closeAndPublishTempFileNoReplace(tmp, tmpPath, destination)
 	} else {
 		_ = tmp.Close()
 	}
@@ -769,7 +913,7 @@ func parsePerformanceRow(step string, row []string) (performanceRow, error) {
 	if row[0] == "" || row[1] != step || row[2] == "" {
 		return parsed, fmt.Errorf("performance artifact for step %s has invalid row identity", step)
 	}
-	if row[4] != "sha256" {
+	if row[4] != constants.IntegrityAlgorithmSHA256 {
 		return parsed, fmt.Errorf("performance artifact for step %s has unsupported algorithm %q", step, row[4])
 	}
 	parsed.phase = row[3]

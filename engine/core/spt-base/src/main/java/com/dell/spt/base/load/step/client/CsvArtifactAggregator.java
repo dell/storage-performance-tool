@@ -207,7 +207,6 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 						IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
 						loadStepId,
 						counts.source(),
-						emittedCount,
 						counts.unique(),
 						counts.selected());
 		try {

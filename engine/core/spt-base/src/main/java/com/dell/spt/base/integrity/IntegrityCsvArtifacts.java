@@ -29,13 +29,20 @@ public final class IntegrityCsvArtifacts {
 	private IntegrityCsvArtifacts() {}
 
 	public static List<Artifact> applicableHeaders(
-					final OpType opType, final String driverType, final boolean metadataMode) {
-		return applicableHeaders(opType, driverType, metadataMode, true);
+					final OpType opType, final String ignoredDriverType, final boolean metadataMode) {
+		return applicableHeaders(opType, metadataMode, true);
 	}
 
 	public static List<Artifact> applicableHeaders(
 					final OpType opType,
-					final String driverType,
+					final String ignoredDriverType,
+					final boolean metadataMode,
+					final boolean multipartEnabled) {
+		return applicableHeaders(opType, metadataMode, multipartEnabled);
+	}
+
+	public static List<Artifact> applicableHeaders(
+					final OpType opType,
 					final boolean metadataMode,
 					final boolean multipartEnabled) {
 		if (!metadataMode) {
@@ -47,7 +54,7 @@ public final class IntegrityCsvArtifacts {
 							new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER));
 		}
 		if (opType == OpType.CREATE) {
-			if (multipartEnabled && IntegrityConfig.isSupportedDriver(driverType)) {
+			if (multipartEnabled) {
 				return List.of(
 								new Artifact(Kind.PERFORMANCE, PERFORMANCE_HEADER),
 								new Artifact(Kind.MULTIPART_LIFECYCLE, MULTIPART_LIFECYCLE_HEADER));

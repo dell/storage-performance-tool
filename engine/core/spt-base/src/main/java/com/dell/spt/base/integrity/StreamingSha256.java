@@ -17,7 +17,7 @@ public final class StreamingSha256 implements AutoCloseable {
 
 	public static final int BUFFER_SIZE = 64 * 1024;
 	private static final String JCA_ALGORITHM = "SHA-256";
-	private static final Worker CLOSED_WORKER = new Worker(true);
+	private static final Worker CLOSED_WORKER = Worker.closedSentinel();
 
 	private final int workerCount;
 	private final ArrayBlockingQueue<Worker> workers;
@@ -31,7 +31,7 @@ public final class StreamingSha256 implements AutoCloseable {
 		workers = new ArrayBlockingQueue<>(workerCount);
 		try {
 			for (int i = 0; i < workerCount; i++) {
-				workers.add(new Worker());
+				workers.add(Worker.digestWorker());
 			}
 		} catch (final NoSuchAlgorithmException e) {
 			throw new IllegalStateException("SHA-256 is unavailable", e);
@@ -151,14 +151,18 @@ public final class StreamingSha256 implements AutoCloseable {
 		private final ByteBuffer buffer;
 		private final MessageDigest digest;
 
-		private Worker() throws NoSuchAlgorithmException {
-			buffer = ByteBuffer.allocate(BUFFER_SIZE);
-			digest = MessageDigest.getInstance(JCA_ALGORITHM);
+		private Worker(final ByteBuffer buffer, final MessageDigest digest) {
+			this.buffer = buffer;
+			this.digest = digest;
 		}
 
-		private Worker(final boolean sentinel) {
-			buffer = null;
-			digest = null;
+		private static Worker digestWorker() throws NoSuchAlgorithmException {
+			return new Worker(
+							ByteBuffer.allocate(BUFFER_SIZE), MessageDigest.getInstance(JCA_ALGORITHM));
+		}
+
+		private static Worker closedSentinel() {
+			return new Worker(null, null);
 		}
 	}
 }

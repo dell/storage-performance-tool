@@ -43,7 +43,6 @@ type Completion struct {
 	ProducerID          string `json:"producer_id"`
 	Artifact            string `json:"artifact"`
 	SourceRecordCount   int    `json:"source_record_count"`
-	EmittedRecordCount  int    `json:"emitted_record_count"`
 	UniqueRecordCount   int    `json:"unique_record_count"`
 	SelectedRecordCount int    `json:"selected_record_count"`
 	ManifestBytes       int64  `json:"manifest_bytes"`
@@ -153,7 +152,7 @@ func stageInputManifestWithOperations(
 	marker := Completion{
 		Version: 1, Status: "complete", RunID: runID,
 		ProducerKind: constants.IntegrityProvenanceCLIStager, ProducerID: CLIStagerProducerID,
-		Artifact: VerifyInputName, SourceRecordCount: sourceCount, EmittedRecordCount: sourceCount,
+		Artifact: VerifyInputName, SourceRecordCount: sourceCount,
 		UniqueRecordCount: uniqueCount, SelectedRecordCount: uniqueCount,
 		ManifestBytes: manifestBytes, ManifestSHA256: hex.EncodeToString(hasher.Sum(nil)),
 	}

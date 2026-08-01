@@ -100,7 +100,6 @@ class CsvArtifactAggregatorTest {
 		final var completion = IntegrityManifestCompletion.validate(
 						manifest, 100, IntegrityInputProvenance.ENGINE_STEP, "list-step");
 		assertEquals(3, completion.sourceRecordCount());
-		assertEquals(3, completion.emittedRecordCount());
 		assertEquals(2, completion.uniqueRecordCount());
 		assertEquals(1, completion.selectedRecordCount());
 		assertFalse(Files.exists(tempDir.resolve("verify-input.node-001.csv")));

@@ -48,10 +48,14 @@ type readVerifyScenarioData struct {
 var integrityScenarioTemplates = template.Must(
 	template.New("integrity-scenarios").
 		Option("missingkey=error").
-		Funcs(template.FuncMap{"jsq": quoteJS}).
+		Funcs(template.FuncMap{
+			"jsq":                quoteJS,
+			"integrityMode":      func() string { return integrityModeMetadata },
+			"integrityAlgorithm": func() string { return ChecksumSHA256 },
+		}).
 		Parse(`{{define "integrity"}}
 "integrity": {
-      "mode": "metadata", "algorithm": "sha256",
+      "mode": {{jsq integrityMode}}, "algorithm": {{jsq integrityAlgorithm}},
       "input": {"provenance": {{jsq .Provenance}}, "expectedProducerId": {{jsq .ExpectedProducerID}}}{{if .MaxCount}},
       "selection": {"maxCount": {{.MaxCount}}}{{end}}
     }{{end}}

@@ -28,8 +28,9 @@ var RequiredIntegritySchemaPaths = []string{
 
 // Integrity mode values.
 const (
-	IntegrityModeNone     = "none"
-	IntegrityModeMetadata = "metadata"
+	IntegrityModeNone        = "none"
+	IntegrityModeMetadata    = "metadata"
+	IntegrityAlgorithmSHA256 = "sha256"
 )
 
 // Distributed verification runtime-identity tiers. The public CLI accepts these short values;

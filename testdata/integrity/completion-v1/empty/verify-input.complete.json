@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "status": "complete",
+  "run_id": 1722369600000,
+  "producer_kind": "engine_step",
+  "producer_id": "mt-001-20260730.120000.000-list",
+  "artifact": "verify-input.csv",
+  "source_record_count": 0,
+  "unique_record_count": 0,
+  "selected_record_count": 0,
+  "manifest_bytes": 27,
+  "manifest_sha256": "d14234715ea87d75875beb7aed1ddd1ad20d1d85ce83e91904060dfe760ed39c"
+}

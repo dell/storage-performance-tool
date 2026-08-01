@@ -59,6 +59,26 @@ func durableRenameWithOperations(source, destination string, operations durableP
 	)
 }
 
+func durableRenameNoReplace(source, destination string) error {
+	destinationDirectory, err := durablePublicationDirectory(source, destination)
+	if err != nil {
+		return err
+	}
+	if err = durableOSOperations.syncFile(source); err != nil {
+		return fmt.Errorf("synchronize publication file %s: %w", filepath.Base(source), err)
+	}
+	if err = renameNoReplace(source, destination); err != nil {
+		return fmt.Errorf("atomically publish %s without replacement: %w", filepath.Base(destination), err)
+	}
+	if err = durableOSOperations.syncDirectory(destinationDirectory); err != nil {
+		return fmt.Errorf(
+			"published %s but failed to synchronize its directory; durable state is indeterminate: %w",
+			filepath.Base(destination), err,
+		)
+	}
+	return nil
+}
+
 func durablePublicationDirectory(source, destination string) (string, error) {
 	sourceDirectory, err := filepath.Abs(filepath.Dir(source))
 	if err != nil {
@@ -120,6 +140,21 @@ func closeAndPublishTempFileWithOperations(
 		return fmt.Errorf("close publication staging file: %w", err)
 	}
 	return durableRenameWithOperations(tempPath, destination, operations)
+}
+
+func closeAndPublishTempFileNoReplace(
+	tempFile *os.File,
+	tempPath string,
+	destination string,
+) error {
+	if err := tempFile.Chmod(durableArtifactFileMode); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("set publication permissions: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("close publication staging file: %w", err)
+	}
+	return durableRenameNoReplace(tempPath, destination)
 }
 
 func writeFileDurableAtomicWithOperations(
