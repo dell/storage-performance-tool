@@ -1241,6 +1241,9 @@ func TestRunningIntegrityPayloadIdentityUsesStartedContainers(t *testing.T) {
 	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
 		t.Fatal(err)
 	}
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusRunning)
+	}
 	if err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1277,6 +1280,9 @@ func TestRunningIntegrityPayloadIdentityRejectsDriftAndUnavailableEvidence(t *te
 			orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
 			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
 				t.Fatal(err)
+			}
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusRunning)
 			}
 			err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -2094,6 +2100,119 @@ func TestRunningPayloadEvidenceRecordsExactStartedParticipantSetByHost(t *testin
 	}
 }
 
+func TestRunningImageEvidenceRecordsExactStartedParticipantSetByHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "dropped", Original: "dropped"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "dropped": {ID: imageID}, "worker": {ID: imageID},
+		},
+		payloadCalls: payloadCalls,
+	}
+	var recorded DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = evidence
+	})
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].ContainerID = "entry-container"
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusRunning)
+	orchestrator.hosts[2].ContainerID = "worker-container"
+
+	if err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if payloadCalls.Load() != 0 {
+		t.Fatalf("image-tier reconciliation made %d payload probes, want 0", payloadCalls.Load())
+	}
+	if len(recorded.Participants) != 2 || recorded.Participants[0].Host != "entry" ||
+		recorded.Participants[1].Host != "worker" {
+		t.Fatalf("running image participant evidence = %+v, want exact entry/worker set", recorded.Participants)
+	}
+	for _, participant := range recorded.Participants {
+		if participant.ImageID != imageID || participant.PayloadSHA256 != "" {
+			t.Fatalf("invalid running image participant evidence: %+v", participant)
+		}
+	}
+}
+
+func TestRunningImageEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T) {
+	newPrepared := func(t *testing.T) *MultiHostOrchestrator {
+		t.Helper()
+		hostInfos := []*hostparse.HostInfo{
+			{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+		}
+		orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+		for index, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusReady)
+			host.ContainerID = fmt.Sprintf("container-%d", index)
+		}
+		imageID := "sha256:" + strings.Repeat("a", 64)
+		orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "worker": {ID: imageID},
+		}}
+		if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+			context.Background(), "repo/spt:test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusRunning)
+		}
+		return orchestrator
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*MultiHostOrchestrator)
+		want   string
+	}{
+		{name: "no running participants", mutate: func(orchestrator *MultiHostOrchestrator) {
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusFailed)
+			}
+		}, want: "no running participants"},
+		{name: "empty prepared host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants[0].Host = ""
+		}, want: "empty participant host"},
+		{name: "duplicate prepared host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants[1].Host =
+				orchestrator.runtimeIdentityEvidence.Participants[0].Host
+		}, want: "duplicate host"},
+		{name: "missing prepared running host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants =
+				orchestrator.runtimeIdentityEvidence.Participants[:1]
+		}, want: "worker was not present in prepared"},
+		{name: "unexpected running host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.hosts[1].Info.Host = "replacement"
+		}, want: "not present in prepared"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orchestrator := newPrepared(t)
+			orchestrator.mu.Lock()
+			test.mutate(orchestrator)
+			orchestrator.mu.Unlock()
+			err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("coverage error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestRunningPayloadEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T) {
 	newPrepared := func(t *testing.T) (*MultiHostOrchestrator, string) {
 		t.Helper()
@@ -2114,6 +2233,9 @@ func TestRunningPayloadEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T
 		if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
 			context.Background(), "repo/spt:test"); err != nil {
 			t.Fatal(err)
+		}
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusRunning)
 		}
 		return orchestrator, payload
 	}
