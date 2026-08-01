@@ -9,9 +9,10 @@ import "time"
 // Timeout constants for various operations
 const (
 	// API and connection timeouts
-	APIPollingTimeout   = 500 * time.Millisecond // Timeout for API polling requests
-	APIReadinessTimeout = 30 * time.Second       // Timeout for waiting for APIs to be ready
-	PortCheckTimeout    = 2 * time.Second        // Timeout for checking if a port is open
+	APIPollingTimeout             = 500 * time.Millisecond // Timeout for API polling requests
+	APIReadinessTimeout           = 30 * time.Second       // Timeout for waiting for APIs to be ready
+	PortCheckTimeout              = 2 * time.Second        // Timeout for checking if a port is open
+	AutoResultsUnavailableTimeout = 2 * time.Minute        // Maximum continuous loss of all completion-tracker API signals
 
 	// Container lifecycle timeouts
 	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown

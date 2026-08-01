@@ -7,10 +7,13 @@ Copyright © 2025 Dell Technologies
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/config"
@@ -91,7 +94,9 @@ func executeRoot() int {
 }
 
 func executeCommandCode(cmd *cobra.Command) int {
-	err := cmd.Execute()
+	ctx, stop := signal.NotifyContext(commandContext(cmd), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := cmd.ExecuteContext(ctx)
 	if err == nil {
 		return 0
 	}
@@ -100,6 +105,15 @@ func executeCommandCode(cmd *cobra.Command) int {
 		return exitErr.Code
 	}
 	return 1
+}
+
+func commandContext(cmd *cobra.Command) context.Context {
+	if cmd != nil {
+		if ctx := cmd.Context(); ctx != nil {
+			return ctx
+		}
+	}
+	return context.Background()
 }
 
 // initializeLogger sets up the slog logger based on command-line flags

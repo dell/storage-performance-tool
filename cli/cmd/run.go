@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,22 @@ var (
 	generateRunSummaryFunc = generateRunSummary
 	requestShutdownAllFunc = requestShutdownAll
 )
+
+var integrityRuntimeGOOS = runtime.GOOS
+
+const integritySupportedGOOS = "linux"
+
+func prepareExternalItemFilesForRun(params scenario.Params) (scenario.Params, error) {
+	if scenario.IsIntegrityWorkload(params) && integrityRuntimeGOOS != integritySupportedGOOS {
+		return params, fmt.Errorf(
+			"%s is unsupported on %s: crash-durable verification evidence requires "+
+				"a parent-directory synchronization primitive; use the Linux CLI",
+			params.WorkloadType,
+			integrityRuntimeGOOS,
+		)
+	}
+	return scenario.PrepareExternalItemFiles(params)
+}
 
 // shouldRunHeadless determines if the application should run in headless mode
 func shouldRunHeadless(cmd *cobra.Command) bool {
@@ -959,7 +976,7 @@ Available workload types:
 		// Lock the base timestamp so that every GenerateScenario call
 		// (here and later in the orchestrator) produces identical step IDs.
 		params.BaseTimestamp = scenario.BaseTimestamp()
-		params, err = scenario.PrepareExternalItemFiles(params)
+		params, err = prepareExternalItemFilesForRun(params)
 		if err != nil {
 			return err
 		}
@@ -1065,10 +1082,6 @@ Available workload types:
 			return fmt.Errorf("invalid test hosts: %w", err)
 		}
 		integrityIdentityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
-		if verificationRun && integrityIdentityTier == constants.IntegrityRuntimeIdentityTierPayload && len(hostInfos) < 2 {
-			return fmt.Errorf("--%s=%s requires at least two --test-hosts participants",
-				flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierPayload)
-		}
 
 		// Set default min-hosts to total host count if not specified
 		if minHosts == 0 {
@@ -1236,10 +1249,11 @@ Available workload types:
 		}
 
 		// Start background auto-results tracker/fetcher if enabled.
+		runContext := commandContext(cmd)
 		var integrityOptions *integrity.FinalizeOptions
 		if verificationRun {
 			integrityOptions = buildIntegrityFinalizeOptions(params)
-			integrityOptions.Context = cmd.Context()
+			integrityOptions.Context = runContext
 		}
 		var autoResultsDone chan autoResultsOutcome
 		startAutoResultsMonitoring := func() {
@@ -1256,7 +1270,11 @@ Available workload types:
 					case autoOutcome = <-autoResultsDone:
 						autoOutcomeReceived = true
 						return true
-					case <-cmd.Context().Done():
+					case <-runContext.Done():
+						// Let the context-aware monitor close its discovery worker and
+						// preserve any evidence it observed before command cancellation.
+						autoOutcome = <-autoResultsDone
+						autoOutcomeReceived = true
 						return false
 					}
 				}
@@ -1312,7 +1330,7 @@ Available workload types:
 			// Already constructed above (before startAutoResults) so its
 			// FinalizeDiagnosticsAndCleanup could be wired in as a pre-summary hook.
 			orchestrator := multiHostOrchestrator
-			ctx := cmd.Context()
+			ctx := runContext
 
 			// Respect force cleanup for preflight conflicts
 			forceMode, _ := cmd.Flags().GetBool("force")

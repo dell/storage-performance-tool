@@ -3,8 +3,10 @@ package portcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,5 +226,103 @@ func TestRunTracker_StatusTransitionsToIdle(t *testing.T) {
 	}
 	if res.FinalState != "IDLE" {
 		t.Fatalf("FinalState = %q, want IDLE", res.FinalState)
+	}
+}
+
+func TestRunTrackerUnavailableReturnsWithinLivenessDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	baseURL := server.URL
+	server.Close()
+
+	tracker := NewRunTracker(baseURL)
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.UnavailableTimeout = 15 * time.Millisecond
+
+	started := time.Now()
+	result, err := tracker.WaitForCompletion(context.Background(), nil)
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "completion tracker unavailable") {
+		t.Fatalf("WaitForCompletion error = %v, want tracker-unavailable error", err)
+	}
+	if result == nil || result.Steps == nil {
+		t.Fatalf("partial result = %#v, want preserved evidence", result)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("tracker returned after %s, want bounded return", elapsed)
+	}
+}
+
+func TestRunTrackerAPIDisappearsAfterActivity(t *testing.T) {
+	var statusCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/status" && atomic.AddInt32(&statusCalls, 1) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "RUNNING"})
+			return
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.UnavailableTimeout = 15 * time.Millisecond
+	result, err := tracker.WaitForCompletion(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "completion tracker unavailable") {
+		t.Fatalf("WaitForCompletion error = %v, want tracker-unavailable error", err)
+	}
+	if result == nil || result.FinalState != "RUNNING" {
+		t.Fatalf("partial result = %#v, want preserved RUNNING state", result)
+	}
+	if atomic.LoadInt32(&statusCalls) < 2 {
+		t.Fatalf("status calls = %d, want API disappearance after activity", statusCalls)
+	}
+}
+
+func TestRunTrackerDoesNotCapHealthyLongRunningWork(t *testing.T) {
+	var statusCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if atomic.AddInt32(&statusCalls, 1) < 8 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "RUNNING"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"state": "COMPLETED"})
+	}))
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.UnavailableTimeout = time.Nanosecond
+	result, err := tracker.WaitForCompletion(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("WaitForCompletion error: %v", err)
+	}
+	if result.FinalState != "COMPLETED" {
+		t.Fatalf("FinalState = %q, want COMPLETED", result.FinalState)
+	}
+	if atomic.LoadInt32(&statusCalls) < 8 {
+		t.Fatalf("status calls = %d, want repeated healthy progress", statusCalls)
+	}
+}
+
+func TestRunTrackerCancellationPreservesPartialLifecycle(t *testing.T) {
+	tracker := NewRunTracker("http://127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := tracker.WaitForCompletion(ctx, []string{"planned-step"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitForCompletion error = %v, want context.Canceled", err)
+	}
+	if result == nil {
+		t.Fatal("partial result is nil")
+	}
+	if got := result.Steps["planned-step"].Lifecycle; got != StepLifecyclePlanned {
+		t.Fatalf("planned-step lifecycle = %q, want %q", got, StepLifecyclePlanned)
 	}
 }

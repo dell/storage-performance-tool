@@ -20,6 +20,7 @@ type RunTracker struct {
 	HTTPClient           *http.Client
 	PollInterval         time.Duration
 	IdleGrace            time.Duration
+	UnavailableTimeout   time.Duration
 	StableConfirmations  int // consecutive confirmations for a step file to be considered stable
 	Clock                Clock
 	lastJSONTimestamp    int64
@@ -36,6 +37,7 @@ func NewRunTracker(baseURL string) *RunTracker {
 		HTTPClient:          &http.Client{Timeout: DefaultHTTPTimeout},
 		PollInterval:        500 * time.Millisecond,
 		IdleGrace:           20 * time.Second,
+		UnavailableTimeout:  constants.AutoResultsUnavailableTimeout,
 		StableConfirmations: 2,
 		Clock:               api.Clock,
 	}
@@ -97,17 +99,18 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 	}
 
 	idleSince := time.Time{}
+	unavailableSince := time.Time{}
 	final := &RunResult{Steps: make(map[string]StepCompletion, len(stepIDs))}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return populateStepLifecycles(final, stepState, stepIDs), ctx.Err()
 		case <-t.Clock.After(t.PollInterval):
 		}
 
 		// 1) Check run state
-		status, terminal := t.checkRunState(ctx)
+		status, terminal, trackerAvailable := t.checkRunState(ctx)
 		state := status.State
 		if t.Debug {
 			logging.LogDebug("auto-results", "poll",
@@ -135,7 +138,10 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			if st.completed {
 				continue
 			}
-			done, size, mod, err := t.probeStepFile(ctx, id)
+			done, size, mod, probeAvailable, err := t.probeStepFile(ctx, id)
+			if probeAvailable {
+				trackerAvailable = true
+			}
 			if err != nil {
 				logging.LogDebug("tracker", "probe error", "stepId", id, "error", err.Error())
 			}
@@ -171,7 +177,10 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 
 		// 3) Idle fallback when /run is not available
-		usedIdle, isIdle := t.checkIdle(ctx)
+		usedIdle, isIdle, idleAvailable := t.checkIdle(ctx)
+		if idleAvailable {
+			trackerAvailable = true
+		}
 		if t.Debug {
 			logging.LogDebug("auto-results", "idle_check", "used", usedIdle, "is_idle", isIdle)
 		}
@@ -196,6 +205,23 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 				"all_done", allDone)
 		}
 
+		// A healthy but slow run may remain in one state indefinitely. Bound only
+		// continuous loss of every API signal, not the valid run duration.
+		if trackerAvailable {
+			unavailableSince = time.Time{}
+		} else if unavailableSince.IsZero() {
+			unavailableSince = t.Clock.Now()
+		} else {
+			unavailableTimeout := t.UnavailableTimeout
+			if unavailableTimeout <= 0 {
+				unavailableTimeout = constants.AutoResultsUnavailableTimeout
+			}
+			if t.Clock.Now().Sub(unavailableSince) >= unavailableTimeout {
+				return populateStepLifecycles(final, stepState, stepIDs), fmt.Errorf(
+					"completion tracker unavailable for %s", unavailableTimeout)
+			}
+		}
+
 		// Exit conditions
 		if terminal || (len(stepState) > 0 && allDone && (!t.RequireTerminalState ||
 			(final.FinalState != constants.StateRunning && final.FinalState != constants.StateStarting &&
@@ -204,6 +230,10 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 	}
 
+	return populateStepLifecycles(final, stepState, stepIDs), nil
+}
+
+func populateStepLifecycles(final *RunResult, stepState map[string]*stepProbe, stepIDs []string) *RunResult {
 	terminalStepIndex := -1
 	for index, id := range stepIDs {
 		if id == final.FailureStepID {
@@ -231,38 +261,38 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			Completed: st.completed, Failed: lifecycle == StepLifecycleFailed, CompletedAt: st.completedAt,
 		}
 	}
-	return final, nil
+	return final
 }
 
-func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal bool) {
+func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal, available bool) {
 	// New contract: rely on /status only and retain its structured terminal cause.
 	if status, err := t.Client.getStatusDetail(ctx); err == nil {
 		switch status.State {
 		case constants.StateRunning, constants.StateStarting, constants.StateInitializing:
 			t.seenActive = true
-			return status, false
+			return status, false, true
 		case constants.StateIdle:
-			return status, t.seenActive
+			return status, t.seenActive, true
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
-			return status, true
+			return status, true, true
 		default:
-			return status, false
+			return status, false, true
 		}
 	}
-	return terminalStatus{}, false
+	return terminalStatus{}, false, false
 }
 
 // checkIdle tries to infer idle state via /metrics when /run is absent or unhelpful.
-// Returns (usedIdleProbe, currentlyIdle).
-func (t *RunTracker) checkIdle(ctx context.Context) (bool, bool) {
+// Returns (usedIdleProbe, currentlyIdle, APIAvailable).
+func (t *RunTracker) checkIdle(ctx context.Context) (bool, bool, bool) {
 	steps, err := t.Client.getMetricsJSON(ctx)
 	if err != nil || len(steps) == 0 {
 		// If metrics endpoint responds but returns no steps, consider this an idle signal
 		// in single-host runs after we've observed activity.
 		if err == nil && len(steps) == 0 {
-			return true, t.seenActive
+			return true, t.seenActive, true
 		}
-		return false, false
+		return false, false, false
 	}
 	// Aggregate across steps
 	var maxTS int64
@@ -283,31 +313,31 @@ func (t *RunTracker) checkIdle(ctx context.Context) (bool, bool) {
 	t.lastJSONTimestamp = maxTS
 	// Prefer explicit terminal flag when present, keep legacy heuristic as fallback
 	if (hasTerminal && sumRates == 0 && unchanged) || (sumRates == 0 && unchanged) {
-		return true, true
+		return true, true, true
 	}
-	return true, false
+	return true, false, true
 }
 
 // probeStepFile checks if metrics.total.csv exists for a step using HEAD and returns its size and last-modified when available.
-func (t *RunTracker) probeStepFile(ctx context.Context, stepID string) (bool, int64, string, error) {
+func (t *RunTracker) probeStepFile(ctx context.Context, stepID string) (bool, int64, string, bool, error) {
 	u, err := url.Parse(t.Client.BaseURL)
 	if err != nil {
-		return false, 0, "", err
+		return false, 0, "", false, err
 	}
 	u.Path = path.Join(u.Path, "/logs/", stepID, "metrics.FileTotal")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u.String(), nil)
 	if err != nil {
-		return false, 0, "", fmt.Errorf("create request: %w", err)
+		return false, 0, "", false, fmt.Errorf("create request: %w", err)
 	}
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return false, 0, "", fmt.Errorf("http do: %w", err)
+		return false, 0, "", false, fmt.Errorf("http do: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, 0, "", nil
+		return false, 0, "", true, nil
 	}
 	// Parse Content-Length and Last-Modified headers
 	var size int64
@@ -317,5 +347,5 @@ func (t *RunTracker) probeStepFile(ctx context.Context, stepID string) (bool, in
 		}
 	}
 	lm := resp.Header.Get("Last-Modified")
-	return true, size, lm, nil
+	return true, size, lm, true, nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -47,6 +48,18 @@ func (f *fakeRunTracker) SetDebug(debug bool) {
 	f.debugCalled = true
 	f.debugValue = debug
 }
+
+type cancelAwareRunTracker struct {
+	exited chan struct{}
+}
+
+func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []string) (*portcheck.RunResult, error) {
+	defer close(t.exited)
+	<-ctx.Done()
+	return &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{}}, ctx.Err()
+}
+
+func (*cancelAwareRunTracker) SetDebug(bool) {}
 
 type fakeFetcher struct {
 	mu       sync.Mutex
@@ -744,5 +757,44 @@ func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) 
 
 	if atomic.LoadInt32(&hookCalled) != 0 {
 		t.Fatalf("preSummaryHook called %d times with shutdown disabled, want 0", hookCalled)
+	}
+}
+
+func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		generateRunSummaryFunc = origSummary
+	}()
+
+	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
+	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
+	discoverStepIDsFunc = func(string) ([]string, error) { return nil, nil }
+	discoverFleetStepIDsFunc = func(string) ([]string, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startAutoResults(
+		"http://127.0.0.1:1", "mt", t.TempDir(), nil, false, nil, "", false, 0, "", nil,
+		io.Discard, io.Discard, "", nil, &integrity.FinalizeOptions{Context: ctx})
+	cancel()
+
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.TrackerErr, context.Canceled) {
+			t.Fatalf("tracker error = %v, want context.Canceled", outcome.TrackerErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("auto-results monitor did not terminate after cancellation")
+	}
+	select {
+	case <-tracker.exited:
+	default:
+		t.Fatal("tracker worker had not exited when auto-results completed")
 	}
 }
