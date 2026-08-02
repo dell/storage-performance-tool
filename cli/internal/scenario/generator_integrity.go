@@ -16,8 +16,8 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 		return "", fmt.Errorf("write-verify object count must be non-negative")
 	}
 	ts := resolveTimestamp(params)
-	createID := formatStepID(1, ts, stepOpCreate)
-	readID := formatStepID(2, ts, "verify")
+	createID := formatStepID(1, ts, constants.IntegrityStepRoleCreate)
+	readID := formatStepID(2, ts, constants.IntegrityStepRoleVerify)
 	deleteID := formatStepID(3, ts, stepOpDelete)
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	count := params.ObjectCount
@@ -78,7 +78,7 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	driver := resolveStorageDriverType(params.S3Driver)
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	readNumber := 2
-	producerID := formatStepID(1, ts, listStepSuffix)
+	producerID := formatStepID(1, ts, constants.IntegrityStepRoleList)
 	provenance := constants.IntegrityProvenanceEngineStep
 	discovery := params.ItemsFile == ""
 	if params.ItemsFile != "" {
@@ -86,11 +86,11 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 		producerID = constants.IntegrityCLIStagerProducerID
 		provenance = constants.IntegrityProvenanceCLIStager
 	}
-	readID := formatStepID(readNumber, ts, "verify")
+	readID := formatStepID(readNumber, ts, constants.IntegrityStepRoleVerify)
 	selectionMaxCount := params.ObjectCount
 	return executeIntegrityScenario("read-verify", readVerifyScenarioData{
 		Discovery: discovery,
-		ListStep:  formatStepID(1, ts, listStepSuffix),
+		ListStep:  formatStepID(1, ts, constants.IntegrityStepRoleList),
 		ReadStep:  readID,
 		ListStorage: integrityStorageTemplateData{
 			Driver: driver, Concurrency: params.Threads,

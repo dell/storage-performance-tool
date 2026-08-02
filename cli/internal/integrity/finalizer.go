@@ -132,18 +132,20 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
 	}
-	if options.StepLifecycles[readStep] == string(results.StepLifecycleNotStarted) {
-		return outcome, nil
-	}
-	readCounts, metricsErr := readOperationMetrics(options.ResultsRoot, readStep, "READ")
-	if metricsErr != nil {
-		return outcome, metricsErr
-	}
-	outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
-	outcome.CorruptCount = readCounts.corrupt
-	if options.BaseURL != "" {
-		if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
-			return outcome, err
+	readNotStarted := options.StepLifecycles[readStep] == string(results.StepLifecycleNotStarted)
+	readCounts := operationCounts{}
+	if !readNotStarted {
+		var metricsErr error
+		readCounts, metricsErr = readOperationMetrics(options.ResultsRoot, readStep, "READ")
+		if metricsErr != nil {
+			return outcome, metricsErr
+		}
+		outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
+		outcome.CorruptCount = readCounts.corrupt
+		if options.BaseURL != "" {
+			if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
+				return outcome, err
+			}
 		}
 	}
 
@@ -172,7 +174,19 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			producerStep = listStep
 		}
 		if producerStep == "" {
+			if readNotStarted {
+				// There is no applicable producer evidence to require. Preserve the
+				// structured engine cause without manufacturing missing-artifact noise.
+				return outcome, nil
+			}
 			return outcome, fmt.Errorf("verification input producer step could not be identified")
+		}
+		if readNotStarted {
+			producerLifecycle := options.StepLifecycles[producerStep]
+			if producerLifecycle == string(results.StepLifecycleNotStarted) ||
+				producerLifecycle == string(results.StepLifecyclePlanned) {
+				return outcome, nil
+			}
 		}
 		inputSourcePath = filepath.Join(options.ResultsRoot, producerStep+"."+inputName)
 		inputSourceCompletionPath = filepath.Join(options.ResultsRoot, producerStep+"."+inputCompletionName)
@@ -207,6 +221,13 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	}
 	outcome.EmptySelection = outcome.SelectionCount == 0
 	outcome.EmptyAllowed = outcome.EmptySelection && options.Workload == workload.ReadVerify && options.AllowEmptySelection
+	if readNotStarted {
+		// The producer pair is canonical evidence even though the engine
+		// correctly prevented the dependent READ from opening its input. The
+		// deferred summary remains incomplete while reporting the exact empty
+		// selection and zero attempted verification operations.
+		return outcome, nil
+	}
 
 	verifiedPath := filepath.Join(options.ResultsRoot, VerifiedName)
 	verifiedCompletionPath := filepath.Join(options.ResultsRoot, VerifiedCompletionName)
@@ -322,7 +343,7 @@ type StepRoles struct {
 
 // ResolveStepRoles preserves the first nonempty match for each role. Callers
 // place runtime-discovered IDs before generated and manifest-appended IDs.
-func ResolveStepRoles(workloadName string, configured []string, manifest *results.Manifest) StepRoles {
+func ResolveStepRoles(_ string, configured []string, manifest *results.Manifest) StepRoles {
 	ids := append([]string(nil), configured...)
 	if manifest != nil {
 		for _, step := range manifest.Steps {
@@ -334,27 +355,12 @@ func ResolveStepRoles(workloadName string, configured []string, manifest *result
 	roles := StepRoles{}
 	for _, id := range ids {
 		switch {
-		case roles.Create == "" && strings.HasSuffix(id, "-create"):
+		case roles.Create == "" && strings.HasSuffix(id, "-"+constants.IntegrityStepRoleCreate):
 			roles.Create = id
-		case roles.List == "" && strings.HasSuffix(id, "-list"):
+		case roles.List == "" && strings.HasSuffix(id, "-"+constants.IntegrityStepRoleList):
 			roles.List = id
-		case roles.Read == "" && strings.HasSuffix(id, "-verify"):
+		case roles.Read == "" && strings.HasSuffix(id, "-"+constants.IntegrityStepRoleVerify):
 			roles.Read = id
-		}
-	}
-	if workloadName == workload.WriteVerify {
-		if roles.Create == "" && len(configured) > 0 {
-			roles.Create = configured[0]
-		}
-		if roles.Read == "" && len(configured) > 1 {
-			roles.Read = configured[1]
-		}
-	} else {
-		if roles.Read == "" && len(configured) > 0 {
-			roles.Read = configured[len(configured)-1]
-		}
-		if roles.List == "" && len(configured) > 1 {
-			roles.List = configured[0]
 		}
 	}
 	return roles

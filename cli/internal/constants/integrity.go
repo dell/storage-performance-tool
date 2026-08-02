@@ -32,6 +32,14 @@ const (
 	IntegrityAlgorithmSHA256 = "sha256"
 )
 
+// Integrity scenario step-role tokens are shared by scenario generation and
+// result finalization. They form part of the generated step-ID contract.
+const (
+	IntegrityStepRoleCreate = "create"
+	IntegrityStepRoleList   = "list"
+	IntegrityStepRoleVerify = "verify"
+)
+
 // Distributed verification runtime-identity tiers. The public CLI accepts these short values;
 // result evidence records the more descriptive engine-runtime tier names.
 const (

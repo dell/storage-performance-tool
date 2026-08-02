@@ -178,6 +178,51 @@ func TestFinalizeNotStartedReadRecordsIncompleteLifecycleWithoutMissingArtifactN
 	}
 }
 
+func TestFinalizeFailedZeroWritePromotesProducerAndReportsEmptySelection(t *testing.T) {
+	root := t.TempDir()
+	createStep, readStep := "mt-001-create", "mt-002-verify"
+	writeResultsIndex(t, root, createStep, readStep)
+	writeCommittedFixture(t, root, createStep, WrittenName, 211, createStep, [][]string{canonicalHeader})
+	writeCSVFixture(t, filepath.Join(root, createStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, {"CREATE", "0", "1", "0"},
+	})
+
+	outcome, err := FinalizeResults(FinalizeOptions{
+		ResultsRoot: root, Workload: workload.WriteVerify, RunID: 211,
+		StepIDs: []string{createStep, readStep},
+		StepLifecycles: map[string]string{
+			createStep: string(results.StepLifecycleFailed),
+			readStep:   string(results.StepLifecycleNotStarted),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed zero-write evidence should not add consequential artifact noise: %v", err)
+	}
+	if outcome.Complete || outcome.SelectionCount != 0 || !outcome.EmptySelection ||
+		outcome.EmptyAllowed || outcome.VerificationAttemptedCount != 0 {
+		t.Fatalf("unexpected zero-write outcome: %+v", outcome)
+	}
+	for _, name := range []string{WrittenName, WrittenCompletionName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); statErr != nil {
+			t.Fatalf("canonical producer evidence %s was not preserved: %v", name, statErr)
+		}
+	}
+	for _, name := range []string{VerifiedName, VerifiedCompletionName, VerifyRemainingName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("dependent READ artifact %s should be absent: %v", name, statErr)
+		}
+	}
+	manifest, manifestErr := readResultsManifest(root)
+	if manifestErr != nil {
+		t.Fatal(manifestErr)
+	}
+	if manifest.Integrity == nil || manifest.Integrity.Complete ||
+		!manifest.Integrity.EmptySelection || manifest.Integrity.SelectionCount != 0 ||
+		manifest.Integrity.VerificationAttemptedCount != 0 {
+		t.Fatalf("incorrect zero-write machine summary: %+v", manifest.Integrity)
+	}
+}
+
 func TestReadOperationMetricsReportsSemanticErrorsWithoutNilWrapFormatting(t *testing.T) {
 	root := t.TempDir()
 	step := "verify"

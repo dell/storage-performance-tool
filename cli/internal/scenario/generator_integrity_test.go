@@ -6,7 +6,76 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 )
+
+func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
+	tests := []struct {
+		name     string
+		workload string
+		generate func() (string, error)
+		want     func(StepPlan) integrity.StepRoles
+	}{
+		{
+			name: "write verify", workload: WorkloadTypeWriteVerify,
+			generate: func() (string, error) {
+				return GenerateWriteVerifyScenario(Params{
+					WorkloadType: WorkloadTypeWriteVerify, RunID: 501,
+					Bucket: "bucket", ObjectSize: "1KiB", ObjectCount: 1, Threads: 1,
+					BaseTimestamp: "20260801.120000.000",
+				})
+			},
+			want: func(plan StepPlan) integrity.StepRoles {
+				return integrity.StepRoles{Create: plan.Steps[0].ID, Read: plan.Steps[1].ID}
+			},
+		},
+		{
+			name: "read verify discovery", workload: WorkloadTypeReadVerify,
+			generate: func() (string, error) {
+				return GenerateReadVerifyScenario(Params{
+					WorkloadType: WorkloadTypeReadVerify, RunID: 502,
+					Bucket: "bucket", ObjectCount: 1, Threads: 1,
+					BaseTimestamp: "20260801.120000.000",
+				})
+			},
+			want: func(plan StepPlan) integrity.StepRoles {
+				return integrity.StepRoles{List: plan.Steps[0].ID, Read: plan.Steps[1].ID}
+			},
+		},
+		{
+			name: "read verify staged", workload: WorkloadTypeReadVerify,
+			generate: func() (string, error) {
+				return GenerateReadVerifyScenario(Params{
+					WorkloadType: WorkloadTypeReadVerify, RunID: 503,
+					Bucket: "bucket", ObjectCount: 1, Threads: 1, ItemsFile: "/spt-input/items.csv",
+					BaseTimestamp: "20260801.120000.000",
+				})
+			},
+			want: func(plan StepPlan) integrity.StepRoles {
+				return integrity.StepRoles{Read: plan.Steps[0].ID}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenarioText, err := test.generate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildStepPlanFromScenario(scenarioText)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, 0, len(plan.Steps))
+			for _, step := range plan.Steps {
+				ids = append(ids, step.ID)
+			}
+			if got, want := integrity.ResolveStepRoles(test.workload, ids, nil), test.want(plan); got != want {
+				t.Fatalf("ResolveStepRoles(generated plan) = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
 
 func TestGenerateWriteVerifyScenarioContract(t *testing.T) {
 	got, err := GenerateWriteVerifyScenario(Params{

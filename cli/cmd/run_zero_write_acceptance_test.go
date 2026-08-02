@@ -146,6 +146,10 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, createStep+"."+integrity.WrittenCompletionName), append(completionData, '\n'), 0o600); err != nil {
 				return err
 			}
+			createMetrics := "OpType,CountSucc,CountFail,CountCorrupt\nCREATE,0,1,0\n"
+			if err := os.WriteFile(filepath.Join(root, createStep+".metrics.total.csv"), []byte(createMetrics), 0o600); err != nil {
+				return err
+			}
 			index := results.Manifest{Steps: []results.StepManifest{
 				{StepID: createStep}, {StepID: readStep},
 			}}
@@ -181,6 +185,10 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	if outcome.Finalization == nil || outcome.Finalization.Complete {
 		t.Fatalf("zero-write finalization = %+v, want incomplete", outcome.Finalization)
 	}
+	if !outcome.Finalization.EmptySelection || outcome.Finalization.EmptyAllowed ||
+		outcome.Finalization.SelectionCount != 0 || outcome.Finalization.VerificationAttemptedCount != 0 {
+		t.Fatalf("zero-write machine outcome = %+v", outcome.Finalization)
+	}
 
 	runErr := resolveVerificationRunError(nil, outcome, true, params)
 	var exitErr *ExitCodeError
@@ -193,8 +201,6 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		filepath.Join(resultsRoot, integrity.WrittenName),
-		filepath.Join(resultsRoot, integrity.WrittenCompletionName),
 		filepath.Join(resultsRoot, readStep+"."+integrity.VerifiedName),
 		filepath.Join(resultsRoot, integrity.VerifiedName),
 		filepath.Join(resultsRoot, integrity.VerifiedCompletionName),
@@ -205,5 +211,10 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(resultsRoot, createStep+"."+integrity.WrittenName)); statErr != nil {
 		t.Fatalf("valid header-only CREATE evidence was not preserved: %v", statErr)
+	}
+	for _, name := range []string{integrity.WrittenName, integrity.WrittenCompletionName} {
+		if _, statErr := os.Stat(filepath.Join(resultsRoot, name)); statErr != nil {
+			t.Fatalf("canonical zero-write producer evidence %s was not promoted: %v", name, statErr)
+		}
 	}
 }

@@ -63,6 +63,75 @@ func TestResolveStepRolesPortablePreservesOrderedFirstMatchAcrossEvidenceSources
 	}
 }
 
+func TestResolveStepRolesPortableDoesNotGuessMalformedPlanPositions(t *testing.T) {
+	for _, workloadName := range []string{workload.WriteVerify, workload.ReadVerify} {
+		if got := ResolveStepRoles(workloadName, []string{"step-one", "step-two"}, nil); got != (StepRoles{}) {
+			t.Fatalf("ResolveStepRoles(%s malformed plan) = %+v, want no guessed roles", workloadName, got)
+		}
+	}
+}
+
+func TestManifestRecordParsingPortablePreservesKeysAndRejectsInvalidSize(t *testing.T) {
+	record, err := parseManifestRecord([]string{"bucket", "line\nkey,雪", "17", "v1"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.bucket != "bucket" || record.key != "line\nkey,雪" || record.size != 17 || record.version != "v1" {
+		t.Fatalf("parsed manifest record = %+v", record)
+	}
+	for _, fields := range [][]string{
+		{"bucket", "key", "-1", ""},
+		{"bucket", "key", "not-a-size", ""},
+		{"bucket", "key", "1"},
+	} {
+		if _, err := parseManifestRecord(fields, 3); err == nil {
+			t.Fatalf("parseManifestRecord(%v) error = nil", fields)
+		}
+	}
+}
+
+func TestValidateCanonicalManifestPortableAcceptsQuotedNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.csv")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := csv.NewWriter(file)
+	for _, row := range [][]string{canonicalHeader, {"bucket", "line\nkey,雪", "3", ""}} {
+		if err = writer.Write(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer.Flush()
+	if err = writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err = file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := validateCanonicalManifest(path); err != nil || count != 1 {
+		t.Fatalf("validateCanonicalManifest() = (%d, %v), want one record", count, err)
+	}
+}
+
+func TestReadOperationMetricsPortableRejectsMissingAndNegativeCounts(t *testing.T) {
+	root := t.TempDir()
+	step := "mt-001-verify"
+	path := filepath.Join(root, step+".metrics.total.csv")
+	if err := os.WriteFile(path, []byte("OpType,CountSucc,CountFail,CountCorrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOperationMetrics(root, step, "READ"); err == nil || !strings.Contains(err.Error(), "no data rows") {
+		t.Fatalf("header-only metrics error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("OpType,CountSucc,CountFail,CountCorrupt\nREAD,-1,0,0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOperationMetrics(root, step, "READ"); err == nil || !strings.Contains(err.Error(), "negative value") {
+		t.Fatalf("negative metrics error = %v", err)
+	}
+}
+
 func TestValidateCompletionPortableAcceptsOneIdentityBoundRecordAndRejectsTrailingJSON(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, WrittenName)
