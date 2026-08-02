@@ -79,25 +79,6 @@ type Params struct {
 	// External item files for mixed workload (optional)
 	ReadItemsFile   string // Pre-created items for the READ+STAT pool (skips seed phase)
 	DeleteItemsFile string // Pre-created items to pre-populate DELETE queue (relaxes delete<=put constraint)
-
-	// launchSubmitted is command-local lifecycle wiring. It is deliberately
-	// unexported so scenario metadata and generated configuration remain pure data.
-	launchSubmitted func()
-}
-
-// SetLaunchSubmittedCallback installs a command-local notification invoked only
-// after the engine accepts the scenario submission.
-func (p *Params) SetLaunchSubmittedCallback(callback func()) {
-	if p != nil {
-		p.launchSubmitted = callback
-	}
-}
-
-// NotifyLaunchSubmitted marks the scenario submission boundary for orchestration consumers.
-func (p Params) NotifyLaunchSubmitted() {
-	if p.launchSubmitted != nil {
-		p.launchSubmitted()
-	}
 }
 
 // TablesParams holds parameters specific to the S3 Tables workload.

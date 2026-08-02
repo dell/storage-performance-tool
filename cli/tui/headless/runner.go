@@ -40,6 +40,7 @@ type HeadlessRunner struct {
 	apiPort       string
 	networkMode   string
 	resultsRoot   string
+	launchHooks   tui.LaunchHooks
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -61,6 +62,7 @@ type HeadlessOptions struct {
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
 	ExpectedStepIDs        []string
+	LaunchHooks            tui.LaunchHooks
 }
 
 // AutoTerminateError indicates a headless multi-host run reached the configured
@@ -105,6 +107,7 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		apiPort:       apiPort,
 		networkMode:   networkMode,
 		resultsRoot:   options.ResultsRoot,
+		launchHooks:   options.LaunchHooks,
 		// keepScenario will be set when RunWithScenario is called
 	}
 
@@ -138,6 +141,7 @@ type MultiHostHeadlessRunner struct {
 	verbose                bool
 	delegateNormalShutdown bool
 	expectedStepIDs        []string
+	launchHooks            tui.LaunchHooks
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
@@ -147,6 +151,7 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 		verbose:                options.Verbose,
 		delegateNormalShutdown: options.DelegateNormalShutdown,
 		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
+		launchHooks:            options.LaunchHooks,
 	}
 
 	// Set up trace file if specified
@@ -206,9 +211,10 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	})
 	var err error
 	if scenarioContent != nil {
-		err = testOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		err = testOrchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	} else {
-		err = testOrchestrator.StartTest(ctx, image, params)
+		err = testOrchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
 	}
 	if err != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
@@ -454,13 +460,14 @@ func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string
 // runBenchmarkWithParams executes the actual benchmark with scenario parameters
 func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
 	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
-		return orchestrator.StartTest(ctx, image, params)
+		return orchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
 	})
 }
 
 func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
 	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
-		return orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		return orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	})
 }
 

@@ -825,7 +825,7 @@ func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Dur
 		default:
 			return fmt.Errorf("non-terminal state during linger: %s", st.State)
 		}
-		timer := time.NewTimer(200 * time.Millisecond)
+		timer := time.NewTimer(constants.APILingerPollInterval)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {

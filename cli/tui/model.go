@@ -956,17 +956,51 @@ func StartTUIWithScenarioAndParamsWithTrace(image string, scenarioPath string, p
 	return StartTUIWithScenarioAndParamsNetworkModeWithTrace(image, scenarioPath, params, apiPort, constants.DefaultNetworkMode, "", setSummarySink, tracePath, traceAppend)
 }
 
+// RunOptions carries orchestration-only launch settings separately from
+// scenario configuration. Existing TUI entrypoints remain compatibility wrappers.
+type RunOptions struct {
+	APIPort              string
+	NetworkMode          string
+	ResultsRoot          string
+	AutoTerminateSeconds int
+	SetSummarySink       func(func(string))
+	TracePath            string
+	TraceAppend          bool
+	ScenarioContent      []byte
+	DefaultsContent      []byte
+	LaunchHooks          LaunchHooks
+}
+
+// StartTUIWithScenarioRunOptions starts a local TUI run with explicit
+// orchestration lifecycle options.
+func StartTUIWithScenarioRunOptions(
+	image, scenarioPath string, params scenario.ScenarioParams, options RunOptions,
+) error {
+	if options.AutoTerminateSeconds > 0 {
+		return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(
+			image, scenarioPath, params, options.APIPort, options.NetworkMode,
+			options.ResultsRoot, options.AutoTerminateSeconds, options.SetSummarySink,
+			options.TracePath, options.TraceAppend, options.ScenarioContent,
+			options.DefaultsContent, options.LaunchHooks)
+	}
+	return startTUIWithScenarioAndParamsWithNetworkModeTrace(
+		image, scenarioPath, params, options.APIPort, options.NetworkMode,
+		options.ResultsRoot, options.SetSummarySink, options.TracePath,
+		options.TraceAppend, options.ScenarioContent, options.DefaultsContent,
+		options.LaunchHooks)
+}
+
 // StartTUIWithScenarioAndParamsNetworkModeWithTrace starts the TUI with a selected Docker network mode.
 func StartTUIWithScenarioAndParamsNetworkModeWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
-	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend, nil, nil)
+	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend, nil, nil, LaunchHooks{})
 }
 
 // StartTUIWithScenarioContentAndParamsWithTrace starts the TUI with caller-provided scenario/defaults content.
 func StartTUIWithScenarioContentAndParamsWithTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
-	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	return startTUIWithScenarioAndParamsWithNetworkModeTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent, LaunchHooks{})
 }
 
-func startTUIWithScenarioAndParamsWithNetworkModeTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func startTUIWithScenarioAndParamsWithNetworkModeTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte, launchHooks LaunchHooks) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1044,9 +1078,10 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(image string, scenarioPat
 
 		var startErr error
 		if scenarioContent != nil {
-			startErr = orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+			startErr = orchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, image, params, scenarioContent, defaultsContent, launchHooks)
 		} else {
-			startErr = orchestrator.StartTest(ctx, image, params)
+			startErr = orchestrator.StartTestWithLaunchHooks(ctx, image, params, launchHooks)
 		}
 		if startErr != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", startErr)))
@@ -1100,16 +1135,36 @@ func StartTUIWithMultiHostOrchestrator(orchestrator *MultiHostOrchestrator, imag
 
 // StartTUIWithMultiHostOrchestratorWithTrace starts the multi-host TUI with optional full-output trace capture.
 func StartTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
-	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, nil, nil)
+	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, nil, nil, LaunchHooks{})
 }
 
 // StartTUIWithMultiHostOrchestratorContentWithTrace starts the multi-host TUI
 // with caller-provided scenario/defaults content.
 func StartTUIWithMultiHostOrchestratorContentWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
-	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent, LaunchHooks{})
 }
 
-func startTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+// StartTUIWithMultiHostRunOptions starts a host-orchestrated TUI run with
+// explicit orchestration lifecycle options.
+func StartTUIWithMultiHostRunOptions(
+	orchestrator *MultiHostOrchestrator,
+	image, scenarioPath string,
+	params scenario.ScenarioParams,
+	options RunOptions,
+) error {
+	if options.AutoTerminateSeconds > 0 {
+		return startTUIWithMultiHostOrchestratorTimeoutWithTrace(
+			orchestrator, image, scenarioPath, params, options.AutoTerminateSeconds,
+			options.SetSummarySink, options.TracePath, options.TraceAppend,
+			options.ScenarioContent, options.DefaultsContent, options.LaunchHooks)
+	}
+	return startTUIWithMultiHostOrchestratorWithTrace(
+		orchestrator, image, scenarioPath, params, options.SetSummarySink,
+		options.TracePath, options.TraceAppend, options.ScenarioContent,
+		options.DefaultsContent, options.LaunchHooks)
+}
+
+func startTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte, launchHooks LaunchHooks) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1205,9 +1260,10 @@ func startTUIWithMultiHostOrchestratorWithTrace(orchestrator *MultiHostOrchestra
 		// Start the distributed test via the multi-host orchestrator
 		var err error
 		if scenarioContent != nil {
-			err = multiOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+			err = multiOrchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, image, params, scenarioContent, defaultsContent, launchHooks)
 		} else {
-			err = multiOrchestrator.StartTest(ctx, image, params)
+			err = multiOrchestrator.StartTestWithLaunchHooks(ctx, image, params, launchHooks)
 		}
 		if err != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting multi-host test monitoring: %v", err)))
@@ -1266,7 +1322,7 @@ func StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(image string, scen
 	if autoTerminateSeconds <= 0 {
 		return StartTUIWithScenarioAndParamsNetworkModeWithTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend)
 	}
-	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
+	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil, LaunchHooks{})
 }
 
 // StartTUIWithScenarioContentAndParamsTimeoutWithTrace starts the TUI with caller-provided content and optional timeout.
@@ -1274,10 +1330,10 @@ func StartTUIWithScenarioContentAndParamsTimeoutWithTrace(image string, scenario
 	if autoTerminateSeconds <= 0 {
 		return StartTUIWithScenarioContentAndParamsWithTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
 	}
-	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	return startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image, scenarioPath, params, apiPort, networkMode, resultsRoot, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent, LaunchHooks{})
 }
 
-func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image string, scenarioPath string, params scenario.ScenarioParams, apiPort string, networkMode string, resultsRoot string, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte, launchHooks LaunchHooks) error {
 	model := InitialModel()
 	if params.MinimalTUI {
 		model.processOutputHidden = true
@@ -1336,9 +1392,10 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(image string, scenario
 		ctx := context.Background()
 		var startErr error
 		if scenarioContent != nil {
-			startErr = orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+			startErr = orchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, image, params, scenarioContent, defaultsContent, launchHooks)
 		} else {
-			startErr = orchestrator.StartTest(ctx, image, params)
+			startErr = orchestrator.StartTestWithLaunchHooks(ctx, image, params, launchHooks)
 		}
 		if startErr != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting test: %v", startErr)))
@@ -1391,18 +1448,18 @@ func StartTUIWithMultiHostOrchestratorTimeout(orchestrator *MultiHostOrchestrato
 
 // StartTUIWithMultiHostOrchestratorTimeoutWithTrace starts the multi-host TUI with timeout and optional full-output trace capture.
 func StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool) error {
-	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil)
+	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, nil, nil, LaunchHooks{})
 }
 
 // StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace starts the multi-host
 // TUI with caller-provided content and optional auto-terminate timeout.
 func StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
-	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+	return startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, image, scenarioPath, params, autoTerminateSeconds, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent, LaunchHooks{})
 }
 
-func startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte) error {
+func startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOrchestrator, image string, scenarioPath string, params scenario.ScenarioParams, autoTerminateSeconds int, setSummarySink func(func(string)), tracePath string, traceAppend bool, scenarioContent, defaultsContent []byte, launchHooks LaunchHooks) error {
 	if autoTerminateSeconds <= 0 {
-		return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent)
+		return startTUIWithMultiHostOrchestratorWithTrace(orchestrator, image, scenarioPath, params, setSummarySink, tracePath, traceAppend, scenarioContent, defaultsContent, launchHooks)
 	}
 	model := InitialModel()
 	if params.MinimalTUI {
@@ -1468,9 +1525,10 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator *MultiHostOr
 		ctx := context.Background()
 		var err error
 		if scenarioContent != nil {
-			err = multiOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+			err = multiOrchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, image, params, scenarioContent, defaultsContent, launchHooks)
 		} else {
-			err = multiOrchestrator.StartTest(ctx, image, params)
+			err = multiOrchestrator.StartTestWithLaunchHooks(ctx, image, params, launchHooks)
 		}
 		if err != nil {
 			p.Send(sptMessageMsg(fmt.Sprintf("Error starting multi-host test monitoring: %v", err)))

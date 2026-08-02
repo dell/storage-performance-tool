@@ -147,6 +147,14 @@ func (o *TestOrchestrator) containerStartupDiagnostics() string {
 
 // StartTest starts a Spt test using the API approach
 func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params scenario.Params) error {
+	return o.StartTestWithLaunchHooks(ctx, image, params, LaunchHooks{})
+}
+
+// StartTestWithLaunchHooks starts a Spt test and reports its API submission
+// through explicit orchestration hooks.
+func (o *TestOrchestrator) StartTestWithLaunchHooks(
+	ctx context.Context, image string, params scenario.Params, hooks LaunchHooks,
+) error {
 	var err error
 	params, err = scenario.PrepareExternalItemFiles(params)
 	if err != nil {
@@ -165,11 +173,25 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		return fmt.Errorf("failed to generate defaults: %w", err)
 	}
 
-	return o.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
+	return o.StartTestWithContentAndLaunchHooks(
+		ctx, image, params, []byte(scenarioContent), defaultsContent, hooks)
 }
 
 // StartTestWithContent starts a Spt test with caller-provided scenario and defaults content.
 func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	return o.StartTestWithContentAndLaunchHooks(
+		ctx, image, params, scenarioContent, defaultsContent, LaunchHooks{})
+}
+
+// StartTestWithContentAndLaunchHooks starts caller-provided content and reports
+// the accepted API submission through explicit orchestration hooks.
+func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
+	ctx context.Context,
+	image string,
+	params scenario.Params,
+	scenarioContent, defaultsContent []byte,
+	hooks LaunchHooks,
+) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -224,25 +246,31 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 			o.onError("Container startup diagnostics:\n" + diagnostics)
 			reportedDiagnostics = true
 		}
-		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+		cleanupErr := o.dockerManager.CleanupContext(ctx)
+		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API failure", cleanupErr)
 		}
+		var startupErr error
 		if diagnostics != "" {
 			if reportedDiagnostics {
-				return fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+				startupErr = fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+			} else {
+				startupErr = fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 			}
-			return fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
+		} else {
+			startupErr = fmt.Errorf("spt API failed to become ready: %w", err)
 		}
-		return fmt.Errorf("spt API failed to become ready: %w", err)
+		return errors.Join(startupErr, cleanupErr)
 	}
 
 	if scenario.IsIntegrityWorkload(params) {
 		if err := o.apiClient.VerifyIntegrityCapability(image); err != nil {
 			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
-			if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+			cleanupErr := o.dockerManager.CleanupContext(ctx)
+			if cleanupErr != nil {
 				logging.LogError("orchestrator", "failed to cleanup container after capability failure", cleanupErr)
 			}
-			return err
+			return errors.Join(err, cleanupErr)
 		}
 	}
 
@@ -264,12 +292,13 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 	if err != nil {
 		// Clean up the started container since API test start failed
 		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)
-		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+		cleanupErr := o.dockerManager.CleanupContext(ctx)
+		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API start failure", cleanupErr)
 		}
-		return fmt.Errorf("failed to start test via API: %w", err)
+		return errors.Join(fmt.Errorf("failed to start test via API: %w", err), cleanupErr)
 	}
-	params.NotifyLaunchSubmitted()
+	hooks.NotifySubmitted()
 
 	logging.LogInfo("orchestrator", "test started successfully", "runID", runID)
 	if o.onOutput != nil {

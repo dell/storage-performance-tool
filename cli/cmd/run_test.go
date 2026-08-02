@@ -154,6 +154,10 @@ func TestRunCmdSingleRemoteHostUsesOrchestratorAndSkipsControllerPortCheck(t *te
 }
 
 func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
+	previousGOOS := integrityRuntimeGOOS
+	integrityRuntimeGOOS = "linux"
+	t.Cleanup(func() { integrityRuntimeGOOS = previousGOOS })
+
 	type routeContextKey struct{}
 	tests := []struct {
 		name        string
@@ -220,16 +224,16 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				prepareCalls++
 				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
 			}
-			startLocalHeadlessRunFunc = func(_ string, _ string, params scenario.Params, _ headless.HeadlessOptions) error {
+			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
 				localCalls++
-				params.NotifyLaunchSubmitted()
+				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
 			startMultiHostHeadlessRunFunc = func(
-				_ *tui.MultiHostOrchestrator, _ string, _ string, params scenario.Params, _ headless.HeadlessOptions,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
 			) error {
 				multiCalls++
-				params.NotifyLaunchSubmitted()
+				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
 			startAutoResultsFunc = func(

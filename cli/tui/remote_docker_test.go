@@ -6,10 +6,12 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
@@ -66,6 +68,82 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "--name spt-node-") {
 		t.Errorf("expected docker run command to include node name prefix, got: %s", cmd)
+	}
+}
+
+func TestRemoteDockerCleanupStopFailureRetainsContainerAndStagingForRetry(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "retry-container"
+	mgr.stagingDir = "/tmp/retry-staging"
+	mock.SetCommandFailure("docker rm -f retry-container", "busy", errors.New("remove failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want container removal failure")
+	}
+	if mgr.containerID != "retry-container" || mgr.stagingDir != "/tmp/retry-staging" {
+		t.Fatalf("failed cleanup lost ownership: container=%q staging=%q", mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("docker rm -f retry-container", "removed")
+	mock.SetCommandSuccess("rm -rf /tmp/retry-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" {
+		t.Fatalf("successful retry retained ownership: container=%q staging=%q", mgr.containerID, mgr.stagingDir)
+	}
+}
+
+func TestRemoteDockerCleanupStagingFailureRemainsRetryable(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "removed-container"
+	mgr.stagingDir = "/tmp/retry-staging"
+	mock.SetCommandSuccess("docker rm -f removed-container", "removed")
+	mock.SetCommandFailure("rm -rf /tmp/retry-staging", "permission denied", errors.New("rm failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want staging removal failure")
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "/tmp/retry-staging" {
+		t.Fatalf("staging failure state = container %q staging %q", mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("rm -rf /tmp/retry-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("staging cleanup retry error = %v", err)
+	}
+	if mgr.stagingDir != "" {
+		t.Fatalf("successful staging retry retained path %q", mgr.stagingDir)
+	}
+}
+
+func TestRemoteDockerCleanupCancellationDuringStopRetainsOwnershipForRetry(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "cancel-container"
+	mgr.stagingDir = "/tmp/cancel-staging"
+	mock.SetCommandResponse("docker rm -f cancel-container", command.MockResponse{
+		Stdout: "removed",
+		Delay:  100 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if err := mgr.CleanupContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CleanupContext() error = %v, want context deadline", err)
+	}
+	if mgr.containerID != "cancel-container" || mgr.stagingDir != "/tmp/cancel-staging" {
+		t.Fatalf("mid-cleanup cancellation lost ownership: container=%q staging=%q",
+			mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("docker rm -f cancel-container", "removed")
+	mock.SetCommandSuccess("rm -rf /tmp/cancel-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" {
+		t.Fatalf("successful retry retained ownership: container=%q staging=%q",
+			mgr.containerID, mgr.stagingDir)
 	}
 }
 

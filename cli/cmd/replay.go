@@ -244,29 +244,41 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Launching replay against %d configured endpoint(s)...\n", len(params.Endpoints))
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
-	var autoResultsDone chan autoResultsOutcome
+	var replayMonitor *autoResultsMonitor
+	launchHooks := tui.LaunchHooks{}
 	startReplayAutoResults := func() {
-		if autoResultsDone != nil || !resultsOpts.AutoResults {
+		if replayMonitor != nil || !resultsOpts.AutoResults {
 			return
 		}
 		// Replay does not currently wire a pre-summary diagnostics/cleanup hook
 		// (see run.go's finalizeMultiHost for the run-command equivalent); its
 		// own StopAllContainers-based cleanup (below) still runs after
 		// waitForAutoResults, same as before.
-		autoResultsDone = startAutoResults(commandContext(cmd), metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir, replayStepIDs(generated), resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario, metadata, out, out, traceOpts.Path, nil)
+		replayMonitor = startAutoResultsMonitor(
+			commandContext(cmd), metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir,
+			replayStepIDs(generated), params.RunID, resultsOpts.Debug, hostInfos, apiPort,
+			resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario,
+			metadata, out, out, traceOpts.Path, nil,
+		)
+		launchHooks.OnSubmitted = replayMonitor.Arm
 	}
 	waitForAutoResults := func() bool {
-		if autoResultsDone == nil {
+		if replayMonitor == nil {
 			return true
 		}
 		select {
-		case <-autoResultsDone:
+		case <-replayMonitor.done:
 			return true
 		case <-time.After(2 * time.Minute):
 			logging.GetLogger().Warn("Timed out waiting for replay auto-results")
 			return false
 		}
 	}
+	defer func() {
+		if replayMonitor != nil {
+			replayMonitor.Cancel()
+		}
+	}()
 	finalizeTraceArtifact := func() {
 		if err := appendTraceToResultsManifest(plannedResultsRoot, traceOpts.Path); err != nil {
 			logging.GetLogger().Debug("Failed to finalize replay trace artifact",
@@ -282,6 +294,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, delegateShutdownToAutoResults, replayStepIDs(generated))
+			options.LaunchHooks = launchHooks
 			if autoTerminate > 0 {
 				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
@@ -320,12 +333,16 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err := tui.StartTUIWithMultiHostOrchestratorContentTimeoutWithTrace(replayOrchestrator, sptImage, paths.Scenario, params, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
-			waitForAutoResults()
-			finalizeTraceArtifact()
-			return err
 		}
-		err = tui.StartTUIWithMultiHostOrchestratorContentWithTrace(replayOrchestrator, sptImage, paths.Scenario, params, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+		err = tui.StartTUIWithMultiHostRunOptions(
+			replayOrchestrator, sptImage, paths.Scenario, params, tui.RunOptions{
+				AutoTerminateSeconds: autoTerminate,
+				TracePath:            traceOpts.Path,
+				TraceAppend:          traceOpts.Append,
+				ScenarioContent:      generated.ScenarioJS,
+				DefaultsContent:      generated.DefaultsYAML,
+				LaunchHooks:          launchHooks,
+			})
 		waitForAutoResults()
 		finalizeTraceArtifact()
 		return err
@@ -337,6 +354,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
 		options.NetworkMode = networkMode
 		options.ResultsRoot = plannedResultsRoot
+		options.LaunchHooks = launchHooks
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
@@ -349,12 +367,19 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Starting TUI...")
 	if autoTerminate > 0 {
 		_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
-		err := tui.StartTUIWithScenarioContentAndParamsTimeoutWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, plannedResultsRoot, autoTerminate, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForAutoResults()
-		finalizeTraceArtifact()
-		return err
 	}
-	err = tui.StartTUIWithScenarioContentAndParamsWithTrace(sptImage, paths.Scenario, params, apiPort, networkMode, plannedResultsRoot, nil, traceOpts.Path, traceOpts.Append, generated.ScenarioJS, generated.DefaultsYAML)
+	err = tui.StartTUIWithScenarioRunOptions(
+		sptImage, paths.Scenario, params, tui.RunOptions{
+			APIPort:              apiPort,
+			NetworkMode:          networkMode,
+			ResultsRoot:          plannedResultsRoot,
+			AutoTerminateSeconds: autoTerminate,
+			TracePath:            traceOpts.Path,
+			TraceAppend:          traceOpts.Append,
+			ScenarioContent:      generated.ScenarioJS,
+			DefaultsContent:      generated.DefaultsYAML,
+			LaunchHooks:          launchHooks,
+		})
 	waitForAutoResults()
 	finalizeTraceArtifact()
 	return err

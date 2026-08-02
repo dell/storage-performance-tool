@@ -33,6 +33,114 @@ type fakeRunTracker struct {
 	runID       int64
 }
 
+// startAutoResults is a test-only convenience for cases that do not exercise
+// the launch boundary itself. Production callers must arm through LaunchHooks.
+func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) chan autoResultsOutcome {
+	expectedRunID := int64(0)
+	if len(integrityOptions) > 0 && integrityOptions[0] != nil {
+		expectedRunID = integrityOptions[0].RunID
+	}
+	monitor := startAutoResultsMonitor(
+		parentCtx, baseURL, label, resultsDir, expectedStepIDs, expectedRunID, debug,
+		allHosts, apiPort, shutdownOn, lingerSec, scenarioPath, metadata, progressOut,
+		summaryOut, traceFile, preSummaryHook, integrityOptions...,
+	)
+	monitor.Arm()
+	return monitor.done
+}
+
+func TestSelectResultStepIDsSeparatesRuntimeFactsFromPlannedAliases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/index.json") {
+			stepID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/logs/"), "/index.json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"step_id": stepID,
+				"items": []map[string]any{{
+					"logger": "metrics.FileTotal",
+					"href":   "/logs/" + stepID + "/metrics.FileTotal",
+					"size":   5,
+				}},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/metrics.FileTotal") {
+			_, _ = w.Write([]byte("total"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name     string
+		expected []string
+		fleet    []string
+		node     []string
+		want     []string
+		runtime  []string
+	}{
+		{
+			name: "equal ids", expected: []string{"create", "verify"},
+			fleet: []string{"create", "verify"}, want: []string{"create", "verify"},
+			runtime: []string{"create", "verify"},
+		},
+		{
+			name: "reassigned ids", expected: []string{"planned-create", "planned-verify"},
+			fleet: []string{"runtime-create", "runtime-verify"},
+			want:  []string{"runtime-create", "runtime-verify"}, runtime: []string{"runtime-create", "runtime-verify"},
+		},
+		{
+			name: "discovery unavailable", expected: []string{"planned-create", "planned-verify"},
+			want: []string{"planned-create", "planned-verify"},
+		},
+		{
+			name: "partial fleet completed by node", expected: []string{"planned-create", "planned-verify"},
+			fleet: []string{"runtime-create"}, node: []string{"runtime-create", "runtime-verify"},
+			want: []string{"runtime-create", "runtime-verify"}, runtime: []string{"runtime-create", "runtime-verify"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selected, runtime := selectResultStepIDs(test.expected, test.fleet, test.node)
+			if strings.Join(selected, ",") != strings.Join(test.want, ",") ||
+				strings.Join(runtime, ",") != strings.Join(test.runtime, ",") {
+				t.Fatalf("selectResultStepIDs() = selected %v runtime %v, want %v / %v",
+					selected, runtime, test.want, test.runtime)
+			}
+			root := t.TempDir()
+			fetcher := results.NewFetcher(server.URL, root)
+			fetcher.Retries = 1
+			fetcher.Artifacts = []results.ArtifactSpec{{
+				Loggers: []string{"metrics.FileTotal"}, Suffix: "metrics.total.csv", Required: true,
+			}}
+			manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertManifestStepIDs := func(label string, got results.Manifest) {
+				t.Helper()
+				ids := make([]string, 0, len(got.Steps))
+				for _, step := range got.Steps {
+					ids = append(ids, step.StepID)
+				}
+				if strings.Join(ids, ",") != strings.Join(test.want, ",") {
+					t.Fatalf("%s step IDs = %v, want exact selected set %v", label, ids, test.want)
+				}
+			}
+			assertManifestStepIDs("returned manifest", *manifest)
+			data, err := os.ReadFile(filepath.Join(root, constants.ResultsManifestFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted results.Manifest
+			if err = json.Unmarshal(data, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			assertManifestStepIDs("persisted manifest", persisted)
+		})
+	}
+}
+
 func (f *fakeRunTracker) WaitForCompletion(ctx context.Context, expected []string) (*portcheck.RunResult, error) {
 	f.mu.Lock()
 	f.called = true
@@ -172,8 +280,9 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 		"mt-003-20260303.154534.368-compaction",
 	}
 
-	// The mock simulates the lingering prior container: early calls return stale IDs, later calls
-	// return both sets (as the prior container's /metrics/json keeps accumulating).
+	// The mock simulates the production current-run filter against a lingering prior container:
+	// early calls have no matching current-run IDs, while later calls expose only the current set.
+	// The lower-level discovery tests independently prove retained metrics are filtered by run ID.
 	var discoverCallCount int
 	var discoverMu sync.Mutex
 	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
@@ -182,11 +291,9 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 		n := discoverCallCount
 		discoverMu.Unlock()
 		if n <= 2 {
-			// First two polls hit the still-lingering prior container.
-			return staleIDs, nil
+			return nil, nil
 		}
-		// Later polls see both runs while the current container is active.
-		return append(append([]string(nil), staleIDs...), currentIDs...), nil
+		return append([]string(nil), currentIDs...), nil
 	}
 
 	fetcher := &fakeFetcher{}
@@ -420,11 +527,9 @@ func TestAutoResultsBindsLingeringEngineAndFleetEvidenceToArmedRun(t *testing.T)
 	}
 }
 
-// TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet verifies that when expectedStepIDs is
-// provided, the fetcher receives only those IDs — even if the background discovery poller returns
-// additional IDs (e.g. from a different run) alongside the expected ones. Discovered IDs that are
-// also in the expected set are kept; foreign IDs are excluded.
-func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
+// Run-filtered node discovery is execution evidence. Once present, it replaces
+// rather than augments CLI-generated aliases.
+func TestStartAutoResults_NodeRuntimeDiscoveryReplacesExpectedAliases(t *testing.T) {
 	t.Parallel()
 
 	origRunTracker := newRunTrackerFunc
@@ -451,11 +556,11 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 	// Fleet endpoint unavailable (older engine)
 	discoverFleetStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) { return nil, nil }
 
-	// Discovery returns the expected ID mixed in with a foreign one from another run.
+	// Discovery returns the current engine ID with a reassigned timestamp.
 	discoverCalls := 0
 	discoverStepIDsFunc = func(_ context.Context, baseURL string, _ int64) ([]string, error) {
 		discoverCalls++
-		return []string{"foreign-step-other-run", "expected-create"}, nil
+		return []string{"runtime-create"}, nil
 	}
 
 	fetcher := &fakeFetcher{}
@@ -496,9 +601,8 @@ func TestStartAutoResults_DiscoveredIDsFilteredToExpectedSet(t *testing.T) {
 
 	fetcher.mu.Lock()
 	defer fetcher.mu.Unlock()
-	// Only the expected ID should reach the fetcher; the foreign discovered ID must be excluded.
-	if len(fetcher.stepIDs) != 1 || fetcher.stepIDs[0] != "expected-create" {
-		t.Fatalf("unexpected stepIDs %v, want [expected-create]", fetcher.stepIDs)
+	if len(fetcher.stepIDs) != 1 || fetcher.stepIDs[0] != "runtime-create" {
+		t.Fatalf("unexpected stepIDs %v, want exact runtime set [runtime-create]", fetcher.stepIDs)
 	}
 
 	if fetcher.baseURL != "http://example" {
@@ -564,7 +668,8 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
 
 	tmpDir := t.TempDir()
-	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
+	metadata := &runMetadata{ExpectedStepIDs: append([]string(nil), expectedIDs...)}
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", metadata, io.Discard, io.Discard, "", nil)
 
 	select {
 	case <-done:
@@ -575,19 +680,14 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 	fetcher.mu.Lock()
 	defer fetcher.mu.Unlock()
 
-	// Fleet IDs should be present in the fetched step IDs
-	fleetSet := make(map[string]bool, len(fleetIDs))
-	for _, id := range fleetIDs {
-		fleetSet[id] = true
+	if strings.Join(fetcher.stepIDs, ",") != strings.Join(fleetIDs, ",") {
+		t.Fatalf("fetcher step IDs = %v, want exact runtime set %v", fetcher.stepIDs, fleetIDs)
 	}
-	foundFleet := 0
-	for _, id := range fetcher.stepIDs {
-		if fleetSet[id] {
-			foundFleet++
-		}
+	if strings.Join(metadata.ActualStepIDs, ",") != strings.Join(fleetIDs, ",") {
+		t.Fatalf("actual step IDs = %v, want exact runtime set %v", metadata.ActualStepIDs, fleetIDs)
 	}
-	if foundFleet != len(fleetIDs) {
-		t.Fatalf("expected all %d fleet IDs in fetcher.stepIDs, found %d; got %v", len(fleetIDs), foundFleet, fetcher.stepIDs)
+	if strings.Join(metadata.DiscoveredStepIDs, ",") != strings.Join(fleetIDs, ",") {
+		t.Fatalf("discovered step IDs = %v, want exact runtime set %v", metadata.DiscoveredStepIDs, fleetIDs)
 	}
 }
 

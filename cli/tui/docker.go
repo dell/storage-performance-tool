@@ -1097,12 +1097,15 @@ func (dm *DockerManager) CleanupContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if dm.remote != nil {
 		return dm.remote.CleanupContext(ctx)
 	}
-	defer dm.cleanupNodeLogDir()
-	defer dm.cleanupDiagnosticsDir()
 	if dm.containerID == "" {
+		dm.cleanupNodeLogDir()
+		dm.cleanupDiagnosticsDir()
 		return nil
 	}
 
@@ -1149,6 +1152,8 @@ func (dm *DockerManager) CleanupContext(ctx context.Context) error {
 
 	logging.LogContainerEvent("removed", dm.containerID)
 	dm.containerID = ""
+	dm.cleanupNodeLogDir()
+	dm.cleanupDiagnosticsDir()
 	if err := writeDiagnosticsAggregateManifest(dm.diagnosticsRoot, diagnosticsRecords); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
 	}

@@ -25,9 +25,10 @@ const (
 	IntegrityMetricsHTTPTimeout     = 10 * time.Second       // Required corruption-metrics request timeout
 
 	// Container lifecycle timeouts
-	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown
-	APILingerDefault             = 5 * time.Second // Default /status linger window after /shutdown
-	DiagnosticsCollectionTimeout = 5 * time.Minute // Per-host timeout for copying JVM diagnostics artifacts
+	ContainerShutdownGrace       = 2 * time.Second        // Grace period for container graceful shutdown
+	APILingerDefault             = 5 * time.Second        // Default /status linger window after /shutdown
+	APILingerPollInterval        = 200 * time.Millisecond // Interval between post-shutdown status probes
+	DiagnosticsCollectionTimeout = 5 * time.Minute        // Per-host timeout for copying JVM diagnostics artifacts
 
 	// Metrics collection intervals
 	DefaultMetricsInterval = 500 * time.Millisecond // Default interval for metrics collection

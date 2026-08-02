@@ -204,6 +204,109 @@ func TestMultiHostOrchestrator_StopAllContainers_NoRunning(t *testing.T) {
 	}
 }
 
+func TestMultiHostOrchestratorStopFailureRetainsOwnershipAndRetryClearsIt(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.StopAllContainers(context.Background()); err == nil {
+		t.Fatal("StopAllContainers() error = nil, want cleanup failure")
+	}
+	if !host.IsManaged() || host.GetStatus() != HostStatusRunning ||
+		host.ContainerID != "container-1" || manager.ContainerID() != "container-1" {
+		t.Fatalf("failed cleanup disowned live resource: managed=%t status=%s hostID=%q managerID=%q",
+			host.IsManaged(), host.GetStatus(), host.ContainerID, manager.ContainerID())
+	}
+
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("StopAllContainers() retry error = %v", err)
+	}
+	if host.IsManaged() || host.GetStatus() != HostStatusStopped || host.ContainerID != "" {
+		t.Fatalf("successful retry retained ownership: managed=%t status=%s id=%q",
+			host.IsManaged(), host.GetStatus(), host.ContainerID)
+	}
+}
+
+func TestCleanupManagedContainersAfterStartFailureRetainsFailedHostForRetry(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(context.Background()); err == nil {
+		t.Fatal("pre-submission cleanup error = nil, want failure")
+	}
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed pre-submission cleanup lost retry ownership: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(context.Background()); err != nil {
+		t.Fatalf("pre-submission cleanup retry error = %v", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" || host.GetStatus() != HostStatusStopped {
+		t.Fatalf("successful pre-submission retry retained host: managed=%t id=%q status=%s",
+			host.IsManaged(), host.ContainerID, host.GetStatus())
+	}
+}
+
+type mountFailureDockerManager struct {
+	*MockDockerManager
+	mountErr error
+}
+
+func (m *mountFailureDockerManager) SetFileMounts([]scenario.FileMount) error {
+	return m.mountErr
+}
+
+func TestItemStagingFailureRetainsManagedOwnershipWithoutContainerID(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &mountFailureDockerManager{
+		MockDockerManager: NewMockDockerManager(),
+		mountErr:          errors.New("remote staging and cleanup failed"),
+	}
+	manager.SetContainerID("")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.SetStatus(HostStatusReady)
+	orchestrator.itemFileMounts = []scenario.FileMount{{
+		HostPath: "/local/items.csv", ContainerPath: "/spt-input/items.csv",
+	}}
+
+	err := orchestrator.StartContainers(context.Background(), "test-image", nil)
+	if err == nil || !strings.Contains(err.Error(), "remote staging and cleanup failed") {
+		t.Fatalf("StartContainers() error = %v, want staging failure", err)
+	}
+	if !host.IsManaged() || host.ContainerID != "" || manager.ContainerID() != "" {
+		t.Fatalf("staging-only cleanup failure lost ownership: managed=%t hostID=%q managerID=%q",
+			host.IsManaged(), host.ContainerID, manager.ContainerID())
+	}
+
+	manager.SetFailOnCleanup(false)
+	if err = orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("StopAllContainers() staging retry error = %v", err)
+	}
+	if host.IsManaged() || host.GetStatus() != HostStatusStopped {
+		t.Fatalf("successful staging retry retained ownership: managed=%t status=%s",
+			host.IsManaged(), host.GetStatus())
+	}
+}
+
 func TestMultiHostOrchestrator_StopAllContainers_EmptyContainerID(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
@@ -298,6 +401,10 @@ func newOrderedDiagnosticsDockerManager() *orderedDiagnosticsDockerManager {
 }
 
 func (m *orderedDiagnosticsDockerManager) Cleanup() error {
+	return m.CleanupContext(context.Background())
+}
+
+func (m *orderedDiagnosticsDockerManager) CleanupContext(ctx context.Context) error {
 	m.appendEvent("cleanup")
 	m.record = &diagnosticsRecord{
 		Host:        "host1",
@@ -305,7 +412,7 @@ func (m *orderedDiagnosticsDockerManager) Cleanup() error {
 		Collected:   true,
 		ContainerID: "container-1",
 	}
-	return m.MockDockerManager.Cleanup()
+	return m.MockDockerManager.CleanupContext(ctx)
 }
 
 func (m *orderedDiagnosticsDockerManager) gracefulStopForDiagnostics(context.Context) error {
@@ -538,8 +645,12 @@ func (m *finalizeOrderDockerManager) diagnosticsRecord() *diagnosticsRecord {
 }
 
 func (m *finalizeOrderDockerManager) Cleanup() error {
+	return m.CleanupContext(context.Background())
+}
+
+func (m *finalizeOrderDockerManager) CleanupContext(ctx context.Context) error {
 	m.record("cleanup")
-	return m.MockDockerManager.Cleanup()
+	return m.MockDockerManager.CleanupContext(ctx)
 }
 
 func (m *finalizeOrderDockerManager) record(event string) {
@@ -621,6 +732,40 @@ func TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_RunsOnceConcurrentl
 	if cleanupCount != 1 {
 		t.Fatalf("cleanup ran %d times across %d concurrent callers, want exactly 1 (events: %v)",
 			cleanupCount, callers, fake.eventList())
+	}
+}
+
+func TestMultiHostOrchestratorFinalizeDiagnosticsRetriesFailedCleanup(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err == nil {
+		t.Fatal("first finalization error = nil, want cleanup failure")
+	}
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed finalization lost cleanup ownership: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("finalization retry error = %v", err)
+	}
+	if manager.GetCleanupCallCount() != 2 || host.IsManaged() || host.ContainerID != "" {
+		t.Fatalf("retry state: calls=%d managed=%t id=%q",
+			manager.GetCleanupCallCount(), host.IsManaged(), host.ContainerID)
+	}
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("successful finalization should remain sticky: %v", err)
+	}
+	if manager.GetCleanupCallCount() != 2 {
+		t.Fatalf("successful finalization reran cleanup: %d calls", manager.GetCleanupCallCount())
 	}
 }
 
@@ -961,9 +1106,9 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB"}
 	var launchSubmitted atomic.Bool
-	params.SetLaunchSubmittedCallback(func() { launchSubmitted.Store(true) })
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
 
-	err := wrapper.StartTest(ctx, "test-image", params)
+	err := wrapper.StartTestWithLaunchHooks(ctx, "test-image", params, hooks)
 	if err != nil {
 		t.Errorf("Expected StartTest to succeed for single host, got: %v", err)
 	}
@@ -1452,10 +1597,17 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 			"load.service.threads=4",
 		},
 	}
-	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
+	var launchSubmitted atomic.Bool
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
+	if err := wrapper.StartTestWithContentAndLaunchHooks(
+		ctx, "test-image", params, replayScenario, replayDefaults, hooks,
+	); err != nil {
 		t.Fatalf("StartTestWithContent() error = %v", err)
 	}
 	defer func() { _ = wrapper.StopTest() }()
+	if !launchSubmitted.Load() {
+		t.Fatal("successful distributed /run POST did not signal launch submission")
+	}
 
 	if postedScenario != string(replayScenario) {
 		t.Fatalf("posted scenario mismatch:\n%s", postedScenario)
@@ -1924,8 +2076,8 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeList, Threads: 2, Bucket: "demo", Endpoint: "http://minio:9000"}
 	var launchSubmitted atomic.Bool
-	params.SetLaunchSubmittedCallback(func() { launchSubmitted.Store(true) })
-	if err := wrapper.StartTest(ctx, "test-image", params); err != nil {
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
+	if err := wrapper.StartTestWithLaunchHooks(ctx, "test-image", params, hooks); err != nil {
 		t.Fatalf("StartTest(list) returned error: %v", err)
 	}
 
@@ -2459,7 +2611,7 @@ func TestEntryAPIRunRejectsAPIFailedLockedWorkerBeforeScenarioPostForEveryTier(t
 				context.Background(), "repo/spt:test",
 				scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
 				[]byte(`CreateLoad.config({}).run(); ReadLoad.config({}).run();`), nil,
-				"Distributed verification",
+				"Distributed verification", LaunchHooks{},
 			)
 			if err == nil || !strings.Contains(err.Error(), "worker is not running") {
 				t.Fatalf("entry API gate error = %v", err)

@@ -485,10 +485,16 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			var launchSubmitted atomic.Bool
+			hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
 
-			err := orchestrator.StartTestWithContent(ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil)
+			err := orchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil, hooks)
 			if err != nil {
 				t.Fatalf("StartTestWithContent() error = %v", err)
+			}
+			if !launchSubmitted.Load() {
+				t.Fatal("successful local /run POST did not signal launch submission")
 			}
 			cancel()
 

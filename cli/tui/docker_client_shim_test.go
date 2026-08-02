@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -163,6 +164,55 @@ func TestCleanupIgnoresAlreadyGoneContainer(t *testing.T) {
 	}
 	if f.stopped != 1 || f.removed != 1 {
 		t.Fatalf("expected stop+remove once, got %d/%d", f.stopped, f.removed)
+	}
+}
+
+func TestCleanupContextStopFailureRetainsContainerForRetry(t *testing.T) {
+	f := &fakeDockerClient{stopErr: errors.New("stop failed")}
+	dm := &DockerManager{client: f, containerID: "retry-stop", ctx: context.Background()}
+	if err := dm.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want stop failure")
+	}
+	if dm.ContainerID() != "retry-stop" || f.removed != 0 {
+		t.Fatalf("failed stop lost cleanup ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+	f.stopErr = nil
+	if err := dm.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if dm.ContainerID() != "" || f.removed != 1 {
+		t.Fatalf("successful retry did not clear ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+}
+
+func TestCleanupContextRemoveFailureRetainsContainerForRetry(t *testing.T) {
+	f := &fakeDockerClient{removeErr: errors.New("remove failed")}
+	dm := &DockerManager{client: f, containerID: "retry-remove", ctx: context.Background()}
+	if err := dm.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want remove failure")
+	}
+	if dm.ContainerID() != "retry-remove" {
+		t.Fatalf("failed remove cleared container ID: %q", dm.ContainerID())
+	}
+	f.removeErr = nil
+	if err := dm.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if dm.ContainerID() != "" || f.removed != 2 {
+		t.Fatalf("successful retry did not clear ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+}
+
+func TestCleanupContextCanceledBeforeStopRetainsContainer(t *testing.T) {
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, containerID: "retry-cancel", ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := dm.CleanupContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CleanupContext() error = %v, want context.Canceled", err)
+	}
+	if dm.ContainerID() != "retry-cancel" || f.removed != 0 {
+		t.Fatalf("canceled cleanup lost ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
 	}
 }
 

@@ -7,6 +7,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -393,33 +394,22 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 		writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
 
-		// Discover step IDs from metrics already filtered to expectedRunID. Fleet
-		// IDs lead because distributed runtime IDs may differ from generated IDs.
+		// Discovery is already filtered to expectedRunID. Fleet and node metrics
+		// therefore describe execution facts and may legitimately use IDs that
+		// differ from the CLI-generated plan.
 		mu.Lock()
 		cachedDiscovered := append([]string(nil), discovered...)
 		cachedFleet := append([]string(nil), fleetDiscovered...)
 		mu.Unlock()
-		if len(expectedStepIDs) > 0 {
-			expectedSet := make(map[string]struct{}, len(expectedStepIDs))
-			for _, id := range expectedStepIDs {
-				expectedSet[id] = struct{}{}
-			}
-			filtered := cachedDiscovered[:0:0]
-			for _, id := range cachedDiscovered {
-				if _, expected := expectedSet[id]; expected {
-					filtered = append(filtered, id)
-				}
-			}
-			cachedDiscovered = filtered
-		}
-		stepIDs := uniqueStepIDs(cachedFleet, expectedStepIDs, cachedDiscovered)
+		stepIDs, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, cachedFleet, cachedDiscovered)
 		var discoverErr error
-		if len(stepIDs) == 0 {
-			var fallback []string
-			fallback, discoverErr = discoverStepIDsFunc(postCtx, baseURL, expectedRunID)
-			// Also try fleet endpoint as fallback
-			fleetFallback, _ := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID)
-			stepIDs = uniqueStepIDs(fleetFallback, stepIDs, fallback)
+		if len(runtimeStepIDs) == 0 {
+			nodeFallback, nodeErr := discoverStepIDsFunc(postCtx, baseURL, expectedRunID)
+			fleetFallback, fleetErr := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID)
+			stepIDs, runtimeStepIDs = selectResultStepIDs(expectedStepIDs, fleetFallback, nodeFallback)
+			if nodeErr != nil || fleetErr != nil {
+				discoverErr = errors.Join(nodeErr, fleetErr)
+			}
 		}
 		outcome.StepIDs = append([]string(nil), stepIDs...)
 		artifactsReady := len(stepIDs) > 0
@@ -452,7 +442,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 		if metadata != nil {
 			metadata.ActualStepIDs = append([]string(nil), stepIDs...)
-			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, cachedFleet, cachedDiscovered, stepIDs)
+			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
 			if err := writeRunMetadata(metadata, root); err != nil {
 				logging.LogError("auto-results", "write run metadata", err, "dest", root)
 			}
@@ -559,22 +549,6 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 	}()
 	return monitor
-}
-
-// startAutoResults preserves the pre-existing, immediately armed test/helper contract.
-// Command orchestration uses startAutoResultsMonitor so it can arm at launch.
-func startAutoResults(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) chan autoResultsOutcome {
-	expectedRunID := int64(0)
-	if len(integrityOptions) > 0 && integrityOptions[0] != nil {
-		expectedRunID = integrityOptions[0].RunID
-	}
-	monitor := startAutoResultsMonitor(
-		parentCtx, baseURL, label, resultsDir, expectedStepIDs, expectedRunID, debug,
-		allHosts, apiPort, shutdownOn, lingerSec, scenarioPath, metadata, progressOut,
-		summaryOut, traceFile, preSummaryHook, integrityOptions...,
-	)
-	monitor.Arm()
-	return monitor.done
 }
 
 func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOptions {
@@ -702,6 +676,17 @@ func uniqueStepIDs(lists ...[]string) []string {
 		}
 	}
 	return out
+}
+
+func selectResultStepIDs(expected, fleet, node []string) (selected, runtime []string) {
+	runtime = uniqueStepIDs(fleet, node)
+	if len(runtime) > 0 {
+		return append([]string(nil), runtime...), runtime
+	}
+	// Older engines may not expose current-run discovery. Preserve that
+	// compatibility fallback without mixing planned aliases into a known
+	// runtime set.
+	return uniqueStepIDs(expected), nil
 }
 
 type traceOptions struct {
@@ -1336,10 +1321,11 @@ Available workload types:
 			integrityOptions = buildIntegrityFinalizeOptions(params)
 		}
 		var autoMonitor *autoResultsMonitor
+		launchHooks := tui.LaunchHooks{}
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
-				params.SetLaunchSubmittedCallback(autoMonitor.Arm)
+				launchHooks.OnSubmitted = autoMonitor.Arm
 			}
 		}
 		var autoOutcome autoResultsOutcome
@@ -1447,6 +1433,7 @@ Available workload types:
 
 				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
+				options.LaunchHooks = launchHooks
 
 				if autoTerminate > 0 {
 					fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1482,18 +1469,15 @@ Available workload types:
 			fmt.Printf("Starting multi-host TUI...\n\n")
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-				err = tui.StartTUIWithMultiHostOrchestratorTimeoutWithTrace(orchestrator, sptImage, scenarioPath, params, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-				if err != nil && autoMonitor != nil {
-					autoMonitor.Cancel()
-				}
-				autoResultsComplete := waitForAutoResults(verificationRun)
-				if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
-					finalizeMultiHost(runContext)
-				}
-				finalizeTraceArtifact()
-				return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 			}
-			err = tui.StartTUIWithMultiHostOrchestratorWithTrace(orchestrator, sptImage, scenarioPath, params, setSummarySink, traceOpts.Path, traceOpts.Append)
+			err = tui.StartTUIWithMultiHostRunOptions(
+				orchestrator, sptImage, scenarioPath, params, tui.RunOptions{
+					AutoTerminateSeconds: autoTerminate,
+					SetSummarySink:       setSummarySink,
+					TracePath:            traceOpts.Path,
+					TraceAppend:          traceOpts.Append,
+					LaunchHooks:          launchHooks,
+				})
 			if err != nil && autoMonitor != nil {
 				autoMonitor.Cancel()
 			}
@@ -1514,6 +1498,7 @@ Available workload types:
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
 			options.NetworkMode = networkMode
 			options.ResultsRoot = plannedResultsRoot
+			options.LaunchHooks = launchHooks
 			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1532,10 +1517,18 @@ Available workload types:
 		// Launch TUI with the scenario file
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
-			err = tui.StartTUIWithScenarioAndParamsNetworkModeTimeoutWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, autoTerminate, setSummarySink, traceOpts.Path, traceOpts.Append)
-		} else {
-			err = tui.StartTUIWithScenarioAndParamsNetworkModeWithTrace(sptImage, scenarioPath, params, apiPort, networkMode, plannedResultsRoot, setSummarySink, traceOpts.Path, traceOpts.Append)
 		}
+		err = tui.StartTUIWithScenarioRunOptions(
+			sptImage, scenarioPath, params, tui.RunOptions{
+				APIPort:              apiPort,
+				NetworkMode:          networkMode,
+				ResultsRoot:          plannedResultsRoot,
+				AutoTerminateSeconds: autoTerminate,
+				SetSummarySink:       setSummarySink,
+				TracePath:            traceOpts.Path,
+				TraceAppend:          traceOpts.Append,
+				LaunchHooks:          launchHooks,
+			})
 		if err != nil && autoMonitor != nil {
 			autoMonitor.Cancel()
 		}

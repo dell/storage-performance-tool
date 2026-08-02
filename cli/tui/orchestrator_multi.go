@@ -99,17 +99,22 @@ type MultiHostOrchestrator struct {
 	// If nil, messages are printed to stdout as before.
 	notifier func(string)
 
-	// Starts FinalizeDiagnosticsAndCleanup once. Each caller waits on
-	// finalizeDone with its own context rather than blocking inside sync.Once.
-	finalizeOnce sync.Once
-	finalizeDone chan struct{}
-	finalizeErr  error
+	// Concurrent finalization callers share one active attempt. A successful
+	// attempt is sticky; a failed/canceled attempt releases the slot for a
+	// bounded retry while hosts retain cleanup ownership.
+	finalizeMu      sync.Mutex
+	finalizeAttempt *cleanupAttempt
 
 	runtimeIdentityRecorder  func(DistributedRuntimeIdentityEvidence)
 	runtimeIdentityTier      string
 	runtimeIdentityReference string
 	runtimeIdentityEvidence  *DistributedRuntimeIdentityEvidence
 	executionParticipantKeys []string
+}
+
+type cleanupAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -539,23 +544,30 @@ func (o *MultiHostOrchestrator) GetReadyHosts() []*HostConnection {
 	return readyHosts
 }
 
-func (o *MultiHostOrchestrator) configureItemFileMounts(hosts []*HostConnection, mounts []scenario.FileMount) error {
+func (o *MultiHostOrchestrator) configureItemFileMounts(
+	ctx context.Context, hosts []*HostConnection, mounts []scenario.FileMount,
+) error {
 	if len(mounts) == 0 {
 		return nil
 	}
 	for _, host := range hosts {
 		if host.DockerManager == nil {
-			return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+			cause := fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
+			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
 		}
+		// Remote item staging is itself a managed resource. Claim ownership
+		// before staging so a failed remote rm remains reachable by StopAll.
+		host.SetManaged(true)
 		if err := configureDockerFileMounts(host.DockerManager, mounts); err != nil {
-			return fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
+			cause := fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
+			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
 	return nil
 }
 
 // StartContainers starts Spt containers on all ready hosts
-func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string, additionalArgs []string) error {
+func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image string, additionalArgs []string) error {
 	o.mu.Lock()
 	o.image = image
 	o.mu.Unlock()
@@ -564,7 +576,7 @@ func (o *MultiHostOrchestrator) StartContainers(_ context.Context, image string,
 	if len(readyHosts) == 0 {
 		return fmt.Errorf("no ready hosts available for container startup")
 	}
-	if err := o.configureItemFileMounts(readyHosts, o.itemFileMounts); err != nil {
+	if err := o.configureItemFileMounts(ctx, readyHosts, o.itemFileMounts); err != nil {
 		return err
 	}
 
@@ -750,29 +762,29 @@ func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx co
 		}
 		if err := cleanupDockerWithinContext(ctx, host.DockerManager); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, err))
+			continue
 		}
-		host.SetStatus(HostStatusStopped)
-		host.SetManaged(false)
+		if host.DockerManager.ContainerID() != "" {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"cleanup %s returned with container %s still owned",
+				host.Info.Original, host.DockerManager.ContainerID()))
+			continue
+		}
+		markHostCleanupComplete(host)
 	}
 	return errors.Join(cleanupErrors...)
 }
 
-type contextDockerCleaner interface {
-	CleanupContext(context.Context) error
+func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
+	return manager.CleanupContext(ctx)
 }
 
-func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
-	if cleaner, ok := manager.(contextDockerCleaner); ok {
-		return cleaner.CleanupContext(ctx)
-	}
-	done := make(chan error, 1)
-	go func() { done <- manager.Cleanup() }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+func markHostCleanupComplete(host *HostConnection) {
+	host.mu.Lock()
+	host.ContainerID = ""
+	host.Status = HostStatusStopped
+	host.Managed = false
+	host.mu.Unlock()
 }
 
 // StopAllContainers stops all managed containers within the caller's budget.
@@ -780,26 +792,26 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runningHosts := make([]*HostConnection, 0)
+	managedHosts := make([]*HostConnection, 0)
 	for _, host := range o.hosts {
-		if host != nil && host.DockerManager != nil && host.IsManaged() && host.ContainerID != "" {
-			runningHosts = append(runningHosts, host)
+		if host != nil && host.DockerManager != nil && host.IsManaged() {
+			managedHosts = append(managedHosts, host)
 		}
 	}
 
-	if len(runningHosts) == 0 {
+	if len(managedHosts) == 0 {
 		return nil // Nothing to stop
 	}
 
-	o.notifyf("🛑 Stopping containers on %d host(s)...", len(runningHosts))
+	o.notifyf("🛑 Stopping containers on %d host(s)...", len(managedHosts))
 
 	type stopResult struct {
 		record *diagnosticsRecord
 		err    error
 	}
 	var wg sync.WaitGroup
-	resultsCh := make(chan stopResult, len(runningHosts))
-	for _, host := range runningHosts {
+	resultsCh := make(chan stopResult, len(managedHosts))
+	for _, host := range managedHosts {
 		wg.Add(1)
 		go func(h *HostConnection) {
 			defer wg.Done()
@@ -812,11 +824,11 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 
 			containerID := h.ContainerID
 			if containerID == "" {
-				return
+				containerID = h.DockerManager.ContainerID()
 			}
 
 			// Try graceful API shutdown first if API client is available
-			if h.APIClient != nil {
+			if h.APIClient != nil && containerID != "" {
 				labelPrefix := h.Info.Original
 				h.APIClient.LogReadySnapshotContext(ctx, "pre-shutdown/"+labelPrefix)
 				if err := h.APIClient.ShutdownContext(ctx); err != nil {
@@ -858,6 +870,9 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 					result.record = record
 				}
 			}
+			if err == nil && h.DockerManager.ContainerID() != "" {
+				err = fmt.Errorf("cleanup returned with container %s still present", h.DockerManager.ContainerID())
+			}
 			if err != nil {
 				result.err = fmt.Errorf("%s: %w", h.Info.Original, err)
 				logging.LogError("docker-multi", "container stop failed",
@@ -869,10 +884,8 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 				logging.LogInfo("docker-multi", "container stopped",
 					"host", h.Info.Original,
 					"container_id", containerID)
+				markHostCleanupComplete(h)
 			}
-
-			h.SetStatus(HostStatusStopped)
-			h.SetManaged(false)
 		}(host)
 	}
 
@@ -888,7 +901,7 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 	}
 	var records []diagnosticsRecord
 	var stopErrors []error
-	for range runningHosts {
+	for range managedHosts {
 		result := <-resultsCh
 		if result.record != nil {
 			records = append(records, *result.record)
@@ -990,18 +1003,29 @@ func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Contex
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	o.finalizeOnce.Do(func() {
-		o.finalizeDone = make(chan struct{})
-		go func() {
+	o.finalizeMu.Lock()
+	attempt := o.finalizeAttempt
+	if attempt == nil {
+		attempt = &cleanupAttempt{done: make(chan struct{})}
+		o.finalizeAttempt = attempt
+		go func(active *cleanupAttempt) {
 			diagErr := o.CollectDiagnostics(ctx)
 			stopErr := o.StopAllContainers(ctx)
-			o.finalizeErr = errors.Join(diagErr, stopErr)
-			close(o.finalizeDone)
-		}()
-	})
+			active.err = errors.Join(diagErr, stopErr)
+			if active.err != nil {
+				o.finalizeMu.Lock()
+				if o.finalizeAttempt == active {
+					o.finalizeAttempt = nil
+				}
+				o.finalizeMu.Unlock()
+			}
+			close(active.done)
+		}(attempt)
+	}
+	o.finalizeMu.Unlock()
 	select {
-	case <-o.finalizeDone:
-		return o.finalizeErr
+	case <-attempt.done:
+		return attempt.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -1586,6 +1610,14 @@ collectLoop:
 
 // StartTest starts monitoring tests on all hosts
 func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string, params scenario.ScenarioParams) error {
+	return m.StartTestWithLaunchHooks(ctx, image, params, LaunchHooks{})
+}
+
+// StartTestWithLaunchHooks starts a host-orchestrated test and reports its API
+// submission through explicit orchestration hooks.
+func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
+	ctx context.Context, image string, params scenario.ScenarioParams, hooks LaunchHooks,
+) error {
 	var err error
 	params, err = scenario.PrepareExternalItemFiles(params)
 	if err != nil {
@@ -1607,7 +1639,8 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		if err != nil {
 			return fmt.Errorf("failed to generate defaults: %w", err)
 		}
-		return m.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
+		return m.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, []byte(scenarioContent), defaultsContent, hooks)
 
 	} else { //nolint:revive // keep else for clarity here
 		// Special-case: LIST workload is intentionally single-host for now.
@@ -1716,7 +1749,7 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 			if serr != nil {
 				return fmt.Errorf("failed to start LIST via entry node API: %w", serr)
 			}
-			params.NotifyLaunchSubmitted()
+			hooks.NotifySubmitted()
 			if m.onOutput != nil {
 				m.onOutput(fmt.Sprintf("LIST started on primary with run ID: %s", runID))
 			}
@@ -1785,19 +1818,37 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 		// Use the full distributed test flow with RMI coordination
 		err = m.multiHost.StartDistributedTest(ctx, image, params)
 		if err != nil {
-			return err
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 		defaultsContent, derr := scenario.GenerateDefaults(params)
 		if derr != nil {
-			return fmt.Errorf("failed to generate defaults: %w", derr)
+			return errors.Join(
+				fmt.Errorf("failed to generate defaults: %w", derr),
+				m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+			)
 		}
-		return m.startEntryAPIRun(ctx, image, params, []byte(m.multiHost.scenarioContent), defaultsContent, "Distributed test")
+		return m.startEntryAPIRun(
+			ctx, image, params, []byte(m.multiHost.scenarioContent), defaultsContent,
+			"Distributed test", hooks)
 	}
 }
 
 // StartTestWithContent starts a test using caller-provided scenario and
 // defaults content.
 func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent, defaultsContent []byte) error {
+	return m.StartTestWithContentAndLaunchHooks(
+		ctx, image, params, scenarioContent, defaultsContent, LaunchHooks{})
+}
+
+// StartTestWithContentAndLaunchHooks starts caller-provided content and reports
+// the accepted API submission through explicit orchestration hooks.
+func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
+	ctx context.Context,
+	image string,
+	params scenario.ScenarioParams,
+	scenarioContent, defaultsContent []byte,
+	hooks LaunchHooks,
+) error {
 	readyHosts := m.multiHost.GetReadyHosts()
 	if len(readyHosts) == 0 {
 		return fmt.Errorf("no ready hosts available to start tests")
@@ -1826,9 +1877,10 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 		}
 
 		if err := m.multiHost.StartDistributedTestWithContent(ctx, image, params, scenarioContent); err != nil {
-			return err
+			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		return m.startEntryAPIRun(ctx, image, params, scenarioContent, defaultsContent, "Distributed replay")
+		return m.startEntryAPIRun(
+			ctx, image, params, scenarioContent, defaultsContent, "Distributed replay", hooks)
 	}
 
 	host := readyHosts[0]
@@ -1859,10 +1911,13 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	m.multiHost.scenarioContent = string(scenarioContent)
 
 	if err := m.multiHost.StartContainers(ctx, runtimeImage, startupArgs); err != nil {
-		return err
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
-		return fmt.Errorf("failed waiting for single-host API: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed waiting for single-host API: %w", err),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
 
 	if m.onMetrics != nil {
@@ -1872,7 +1927,10 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	}
 
 	if host.APIClient == nil {
-		return fmt.Errorf("host %s API client not initialized", host.Info.Original)
+		return errors.Join(
+			fmt.Errorf("host %s API client not initialized", host.Info.Original),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
@@ -1889,9 +1947,12 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	}
 	runID, err := host.APIClient.StartTest(scenarioContent, defaultsContent)
 	if err != nil {
-		return fmt.Errorf("failed to start test via host API: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to start test via host API: %w", err),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
-	params.NotifyLaunchSubmitted()
+	hooks.NotifySubmitted()
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("Single-host test started with run ID: %s", runID))
 	}
@@ -1901,10 +1962,20 @@ func (m *MultiHostTestOrchestrator) StartTestWithContent(ctx context.Context, im
 	return nil
 }
 
-func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent, defaultsContent []byte, runLabel string) error {
+func (m *MultiHostTestOrchestrator) startEntryAPIRun(
+	ctx context.Context,
+	image string,
+	params scenario.ScenarioParams,
+	scenarioContent, defaultsContent []byte,
+	runLabel string,
+	hooks LaunchHooks,
+) error {
 	// Wait for APIs to be ready on all running hosts (ensures API clients set)
 	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
-		return fmt.Errorf("failed waiting for APIs after distributed start: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed waiting for APIs after distributed start: %w", err),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
 
 	if m.onMetrics != nil {
@@ -1921,7 +1992,10 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image 
 
 	// Start the distributed test via the entry node API (first host is entry)
 	if len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0].APIClient == nil {
-		return fmt.Errorf("entry node API client not initialized")
+		return errors.Join(
+			fmt.Errorf("entry node API client not initialized"),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
@@ -1936,9 +2010,12 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(ctx context.Context, image 
 	}
 	runID, err := m.multiHost.hosts[0].APIClient.StartTest(scenarioContent, defaultsContent)
 	if err != nil {
-		return fmt.Errorf("failed to start test via entry node API: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to start test via entry node API: %w", err),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
 	}
-	params.NotifyLaunchSubmitted()
+	hooks.NotifySubmitted()
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("%s started with run ID: %s", runLabel, runID))
 	}
@@ -2593,7 +2670,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 
 	entryNode := o.hosts[0]
 	workerNodes := o.hosts[1:]
-	if err := o.configureItemFileMounts(o.hosts, params.ItemFileMounts); err != nil {
+	if err := o.configureItemFileMounts(ctx, o.hosts, params.ItemFileMounts); err != nil {
 		return err
 	}
 

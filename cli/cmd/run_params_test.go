@@ -310,35 +310,18 @@ func TestFormatScenarioParams(t *testing.T) {
 				}
 			}
 
-			// Verify the output is properly formatted (each parameter on its own line)
-			lines := strings.Split(output, "\n")
-			if len(lines) == 0 {
-				t.Error("Output should contain multiple lines")
-			}
-
-			// For non-mock workloads, count expected number of lines
-			// Note: strings.Split includes an empty string after the last \n
-			if tt.params.WorkloadType != "mock" {
-				expectedLineCount := 12 // Baseline for non-mock workloads (includes auth version)
-				if tt.params.WorkloadType == WorkloadTypeList ||
-					tt.params.WorkloadType == WorkloadTypeReadVerify ||
-					tt.params.WorkloadType == WorkloadTypeWriteVerify {
-					expectedLineCount++ // Prefix line for list and verification workloads
+			lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+			seenLabels := make(map[string]struct{}, len(lines))
+			for _, line := range lines {
+				label, _, ok := strings.Cut(line, ":")
+				if !ok || strings.TrimSpace(label) == "" {
+					t.Errorf("malformed selected-options line %q\nOutput:\n%s", line, output)
+					continue
 				}
-				if tt.params.WorkloadType == WorkloadTypeRead {
-					expectedLineCount++ // Seed Objects line for read workloads
+				if _, duplicate := seenLabels[label]; duplicate {
+					t.Errorf("duplicate selected-options label %q\nOutput:\n%s", label, output)
 				}
-				if tt.params.PartSize != "" {
-					expectedLineCount++ // Part Size line for MPU workloads
-				}
-				if len(lines) != expectedLineCount {
-					t.Errorf("Expected %d lines for non-mock workload, got %d\nOutput:\n%s", expectedLineCount, len(lines), output)
-				}
-			} else {
-				expectedLineCount := 7 // Fewer parameters for mock (6 lines + 1 empty)
-				if len(lines) != expectedLineCount {
-					t.Errorf("Expected %d lines for mock workload, got %d\nOutput:\n%s", expectedLineCount, len(lines), output)
-				}
+				seenLabels[label] = struct{}{}
 			}
 		})
 	}

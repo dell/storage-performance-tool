@@ -4,6 +4,8 @@ Copyright © 2025 Dell Technologies
 
 package tui
 
+import "context"
+
 // DockerInterface defines the interface for Docker operations
 // This allows for easy mocking in tests
 type DockerInterface interface {
@@ -30,6 +32,10 @@ type DockerInterface interface {
 
 	// Cleanup stops and removes the container
 	Cleanup() error
+
+	// CleanupContext stops/removes the container and ancillary staging within
+	// the caller's bounded lifecycle budget.
+	CleanupContext(context.Context) error
 
 	// Close cleans up resources
 	Close()
