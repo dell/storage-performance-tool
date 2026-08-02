@@ -598,7 +598,7 @@ func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) 
 				},
 			}
 			started := time.Now()
-			if !waitForReplayAutoResults(monitor, launchErr) {
+			if !waitForReplayAutoResults(monitor, launchErr, false) {
 				t.Fatal("failed launch monitor timed out instead of canceling")
 			}
 			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
@@ -614,11 +614,38 @@ func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	if !waitForReplayAutoResults(monitor, nil) {
+	if !waitForReplayAutoResults(monitor, nil, true) {
 		t.Fatal("completed replay monitor timed out")
 	}
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("successful launch canceled monitor %d time(s)", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsPreservesArmedMonitorAfterLaunchError(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	done <- autoResultsOutcome{}
+	var cancelCalls atomic.Int32
+	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
+	if !waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), true) {
+		t.Fatal("post-submission replay monitor timed out")
+	}
+	if cancelCalls.Load() != 0 {
+		t.Fatalf("post-submission launch error canceled monitor %d time(s)", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsTimeoutIsDeterministic(t *testing.T) {
+	originalTimeout := replayAutoResultsWaitTimeout
+	replayAutoResultsWaitTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { replayAutoResultsWaitTimeout = originalTimeout })
+
+	started := time.Now()
+	if waitForReplayAutoResults(&autoResultsMonitor{done: make(chan autoResultsOutcome)}, nil, true) {
+		t.Fatal("incomplete replay monitor unexpectedly completed")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("deterministic replay timeout took %s", elapsed)
 	}
 }
 

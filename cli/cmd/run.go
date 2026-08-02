@@ -137,6 +137,8 @@ var (
 	}
 	startLocalHeadlessRunFunc     = headless.StartHeadlessModeWithParams
 	startMultiHostHeadlessRunFunc = headless.StartHeadlessModeWithOrchestrator
+	startLocalTUIRunFunc          = tui.StartTUIWithScenarioRunOptions
+	startMultiHostTUIRunFunc      = tui.StartTUIWithMultiHostRunOptions
 	startAutoResultsFunc          = startAutoResultsMonitor
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
@@ -1324,7 +1326,7 @@ Available workload types:
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			diagCtx, diagCancel := context.WithTimeout(ctx, constants.DiagnosticsCollectionTimeout)
+			diagCtx, diagCancel := context.WithTimeout(ctx, constants.DiagnosticsFinalizationTimeout)
 			defer diagCancel()
 			if err := multiHostOrchestrator.FinalizeDiagnosticsAndCleanup(diagCtx); err != nil {
 				logger.Warn("Diagnostics collection/cleanup completed with warnings", "error", err.Error())
@@ -1338,11 +1340,14 @@ Available workload types:
 			integrityOptions = buildIntegrityFinalizeOptions(params)
 		}
 		var autoMonitor *autoResultsMonitor
-		launchHooks := tui.LaunchHooks{}
+		launchHooks := tui.NewLaunchHooks(func() {
+			if autoMonitor != nil {
+				autoMonitor.Arm()
+			}
+		})
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
-				launchHooks.OnSubmitted = autoMonitor.Arm
 			}
 		}
 		var autoOutcome autoResultsOutcome
@@ -1450,6 +1455,7 @@ Available workload types:
 
 				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
+				options.Context = runContext
 				options.LaunchHooks = launchHooks
 
 				if autoTerminate > 0 {
@@ -1457,7 +1463,7 @@ Available workload types:
 				}
 
 				err := startMultiHostHeadlessRunFunc(orchestrator, sptImage, scenarioPath, params, options)
-				if err != nil && autoMonitor != nil {
+				if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 					autoMonitor.Cancel()
 				}
 				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
@@ -1487,15 +1493,16 @@ Available workload types:
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
-			err = tui.StartTUIWithMultiHostRunOptions(
+			err = startMultiHostTUIRunFunc(
 				orchestrator, sptImage, scenarioPath, params, tui.RunOptions{
+					Context:              runContext,
 					AutoTerminateSeconds: autoTerminate,
 					SetSummarySink:       setSummarySink,
 					TracePath:            traceOpts.Path,
 					TraceAppend:          traceOpts.Append,
 					LaunchHooks:          launchHooks,
 				})
-			if err != nil && autoMonitor != nil {
+			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 				autoMonitor.Cancel()
 			}
 			autoResultsComplete := waitForAutoResults(verificationRun)
@@ -1513,6 +1520,7 @@ Available workload types:
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
+			options.Context = runContext
 			options.NetworkMode = networkMode
 			options.ResultsRoot = plannedResultsRoot
 			options.LaunchHooks = launchHooks
@@ -1522,7 +1530,7 @@ Available workload types:
 			}
 
 			err := startLocalHeadlessRunFunc(sptImage, scenarioPath, params, options)
-			if err != nil && autoMonitor != nil {
+			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 				autoMonitor.Cancel()
 			}
 			waitForAutoResults(verificationRun)
@@ -1535,8 +1543,9 @@ Available workload types:
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
-		err = tui.StartTUIWithScenarioRunOptions(
+		err = startLocalTUIRunFunc(
 			sptImage, scenarioPath, params, tui.RunOptions{
+				Context:              runContext,
 				APIPort:              apiPort,
 				NetworkMode:          networkMode,
 				ResultsRoot:          plannedResultsRoot,
@@ -1546,7 +1555,7 @@ Available workload types:
 				TraceAppend:          traceOpts.Append,
 				LaunchHooks:          launchHooks,
 			})
-		if err != nil && autoMonitor != nil {
+		if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 			autoMonitor.Cancel()
 		}
 		waitForAutoResults(verificationRun)

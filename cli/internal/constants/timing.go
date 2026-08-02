@@ -22,14 +22,22 @@ const (
 	AutoResultsShutdownTimeout      = 30 * time.Second       // Graceful API shutdown request budget
 	AutoResultsShutdownSettleDelay  = 1 * time.Second        // Artifact settle delay before shutdown
 	AutoResultsOptionalWaitTimeout  = 2 * time.Second        // Optional wait for a background results pass
+	ReplayAutoResultsWaitTimeout    = 2 * time.Minute        // Maximum replay wait for automatic result publication
 	ResultsDiscoveryHTTPTimeout     = 5 * time.Second        // Step-identity discovery request timeout
 	IntegrityMetricsHTTPTimeout     = 10 * time.Second       // Required corruption-metrics request timeout
 
 	// Container lifecycle timeouts
-	ContainerShutdownGrace       = 2 * time.Second        // Grace period for container graceful shutdown
-	APILingerDefault             = 5 * time.Second        // Default /status linger window after /shutdown
-	APILingerPollInterval        = 200 * time.Millisecond // Interval between post-shutdown status probes
-	DiagnosticsCollectionTimeout = 5 * time.Minute        // Per-host timeout for copying JVM diagnostics artifacts
+	ContainerShutdownGrace         = 2 * time.Second  // Grace period for container graceful shutdown
+	ContainerCleanupTimeout        = 30 * time.Second // Bounded mandatory container/staging removal budget
+	ContainerStopTimeoutSeconds    = 10               // Normal Docker stop timeout in seconds
+	StartupRollbackTimeout         = 30 * time.Second // Bounded pre-submission rollback budget
+	AdvertisedIPDetectionTimeout   = 10 * time.Second // Per-host advertised-IP detection budget
+	DiagnosticsCollectionTimeout   = 5 * time.Minute  // Per-host timeout for copying JVM diagnostics artifacts
+	DiagnosticsFinalizationTimeout = DiagnosticsCollectionTimeout + ContainerCleanupTimeout
+	APILingerDefault               = 5 * time.Second        // Default /status linger window after /shutdown
+	APILingerPollInterval          = 200 * time.Millisecond // Interval between post-shutdown status probes
+	TUIStartupDelay                = 100 * time.Millisecond // Delay allowing the TUI event loop to initialize before startup
+	TUILaunchJoinTimeout           = StartupRollbackTimeout // Bound for joining canceled TUI startup and rollback work
 
 	// Metrics collection intervals
 	DefaultMetricsInterval = 500 * time.Millisecond // Default interval for metrics collection

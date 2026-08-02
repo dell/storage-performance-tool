@@ -43,11 +43,13 @@ var (
 	startReplayRemoteTUI            = tui.StartTUIWithMultiHostRunOptions
 	startReplayLocalHeadless        = headless.StartHeadlessModeWithScenarioContentAndParams
 	startReplayLocalTUI             = tui.StartTUIWithScenarioRunOptions
+	startReplayAutoResultsMonitor   = startAutoResultsMonitor
 	confirmReplayLaunchCommand      = func(out io.Writer) error { return confirmReplayLaunch(out, os.OpenFile) }
 	shouldReplayRunHeadless         = shouldRunHeadless
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		return orchestrator.ConnectHosts(ctx)
 	}
+	replayAutoResultsWaitTimeout = constants.ReplayAutoResultsWaitTimeout
 )
 
 func runReplay(cmd *cobra.Command, _ []string) error {
@@ -250,8 +252,13 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Launching replay against %d configured endpoint(s)...\n", len(params.Endpoints))
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
+	replayContext := commandContext(cmd)
 	var replayMonitor *autoResultsMonitor
-	launchHooks := tui.LaunchHooks{}
+	launchHooks := tui.NewLaunchHooks(func() {
+		if replayMonitor != nil {
+			replayMonitor.Arm()
+		}
+	})
 	startReplayAutoResults := func() {
 		if replayMonitor != nil || !resultsOpts.AutoResults {
 			return
@@ -260,13 +267,12 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		// (see run.go's finalizeMultiHost for the run-command equivalent); its
 		// own StopAllContainers-based cleanup (below) still runs after
 		// waitForAutoResults, same as before.
-		replayMonitor = startAutoResultsMonitor(
-			commandContext(cmd), metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir,
+		replayMonitor = startReplayAutoResultsMonitor(
+			replayContext, metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir,
 			replayStepIDs(generated), params.RunID, resultsOpts.Debug, hostInfos, apiPort,
 			resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario,
 			metadata, out, out, traceOpts.Path, nil,
 		)
-		launchHooks.OnSubmitted = replayMonitor.Arm
 	}
 	defer func() {
 		if replayMonitor != nil {
@@ -288,6 +294,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, delegateShutdownToAutoResults, replayStepIDs(generated))
+			options.Context = replayContext
 			options.LaunchHooks = launchHooks
 			if autoTerminate > 0 {
 				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -303,11 +310,15 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 			err = normalizedErr
-			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			if err != nil && !launchHooks.Submitted() &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				if replayMonitor != nil {
+					replayMonitor.Cancel()
+				}
 				finalizeTraceArtifact()
 				return err
 			}
-			autoResultsOK := waitForReplayAutoResults(replayMonitor, err)
+			autoResultsOK := waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
 			if delegateShutdownToAutoResults {
 				if !autoResultsOK {
 					logging.GetLogger().Warn("Timed out waiting for replay auto-results; forcing remote container cleanup")
@@ -330,6 +341,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 		err = startReplayRemoteTUI(
 			replayOrchestrator, sptImage, paths.Scenario, params, tui.RunOptions{
+				Context:              replayContext,
 				AutoTerminateSeconds: autoTerminate,
 				TracePath:            traceOpts.Path,
 				TraceAppend:          traceOpts.Append,
@@ -337,7 +349,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err)
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -346,6 +358,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if headlessMode {
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
+		options.Context = replayContext
 		options.NetworkMode = networkMode
 		options.ResultsRoot = plannedResultsRoot
 		options.LaunchHooks = launchHooks
@@ -353,7 +366,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err)
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -364,6 +377,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	}
 	err = startReplayLocalTUI(
 		sptImage, paths.Scenario, params, tui.RunOptions{
+			Context:              replayContext,
 			APIPort:              apiPort,
 			NetworkMode:          networkMode,
 			ResultsRoot:          plannedResultsRoot,
@@ -374,21 +388,21 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err)
+	waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
 	finalizeTraceArtifact()
 	return err
 }
 
-func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error) bool {
+func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, submitted bool) bool {
 	if monitor == nil {
 		return true
 	}
-	if launchErr != nil {
-		// A launcher that failed before POST never armed the monitor. Cancel its
+	if launchErr != nil && !submitted {
+		// A proven pre-submission failure never armed the monitor. Cancel its
 		// launch gate before waiting so the original error returns promptly.
 		monitor.Cancel()
 	}
-	timer := time.NewTimer(2 * time.Minute)
+	timer := time.NewTimer(replayAutoResultsWaitTimeout)
 	defer timer.Stop()
 	select {
 	case <-monitor.done:

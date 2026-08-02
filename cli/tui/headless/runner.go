@@ -47,6 +47,7 @@ type HeadlessRunner struct {
 //
 //revive:disable-next-line:exported
 type HeadlessOptions struct {
+	Context     context.Context
 	TraceFile   string
 	TraceAppend bool
 	Verbose     bool
@@ -70,6 +71,19 @@ type HeadlessOptions struct {
 // stopped managed containers before returning.
 type AutoTerminateError struct {
 	CleanupComplete bool
+}
+
+func stopAllContainersAfterRun(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
+	if orchestrator == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), constants.ContainerCleanupTimeout)
+	defer cancel()
+	return orchestrator.StopAllContainers(cleanupCtx)
 }
 
 func (e *AutoTerminateError) Error() string {
@@ -218,7 +232,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	}
 	if err != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
-		if stopErr := r.orchestrator.StopAllContainers(ctx); stopErr != nil {
+		if stopErr := stopAllContainersAfterRun(ctx, r.orchestrator); stopErr != nil {
 			r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 			if err == nil {
 				err = stopErr
@@ -259,7 +273,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 
 	// Stop all containers
 	r.output("SHUTDOWN", "Stopping all containers...")
-	stopErr := r.orchestrator.StopAllContainers(ctx)
+	stopErr := stopAllContainersAfterRun(ctx, r.orchestrator)
 	if stopErr != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 		if err == nil {
@@ -696,7 +710,10 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 	defer func() { _ = runner.Close() }()
 
 	// Run the benchmark with optional auto-terminate timeout
-	baseCtx := context.Background()
+	baseCtx := options.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()
@@ -731,7 +748,10 @@ func startHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, 
 	defer func() { _ = runner.Close() }()
 
 	// Run the multi-host benchmark with optional auto-terminate timeout
-	baseCtx := context.Background()
+	baseCtx := options.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()
