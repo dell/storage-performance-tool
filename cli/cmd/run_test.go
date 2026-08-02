@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -397,22 +399,39 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					}
 
 					launchErr := errors.New("launcher failed")
+					assertPreparedContent := func(path string, scenarioContent, defaultsContent []byte) {
+						t.Helper()
+						onDisk, readErr := os.ReadFile(path)
+						if readErr != nil {
+							t.Fatalf("read prepared scenario: %v", readErr)
+						}
+						if !bytes.Equal(onDisk, scenarioContent) {
+							t.Fatalf("route scenario differs from prepared file")
+						}
+						if len(defaultsContent) == 0 {
+							t.Fatal("route did not receive prepared defaults")
+						}
+					}
 					launch := func(hooks tui.LaunchHooks) error {
 						if submitted {
 							hooks.NotifySubmitted()
 						}
 						return launchErr
 					}
-					startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+					startLocalHeadlessRunFunc = func(_ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
 						return launch(options.LaunchHooks)
 					}
-					startMultiHostHeadlessRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+					startMultiHostHeadlessRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
 						return launch(options.LaunchHooks)
 					}
-					startLocalTUIRunFunc = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+					startLocalTUIRunFunc = func(_ string, path string, _ scenario.Params, options tui.RunOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
 						return launch(options.LaunchHooks)
 					}
-					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options tui.RunOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
 						return launch(options.LaunchHooks)
 					}
 
@@ -470,13 +489,33 @@ func setGlobalRunFlagForTest(t *testing.T, name, value string) {
 		t.Fatalf("run flag %q not found", name)
 	}
 	previousValue := flag.Value.String()
+	type sliceValue interface {
+		GetSlice() []string
+		Replace([]string) error
+	}
+	sliceFlag, isSlice := flag.Value.(sliceValue)
+	var previousSlice []string
+	if isSlice {
+		previousSlice = append([]string(nil), sliceFlag.GetSlice()...)
+	}
 	previousChanged := flag.Changed
-	if err := flag.Value.Set(value); err != nil {
+	var err error
+	if isSlice {
+		err = sliceFlag.Replace(strings.Split(value, ","))
+	} else {
+		err = flag.Value.Set(value)
+	}
+	if err != nil {
 		t.Fatalf("set %s=%q: %v", name, value, err)
 	}
 	flag.Changed = true
 	t.Cleanup(func() {
-		if err := flag.Value.Set(previousValue); err != nil {
+		if isSlice {
+			err = sliceFlag.Replace(previousSlice)
+		} else {
+			err = flag.Value.Set(previousValue)
+		}
+		if err != nil {
 			t.Errorf("restore %s=%q: %v", name, previousValue, err)
 		}
 		flag.Changed = previousChanged

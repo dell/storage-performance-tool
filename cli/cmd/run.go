@@ -283,10 +283,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		if err := os.MkdirAll(root, 0o750); err != nil {
 			logging.LogError("auto-results", "create results dir", err, "path", root)
 		} else {
-			if storedPath, copyErr := copyScenarioForResults(scenarioPath, root); copyErr != nil {
-				logging.LogError("auto-results", "copy scenario", copyErr, "src", scenarioPath, "dest", root)
-			} else if metadata != nil {
-				metadata.ScenarioStoredPath = storedPath
+			if archiveErr := archivePreparedRunInputs(metadata, scenarioPath, root); archiveErr != nil {
+				logging.LogError("auto-results", "archive prepared inputs", archiveErr, "dest", root)
 			}
 		}
 		select {
@@ -1079,52 +1077,28 @@ Available workload types:
 			warnSeedSize(params)
 		}
 
-		// Lock the base timestamp so that every GenerateScenario call
-		// (here and later in the orchestrator) produces identical step IDs.
+		// Lock the base timestamp so every generator used during preparation
+		// observes one run identity.
 		params.BaseTimestamp = scenario.BaseTimestamp()
-		params, err = prepareExternalItemFilesForRun(params)
+		generateOnly, _ := cmd.Flags().GetBool("generate-only")
+		scenarioFile := fmt.Sprintf("spt-scenario-%d.js", time.Now().Unix())
+		scenarioPath := filepath.Join(".", scenarioFile)
+		prepared, err := prepareRunBundle(params, scenarioPath, generateOnly || params.KeepScenario)
 		if err != nil {
 			return err
 		}
-		defer scenario.CleanupPreparedItemFiles(params)
+		defer func() {
+			if cleanupErr := prepared.Cleanup(context.Background()); cleanupErr != nil {
+				logging.GetLogger().Debug("Failed to clean up prepared run", "error", cleanupErr.Error())
+			}
+		}()
+		params = prepared.Params()
+		scenarioContent := string(prepared.ScenarioJS())
+		expectedStepIDs := prepared.ExpectedStepIDs()
 		verificationRun := scenario.IsIntegrityWorkload(params)
 		for _, notice := range integrityCostNotices(params) {
 			fmt.Println(notice)
 		}
-
-		// Generate scenario content
-		scenarioContent, err := scenario.GenerateScenario(params)
-		if err != nil {
-			return err
-		}
-
-		// Extract expected step IDs to drive completion detection
-		plan, planErr := scenario.BuildStepPlanFromScenario(scenarioContent)
-		var expectedStepIDs []string
-		if planErr == nil && len(plan.Steps) > 0 {
-			expectedStepIDs = make([]string, 0, len(plan.Steps))
-			for _, s := range plan.Steps {
-				expectedStepIDs = append(expectedStepIDs, s.ID)
-			}
-		}
-
-		// Create temporary scenario file
-		scenarioFile := fmt.Sprintf("spt-scenario-%d.js", time.Now().Unix())
-		scenarioPath := filepath.Join(".", scenarioFile)
-
-		if err := os.WriteFile(scenarioPath, []byte(scenarioContent), 0600); err != nil {
-			return fmt.Errorf("failed to write scenario file: %w", err)
-		}
-		preserveScenario := false
-		defer func() {
-			if preserveScenario || params.KeepScenario {
-				return
-			}
-			if removeErr := os.Remove(scenarioPath); removeErr != nil && !os.IsNotExist(removeErr) {
-				logging.GetLogger().Debug("Failed to clean up generated scenario file",
-					"file", scenarioPath, "error", removeErr.Error())
-			}
-		}()
 
 		// Log scenario content in debug mode
 		logger := logging.GetLogger()
@@ -1141,9 +1115,7 @@ Available workload types:
 			"debug", resultsOpts.Debug)
 
 		// Check if generate-only flag is set
-		generateOnly, _ := cmd.Flags().GetBool("generate-only")
 		if generateOnly {
-			preserveScenario = true
 			fmt.Printf("Generated scenario file: %s\n", scenarioPath)
 			fmt.Printf("\nSelected Options:\n%s\n", formatScenarioParams(params))
 			fmt.Printf("\nScenario content:\n%s\n", scenarioContent)
@@ -1179,12 +1151,6 @@ Available workload types:
 
 		hostInfos, err := hostparse.ParseTestHosts(testHostsStr)
 		if err != nil {
-			// Clean up scenario file on host parsing failure
-			if removeErr := os.Remove(scenarioPath); removeErr != nil {
-				logger.Debug("Failed to clean up scenario file after host parsing error",
-					"file", scenarioPath,
-					"error", removeErr.Error())
-			}
 			return fmt.Errorf("invalid test hosts: %w", err)
 		}
 		integrityIdentityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
@@ -1196,21 +1162,10 @@ Available workload types:
 
 		// Validate min-hosts doesn't exceed total hosts
 		if minHosts > len(hostInfos) {
-			// Clean up scenario file
-			if removeErr := os.Remove(scenarioPath); removeErr != nil {
-				logger.Debug("Failed to clean up scenario file after min-hosts validation error",
-					"file", scenarioPath,
-					"error", removeErr.Error())
-			}
 			return fmt.Errorf("min-hosts (%d) cannot exceed total hosts (%d)", minHosts, len(hostInfos))
 		}
 
 		if attachExisting && len(hostInfos) < 2 {
-			if removeErr := os.Remove(scenarioPath); removeErr != nil {
-				logger.Debug("Failed to clean up scenario file after attach validation error",
-					"file", scenarioPath,
-					"error", removeErr.Error())
-			}
 			return fmt.Errorf("--%s requires at least two hosts (entry + worker)", flagAttachExistingWorkers)
 		}
 
@@ -1226,12 +1181,6 @@ Available workload types:
 		// port preflight on each configured Docker host instead.
 		if !useMultiHostOrchestrator {
 			if err := checkPortConflicts(cmd); err != nil {
-				// Clean up scenario file on conflict resolution failure
-				if removeErr := os.Remove(scenarioPath); removeErr != nil {
-					logger.Debug("Failed to clean up scenario file after port conflict",
-						"file", scenarioPath,
-						"error", removeErr.Error())
-				}
 				return err
 			}
 		}
@@ -1252,11 +1201,6 @@ Available workload types:
 		}
 		traceOpts, err := prepareTraceOptions(traceFileFlag, traceAppendFlag, resultsOpts.AutoResults, plannedResultsRoot, runToken, os.Stdout)
 		if err != nil {
-			if removeErr := os.Remove(scenarioPath); removeErr != nil {
-				logger.Debug("Failed to clean up scenario file after trace initialization error",
-					"file", scenarioPath,
-					"error", removeErr.Error())
-			}
 			return err
 		}
 		metadata := buildRunMetadata(runMetadataInput{
@@ -1278,6 +1222,9 @@ Available workload types:
 			Command:              cmd,
 			AutoTerminateSeconds: autoTerminate,
 		})
+		metadata.preparedInputs = true
+		metadata.preparedScenarioJS = prepared.ScenarioJS()
+		metadata.preparedDefaultsYAML = prepared.DefaultsYAML()
 		metadata.TraceFile = traceOpts.Path
 		metadata.TraceAuto = traceOpts.Auto
 		if plannedResultsRoot != "" {
@@ -1457,12 +1404,6 @@ Available workload types:
 			// Connect to all hosts
 			err := connectMultiHostOrchestratorFunc(ctx, orchestrator)
 			if err != nil {
-				// Clean up scenario file on connection failure
-				if removeErr := os.Remove(scenarioPath); removeErr != nil {
-					logger.Debug("Failed to clean up scenario file after connection error",
-						"file", scenarioPath,
-						"error", removeErr.Error())
-				}
 				return fmt.Errorf("failed to connect to required hosts: %w", err)
 			}
 			if verificationRun {
@@ -1480,6 +1421,8 @@ Available workload types:
 				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
 				options.Context = runContext
 				options.LaunchHooks = launchHooks
+				options.ScenarioContent = prepared.ScenarioJS()
+				options.DefaultsContent = prepared.DefaultsYAML()
 
 				if autoTerminate > 0 {
 					fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1524,6 +1467,8 @@ Available workload types:
 					TracePath:            traceOpts.Path,
 					TraceAppend:          traceOpts.Append,
 					LaunchHooks:          launchHooks,
+					ScenarioContent:      prepared.ScenarioJS(),
+					DefaultsContent:      prepared.DefaultsYAML(),
 				})
 			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 				autoMonitor.Cancel()
@@ -1547,6 +1492,8 @@ Available workload types:
 			options.NetworkMode = networkMode
 			options.ResultsRoot = plannedResultsRoot
 			options.LaunchHooks = launchHooks
+			options.ScenarioContent = prepared.ScenarioJS()
+			options.DefaultsContent = prepared.DefaultsYAML()
 			// KeepScenario is now passed via params, not options.
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
@@ -1577,6 +1524,8 @@ Available workload types:
 				TracePath:            traceOpts.Path,
 				TraceAppend:          traceOpts.Append,
 				LaunchHooks:          launchHooks,
+				ScenarioContent:      prepared.ScenarioJS(),
+				DefaultsContent:      prepared.DefaultsYAML(),
 			})
 		if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
 			autoMonitor.Cancel()

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,7 @@ type runMetadata struct {
 	ResultsRoot             string                                                  `json:"resultsRoot"`
 	ScenarioFile            string                                                  `json:"scenarioFile"`
 	ScenarioStoredPath      string                                                  `json:"scenarioStoredPath,omitempty"`
+	DefaultsStoredPath      string                                                  `json:"defaultsStoredPath,omitempty"`
 	ScenarioParams          scenario.Params                                         `json:"scenarioParams"`
 	Hosts                   []runHostMetadata                                       `json:"hosts"`
 	TestHosts               string                                                  `json:"testHosts"`
@@ -48,6 +50,9 @@ type runMetadata struct {
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
 	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
+	preparedInputs          bool                                                    `json:"-"`
+	preparedScenarioJS      []byte                                                  `json:"-"`
+	preparedDefaultsYAML    []byte                                                  `json:"-"`
 }
 
 type runHostMetadata struct {
@@ -307,6 +312,76 @@ func copyScenarioForResults(srcPath, destDir string) (string, error) {
 		return "", err
 	}
 	return base, nil
+}
+
+func archivePreparedRunInputs(meta *runMetadata, scenarioPath, destDir string) error {
+	if meta == nil || !meta.preparedInputs {
+		storedPath, err := copyScenarioForResults(scenarioPath, destDir)
+		if meta != nil && err == nil {
+			meta.ScenarioStoredPath = storedPath
+		}
+		return err
+	}
+
+	scenarioName := filepath.Base(scenarioPath)
+	if scenarioName == "." || scenarioName == string(filepath.Separator) || scenarioName == "" {
+		return fmt.Errorf("invalid prepared scenario path %q", scenarioPath)
+	}
+	var archiveErrs []error
+	if err := writePreparedInputDurable(
+		filepath.Join(destDir, scenarioName), meta.preparedScenarioJS, 0o600); err != nil {
+		archiveErrs = append(archiveErrs, fmt.Errorf("archive prepared scenario: %w", err))
+	} else {
+		meta.ScenarioStoredPath = scenarioName
+	}
+	if err := writePreparedInputDurable(
+		filepath.Join(destDir, constants.ResultsPreparedDefaultsFileName), meta.preparedDefaultsYAML, 0o600); err != nil {
+		archiveErrs = append(archiveErrs, fmt.Errorf("archive prepared defaults: %w", err))
+	} else {
+		meta.DefaultsStoredPath = constants.ResultsPreparedDefaultsFileName
+	}
+	return errors.Join(archiveErrs...)
+}
+
+func writePreparedInputDurable(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".prepared-input-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	keepTemp := true
+	defer func() {
+		if keepTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	keepTemp = false
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func writeRunMetadata(meta *runMetadata, root string) error {

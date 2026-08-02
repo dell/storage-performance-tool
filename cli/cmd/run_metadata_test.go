@@ -214,6 +214,43 @@ func TestCopyScenarioForResults(t *testing.T) {
 	}
 }
 
+func TestArchivePreparedRunInputsUsesExactSubmittedBytes(t *testing.T) {
+	dir := t.TempDir()
+	scenarioPath := filepath.Join(dir, "prepared.js")
+	if err := os.WriteFile(scenarioPath, []byte("later file content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultsDir := filepath.Join(dir, "results")
+	if err := os.MkdirAll(resultsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	meta := &runMetadata{
+		preparedInputs:       true,
+		preparedScenarioJS:   []byte("exact submitted scenario"),
+		preparedDefaultsYAML: []byte("exact submitted defaults"),
+	}
+	if err := archivePreparedRunInputs(meta, scenarioPath, resultsDir); err != nil {
+		t.Fatalf("archivePreparedRunInputs() error = %v", err)
+	}
+	archivedScenario, err := os.ReadFile(filepath.Join(resultsDir, "prepared.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedDefaults, err := os.ReadFile(
+		filepath.Join(resultsDir, constants.ResultsPreparedDefaultsFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archivedScenario) != "exact submitted scenario" ||
+		string(archivedDefaults) != "exact submitted defaults" {
+		t.Fatalf("archived scenario/defaults = %q/%q", archivedScenario, archivedDefaults)
+	}
+	if meta.ScenarioStoredPath != "prepared.js" ||
+		meta.DefaultsStoredPath != constants.ResultsPreparedDefaultsFileName {
+		t.Fatalf("stored paths = %q/%q", meta.ScenarioStoredPath, meta.DefaultsStoredPath)
+	}
+}
+
 func TestCopyScenarioForResultsSkipsSelfCopy(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "scenario.js")

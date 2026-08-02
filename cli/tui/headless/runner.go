@@ -64,6 +64,8 @@ type HeadlessOptions struct {
 	DelegateNormalShutdown bool
 	ExpectedStepIDs        []string
 	LaunchHooks            tui.LaunchHooks
+	ScenarioContent        []byte
+	DefaultsContent        []byte
 }
 
 // AutoTerminateError indicates a headless multi-host run reached the configured
@@ -686,7 +688,8 @@ func StartHeadlessMode(image string, scenarioPath string, options HeadlessOption
 
 // StartHeadlessModeWithParams is the entry point for headless mode with scenario parameters
 func StartHeadlessModeWithParams(image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
-	return startHeadlessModeWithParams(image, scenarioPath, params, options, nil, nil)
+	return startHeadlessModeWithParams(
+		image, scenarioPath, params, options, options.ScenarioContent, options.DefaultsContent)
 }
 
 // StartHeadlessModeWithScenarioContentAndParams runs headless mode with caller-provided scenario/defaults content.
@@ -730,7 +733,8 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 
 // StartHeadlessModeWithOrchestrator is the entry point for multi-host headless mode
 func StartHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
-	return startHeadlessModeWithOrchestrator(orchestrator, image, scenarioPath, params, options, nil, nil)
+	return startHeadlessModeWithOrchestrator(
+		orchestrator, image, scenarioPath, params, options, options.ScenarioContent, options.DefaultsContent)
 }
 
 // StartHeadlessModeWithOrchestratorContent is the entry point for multi-host

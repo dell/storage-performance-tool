@@ -7,11 +7,12 @@ package constants
 
 // Results manifest and metadata filenames.
 const (
-	ResultsManifestFileName   = "index.json"
-	ResultsMetadataFileName   = "spt_run_params.json"
-	ResultsSummaryFilePrefix  = "spt_"
-	ResultsSummaryFileSuffix  = "_results_summary.txt"
-	ResultsSummaryFilePattern = ResultsSummaryFilePrefix + "%s" + ResultsSummaryFileSuffix
+	ResultsManifestFileName         = "index.json"
+	ResultsMetadataFileName         = "spt_run_params.json"
+	ResultsPreparedDefaultsFileName = "defaults.yaml"
+	ResultsSummaryFilePrefix        = "spt_"
+	ResultsSummaryFileSuffix        = "_results_summary.txt"
+	ResultsSummaryFilePattern       = ResultsSummaryFilePrefix + "%s" + ResultsSummaryFileSuffix
 )
 
 // Results artifact suffixes.
