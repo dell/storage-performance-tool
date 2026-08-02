@@ -16,6 +16,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/replay"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
@@ -254,24 +255,39 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 	replayContext := commandContext(cmd)
 	var replayMonitor *autoResultsMonitor
-	launchHooks := tui.NewLaunchHooks(func() {
+	var runSession *runcontrol.Session
+	if resultsOpts.AutoResults {
+		runSession = runcontrol.NewSession()
+	}
+	armMonitor := func() {
 		if replayMonitor != nil {
 			replayMonitor.Arm()
 		}
-	})
+	}
+	launchHooks := tui.NewLaunchHooks(armMonitor)
+	if runSession != nil {
+		launchHooks = tui.NewSessionLaunchHooks(runSession, armMonitor)
+	}
+	finalizeReplaySession := func(ctx context.Context) {
+		if runSession == nil {
+			return
+		}
+		finalization := runSession.FinalizeResources(ctx)
+		metadata.resourceFinalization = &finalization
+		if err := finalization.Error(); err != nil {
+			logging.GetLogger().Warn("Replay resource finalization encountered issues",
+				"error", err.Error(), "disposition", finalization.Resources)
+		}
+	}
 	startReplayAutoResults := func() {
 		if replayMonitor != nil || !resultsOpts.AutoResults {
 			return
 		}
-		// Replay does not currently wire a pre-summary diagnostics/cleanup hook
-		// (see run.go's finalizeMultiHost for the run-command equivalent); its
-		// own StopAllContainers-based cleanup (below) still runs after
-		// waitForAutoResults, same as before.
 		replayMonitor = startReplayAutoResultsMonitor(
 			replayContext, metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir,
 			replayStepIDs(generated), params.RunID, resultsOpts.Debug, hostInfos, apiPort,
 			resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario,
-			metadata, out, out, traceOpts.Path, nil,
+			metadata, out, out, traceOpts.Path, finalizeReplaySession,
 		)
 	}
 	defer func() {
@@ -300,8 +316,12 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
 			err := startReplayRemoteHeadless(replayOrchestrator, sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, replayOrchestrator, 30*time.Second)
-			if autoTerminated {
+			var autoTerminateCleaner replayContainerCleaner = replayOrchestrator
+			if launchHooks.SessionManaged() {
+				autoTerminateCleaner = nil
+			}
+			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, autoTerminateCleaner, 30*time.Second)
+			if autoTerminated && !launchHooks.SessionManaged() {
 				if normalizedErr != nil {
 					finalizeTraceArtifact()
 					return normalizedErr
@@ -310,7 +330,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 			err = normalizedErr
-			if err != nil && !launchHooks.Submitted() &&
+			if err != nil && launchHooks.ProvenNotSubmitted() &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				if replayMonitor != nil {
 					replayMonitor.Cancel()
@@ -318,15 +338,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				finalizeTraceArtifact()
 				return err
 			}
-			autoResultsOK := waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
-			if delegateShutdownToAutoResults {
-				if !autoResultsOK {
-					logging.GetLogger().Warn("Timed out waiting for replay auto-results; forcing remote container cleanup")
-				}
-				if stopErr := cleanupReplayContainers(replayOrchestrator, 30*time.Second); stopErr != nil {
-					logging.GetLogger().Error("Failed to clean up replay containers", "error", stopErr.Error())
-				}
-			}
+			waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
 			finalizeTraceArtifact()
 			return err
 		}
@@ -349,7 +361,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -366,7 +378,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -388,16 +400,16 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err, launchHooks.Submitted())
+	waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
 	finalizeTraceArtifact()
 	return err
 }
 
-func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, submitted bool) bool {
+func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, potentiallySubmitted bool) {
 	if monitor == nil {
-		return true
+		return
 	}
-	if launchErr != nil && !submitted {
+	if launchErr != nil && !potentiallySubmitted {
 		// A proven pre-submission failure never armed the monitor. Cancel its
 		// launch gate before waiting so the original error returns promptly.
 		monitor.Cancel()
@@ -406,10 +418,9 @@ func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, subm
 	defer timer.Stop()
 	select {
 	case <-monitor.done:
-		return true
+		return
 	case <-timer.C:
 		logging.GetLogger().Warn("Timed out waiting for replay auto-results")
-		return false
 	}
 }
 

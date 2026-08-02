@@ -598,9 +598,7 @@ func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) 
 				},
 			}
 			started := time.Now()
-			if !waitForReplayAutoResults(monitor, launchErr, false) {
-				t.Fatal("failed launch monitor timed out instead of canceling")
-			}
+			waitForReplayAutoResults(monitor, launchErr, false)
 			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
 				t.Fatalf("failed launch teardown calls=%d elapsed=%s",
 					cancelCalls.Load(), time.Since(started))
@@ -614,9 +612,7 @@ func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	if !waitForReplayAutoResults(monitor, nil, true) {
-		t.Fatal("completed replay monitor timed out")
-	}
+	waitForReplayAutoResults(monitor, nil, true)
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("successful launch canceled monitor %d time(s)", cancelCalls.Load())
 	}
@@ -627,9 +623,7 @@ func TestWaitForReplayAutoResultsPreservesArmedMonitorAfterLaunchError(t *testin
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	if !waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), true) {
-		t.Fatal("post-submission replay monitor timed out")
-	}
+	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), true)
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("post-submission launch error canceled monitor %d time(s)", cancelCalls.Load())
 	}
@@ -641,9 +635,7 @@ func TestWaitForReplayAutoResultsTimeoutIsDeterministic(t *testing.T) {
 	t.Cleanup(func() { replayAutoResultsWaitTimeout = originalTimeout })
 
 	started := time.Now()
-	if waitForReplayAutoResults(&autoResultsMonitor{done: make(chan autoResultsOutcome)}, nil, true) {
-		t.Fatal("incomplete replay monitor unexpectedly completed")
-	}
+	waitForReplayAutoResults(&autoResultsMonitor{done: make(chan autoResultsOutcome)}, nil, true)
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
 		t.Fatalf("deterministic replay timeout took %s", elapsed)
 	}
@@ -691,33 +683,46 @@ func TestReplayCommandFailedLaunchTearsDownAutoResultsPromptly(t *testing.T) {
 			confirmReplayLaunchCommand = func(io.Writer) error { return nil }
 			shouldReplayRunHeadless = func(*cobra.Command) bool { return test.headless }
 			var pathCalls atomic.Int32
+			var sessionManagedCalls atomic.Int32
 			startReplayRemoteHeadless = func(
-				*tui.MultiHostOrchestrator, string, string, scenario.Params, headless.HeadlessOptions, []byte, []byte,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
 			) error {
 				if test.wantPath == "remote-headless" {
 					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
 				}
 				return test.wantErr
 			}
 			startReplayRemoteTUI = func(
-				*tui.MultiHostOrchestrator, string, string, scenario.Params, tui.RunOptions,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions,
 			) error {
 				if test.wantPath == "remote-tui" {
 					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
 				}
 				return test.wantErr
 			}
 			startReplayLocalHeadless = func(
-				string, string, scenario.Params, headless.HeadlessOptions, []byte, []byte,
+				_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
 			) error {
 				if test.wantPath == "local-headless" {
 					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
 				}
 				return test.wantErr
 			}
-			startReplayLocalTUI = func(string, string, scenario.Params, tui.RunOptions) error {
+			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
 				if test.wantPath == "local-tui" {
 					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
 				}
 				return test.wantErr
 			}
@@ -740,6 +745,9 @@ func TestReplayCommandFailedLaunchTearsDownAutoResultsPromptly(t *testing.T) {
 			}
 			if pathCalls.Load() != 1 || time.Since(started) > time.Second {
 				t.Fatalf("replay failure path calls=%d elapsed=%s", pathCalls.Load(), time.Since(started))
+			}
+			if sessionManagedCalls.Load() != 1 {
+				t.Fatalf("session-managed replay route calls=%d, want 1", sessionManagedCalls.Load())
 			}
 		})
 	}
