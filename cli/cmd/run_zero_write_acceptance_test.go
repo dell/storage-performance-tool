@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +20,12 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
 
 func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
@@ -221,6 +226,167 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	for _, name := range []string{integrity.WrittenName, integrity.WrittenCompletionName} {
 		if _, statErr := os.Stat(filepath.Join(resultsRoot, name)); statErr != nil {
 			t.Fatalf("canonical zero-write producer evidence %s was not promoted: %v", name, statErr)
+		}
+	}
+}
+
+func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previousGOOS := integrityRuntimeGOOS
+	integrityRuntimeGOOS = integritySupportedGOOS
+	t.Cleanup(func() { integrityRuntimeGOOS = previousGOOS })
+
+	var metricsRequests atomic.Int32
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		metricsRequests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer metricsServer.Close()
+	serverURL, err := url.Parse(metricsServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, apiPort, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for flag, value := range map[string]string{
+		"test-hosts": "127.0.0.1", "min-hosts": "1",
+		"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+		"bucket": "qualification", "object-count": "1", "threads": "1", "api-port": apiPort,
+		"headless": "true", "auto-results": "true", "shutdown-on-complete": "false",
+		"generate-only": "false", "results-dir": t.TempDir(),
+	} {
+		setGlobalRunFlagForTest(t, flag, value)
+	}
+
+	originalPort := resolvePortConflictFunc
+	originalLocal := startLocalHeadlessRunFunc
+	originalAutoResults := startAutoResultsFunc
+	originalTracker := newRunTrackerFunc
+	originalDiscover := discoverStepIDsFunc
+	originalFleetDiscover := discoverFleetStepIDsFunc
+	originalFetcher := newResultsFetcherFunc
+	originalSummary := generateRunSummaryFunc
+	t.Cleanup(func() {
+		resolvePortConflictFunc = originalPort
+		startLocalHeadlessRunFunc = originalLocal
+		startAutoResultsFunc = originalAutoResults
+		newRunTrackerFunc = originalTracker
+		discoverStepIDsFunc = originalDiscover
+		discoverFleetStepIDsFunc = originalFleetDiscover
+		newResultsFetcherFunc = originalFetcher
+		generateRunSummaryFunc = originalSummary
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+
+	const runtimeList = "mt-001-runtime-list"
+	const producerCause = "LIST failed before selecting verification objects"
+	var tracker *fakeRunTracker
+	var capturedMetadata *runMetadata
+	var fetchedStepIDs []string
+	startAutoResultsFunc = func(
+		parentCtx context.Context, baseURL, label, resultsDir string, plannedStepIDs []string,
+		runID int64, debug bool, hosts []*hostparse.HostInfo, port string, shutdownOn bool,
+		lingerSec int, scenarioPath string, metadata *runMetadata, progressOut, summaryOut io.Writer,
+		traceFile string, preSummaryHook func(context.Context), options ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		if len(plannedStepIDs) != 2 {
+			t.Fatalf("planned read-verify IDs = %v, want LIST and READ", plannedStepIDs)
+		}
+		plannedList, plannedRead := plannedStepIDs[0], plannedStepIDs[1]
+		tracker = &fakeRunTracker{result: &portcheck.RunResult{
+			FinalState: constants.StateFailed, RunID: runID,
+			FailureStepID: runtimeList, FailureCategory: "execution", FailureMessage: producerCause,
+			Steps: map[string]portcheck.StepCompletion{
+				runtimeList: {StepID: runtimeList, Lifecycle: portcheck.StepLifecycleFailed, Started: true, Failed: true},
+				plannedList: {StepID: plannedList, Lifecycle: portcheck.StepLifecycleFailed, Planned: true, Started: true, Failed: true},
+				plannedRead: {StepID: plannedRead, Lifecycle: portcheck.StepLifecycleNotStarted, Planned: true},
+			},
+		}}
+		newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
+		discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+			return []string{runtimeList}, nil
+		}
+		discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
+
+		manifestData := []byte("bucket,key,size,version_id\n")
+		digest := sha256.Sum256(manifestData)
+		completionData, marshalErr := json.Marshal(integrity.Completion{
+			Version: 1, Status: "complete", RunID: runID,
+			ProducerKind: constants.IntegrityProvenanceEngineStep,
+			ProducerID:   runtimeList, Artifact: integrity.VerifyInputName,
+			SourceRecordCount: 0, UniqueRecordCount: 0, SelectedRecordCount: 0,
+			ManifestBytes: int64(len(manifestData)), ManifestSHA256: hex.EncodeToString(digest[:]),
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
+			return &fakeFetcher{output: output, onFetch: func(root string, stepIDs []string) error {
+				fetchedStepIDs = append([]string(nil), stepIDs...)
+				if len(stepIDs) != 1 || stepIDs[0] != runtimeList {
+					return fmt.Errorf("unexpected failed-LIST fetch set: %v", stepIDs)
+				}
+				if mkdirErr := os.MkdirAll(root, 0o750); mkdirErr != nil {
+					return mkdirErr
+				}
+				files := map[string][]byte{
+					runtimeList + "." + integrity.VerifyInputName:           manifestData,
+					runtimeList + "." + integrity.VerifyInputCompletionName: append(completionData, '\n'),
+					runtimeList + ".metrics.total.csv":                      []byte("OpType,CountSucc,CountFail,CountCorrupt\nLIST,0,1,0\n"),
+				}
+				for name, data := range files {
+					if writeErr := os.WriteFile(filepath.Join(root, name), data, 0o600); writeErr != nil {
+						return writeErr
+					}
+				}
+				indexData, marshalErr := json.Marshal(results.Manifest{Steps: []results.StepManifest{{StepID: runtimeList}}})
+				if marshalErr != nil {
+					return marshalErr
+				}
+				return os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName), indexData, 0o600)
+			}}
+		}
+		generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+		capturedMetadata = metadata
+		return startAutoResultsMonitor(
+			parentCtx, baseURL, label, resultsDir, plannedStepIDs, runID, debug, hosts, port,
+			shutdownOn, lingerSec, scenarioPath, metadata, progressOut, summaryOut, traceFile,
+			preSummaryHook, options...,
+		)
+	}
+
+	err = runCmd.RunE(runCmd, []string{WorkloadTypeReadVerify})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+		!strings.Contains(err.Error(), producerCause) {
+		t.Fatalf("RunE() error = %#v, want exit %d preserving LIST cause", err, constants.ExitCodeWorkloadFailure)
+	}
+	if tracker == nil || !tracker.requireTerminalCalled || !tracker.requireTerminalValue {
+		t.Fatalf("read-verify terminal policy tracker = %+v", tracker)
+	}
+	if metricsRequests.Load() != 0 {
+		t.Fatalf("not-started READ issued %d live metrics request(s), want zero", metricsRequests.Load())
+	}
+	if strings.Join(fetchedStepIDs, ",") != runtimeList || capturedMetadata == nil ||
+		strings.Join(capturedMetadata.ActualStepIDs, ",") != runtimeList {
+		t.Fatalf("runtime/fetch IDs = fetched %v metadata %+v, want LIST only", fetchedStepIDs, capturedMetadata)
+	}
+	for _, name := range []string{integrity.VerifyInputName, integrity.VerifyInputCompletionName} {
+		if _, statErr := os.Stat(filepath.Join(capturedMetadata.ResultsRoot, name)); statErr != nil {
+			t.Fatalf("canonical failed-LIST producer evidence %s missing: %v", name, statErr)
+		}
+	}
+	for _, name := range []string{integrity.VerifiedName, integrity.VerifiedCompletionName, integrity.VerifyRemainingName} {
+		if _, statErr := os.Stat(filepath.Join(capturedMetadata.ResultsRoot, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("not-started READ artifact %s unexpectedly exists: %v", name, statErr)
 		}
 	}
 }
