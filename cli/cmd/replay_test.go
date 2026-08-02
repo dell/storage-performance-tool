@@ -598,7 +598,7 @@ func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) 
 				},
 			}
 			started := time.Now()
-			if !waitForReplayAutoResults(monitor, launchErr, 500*time.Millisecond) {
+			if !waitForReplayAutoResults(monitor, launchErr) {
 				t.Fatal("failed launch monitor timed out instead of canceling")
 			}
 			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
@@ -614,7 +614,7 @@ func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	if !waitForReplayAutoResults(monitor, nil, 100*time.Millisecond) {
+	if !waitForReplayAutoResults(monitor, nil) {
 		t.Fatal("completed replay monitor timed out")
 	}
 	if cancelCalls.Load() != 0 {

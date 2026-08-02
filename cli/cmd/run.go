@@ -429,17 +429,18 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			runtimeRoles := integrity.ResolveStepRoles(stepIDs, nil)
 			plannedRoles := integrity.ResolveStepRoles(expectedStepIDs, nil)
 			readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
-			if readLifecycle == portcheck.StepLifecycleNotStarted {
-				// A dependent READ which never started cannot publish runtime metrics.
-				// Its planned lifecycle remains part of finalization, while runtime
-				// evidence and ActualStepIDs stay exact.
-			} else if runtimeRoles.Read == "" {
-				outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
-			} else {
-				corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(postCtx, baseURL, runtimeRoles.Read)
-				outcome.CorruptionMetricsErr = observeErr
-				if observeErr == nil {
-					outcome.ObservedCorruptCount = &corrupt
+			// A dependent READ which never started cannot publish runtime metrics.
+			// Its planned lifecycle remains part of finalization, while runtime
+			// evidence and ActualStepIDs stay exact.
+			if readLifecycle != portcheck.StepLifecycleNotStarted {
+				if runtimeRoles.Read == "" {
+					outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
+				} else {
+					corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(postCtx, baseURL, runtimeRoles.Read)
+					outcome.CorruptionMetricsErr = observeErr
+					if observeErr == nil {
+						outcome.ObservedCorruptCount = &corrupt
+					}
 				}
 			}
 		}

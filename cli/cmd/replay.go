@@ -307,7 +307,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				finalizeTraceArtifact()
 				return err
 			}
-			autoResultsOK := waitForReplayAutoResults(replayMonitor, err, 2*time.Minute)
+			autoResultsOK := waitForReplayAutoResults(replayMonitor, err)
 			if delegateShutdownToAutoResults {
 				if !autoResultsOK {
 					logging.GetLogger().Warn("Timed out waiting for replay auto-results; forcing remote container cleanup")
@@ -337,7 +337,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err, 2*time.Minute)
+		waitForReplayAutoResults(replayMonitor, err)
 		finalizeTraceArtifact()
 		return err
 	}
@@ -353,7 +353,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err, 2*time.Minute)
+		waitForReplayAutoResults(replayMonitor, err)
 		finalizeTraceArtifact()
 		return err
 	}
@@ -374,12 +374,12 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err, 2*time.Minute)
+	waitForReplayAutoResults(replayMonitor, err)
 	finalizeTraceArtifact()
 	return err
 }
 
-func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, timeout time.Duration) bool {
+func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error) bool {
 	if monitor == nil {
 		return true
 	}
@@ -388,10 +388,7 @@ func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, time
 		// launch gate before waiting so the original error returns promptly.
 		monitor.Cancel()
 	}
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
-	}
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(2 * time.Minute)
 	defer timer.Stop()
 	select {
 	case <-monitor.done:

@@ -664,10 +664,6 @@ func parseSampleTimestamp(raw string) (time.Time, error) {
 	return time.Parse(time.RFC3339, raw)
 }
 
-func (c *SptAPIClient) probeReady() (bool, readinessResponse, []byte, int, error) {
-	return c.probeReadyContext(context.Background())
-}
-
 func (c *SptAPIClient) probeReadyContext(ctx context.Context) (bool, readinessResponse, []byte, int, error) {
 	var info readinessResponse
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/ready", nil)
