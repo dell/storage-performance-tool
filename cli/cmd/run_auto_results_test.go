@@ -20,6 +20,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/tui"
 )
 
@@ -1146,7 +1147,7 @@ func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *te
 	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
 	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
 	stepID := "mt-001-verify"
-	assertCleanupContext := func(stage string, ctx context.Context) {
+	assertCleanupContext := func(stage string, ctx context.Context, budget time.Duration) {
 		t.Helper()
 		if err := ctx.Err(); err != nil {
 			t.Errorf("%s context is already canceled: %v", stage, err)
@@ -1157,38 +1158,40 @@ func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *te
 			return
 		}
 		remaining := time.Until(deadline)
-		if remaining <= 0 || remaining > constants.AutoResultsCancelCleanupTimeout {
+		if remaining <= 0 || remaining > budget {
 			t.Errorf("%s cleanup deadline remaining = %s", stage, remaining)
 		}
 	}
 	discoverStepIDsFunc = func(ctx context.Context, _ string, _ int64) ([]string, error) {
-		assertCleanupContext("discovery", ctx)
+		assertCleanupContext("discovery", ctx, constants.AutoResultsCancelCleanupTimeout)
 		return []string{stepID}, nil
 	}
 	discoverFleetStepIDsFunc = func(ctx context.Context, _ string, _ int64) ([]string, error) {
-		assertCleanupContext("fleet discovery", ctx)
+		assertCleanupContext("fleet discovery", ctx, constants.AutoResultsCancelCleanupTimeout)
 		return nil, nil
 	}
 	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir, onFetch: func(_ string, _ []string) error {
 			return nil
-		}, onContext: func(ctx context.Context) { assertCleanupContext("artifact fetch", ctx) }}
+		}, onContext: func(ctx context.Context) {
+			assertCleanupContext("artifact fetch", ctx, constants.AutoResultsCancelCleanupTimeout)
+		}}
 	}
 	var shutdownCalled int32
 	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool) error {
-		assertCleanupContext("shutdown", ctx)
+		assertCleanupContext("shutdown", ctx, constants.AutoResultsShutdownTimeout)
 		atomic.AddInt32(&shutdownCalled, 1)
 		return nil
 	}
 	var summaryCalled int32
 	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) error {
-		assertCleanupContext("summary", ctx)
+		assertCleanupContext("summary", ctx, constants.AutoResultsSummaryTimeout)
 		atomic.AddInt32(&summaryCalled, 1)
 		return nil
 	}
 	var hookCalled int32
 	hook := func(ctx context.Context) {
-		assertCleanupContext("pre-summary hook", ctx)
+		assertCleanupContext("pre-summary hook", ctx, constants.DiagnosticsFinalizationTimeout)
 		atomic.AddInt32(&hookCalled, 1)
 	}
 
@@ -1210,5 +1213,115 @@ func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *te
 		atomic.LoadInt32(&summaryCalled) != 1 {
 		t.Fatalf("cleanup calls shutdown=%d hook=%d summary=%d, want all 1",
 			shutdownCalled, hookCalled, summaryCalled)
+	}
+}
+
+func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	origBudgets := autoResultsPhaseBudgets
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+		autoResultsPhaseBudgets = origBudgets
+	}()
+
+	autoResultsPhaseBudgets = postRunBudgets{
+		Artifacts:     20 * time.Millisecond,
+		CancelSalvage: 20 * time.Millisecond,
+		Shutdown:      time.Second,
+		Finalization:  time.Second,
+		Summary:       time.Second,
+	}
+	stepID := "mt-001-20260802.120000.000-create"
+	newRunTrackerFunc = func(string) autoResultsRunTracker { return &fakeRunTracker{} }
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return []string{stepID}, nil
+	}
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return nil, nil
+	}
+	fetchStarted := make(chan struct{})
+	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{
+			output: outputDir,
+			onContext: func(ctx context.Context) {
+				close(fetchStarted)
+				<-ctx.Done()
+			},
+			err: context.DeadlineExceeded,
+		}
+	}
+	shutdownStarted := make(chan struct{})
+	requestShutdownAllFunc = func(
+		ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool,
+	) error {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(errors.New("shutdown received exhausted context"), err)
+		}
+		close(shutdownStarted)
+		return nil
+	}
+	cleanupErr := errors.New("mandatory removal failed")
+	metadata := &runMetadata{}
+	hookCalled := make(chan struct{})
+	preSummaryHook := func(ctx context.Context) {
+		if err := ctx.Err(); err != nil {
+			metadata.resourceFinalization = &runcontrol.FinalizationOutcome{WaitErr: err}
+		} else {
+			metadata.resourceFinalization = &runcontrol.FinalizationOutcome{
+				Diagnostics: runcontrol.CompletedPhase(nil),
+				Removal:     runcontrol.CompletedPhase(cleanupErr),
+				Resources:   runcontrol.ResourceDispositionRetained,
+			}
+		}
+		close(hookCalled)
+	}
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) error {
+		select {
+		case <-hookCalled:
+		default:
+			return errors.New("summary ran before finalization")
+		}
+		return ctx.Err()
+	}
+
+	done := startAutoResults(
+		context.Background(), "http://example", "mt", t.TempDir(), []string{stepID}, false,
+		nil, "9999", true, 1, "", metadata, io.Discard, io.Discard, "", preSummaryHook)
+	outcome := <-done
+	select {
+	case <-fetchStarted:
+	default:
+		t.Fatal("artifact fetch did not start")
+	}
+	select {
+	case <-shutdownStarted:
+	default:
+		t.Fatal("artifact timeout starved the independent shutdown phase")
+	}
+	if !errors.Is(outcome.ArtifactErr, context.DeadlineExceeded) {
+		t.Fatalf("artifact error = %v, want deadline", outcome.ArtifactErr)
+	}
+	if outcome.ShutdownErr != nil {
+		t.Fatalf("shutdown error = %v, want nil", outcome.ShutdownErr)
+	}
+	if outcome.ResourceFinalization == nil ||
+		!errors.Is(outcome.ResourceFinalization.Removal.Err, cleanupErr) {
+		t.Fatalf("resource finalization = %+v, want retained cleanup error", outcome.ResourceFinalization)
+	}
+	if outcome.ResourceFinalization.Resources != runcontrol.ResourceDispositionRetained {
+		t.Fatalf("resource disposition = %q, want retained", outcome.ResourceFinalization.Resources)
+	}
+	if outcome.SummaryErr != nil {
+		t.Fatalf("summary error = %v, want nil after finalization", outcome.SummaryErr)
 	}
 }

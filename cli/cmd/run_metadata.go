@@ -12,6 +12,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/spf13/cobra"
@@ -46,6 +47,7 @@ type runMetadata struct {
 	RuntimeIdentityError    string                                                  `json:"runtimeIdentityError,omitempty"`
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
+	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
 }
 
 type runHostMetadata struct {

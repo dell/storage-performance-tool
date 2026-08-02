@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +31,35 @@ var ErrMetricsIncompatible = errors.New("spt metrics payload incompatible with t
 
 // SptAPIClient handles communication with the Spt REST API
 type SptAPIClient struct {
-	baseURL    string
-	httpClient *http.Client
-	runID      string
-	mu         sync.Mutex
+	baseURL                         string
+	httpClient                      *http.Client
+	runID                           string
+	submissionReconcileTimeout      time.Duration
+	submissionReconcilePollInterval time.Duration
+	startRetryDelay                 time.Duration
+	mu                              sync.Mutex
 }
+
+// StartTestOutcome preserves the submission boundary even when POST /run
+// returns a transport error. Callers must not retry SubmissionUnknown.
+type StartTestOutcome struct {
+	RunID      string
+	Submission SubmissionState
+}
+
+// AmbiguousSubmissionError means POST /run was dispatched but the response
+// and bounded run-id reconciliation did not prove whether it was accepted.
+type AmbiguousSubmissionError struct {
+	ExpectedRunID int64
+	Cause         error
+}
+
+func (e *AmbiguousSubmissionError) Error() string {
+	return fmt.Sprintf("submission of run %d remains ambiguous after bounded /status reconciliation: %v",
+		e.ExpectedRunID, e.Cause)
+}
+
+func (e *AmbiguousSubmissionError) Unwrap() error { return e.Cause }
 
 // HTTPStatusError is returned when the Spt API responds with a non-200 status code.
 type HTTPStatusError struct {
@@ -152,7 +177,10 @@ type JSONMetricsLimit struct {
 // NewSptAPIClient creates a new API client
 func NewSptAPIClient(baseURL string) *SptAPIClient {
 	return &SptAPIClient{
-		baseURL: baseURL,
+		baseURL:                         baseURL,
+		submissionReconcileTimeout:      constants.SubmissionReconciliationTimeout,
+		submissionReconcilePollInterval: constants.APIReadinessPollInterval,
+		startRetryDelay:                 250 * time.Millisecond,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second, // Default timeout for API calls
 		},
@@ -243,92 +271,174 @@ func (c *SptAPIClient) WaitForAPIReadyContext(ctx context.Context, timeout time.
 	}
 }
 
-// StartTest starts a new test run with the provided scenario and defaults
+// StartTest starts a new test run with the provided scenario and defaults.
+// It is retained as a compatibility wrapper; production launchers use
+// StartTestContext with their configured numeric run id.
 func (c *SptAPIClient) StartTest(scenario, defaults []byte) (string, error) {
+	outcome, err := c.StartTestContext(context.Background(), scenario, defaults, 0)
+	return outcome.RunID, err
+}
+
+// StartTestContext posts an exact scenario/defaults pair within the caller's
+// launch context. expectedRunID is optional for compatibility; production
+// callers provide it so an ambiguous transport result can be reconciled using
+// structured /status evidence. An unknown submission is never retried.
+func (c *SptAPIClient) StartTestContext(
+	ctx context.Context, scenario, defaults []byte, expectedRunIDs ...int64,
+) (StartTestOutcome, error) {
+	ctx = normalizeContext(ctx)
+	expectedRunID := int64(0)
+	if len(expectedRunIDs) > 0 {
+		expectedRunID = expectedRunIDs[0]
+	}
 	logging.LogInfo("spt-api", "starting test", "scenario_size", len(scenario), "defaults_size", len(defaults))
 
-	// Helper to build a fresh request each attempt (multipart cannot be reused)
-	buildRequest := func() (*http.Request, string, error) {
+	buildRequest := func() (*http.Request, error) {
 		var body bytes.Buffer
 		writer := multipart.NewWriter(&body)
-
 		scenPart, err := writer.CreateFormFile("scenario", "scenario.js")
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create scenario part: %w", err)
+			return nil, fmt.Errorf("failed to create scenario part: %w", err)
 		}
 		if _, err := scenPart.Write(scenario); err != nil {
-			return nil, "", fmt.Errorf("failed to write scenario: %w", err)
+			return nil, fmt.Errorf("failed to write scenario: %w", err)
 		}
-
 		defPart, err := writer.CreateFormFile("defaults", "defaults.yaml")
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create defaults part: %w", err)
+			return nil, fmt.Errorf("failed to create defaults part: %w", err)
 		}
 		if _, err := defPart.Write(defaults); err != nil {
-			return nil, "", fmt.Errorf("failed to write defaults: %w", err)
+			return nil, fmt.Errorf("failed to write defaults: %w", err)
 		}
-
 		if err := writer.Close(); err != nil {
-			return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
+			return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 		}
-
-		req, err := http.NewRequest("POST", c.baseURL+"/run", &body)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/run", &body)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create request: %w", err)
+			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
-		contentType := writer.FormDataContentType()
-		req.Header.Set("Content-Type", contentType)
-		return req, contentType, nil
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req, nil
 	}
 
-	// Retry a few times on 405 (race while /run is being registered)
 	const maxAttempts = 5
-	const retryDelay = 250 * time.Millisecond
-
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, _, err := buildRequest()
-		if err != nil {
-			return "", err
+		if err := ctx.Err(); err != nil {
+			return StartTestOutcome{Submission: SubmissionNotSubmitted}, err
 		}
-
+		req, err := buildRequest()
+		if err != nil {
+			return StartTestOutcome{Submission: SubmissionNotSubmitted}, err
+		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("failed to send request: %w", err)
+			cause := fmt.Errorf("failed to send POST /run: %w", err)
+			return c.reconcileAmbiguousSubmission(ctx, expectedRunID, cause)
 		}
 
-		// Read body on error paths; defer close per attempt
-		if resp.StatusCode == 200 || resp.StatusCode == 201 || resp.StatusCode == 202 {
-			// Success path
-			runID := resp.Header.Get("ETag")
-			if runID == "" {
-				bodyData, _ := io.ReadAll(resp.Body)
-				logging.LogDebug("spt-api", "no ETag header, checking response body", "body", string(bodyData))
-				runID = fmt.Sprintf("run-%d", time.Now().Unix())
-			}
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated ||
+			resp.StatusCode == http.StatusAccepted {
+			bodyData, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			c.mu.Lock()
-			c.runID = strings.Trim(runID, `"`)
-			c.mu.Unlock()
-			logging.LogInfo("spt-api", "test started successfully", "runID", c.runID)
-			return c.runID, nil
+			runID := acceptedRunID(resp.Header.Get("ETag"), bodyData, expectedRunID)
+			c.setRunID(runID)
+			logging.LogInfo("spt-api", "test started successfully", "runID", runID)
+			return StartTestOutcome{RunID: runID, Submission: SubmissionSubmitted}, nil
 		}
 
-		// Handle 405 specifically with retry
 		if resp.StatusCode == http.StatusMethodNotAllowed && attempt < maxAttempts {
 			bodyData, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			logging.LogDebug("spt-api", "received 405 from /run, retrying", "attempt", attempt, "body", string(bodyData))
-			time.Sleep(retryDelay)
+			timer := time.NewTimer(c.startRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return StartTestOutcome{Submission: SubmissionNotSubmitted}, ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 
-		// Other non-success statuses: return error
 		bodyData, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		return "", fmt.Errorf("failed to start test (status %d): %s", resp.StatusCode, string(bodyData))
+		return StartTestOutcome{Submission: SubmissionNotSubmitted},
+			fmt.Errorf("failed to start test (status %d): %s", resp.StatusCode, string(bodyData))
 	}
+	return StartTestOutcome{Submission: SubmissionNotSubmitted},
+		fmt.Errorf("failed to start test: exceeded retry attempts")
+}
 
-	return "", fmt.Errorf("failed to start test: exceeded retry attempts")
+func acceptedRunID(etag string, body []byte, expectedRunID int64) string {
+	if runID := strings.Trim(etag, `"`); runID != "" {
+		return runID
+	}
+	var payload struct {
+		RunID string `json:"runId"`
+	}
+	if json.Unmarshal(body, &payload) == nil && strings.TrimSpace(payload.RunID) != "" {
+		return strings.TrimSpace(payload.RunID)
+	}
+	if expectedRunID > 0 {
+		return strconv.FormatInt(expectedRunID, 10)
+	}
+	return fmt.Sprintf("run-%d", time.Now().Unix())
+}
+
+func (c *SptAPIClient) reconcileAmbiguousSubmission(
+	launchCtx context.Context, expectedRunID int64, cause error,
+) (StartTestOutcome, error) {
+	outcome := StartTestOutcome{Submission: SubmissionUnknown}
+	if expectedRunID <= 0 {
+		return outcome, &AmbiguousSubmissionError{ExpectedRunID: expectedRunID, Cause: cause}
+	}
+	reconcileBase := context.WithoutCancel(normalizeContext(launchCtx))
+	reconcileCtx, cancel := context.WithTimeout(reconcileBase, c.submissionReconcileTimeout)
+	defer cancel()
+	ticker := time.NewTicker(c.submissionReconcilePollInterval)
+	defer ticker.Stop()
+	for {
+		status, err := c.GetStatusContext(reconcileCtx)
+		if err == nil && statusMatchesSubmission(status, expectedRunID) {
+			outcome.RunID = strconv.FormatInt(expectedRunID, 10)
+			outcome.Submission = SubmissionSubmitted
+			c.setRunID(outcome.RunID)
+			return outcome, cause
+		}
+		select {
+		case <-reconcileCtx.Done():
+			return outcome, &AmbiguousSubmissionError{ExpectedRunID: expectedRunID, Cause: cause}
+		case <-ticker.C:
+		}
+	}
+}
+
+func statusMatchesSubmission(status *TestStatus, expectedRunID int64) bool {
+	if status == nil {
+		return false
+	}
+	runID, err := strconv.ParseInt(strings.TrimSpace(status.RunID), 10, 64)
+	if err != nil || runID != expectedRunID {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(status.State)) {
+	case constants.StateStarting, constants.StateInitializing, constants.StateRunning,
+		constants.StateCompleted, constants.StateFailed, constants.StateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *SptAPIClient) setRunID(runID string) {
+	c.mu.Lock()
+	c.runID = runID
+	c.mu.Unlock()
 }
 
 // GetStatus retrieves the current test status

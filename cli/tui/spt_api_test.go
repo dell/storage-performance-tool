@@ -7,8 +7,10 @@ package tui
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -425,5 +427,154 @@ func TestSptAPIClient_ShutdownAndLinger(t *testing.T) {
 	}
 	if err := client.WaitForLinger(200 * time.Millisecond); err != nil {
 		t.Fatalf("linger error: %v", err)
+	}
+}
+
+func TestSptAPIClient_StartTestContextCancellationLeavesUnknownWithoutRetry(t *testing.T) {
+	var postCalls atomic.Int32
+	postStarted := make(chan struct{})
+	postCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/run":
+			_, _ = io.Copy(io.Discard, r.Body)
+			postCalls.Add(1)
+			if postCalls.Load() == 1 {
+				close(postStarted)
+			}
+			<-r.Context().Done()
+			if postCalls.Load() == 1 {
+				close(postCanceled)
+			}
+		case "/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"IDLE","runId":"41"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.submissionReconcileTimeout = 40 * time.Millisecond
+	client.submissionReconcilePollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		out StartTestOutcome
+		err error
+	}, 1)
+	go func() {
+		out, err := client.StartTestContext(ctx, []byte("scenario"), nil, 42)
+		done <- struct {
+			out StartTestOutcome
+			err error
+		}{out, err}
+	}()
+	<-postStarted
+	cancel()
+
+	result := <-done
+	if result.out.Submission != SubmissionUnknown {
+		t.Fatalf("submission = %s, want %s", result.out.Submission, SubmissionUnknown)
+	}
+	var ambiguous *AmbiguousSubmissionError
+	if !errors.As(result.err, &ambiguous) {
+		t.Fatalf("error = %v, want AmbiguousSubmissionError", result.err)
+	}
+	if calls := postCalls.Load(); calls != 1 {
+		t.Fatalf("POST calls = %d, want exactly one", calls)
+	}
+	select {
+	case <-postCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("POST handler did not observe request cancellation")
+	}
+}
+
+func TestSptAPIClient_StartTestContextReconcilesMatchingRunID(t *testing.T) {
+	postStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/run":
+			_, _ = io.Copy(io.Discard, r.Body)
+			close(postStarted)
+			<-r.Context().Done()
+		case "/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"RUNNING","runId":"77"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.submissionReconcileTimeout = time.Second
+	client.submissionReconcilePollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		out StartTestOutcome
+		err error
+	}, 1)
+	go func() {
+		out, err := client.StartTestContext(ctx, []byte("scenario"), nil, 77)
+		done <- struct {
+			out StartTestOutcome
+			err error
+		}{out, err}
+	}()
+	<-postStarted
+	cancel()
+	result := <-done
+	if result.out.Submission != SubmissionSubmitted || result.out.RunID != "77" {
+		t.Fatalf("outcome = %+v, want confirmed run 77", result.out)
+	}
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("error = %v, want original context cancellation", result.err)
+	}
+}
+
+func TestSptAPIClient_StartTestContextCancellationDuring405DelayDoesNotRetry(t *testing.T) {
+	var postCalls atomic.Int32
+	firstResponse := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/run" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		postCalls.Add(1)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		if postCalls.Load() == 1 {
+			close(firstResponse)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.startRetryDelay = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		out StartTestOutcome
+		err error
+	}, 1)
+	go func() {
+		out, err := client.StartTestContext(ctx, []byte("scenario"), nil, 88)
+		done <- struct {
+			out StartTestOutcome
+			err error
+		}{out, err}
+	}()
+	<-firstResponse
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", result.err)
+	}
+	if result.out.Submission != SubmissionNotSubmitted {
+		t.Fatalf("submission = %s, want %s", result.out.Submission, SubmissionNotSubmitted)
+	}
+	if calls := postCalls.Load(); calls != 1 {
+		t.Fatalf("POST calls = %d, want exactly one", calls)
 	}
 }

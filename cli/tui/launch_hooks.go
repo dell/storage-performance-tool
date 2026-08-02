@@ -14,8 +14,31 @@ import (
 // the pre-/post-submission boundary even when the launcher later returns an
 // unrelated UI, signal, or cleanup error.
 type LaunchState struct {
-	submitted atomic.Bool
-	once      sync.Once
+	submission atomic.Uint32
+	once       sync.Once
+}
+
+// SubmissionState describes what the client can prove about POST /run. Once
+// an HTTP request has been dispatched, a transport error cannot prove that the
+// server rejected it, so SubmissionUnknown is intentionally distinct from
+// SubmissionNotSubmitted.
+type SubmissionState uint32
+
+const (
+	SubmissionNotSubmitted SubmissionState = iota
+	SubmissionSubmitted
+	SubmissionUnknown
+)
+
+func (s SubmissionState) String() string {
+	switch s {
+	case SubmissionSubmitted:
+		return "submitted"
+	case SubmissionUnknown:
+		return "submission-unknown"
+	default:
+		return "not-submitted"
+	}
 }
 
 // LaunchHooks carries orchestration lifecycle notifications that are not part
@@ -48,15 +71,36 @@ func (h LaunchHooks) NotifySubmitted() {
 		return
 	}
 	h.state.once.Do(func() {
-		h.state.submitted.Store(true)
+		h.state.submission.Store(uint32(SubmissionSubmitted))
 		if h.OnSubmitted != nil {
 			h.OnSubmitted()
 		}
 	})
 }
 
+// NotifySubmissionUnknown records that POST /run may have reached the engine,
+// but bounded reconciliation could not prove whether it was accepted. The
+// state may later advance to SubmissionSubmitted if matching /status evidence
+// appears; it never moves back to NotSubmitted.
+func (h LaunchHooks) NotifySubmissionUnknown() {
+	if h.state == nil {
+		return
+	}
+	h.state.submission.CompareAndSwap(
+		uint32(SubmissionNotSubmitted), uint32(SubmissionUnknown))
+}
+
 // Submitted reports whether NotifySubmitted crossed the accepted-POST
 // boundary for this launch.
 func (h LaunchHooks) Submitted() bool {
-	return h.state != nil && h.state.submitted.Load()
+	return h.SubmissionState() == SubmissionSubmitted
+}
+
+// SubmissionState returns the strongest submission fact observed by these
+// hooks. A zero-value LaunchHooks reports SubmissionNotSubmitted.
+func (h LaunchHooks) SubmissionState() SubmissionState {
+	if h.state == nil {
+		return SubmissionNotSubmitted
+	}
+	return SubmissionState(h.state.submission.Load())
 }

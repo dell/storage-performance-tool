@@ -5,6 +5,7 @@ Copyright © 2026 Dell Technologies
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,9 +71,15 @@ func (e *IncompatibleEngineError) Is(target error) bool { return target == ErrEn
 // handling can continue past an invalid path, and an integrity-unaware engine rejects the generated
 // scenario later with an opaque HTTP 400 that cannot be distinguished from any other bad config.
 func (c *SptAPIClient) VerifyIntegrityCapability(engineImage string) error {
+	return c.VerifyIntegrityCapabilityContext(context.Background(), engineImage)
+}
+
+// VerifyIntegrityCapabilityContext binds the schema capability probe to the
+// caller's launch lifecycle.
+func (c *SptAPIClient) VerifyIntegrityCapabilityContext(ctx context.Context, engineImage string) error {
 	url := c.baseURL + constants.SptConfigSchemaEndpoint
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(normalizeContext(ctx), http.MethodGet, url, nil)
 	if err != nil {
 		return &IncompatibleEngineError{
 			EntryNode:   c.baseURL,

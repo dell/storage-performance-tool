@@ -156,7 +156,11 @@ func (m *RemoteDockerManager) setDiagnosticsResultsRoot(resultsRoot string) {
 
 // SetFileMounts stages local item files onto the remote Docker host for bind mounting.
 func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	return m.SetFileMountsContext(context.Background(), mounts)
+}
+
+func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
 	if err := m.cleanupStaging(ctx); err != nil {
 		return err
@@ -260,19 +264,33 @@ func (m *RemoteDockerManager) StartContainer(_ string, _ []string) (string, erro
 	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
 }
 
+func (m *RemoteDockerManager) StartContainerContext(_ context.Context, _ string, _ []string) (string, error) {
+	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
+}
+
 // StartContainerWithScenario is not used in remote multi-host mode.
 func (m *RemoteDockerManager) StartContainerWithScenario(_ string, _ string, _ []string) (string, error) {
 	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
 }
 
+func (m *RemoteDockerManager) StartContainerWithScenarioContext(_ context.Context, _ string, _ string, _ []string) (string, error) {
+	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
+}
+
 // StartContainerInNodeMode starts a single Spt node exposing the provided API port.
 func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
+	return m.StartContainerInNodeModeContext(context.Background(), image, apiPort, networkMode, additionalArgs)
+}
+
+func (m *RemoteDockerManager) StartContainerInNodeModeContext(
+	ctx context.Context, image string, apiPort string, networkMode string, additionalArgs []string,
+) (string, error) {
 	port := command.ParsePortFromString(apiPort)
 	if port <= 0 {
 		return "", fmt.Errorf("invalid api port: %q", apiPort)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
 	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleNode)
 	if err != nil {
@@ -314,11 +332,17 @@ func selectedNodeNetworkMode(networkMode string) command.NetworkMode {
 }
 
 // StartWorkerNodeContainer starts a worker in RMI mode on the remote host.
-func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return m.StartWorkerNodeContainerContext(
+		context.Background(), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+	ctx = normalizeContext(ctx)
 	// Detect advertised IP on the remote host if not explicitly provided
 	advIP := strings.TrimSpace(rmiHostname)
 	if advIP == "" {
-		ip, err := remoteip.DetectAdvertisedIP(context.Background(), m.exec, m.host)
+		ip, err := remoteip.DetectAdvertisedIP(ctx, m.exec, m.host)
 		if err != nil {
 			return "", err
 		}
@@ -326,11 +350,11 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 	}
 	logging.LogInfo("remote-docker", "using advertised IP", "host", m.host.Original, "ip", advIP)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
-	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleWorker)
+	diagnosticBinds, envFiles, err := m.prepareDiagnostics(startCtx, constants.DockerRoleWorker)
 	if err != nil {
-		return "", m.cleanupFailedStart(ctx, err)
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 
 	// Host networking with explicit JVM RMI hostname and explicit ports
@@ -363,16 +387,16 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 	// Echo exact JAVA_OPTS for triage
 	logging.LogInfo("remote-docker", "JAVA_OPTS configured", "host", m.host.Original, "JAVA_OPTS", cfg.Environment[constants.JavaOptsEnvVar])
 
-	id, _, err := m.ops.StartContainer(ctx, cfg)
+	id, _, err := m.ops.StartContainer(startCtx, cfg)
 	if err != nil {
-		return "", m.cleanupFailedStart(ctx, err)
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 	m.containerID = strings.TrimSpace(id)
 
 	// Readiness probe against remote host over network
 	if m.proberRun != nil {
 		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
-		rctx, rcancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
+		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
 			return m.containerID, fmt.Errorf("worker API readiness: %w", err)
@@ -383,6 +407,12 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 
 // StartEntryNodeContainer starts the entry node with worker addresses and extra args (e.g., S3 params).
 func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return m.StartEntryNodeContainerContext(
+		context.Background(), image, workerAddresses, additionalArgs, networkMode)
+}
+
+func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	ctx = normalizeContext(ctx)
 	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
 	cmd := []string{}
 	if len(workerAddresses) > 0 {
@@ -391,11 +421,11 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
 	cmd = append(cmd, additionalArgs...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
-	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleEntry)
+	diagnosticBinds, envFiles, err := m.prepareDiagnostics(startCtx, constants.DockerRoleEntry)
 	if err != nil {
-		return "", m.cleanupFailedStart(ctx, err)
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 
 	name := generateRemoteContainerName("entry", m.host.Host)
@@ -417,14 +447,14 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
-	id, _, err := m.ops.StartContainer(ctx, cfg)
+	id, _, err := m.ops.StartContainer(startCtx, cfg)
 	if err != nil {
-		return "", m.cleanupFailedStart(ctx, err)
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 	m.containerID = strings.TrimSpace(id)
 	if m.proberRun != nil {
 		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
-		rctx, rcancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
+		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
 			return m.containerID, fmt.Errorf("entry API readiness: %w", err)

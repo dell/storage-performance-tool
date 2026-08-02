@@ -73,15 +73,11 @@ type nodeLogResultsRootConfigurer interface {
 	setNodeLogResultsRoot(string)
 }
 
-func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) error {
+func configureDockerFileMounts(ctx context.Context, dm DockerInterface, mounts []scenario.FileMount) error {
 	if len(mounts) == 0 {
 		return nil
 	}
-	configurer, ok := dm.(fileMountConfigurer)
-	if !ok {
-		return fmt.Errorf("docker manager does not support external item file mounts")
-	}
-	return configurer.SetFileMounts(mounts)
+	return setFileMountsContext(ctx, dm, mounts)
 }
 
 func cleanupSingleHostStartFailure(ctx context.Context, dm DockerInterface) error {
@@ -234,7 +230,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		}
 	}
 
-	if err := configureDockerFileMounts(o.dockerManager, params.ItemFileMounts); err != nil {
+	if err := configureDockerFileMounts(ctx, o.dockerManager, params.ItemFileMounts); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -243,7 +239,8 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 
 	// Start container in node mode
 	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
-	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, startupArgs)
+	containerID, err := startContainerInNodeModeContext(
+		ctx, o.dockerManager, image, o.apiPort, o.networkMode, startupArgs)
 	if err != nil {
 		return errors.Join(
 			fmt.Errorf("failed to start container in node mode: %w", err),
@@ -296,7 +293,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	}
 
 	if scenario.IsIntegrityWorkload(params) {
-		if err := o.apiClient.VerifyIntegrityCapability(image); err != nil {
+		if err := o.apiClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
 			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
 			cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 			if cleanupErr != nil {
@@ -326,25 +323,32 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
 	}
 
-	runID, err := o.apiClient.StartTest(scenarioContent, defaultsContent)
-	if err != nil {
-		// Clean up the started container since API test start failed
-		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)
+	submission, submitErr := o.apiClient.StartTestContext(ctx, scenarioContent, defaultsContent, params.RunID)
+	if submission.Submission == SubmissionUnknown {
+		hooks.NotifySubmissionUnknown()
+		logging.LogError("orchestrator", "API test submission remains ambiguous; cleaning up conservatively", submitErr)
+		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
+		return errors.Join(fmt.Errorf("failed to establish whether the engine accepted POST /run: %w", submitErr), cleanupErr)
+	}
+	if submission.Submission == SubmissionNotSubmitted {
+		logging.LogError("orchestrator", "API test start failed, cleaning up container", submitErr)
 		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API start failure", cleanupErr)
 		}
-		return errors.Join(fmt.Errorf("failed to start test via API: %w", err), cleanupErr)
+		return errors.Join(fmt.Errorf("failed to start test via API: %w", submitErr), cleanupErr)
 	}
-	logging.LogInfo("orchestrator", "test started successfully", "runID", runID)
+	logging.LogInfo("orchestrator", "test submission confirmed", "runID", submission.RunID)
 	if o.onOutput != nil {
-		o.onOutput(fmt.Sprintf("Test started with run ID: %s", runID))
+		o.onOutput(fmt.Sprintf("Test started with run ID: %s", submission.RunID))
 	}
 
-	// Start monitoring goroutines
-	go o.monitorStatus(ctx)
-	go o.monitorMetrics(ctx)
-	go o.streamContainerOutput(ctx)
+	if submitErr == nil {
+		// Start monitoring goroutines only while the launch context remains active.
+		go o.monitorStatus(ctx)
+		go o.monitorMetrics(ctx)
+		go o.streamContainerOutput(ctx)
+	}
 
 	// Submission state is fully committed before caller-controlled notification.
 	// Keep acknowledgment synchronous, but never hold the lifecycle mutex while
@@ -352,6 +356,9 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	o.mu.Unlock()
 	locked = false
 	hooks.NotifySubmitted()
+	if submitErr != nil {
+		return fmt.Errorf("engine submission was confirmed after POST /run returned an error: %w", submitErr)
+	}
 
 	return nil
 }

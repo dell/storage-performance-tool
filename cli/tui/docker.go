@@ -116,8 +116,13 @@ func (dm *DockerManager) ContainerID() string {
 
 // SetFileMounts configures read-only external files that must be visible inside SPT containers.
 func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
+	return dm.SetFileMountsContext(dm.ctx, mounts)
+}
+
+// SetFileMountsContext stages external files within the launch lifecycle.
+func (dm *DockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
 	if dm.remote != nil {
-		return dm.remote.SetFileMounts(mounts)
+		return dm.remote.SetFileMountsContext(normalizeContext(ctx), mounts)
 	}
 	dm.fileMounts = append([]scenario.FileMount(nil), mounts...)
 	return nil
@@ -171,14 +176,25 @@ func NewDockerManager() (*DockerManager, error) {
 
 // ensureImageAvailable checks for the image locally and pulls it if missing
 func (dm *DockerManager) ensureImageAvailable(imageName string) error {
+	return dm.ensureImageAvailableContext(dm.ctx, imageName)
+}
+
+func (dm *DockerManager) ensureImageAvailableContext(ctx context.Context, imageName string) error {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !skipImagePull(imageName) {
 		logging.LogInfo("docker", "Pulling Docker image before start", "image", imageName)
-		return dm.pullImage(imageName)
+		return dm.pullImageContext(ctx, imageName)
 	}
 
-	if _, err := dm.client.ImageInspect(dm.ctx, imageName); err == nil {
+	if _, err := dm.client.ImageInspect(ctx, imageName); err == nil {
 		logging.LogInfo("docker", "Using cached Docker image", "image", imageName)
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if constants.IsDevImage(imageName) {
@@ -186,11 +202,15 @@ func (dm *DockerManager) ensureImageAvailable(imageName string) error {
 	}
 
 	logging.LogInfo("docker", "Cached Docker image missing; pulling despite skip request", "image", imageName)
-	return dm.pullImage(imageName)
+	return dm.pullImageContext(ctx, imageName)
 }
 
 func (dm *DockerManager) pullImage(imageName string) error {
-	pullCtx, cancel := context.WithTimeout(dm.ctx, 5*time.Minute)
+	return dm.pullImageContext(dm.ctx, imageName)
+}
+
+func (dm *DockerManager) pullImageContext(ctx context.Context, imageName string) error {
+	pullCtx, cancel := context.WithTimeout(normalizeContext(ctx), 5*time.Minute)
 	defer cancel()
 
 	rc, err := dm.client.ImagePull(pullCtx, imageName, image.PullOptions{})
@@ -492,12 +512,17 @@ func tailLines(content string, maxLines int) string {
 
 // StartContainer creates and starts a new container
 func (dm *DockerManager) StartContainer(image string, cmd []string) (string, error) {
+	return dm.StartContainerContext(dm.ctx, image, cmd)
+}
+
+func (dm *DockerManager) StartContainerContext(ctx context.Context, image string, cmd []string) (string, error) {
+	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartContainer(image, cmd)
+		return dm.remote.StartContainerContext(ctx, image, cmd)
 	}
 	logging.LogContainerEvent("creating", "", "image", image, "cmd", cmd)
 
-	if err := dm.ensureImageAvailable(image); err != nil {
+	if err := dm.ensureImageAvailableContext(ctx, image); err != nil {
 		return "", err
 	}
 
@@ -508,7 +533,7 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 
 	// Create container
-	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
+	resp, err := dm.client.ContainerCreate(ctx, &container.Config{
 		Image:        image,
 		Cmd:          cmd,
 		Tty:          false,
@@ -527,7 +552,7 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 	logging.LogContainerEvent("created", resp.ID)
 
 	// Start container
-	if err := dm.client.ContainerStart(dm.ctx, resp.ID, container.StartOptions{}); err != nil {
+	if err := dm.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start container", err, "container_id", resp.ID)
 		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to start container: %w", err)
@@ -539,12 +564,19 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 
 // StartContainerWithScenario creates and starts a container with a scenario file
 func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath string, additionalArgs []string) (string, error) {
+	return dm.StartContainerWithScenarioContext(dm.ctx, image, scenarioPath, additionalArgs)
+}
+
+func (dm *DockerManager) StartContainerWithScenarioContext(
+	ctx context.Context, image string, scenarioPath string, additionalArgs []string,
+) (string, error) {
+	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartContainerWithScenario(image, scenarioPath, additionalArgs)
+		return dm.remote.StartContainerWithScenarioContext(ctx, image, scenarioPath, additionalArgs)
 	}
 	logging.LogContainerEvent("creating", "", "image", image, "scenario", scenarioPath)
 
-	if err := dm.ensureImageAvailable(image); err != nil {
+	if err := dm.ensureImageAvailableContext(ctx, image); err != nil {
 		return "", err
 	}
 
@@ -568,7 +600,7 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 
 	// Create container with volume mount
-	resp, err := dm.client.ContainerCreate(dm.ctx, &container.Config{
+	resp, err := dm.client.ContainerCreate(ctx, &container.Config{
 		Image:        image,
 		Cmd:          cmd,
 		Tty:          false,
@@ -591,7 +623,7 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	logging.LogContainerEvent("created", resp.ID)
 
 	// Start container
-	if err := dm.client.ContainerStart(dm.ctx, resp.ID, container.StartOptions{}); err != nil {
+	if err := dm.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start container", err, "container_id", resp.ID)
 		dm.cleanupDiagnosticsDir()
 		return "", fmt.Errorf("failed to start container: %w", err)
@@ -603,11 +635,18 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 
 // StartContainerInNodeMode starts a Spt container in API server mode.
 func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
+	return dm.StartContainerInNodeModeContext(dm.ctx, image, apiPort, networkMode, additionalArgs)
+}
+
+func (dm *DockerManager) StartContainerInNodeModeContext(
+	ctx context.Context, image string, apiPort string, networkMode string, additionalArgs []string,
+) (string, error) {
+	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartContainerInNodeMode(image, apiPort, networkMode, additionalArgs)
+		return dm.remote.StartContainerInNodeModeContext(ctx, image, apiPort, networkMode, additionalArgs)
 	}
 
-	if err := dm.ensureImageAvailable(image); err != nil {
+	if err := dm.ensureImageAvailableContext(ctx, image); err != nil {
 		return "", err
 	}
 
@@ -689,7 +728,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	}
 
 	// Create container with the selected network mode.
-	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
+	resp, err := dm.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container in node mode", err, "image", image, "port", apiPort)
@@ -702,16 +741,16 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	logging.LogContainerEvent("created", dm.containerID)
 
 	// Start the container
-	if err := dm.client.ContainerStart(dm.ctx, dm.containerID, container.StartOptions{}); err != nil {
+	if err := dm.client.ContainerStart(ctx, dm.containerID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start container in node mode", err, "container_id", dm.containerID)
 
 		// Clean up the created container since start failed
-		if removeErr := dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil {
+		if removeErr := dm.client.ContainerRemove(ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil && !isNoSuchContainer(removeErr) {
 			logging.LogError("docker", "failed to clean up container after start failure", removeErr, "container_id", dm.containerID)
 		} else {
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
+			dm.containerID = ""
 		}
-		dm.containerID = ""
 		dm.cleanupNodeLogDir()
 		dm.cleanupDiagnosticsDir()
 
@@ -724,8 +763,13 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 
 // StartWorkerNodeContainer starts a container in RMI worker node mode
 func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return dm.StartWorkerNodeContainerContext(dm.ctx, image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+		return dm.remote.StartWorkerNodeContainerContext(ctx, image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 	}
 
 	// Build command for worker node mode
@@ -769,7 +813,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	}
 
 	// Ensure image present
-	if err := dm.ensureImageAvailable(image); err != nil {
+	if err := dm.ensureImageAvailableContext(ctx, image); err != nil {
 		return "", err
 	}
 
@@ -818,7 +862,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	}
 
 	// Create container
-	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
+	resp, err := dm.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		logging.LogError("docker", "failed to create worker node container", err, "image", image, "rmi_hostname", rmiHostname)
 		dm.cleanupDiagnosticsDir()
@@ -829,16 +873,16 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	logging.LogContainerEvent("created", dm.containerID)
 
 	// Start the container
-	if err := dm.client.ContainerStart(dm.ctx, dm.containerID, container.StartOptions{}); err != nil {
+	if err := dm.client.ContainerStart(ctx, dm.containerID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start worker node container", err, "container_id", dm.containerID)
 
 		// Clean up the created container since start failed
-		if removeErr := dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil {
+		if removeErr := dm.client.ContainerRemove(ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil && !isNoSuchContainer(removeErr) {
 			logging.LogError("docker", "failed to clean up container after start failure", removeErr, "container_id", dm.containerID)
 		} else {
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
+			dm.containerID = ""
 		}
-		dm.containerID = ""
 		dm.cleanupDiagnosticsDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)
@@ -850,12 +894,17 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 
 // StartEntryNodeContainer starts a container as RMI entry node with worker addresses
 func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return dm.StartEntryNodeContainerContext(dm.ctx, image, workerAddresses, additionalArgs, networkMode)
+}
+
+func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartEntryNodeContainer(image, workerAddresses, additionalArgs, networkMode)
+		return dm.remote.StartEntryNodeContainerContext(ctx, image, workerAddresses, additionalArgs, networkMode)
 	}
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "entry_node", "workers", len(workerAddresses))
 
-	if err := dm.ensureImageAvailable(image); err != nil {
+	if err := dm.ensureImageAvailableContext(ctx, image); err != nil {
 		return "", err
 	}
 
@@ -926,7 +975,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	}
 
 	// Create container
-	resp, err := dm.client.ContainerCreate(dm.ctx, containerConfig, hostConfig, nil, nil, "")
+	resp, err := dm.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		logging.LogError("docker", "failed to create entry node container", err, "image", image, "workers", len(workerAddresses))
 		dm.cleanupDiagnosticsDir()
@@ -937,16 +986,16 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	logging.LogContainerEvent("created", dm.containerID)
 
 	// Start the container
-	if err := dm.client.ContainerStart(dm.ctx, dm.containerID, container.StartOptions{}); err != nil {
+	if err := dm.client.ContainerStart(ctx, dm.containerID, container.StartOptions{}); err != nil {
 		logging.LogError("docker", "failed to start entry node container", err, "container_id", dm.containerID)
 
 		// Clean up the created container since start failed
-		if removeErr := dm.client.ContainerRemove(dm.ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil {
+		if removeErr := dm.client.ContainerRemove(ctx, dm.containerID, container.RemoveOptions{Force: true}); removeErr != nil && !isNoSuchContainer(removeErr) {
 			logging.LogError("docker", "failed to clean up container after start failure", removeErr, "container_id", dm.containerID)
 		} else {
 			logging.LogContainerEvent("cleaned up after start failure", dm.containerID)
+			dm.containerID = ""
 		}
-		dm.containerID = ""
 		dm.cleanupDiagnosticsDir()
 
 		return "", fmt.Errorf("failed to start container: %w", err)

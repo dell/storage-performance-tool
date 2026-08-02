@@ -44,3 +44,17 @@ func TestZeroValueLaunchHooksRemainCompatible(t *testing.T) {
 		t.Fatal("legacy hooks unexpectedly claimed inspectable submission state")
 	}
 }
+
+func TestLaunchHooksSubmissionUnknownCanAdvanceButNotRegress(t *testing.T) {
+	hooks := NewLaunchHooks(nil)
+	hooks.NotifySubmissionUnknown()
+	if got := hooks.SubmissionState(); got != SubmissionUnknown {
+		t.Fatalf("submission state = %s, want %s", got, SubmissionUnknown)
+	}
+
+	hooks.NotifySubmitted()
+	hooks.NotifySubmissionUnknown()
+	if got := hooks.SubmissionState(); got != SubmissionSubmitted {
+		t.Fatalf("submission state = %s, want %s", got, SubmissionSubmitted)
+	}
+}

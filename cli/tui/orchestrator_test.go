@@ -1229,3 +1229,77 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestOrchestratorCancelDuringPostReconcilesUnknownAndRollsBack(t *testing.T) {
+	postStarted := make(chan struct{})
+	postCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case r.URL.Path == "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.URL.Path == "/run" && r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/run" && r.Method == http.MethodPost:
+			_, _ = io.Copy(io.Discard, r.Body)
+			close(postStarted)
+			<-r.Context().Done()
+			close(postCanceled)
+		case r.URL.Path == "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"IDLE","runId":"41"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	orchestrator.apiClient.submissionReconcileTimeout = 40 * time.Millisecond
+	orchestrator.apiClient.submissionReconcilePollInterval = 5 * time.Millisecond
+	hooks := NewLaunchHooks(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx,
+			"test-image",
+			scenario.ScenarioParams{WorkloadType: "write", RunID: 42},
+			[]byte(`Load.run({})`),
+			nil,
+			hooks,
+		)
+	}()
+
+	select {
+	case <-postStarted:
+	case <-time.After(time.Second):
+		t.Fatal("POST /run did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		var ambiguous *AmbiguousSubmissionError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("launch error = %v, want AmbiguousSubmissionError", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("orchestrator did not return after bounded reconciliation")
+	}
+	if got := hooks.SubmissionState(); got != SubmissionUnknown {
+		t.Fatalf("submission state = %s, want %s", got, SubmissionUnknown)
+	}
+	if mockDM.HasManagedResources() {
+		t.Fatal("ambiguous submission rollback retained managed resources")
+	}
+	select {
+	case <-postCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("POST handler did not observe cancellation")
+	}
+}

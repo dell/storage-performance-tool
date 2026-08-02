@@ -22,6 +22,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/remoteip"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -116,8 +117,8 @@ type MultiHostOrchestrator struct {
 }
 
 type cleanupAttempt struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	outcome runcontrol.FinalizationOutcome
 }
 
 // RMIConfig holds RMI configuration parameters
@@ -564,7 +565,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 		// Remote item staging is itself a managed resource. Claim ownership
 		// before staging so a failed remote rm remains reachable by StopAll.
 		host.SetManaged(true)
-		if err := configureDockerFileMounts(host.DockerManager, mounts); err != nil {
+		if err := configureDockerFileMounts(ctx, host.DockerManager, mounts); err != nil {
 			cause := fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
 			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
 		}
@@ -624,7 +625,8 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 				return
 			}
 
-			containerID, err := h.DockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, additionalArgs)
+			containerID, err := startContainerInNodeModeContext(
+				ctx, h.DockerManager, image, o.apiPort, o.networkMode, additionalArgs)
 			if err != nil {
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
@@ -1047,17 +1049,32 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 // Safe to call more than once, including concurrently. Work starts once, while
 // each waiter remains independently cancellable.
 func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	return o.FinalizeDiagnosticsAndCleanupOutcome(ctx).Error()
+}
+
+// FinalizeDiagnosticsAndCleanupOutcome preserves diagnostics, mandatory
+// removal, and final ownership as independently inspectable results.
+func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanupOutcome(
+	ctx context.Context,
+) runcontrol.FinalizationOutcome {
+	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
-		return err
+		return runcontrol.FinalizationOutcome{
+			WaitErr: err,
+			Resources: func() runcontrol.ResourceDisposition {
+				if o.hasManagedResourceOwnership() {
+					return runcontrol.ResourceDispositionRetained
+				}
+				return runcontrol.ResourceDispositionNotOwned
+			}(),
+		}
 	}
 	o.finalizeMu.Lock()
 	attempt := o.finalizeAttempt
 	if attempt == nil {
 		attempt = &cleanupAttempt{done: make(chan struct{})}
 		o.finalizeAttempt = attempt
+		hadResources := o.hasManagedResourceOwnership()
 		diagnosticsTimeout := o.diagnosticsTimeout
 		if diagnosticsTimeout <= 0 {
 			diagnosticsTimeout = constants.DiagnosticsCollectionTimeout
@@ -1071,12 +1088,21 @@ func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Contex
 			diagnosticsCtx, cancelDiagnostics := context.WithTimeout(attemptBase, diagnosticsTimeout)
 			diagErr := o.CollectDiagnostics(diagnosticsCtx)
 			cancelDiagnostics()
+			active.outcome.Diagnostics = runcontrol.CompletedPhase(diagErr)
 
 			cleanupCtx, cancelCleanup := context.WithTimeout(attemptBase, cleanupTimeout)
 			stopErr := o.stopAllContainers(cleanupCtx, true)
 			cancelCleanup()
-			active.err = errors.Join(diagErr, stopErr)
-			if active.err != nil {
+			active.outcome.Removal = runcontrol.CompletedPhase(stopErr)
+			switch {
+			case o.hasManagedResourceOwnership():
+				active.outcome.Resources = runcontrol.ResourceDispositionRetained
+			case hadResources:
+				active.outcome.Resources = runcontrol.ResourceDispositionRemoved
+			default:
+				active.outcome.Resources = runcontrol.ResourceDispositionNotOwned
+			}
+			if active.outcome.Error() != nil {
 				o.finalizeMu.Lock()
 				if o.finalizeAttempt == active {
 					o.finalizeAttempt = nil
@@ -1089,10 +1115,25 @@ func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Contex
 	o.finalizeMu.Unlock()
 	select {
 	case <-attempt.done:
-		return attempt.err
+		return attempt.outcome
 	case <-ctx.Done():
-		return ctx.Err()
+		return runcontrol.FinalizationOutcome{
+			WaitErr:   ctx.Err(),
+			Resources: runcontrol.ResourceDispositionRetained,
+		}
 	}
+}
+
+func (o *MultiHostOrchestrator) hasManagedResourceOwnership() bool {
+	for _, host := range o.hosts {
+		if host == nil {
+			continue
+		}
+		if host.IsManaged() || (host.DockerManager != nil && hasManagedDockerResources(host.DockerManager)) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetHostCount returns the total number of hosts
@@ -1763,7 +1804,8 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					continue
 				}
 				w.SetPhase(NodePhaseContainerStarting)
-				cid, err := w.DockerManager.StartContainerInNodeMode(image, m.multiHost.apiPort, m.multiHost.networkMode, startupArgs)
+				cid, err := startContainerInNodeModeContext(
+					ctx, w.DockerManager, image, m.multiHost.apiPort, m.multiHost.networkMode, startupArgs)
 				if err != nil {
 					// Record but continue; non-critical for primary execution
 					w.SetError(err)
@@ -1821,7 +1863,8 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					"primary host %s has no Docker manager configured", primary.Info.Original))
 			}
 			primary.SetPhase(NodePhaseContainerStarting)
-			cid, err := primary.DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs, m.multiHost.networkMode)
+			cid, err := startEntryNodeContainerContext(
+				ctx, primary.DockerManager, image, nil, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
 				return failBeforeSubmission(err)
 			}
@@ -1859,12 +1902,22 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			if err := ctx.Err(); err != nil {
 				return failBeforeSubmission(err)
 			}
-			runID, serr := primary.APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
-			if serr != nil {
-				return failBeforeSubmission(fmt.Errorf("failed to start LIST via entry node API: %w", serr))
+			submission, submitErr := primary.APIClient.StartTestContext(
+				ctx, []byte(m.multiHost.scenarioContent), defaultsContent, params.RunID)
+			if submission.Submission == SubmissionUnknown {
+				hooks.NotifySubmissionUnknown()
+				return failBeforeSubmission(fmt.Errorf(
+					"LIST submission remains ambiguous after POST /run: %w", submitErr))
+			}
+			if submission.Submission == SubmissionNotSubmitted {
+				return failBeforeSubmission(fmt.Errorf("failed to start LIST via entry node API: %w", submitErr))
 			}
 			submitted = true
 			hooks.NotifySubmitted()
+			if submitErr != nil {
+				return fmt.Errorf("LIST submission was confirmed after POST /run returned an error: %w", submitErr)
+			}
+			runID := submission.RunID
 			if m.onOutput != nil {
 				m.onOutput(fmt.Sprintf("LIST started on primary with run ID: %s", runID))
 			}
@@ -2060,7 +2113,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := host.APIClient.VerifyIntegrityCapability(image); err != nil {
+		if err := host.APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2072,14 +2125,25 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if m.onOutput != nil {
 		m.onOutput("Starting test via host API...")
 	}
-	runID, err := host.APIClient.StartTest(scenarioContent, defaultsContent)
-	if err != nil {
+	submission, submitErr := host.APIClient.StartTestContext(ctx, scenarioContent, defaultsContent, params.RunID)
+	if submission.Submission == SubmissionUnknown {
+		hooks.NotifySubmissionUnknown()
 		return errors.Join(
-			fmt.Errorf("failed to start test via host API: %w", err),
+			fmt.Errorf("host API submission remains ambiguous after POST /run: %w", submitErr),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
+	}
+	if submission.Submission == SubmissionNotSubmitted {
+		return errors.Join(
+			fmt.Errorf("failed to start test via host API: %w", submitErr),
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
 	hooks.NotifySubmitted()
+	if submitErr != nil {
+		return fmt.Errorf("host API submission was confirmed after POST /run returned an error: %w", submitErr)
+	}
+	runID := submission.RunID
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("Single-host test started with run ID: %s", runID))
 	}
@@ -2131,7 +2195,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapability(image); err != nil {
+		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2141,14 +2205,26 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 	if m.onOutput != nil {
 		m.onOutput("Starting test via entry node API...")
 	}
-	runID, err := m.multiHost.hosts[0].APIClient.StartTest(scenarioContent, defaultsContent)
-	if err != nil {
+	submission, submitErr := m.multiHost.hosts[0].APIClient.StartTestContext(
+		ctx, scenarioContent, defaultsContent, params.RunID)
+	if submission.Submission == SubmissionUnknown {
+		hooks.NotifySubmissionUnknown()
 		return errors.Join(
-			fmt.Errorf("failed to start test via entry node API: %w", err),
+			fmt.Errorf("entry node API submission remains ambiguous after POST /run: %w", submitErr),
+			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+		)
+	}
+	if submission.Submission == SubmissionNotSubmitted {
+		return errors.Join(
+			fmt.Errorf("failed to start test via entry node API: %w", submitErr),
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
 	hooks.NotifySubmitted()
+	if submitErr != nil {
+		return fmt.Errorf("entry node submission was confirmed after POST /run returned an error: %w", submitErr)
+	}
+	runID := submission.RunID
 	if m.onOutput != nil {
 		m.onOutput(fmt.Sprintf("%s started with run ID: %s", runLabel, runID))
 	}
@@ -2307,7 +2383,8 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 		return err
 	}
 
-	containerID, err := host.DockerManager.StartWorkerNodeContainer(
+	containerID, err := startWorkerNodeContainerContext(
+		ctx, host.DockerManager,
 		o.image,
 		advIP,
 		o.rmiPortStart,
@@ -2341,6 +2418,16 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	params scenario.ScenarioParams,
 	startupArgs []string,
 ) error {
+	return o.startEntryNodeContext(context.Background(), primary, workers, params, startupArgs)
+}
+
+func (o *MultiHostOrchestrator) startEntryNodeContext(
+	ctx context.Context,
+	primary *HostConnection,
+	workers []*HostConnection,
+	params scenario.ScenarioParams,
+	startupArgs []string,
+) error {
 	// Build worker addresses for RMI using detected advertised IPs where available
 	workerAddresses := make([]string, 0, len(workers))
 	for _, worker := range workers {
@@ -2365,7 +2452,8 @@ func (o *MultiHostOrchestrator) startEntryNode(
 	}
 	additionalArgs = append(additionalArgs, startupArgs...)
 
-	containerID, err := primary.DockerManager.StartEntryNodeContainer(
+	containerID, err := startEntryNodeContainerContext(
+		ctx, primary.DockerManager,
 		o.image,
 		workerAddresses,
 		additionalArgs,
@@ -2929,7 +3017,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 		}
 	}
 
-	if err := o.startEntryNode(entryNode, activeWorkers, params, startupArgs); err != nil {
+	if err := o.startEntryNodeContext(ctx, entryNode, activeWorkers, params, startupArgs); err != nil {
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
 	if err := ctx.Err(); err != nil {

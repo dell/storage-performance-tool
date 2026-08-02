@@ -74,6 +74,45 @@ func (f *fakeDockerClient) ContainerRemove(ctx context.Context, containerID stri
 func (f *fakeDockerClient) ServerVersion(ctx context.Context) (types.Version, error) {
 	return f.ver, nil
 }
+
+type blockingDockerClient struct {
+	*fakeDockerClient
+	blockCreate bool
+	blockStart  bool
+	started     chan struct{}
+}
+
+func (f *blockingDockerClient) signalStarted() {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+}
+
+func (f *blockingDockerClient) ContainerCreate(
+	ctx context.Context,
+	config *container.Config,
+	hostConfig *container.HostConfig,
+	networkingConfig *network.NetworkingConfig,
+	platform *ocispec.Platform,
+	containerName string,
+) (container.CreateResponse, error) {
+	if f.blockCreate {
+		f.signalStarted()
+		<-ctx.Done()
+		return container.CreateResponse{}, ctx.Err()
+	}
+	return f.fakeDockerClient.ContainerCreate(ctx, config, hostConfig, networkingConfig, platform, containerName)
+}
+
+func (f *blockingDockerClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
+	if f.blockStart {
+		f.signalStarted()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return f.fakeDockerClient.ContainerStart(ctx, containerID, options)
+}
 func (f *fakeDockerClient) Close() error { return nil }
 
 func TestEnsureImageAvailable_PullsWhenMissing(t *testing.T) {
@@ -115,6 +154,7 @@ func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
 	dm := &DockerManager{client: f, ctx: context.Background()}
 	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
 	if err := dm.SetFileMounts(mounts); err != nil {
+
 		t.Fatalf("SetFileMounts() error = %v", err)
 	}
 	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
@@ -126,6 +166,81 @@ func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
 	want := "/host/items.csv:/spt-input/items/read-items.csv:ro"
 	if !containsString(f.createHostConfig.Binds, want) {
 		t.Fatalf("host binds = %v, want %q", f.createHostConfig.Binds, want)
+	}
+}
+
+func TestStartContainerInNodeModeContextCancelsDockerCreateAndStart(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "true")
+	tests := []struct {
+		name        string
+		blockCreate bool
+		blockStart  bool
+	}{
+		{name: "create", blockCreate: true},
+		{name: "start", blockStart: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &blockingDockerClient{
+				fakeDockerClient: &fakeDockerClient{},
+				blockCreate:      test.blockCreate,
+				blockStart:       test.blockStart,
+				started:          make(chan struct{}, 1),
+			}
+			dm := &DockerManager{client: fake, ctx: context.Background()}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				_, err := dm.StartContainerInNodeModeContext(
+					ctx, "test-image", "10080", constants.BridgeNetworkMode, nil)
+				done <- err
+			}()
+
+			select {
+			case <-fake.started:
+			case <-time.After(time.Second):
+				t.Fatal("Docker operation did not start")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("start error = %v, want context cancellation", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Docker operation did not return after cancellation")
+			}
+		})
+	}
+}
+
+func TestStartContainerInNodeModeRetainsOwnershipWhenCanceledCleanupFails(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "true")
+	fake := &blockingDockerClient{
+		fakeDockerClient: &fakeDockerClient{removeErr: context.Canceled},
+		blockStart:       true,
+		started:          make(chan struct{}, 1),
+	}
+	dm := &DockerManager{client: fake, ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := dm.StartContainerInNodeModeContext(
+			ctx, "test-image", "10080", constants.BridgeNetworkMode, nil)
+		done <- err
+	}()
+
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("Docker start did not begin")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context cancellation", err)
+	}
+	if !dm.HasManagedResources() {
+		t.Fatal("container ownership was discarded after canceled removal")
 	}
 }
 

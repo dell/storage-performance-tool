@@ -26,10 +26,46 @@ func newTestRemoteManager(t *testing.T) (*RemoteDockerManager, *command.MockComm
 	// Make any docker command succeed and return a fake container ID
 	mock.DefaultResponse = command.MockResponse{Stdout: "abc123def456", Stderr: "", Error: nil}
 	mgr, err := newRemoteDockerManagerWithExecutor(host, mock)
+
 	if err != nil {
 		t.Fatalf("failed to create remote docker manager: %v", err)
 	}
 	return mgr, mock, host
+}
+
+type blockingRemoteExecutor struct {
+	started chan struct{}
+}
+
+func (e *blockingRemoteExecutor) signalStarted() {
+	select {
+	case e.started <- struct{}{}:
+	default:
+	}
+}
+
+func (e *blockingRemoteExecutor) ExecuteCommand(
+	ctx context.Context, _ *hostparse.HostInfo, _ []string,
+) (string, string, error) {
+	e.signalStarted()
+	<-ctx.Done()
+	return "", "", ctx.Err()
+}
+
+func (e *blockingRemoteExecutor) CopyFile(
+	ctx context.Context, _ *hostparse.HostInfo, _, _ string,
+) error {
+	e.signalStarted()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (e *blockingRemoteExecutor) CopyFromHost(
+	ctx context.Context, _ *hostparse.HostInfo, _, _ string,
+) error {
+	e.signalStarted()
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
@@ -630,5 +666,103 @@ func TestRemoteDocker_CleanupCollectsNodeModeDiagnostics(t *testing.T) {
 	}
 	if !record.Collected || !record.RemoteDirRemoved {
 		t.Fatalf("expected node-mode diagnostics to be collected and remote dir removed, record = %+v", record)
+	}
+}
+
+func TestRemoteDockerSetFileMountsContextCancelsStaging(t *testing.T) {
+	host := &hostparse.HostInfo{
+		User: "root", Host: "worker.example.com", Original: "root@worker.example.com", IsLocal: false,
+	}
+	exec := &blockingRemoteExecutor{started: make(chan struct{}, 1)}
+	mgr, err := newRemoteDockerManagerWithExecutor(host, exec)
+	if err != nil {
+		t.Fatalf("new remote manager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.SetFileMountsContext(ctx, []scenario.FileMount{{
+			HostPath: "/host/items.csv", ContainerPath: "/spt-input/items.csv",
+		}})
+	}()
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("remote staging command did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("staging error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote staging did not return after cancellation")
+	}
+}
+
+func TestRemoteDockerStartContextCancelsRemoteCommand(t *testing.T) {
+	host := &hostparse.HostInfo{
+		User: "root", Host: "worker.example.com", Original: "root@worker.example.com", IsLocal: false,
+	}
+	exec := &blockingRemoteExecutor{started: make(chan struct{}, 1)}
+	mgr, err := newRemoteDockerManagerWithExecutor(host, exec)
+	if err != nil {
+		t.Fatalf("new remote manager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.StartContainerInNodeModeContext(
+			ctx, constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil)
+		done <- err
+	}()
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("remote Docker command did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("remote start error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote Docker start did not return after cancellation")
+	}
+}
+
+func TestRemoteDockerWorkerReadinessUsesLaunchContext(t *testing.T) {
+	mgr, _, _ := newTestRemoteManager(t)
+	readinessStarted := make(chan struct{})
+	mgr.proberRun = func(ctx context.Context, _ string, _ time.Duration) error {
+		close(readinessStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.StartWorkerNodeContainerContext(
+			ctx, constants.DefaultSptImage, "192.0.2.10", 1099, 1, nil)
+		done <- err
+	}()
+	select {
+	case <-readinessStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker readiness did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("readiness error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker readiness did not return after cancellation")
+	}
+	if mgr.containerID == "" {
+		t.Fatal("canceled readiness lost ownership of the started container")
 	}
 }

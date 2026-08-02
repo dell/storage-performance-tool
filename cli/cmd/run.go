@@ -25,6 +25,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
@@ -87,7 +88,25 @@ type autoResultsOutcome struct {
 	ObservedCorruptCount *int64
 	CorruptionMetricsErr error
 	SummaryErr           error
+	ShutdownErr          error
+	ResourceFinalization *runcontrol.FinalizationOutcome
 	StepIDs              []string
+}
+
+type postRunBudgets struct {
+	Artifacts     time.Duration
+	CancelSalvage time.Duration
+	Shutdown      time.Duration
+	Finalization  time.Duration
+	Summary       time.Duration
+}
+
+var autoResultsPhaseBudgets = postRunBudgets{
+	Artifacts:     constants.AutoResultsArtifactTimeout,
+	CancelSalvage: constants.AutoResultsCancelCleanupTimeout,
+	Shutdown:      constants.AutoResultsShutdownTimeout,
+	Finalization:  constants.DiagnosticsFinalizationTimeout,
+	Summary:       constants.AutoResultsSummaryTimeout,
 }
 
 // autoResultsMonitor separates monitor construction from the launch boundary.
@@ -370,15 +389,15 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		// reassignment of those (package-level, test-injectable) function
 		// variables once this function's goroutine finishes.
 		pollWG.Wait()
-		postCtx := parentCtx
-		cleanupCancel := func() {}
+		phaseBase := context.WithoutCancel(parentCtx)
+		artifactBudget := autoResultsPhaseBudgets.Artifacts
 		if parentCtx.Err() != nil || outcome.TrackerErr != nil {
-			postCtx, cleanupCancel = context.WithTimeout(
-				context.WithoutCancel(parentCtx), constants.AutoResultsCancelCleanupTimeout)
+			artifactBudget = autoResultsPhaseBudgets.CancelSalvage
 		}
-		defer cleanupCancel()
+		artifactCtx, cancelArtifacts := context.WithTimeout(phaseBase, artifactBudget)
+		defer cancelArtifacts()
 		// One final fleet discovery after completion (may not have been picked up during polling)
-		if fids, err := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
+		if fids, err := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
 			mu.Lock()
 			for _, id := range fids {
 				if id == "" {
@@ -404,8 +423,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		stepIDs, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, cachedFleet, cachedDiscovered)
 		var discoverErr error
 		if len(runtimeStepIDs) == 0 {
-			nodeFallback, nodeErr := discoverStepIDsFunc(postCtx, baseURL, expectedRunID)
-			fleetFallback, fleetErr := discoverFleetStepIDsFunc(postCtx, baseURL, expectedRunID)
+			nodeFallback, nodeErr := discoverStepIDsFunc(artifactCtx, baseURL, expectedRunID)
+			fleetFallback, fleetErr := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID)
 			stepIDs, runtimeStepIDs = selectResultStepIDs(expectedStepIDs, fleetFallback, nodeFallback)
 			if nodeErr != nil || fleetErr != nil {
 				discoverErr = errors.Join(nodeErr, fleetErr)
@@ -438,7 +457,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				if runtimeRoles.Read == "" {
 					outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
 				} else {
-					corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(postCtx, baseURL, runtimeRoles.Read)
+					corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
 					outcome.CorruptionMetricsErr = observeErr
 					if observeErr == nil {
 						outcome.ObservedCorruptCount = &corrupt
@@ -456,7 +475,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 		if artifactsReady {
 			fetch := newResultsFetcherFunc(baseURL, root)
-			if _, ferr := fetch.FetchArtifactsForSteps(postCtx, stepIDs); ferr != nil {
+			if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
 				outcome.ArtifactErr = ferr
 				artifactsReady = false
 				logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
@@ -475,7 +494,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			options.BaseURL = baseURL
 			options.StepIDs = append([]string(nil), stepIDs...)
 			options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
-			options.Context = postCtx
+			options.Context = artifactCtx
 			finalized, finalizeErr := integrity.FinalizeResults(options)
 			outcome.Finalization = &finalized
 			outcome.FinalizationErr = finalizeErr
@@ -505,12 +524,12 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 		writeProgress("Auto-results: results saved to %s\n", root)
 
-		// Optional: graceful shutdown of all nodes via /shutdown
+		// Optional graceful shutdown has a fresh budget that artifact retrieval
+		// cannot consume.
 		if shutdownOn {
-			// small settle delay before shutdown to avoid races
 			settleTimer := time.NewTimer(constants.AutoResultsShutdownSettleDelay)
 			select {
-			case <-postCtx.Done():
+			case <-phaseBase.Done():
 				if !settleTimer.Stop() {
 					select {
 					case <-settleTimer.C:
@@ -519,30 +538,33 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				}
 			case <-settleTimer.C:
 			}
+			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
 			writeProgress("Auto-results: requesting shutdown on all hosts...\n")
-			shutdownCtx, cancelShutdown := context.WithTimeout(
-				postCtx, constants.AutoResultsShutdownTimeout)
-			defer cancelShutdown()
-			// default linger 5s if invalid
 			if lingerSec <= 0 {
 				lingerSec = int(constants.APILingerDefault / time.Second)
 			}
-			reqErr := requestShutdownAllFunc(shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, debug)
-			if reqErr != nil {
-				logging.LogError("auto-results", "shutdown encountered issues", reqErr)
+			outcome.ShutdownErr = requestShutdownAllFunc(
+				shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, debug)
+			cancelShutdown()
+			if outcome.ShutdownErr != nil {
+				logging.LogError("auto-results", "shutdown encountered issues", outcome.ShutdownErr)
 				writeProgress("Shutdown completed with warnings; see logs for details.\n")
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
 			}
 
-			// Diagnostics collection and full container/staging cleanup must
-			// happen before the summary below, not after: a consumer that
-			// treats the summary (or its results_summary.txt file) as "the
-			// run is done" should not be able to observe it before
-			// diagnostics/diagnostics_manifest.json and copied GC/JFR files
-			// exist.
+			// Diagnostics and mandatory removal use their own independent budgets
+			// inside the canonical finalizer. The outer budget only bounds this
+			// monitor's wait for both phases.
 			if preSummaryHook != nil {
-				preSummaryHook(postCtx)
+				finalizationCtx, cancelFinalization := context.WithTimeout(
+					phaseBase, autoResultsPhaseBudgets.Finalization)
+				preSummaryHook(finalizationCtx)
+				cancelFinalization()
+				if metadata != nil && metadata.resourceFinalization != nil {
+					finalization := *metadata.resourceFinalization
+					outcome.ResourceFinalization = &finalization
+				}
 			}
 		}
 
@@ -550,11 +572,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		if writer == nil {
 			writer = io.Discard
 		}
-		if err := generateRunSummaryFunc(postCtx, root, writer); err != nil {
+		summaryCtx, cancelSummary := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Summary)
+		if err := generateRunSummaryFunc(summaryCtx, root, writer); err != nil {
 			outcome.SummaryErr = err
 			logging.LogError("auto-results", "generate summary", err)
 			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
+		cancelSummary()
 	}()
 	return monitor
 }
@@ -1323,12 +1347,11 @@ Available workload types:
 			if multiHostOrchestrator == nil || plannedResultsRoot == "" {
 				return
 			}
-			if ctx == nil {
-				ctx = context.Background()
+			finalization := multiHostOrchestrator.FinalizeDiagnosticsAndCleanupOutcome(ctx)
+			if metadata != nil {
+				metadata.resourceFinalization = &finalization
 			}
-			diagCtx, diagCancel := context.WithTimeout(ctx, constants.DiagnosticsFinalizationTimeout)
-			defer diagCancel()
-			if err := multiHostOrchestrator.FinalizeDiagnosticsAndCleanup(diagCtx); err != nil {
+			if err := finalization.Error(); err != nil {
 				logger.Warn("Diagnostics collection/cleanup completed with warnings", "error", err.Error())
 			}
 		}
