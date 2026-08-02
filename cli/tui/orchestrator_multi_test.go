@@ -941,6 +941,96 @@ type slowFailedCleanupManager struct {
 	maxActive int
 }
 
+type phaseBudgetDockerManager struct {
+	*MockDockerManager
+	diagnosticsReturned chan struct{}
+	cleanupStarted      chan struct{}
+	normalCleanupCalls  atomic.Int32
+	resourceOnlyCalls   atomic.Int32
+	record              *diagnosticsRecord
+}
+
+func (m *phaseBudgetDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	return nil
+}
+
+func (m *phaseBudgetDockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	<-ctx.Done()
+	m.record = &diagnosticsRecord{
+		Host: "host1", Role: constants.DockerRoleWorker,
+		ContainerID: "container-1", Error: ctx.Err().Error(),
+	}
+	close(m.diagnosticsReturned)
+	return m.record, ctx.Err()
+}
+
+func (m *phaseBudgetDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	return m.record
+}
+
+func (m *phaseBudgetDockerManager) CleanupContext(ctx context.Context) error {
+	m.normalCleanupCalls.Add(1)
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *phaseBudgetDockerManager) CleanupResourcesContext(ctx context.Context) error {
+	m.resourceOnlyCalls.Add(1)
+	close(m.cleanupStarted)
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func TestFinalizeDiagnosticsTimeoutStillRunsMandatoryRemovalWithFreshBudget(t *testing.T) {
+	resultsRoot := t.TempDir()
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	orchestrator.SetResultsRoot(resultsRoot)
+	orchestrator.diagnosticsTimeout = 10 * time.Millisecond
+	orchestrator.cleanupTimeout = time.Second
+	manager := &phaseBudgetDockerManager{
+		MockDockerManager:   NewMockDockerManager(),
+		diagnosticsReturned: make(chan struct{}),
+		cleanupStarted:      make(chan struct{}),
+	}
+	manager.SetContainerID("container-1")
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FinalizeDiagnosticsAndCleanup() error = %v, want diagnostics deadline", err)
+	}
+	select {
+	case <-manager.diagnosticsReturned:
+	default:
+		t.Fatal("timed-out diagnostics collector was not joined")
+	}
+	select {
+	case <-manager.cleanupStarted:
+	default:
+		t.Fatal("mandatory removal did not start after diagnostics timeout")
+	}
+	if manager.normalCleanupCalls.Load() != 0 || manager.resourceOnlyCalls.Load() != 1 {
+		t.Fatalf("cleanup calls normal=%d resource_only=%d, want 0/1",
+			manager.normalCleanupCalls.Load(), manager.resourceOnlyCalls.Load())
+	}
+	if host.IsManaged() || manager.HasManagedResources() {
+		t.Fatal("mandatory removal retained container ownership")
+	}
+	manifestPath := filepath.Join(resultsRoot, dockerDiagnosticsResultsDirName, dockerDiagnosticsManifestFileName)
+	if _, statErr := os.Stat(manifestPath); statErr != nil {
+		t.Fatalf("partial diagnostics evidence was not retained: %v", statErr)
+	}
+	if retryErr := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); retryErr != nil {
+		t.Fatalf("post-timeout retry error = %v", retryErr)
+	}
+	if manager.resourceOnlyCalls.Load() != 1 {
+		t.Fatalf("cleanup retry overlapped or repeated removal: %d calls", manager.resourceOnlyCalls.Load())
+	}
+}
+
 func (m *slowFailedCleanupManager) CleanupContext(ctx context.Context) error {
 	m.mu.Lock()
 	m.calls++
@@ -1083,13 +1173,13 @@ func TestMultiHostOrchestrator_CheckPort(t *testing.T) {
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 
 	// Test with a port that should be closed (high port number)
-	result := orchestrator.checkPort("127.0.0.1", 65432, 1*time.Second)
+	result := orchestrator.checkPortContext(context.Background(), "127.0.0.1", 65432, 1*time.Second)
 	if result {
 		t.Error("Expected checkPort to return false for closed port, got true")
 	}
 
 	// Test with invalid host
-	result = orchestrator.checkPort("invalid-host-that-does-not-exist", 80, 1*time.Second)
+	result = orchestrator.checkPortContext(context.Background(), "invalid-host-that-does-not-exist", 80, 1*time.Second)
 	if result {
 		t.Error("Expected checkPort to return false for invalid host, got true")
 	}
@@ -1105,7 +1195,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	// If the standard RMI port is already open on localhost (e.g., a dev
 	// environment is running a node), this test's assumption is invalid.
 	// Skip to avoid flakiness on shared environments/CI agents.
-	if orchestrator.checkPort("127.0.0.1", constants.RMIRegistryPortInt, 100*time.Millisecond) {
+	if orchestrator.checkPortContext(context.Background(), "127.0.0.1", constants.RMIRegistryPortInt, 100*time.Millisecond) {
 		t.Skip("skipping: RMI port 1099 is open on localhost")
 	}
 
@@ -1116,7 +1206,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	}
 
 	// Test with very short timeout to ensure it times out quickly
-	err := orchestrator.waitForRMIReady(host, 2*time.Second)
+	err := orchestrator.waitForRMIReadyContext(context.Background(), host, 2*time.Second)
 	if err == nil {
 		t.Error("Expected waitForRMIReady to timeout, but it succeeded")
 	}
@@ -1138,7 +1228,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_InvalidHost(t *testing.T) {
 	}
 
 	// Test with invalid host - should fail quickly
-	err := orchestrator.waitForRMIReady(host, 3*time.Second)
+	err := orchestrator.waitForRMIReadyContext(context.Background(), host, 3*time.Second)
 	if err == nil {
 		t.Error("Expected waitForRMIReady to fail with invalid host, but it succeeded")
 	}
@@ -1152,7 +1242,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_NoWorkers(t *testing.T) {
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 
 	// Test with empty worker list
-	err := orchestrator.waitForAllWorkersReady([]*HostConnection{}, 5*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), []*HostConnection{}, 5*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with no workers, got: %v", err)
 	}
@@ -1180,7 +1270,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_InsufficientWorkers(t *tes
 
 	// Both workers will fail to be ready (invalid hosts), so we'll have 0 ready workers
 	// but need 2 (minHosts 3 - 1 entry node = 2 workers required)
-	err := orchestrator.waitForAllWorkersReady(workers, 2*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err == nil {
 		t.Error("Expected waitForAllWorkersReady to fail with insufficient ready workers")
 	}
@@ -1251,7 +1341,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 	}
 
 	// One worker will fail (invalid host), but since we only require 0 workers (minHosts=1 - 1 entry = 0), it should succeed
-	err := orchestrator.waitForAllWorkersReady(workers, 2*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with partial failure when minHosts allows it, got: %v", err)
 	}
@@ -1278,7 +1368,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_ErrorPropagation(t *testin
 	}
 
 	// Both workers will fail, and we need 2, so should get detailed error
-	err := orchestrator.waitForAllWorkersReady(workers, 1*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 1*time.Second)
 	if err == nil {
 		t.Error("Expected waitForAllWorkersReady to fail when all workers fail")
 	}
@@ -2547,6 +2637,136 @@ func TestMultiHostListCleanupFailureRetainsWorkerForRetry(t *testing.T) {
 	}
 	if host.IsManaged() || host.ContainerID != "" {
 		t.Fatalf("LIST cleanup retry retained worker: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+}
+
+func TestStartupRollbackUsesFreshBudgetAfterCallerCancellation(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(canceled); err != nil {
+		t.Fatalf("cleanupManagedContainersAfterStartFailure() error = %v", err)
+	}
+	if host.IsManaged() || manager.HasManagedResources() || manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("canceled rollback state: managed=%t resources=%t cleanup_calls=%d",
+			host.IsManaged(), manager.HasManagedResources(), manager.GetCleanupCallCount())
+	}
+}
+
+func TestMultiHostListCancellationDuringWorkerReadinessStopsAndRollsBack(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "primary", Original: "primary"}, {Host: "worker", Original: "worker"},
+	}, 2)
+	primary, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = primary
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapper.waitForAPIs = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	err := wrapper.StartTestWithLaunchHooks(ctx, "image", scenario.Params{
+		WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket",
+	}, NewLaunchHooks(nil))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("LIST cancellation error = %v, want context.Canceled", err)
+	}
+	if worker.GetStartCallCount() != 1 || worker.GetCleanupCallCount() != 1 {
+		t.Fatalf("worker calls start=%d cleanup=%d, want 1/1",
+			worker.GetStartCallCount(), worker.GetCleanupCallCount())
+	}
+	if primary.GetStartCallCount() != 0 {
+		t.Fatalf("primary started %d time(s) after cancellation", primary.GetStartCallCount())
+	}
+	for _, host := range orchestrator.hosts {
+		if host.IsManaged() || host.ContainerID != "" {
+			t.Fatalf("host %s retained resources after cancellation", host.Info.Original)
+		}
+	}
+}
+
+func TestSingleRemoteCancellationDuringReadinessRollsBackWithoutPost(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "remote", Original: "remote"}}, 1)
+	manager := NewMockDockerManager()
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.SetStatus(HostStatusReady)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapper.waitForAPIs = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	err := wrapper.StartTestWithContentAndLaunchHooks(
+		ctx, "image", scenario.Params{WorkloadType: scenario.WorkloadTypeRead},
+		[]byte("scenario"), []byte("defaults"), NewLaunchHooks(nil))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("single-remote cancellation error = %v, want context.Canceled", err)
+	}
+	if manager.GetStartCallCount() != 1 || manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("single-remote calls start=%d cleanup=%d, want 1/1",
+			manager.GetStartCallCount(), manager.GetCleanupCallCount())
+	}
+	if host.IsManaged() || manager.HasManagedResources() {
+		t.Fatal("single-remote cancellation retained managed resources")
+	}
+}
+
+func TestDistributedAdvertisedIPCancellationPreventsWorkerAndEntryStarts(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+	}, 2)
+	entry, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entry
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	detectionStarted := make(chan struct{})
+	orchestrator.detectAdvIP = func(ctx context.Context, _ *hostparse.HostInfo) (string, error) {
+		close(detectionStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- orchestrator.StartDistributedTestWithContent(
+			ctx, "image", scenario.Params{WorkloadType: scenario.WorkloadTypeRead}, []byte("scenario"))
+	}()
+	select {
+	case <-detectionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("advertised-IP detection did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("distributed cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("distributed startup ignored advertised-IP cancellation")
+	}
+	if worker.GetStartCallCount() != 0 || entry.GetStartCallCount() != 0 {
+		t.Fatalf("container starts after canceled detection: worker=%d entry=%d",
+			worker.GetStartCallCount(), entry.GetStartCallCount())
 	}
 }
 

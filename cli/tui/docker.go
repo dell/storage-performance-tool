@@ -1102,6 +1102,17 @@ func (dm *DockerManager) Cleanup() error {
 
 // CleanupContext stops and removes the container within the caller's budget.
 func (dm *DockerManager) CleanupContext(ctx context.Context) error {
+	return dm.cleanupContext(ctx, true)
+}
+
+// CleanupResourcesContext removes containers and staging without attempting
+// diagnostics again. Canonical finalization uses this after its independently
+// bounded diagnostics phase.
+func (dm *DockerManager) CleanupResourcesContext(ctx context.Context) error {
+	return dm.cleanupContext(ctx, false)
+}
+
+func (dm *DockerManager) cleanupContext(ctx context.Context, collectDiagnostics bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1109,7 +1120,10 @@ func (dm *DockerManager) CleanupContext(ctx context.Context) error {
 		return err
 	}
 	if dm.remote != nil {
-		return dm.remote.CleanupContext(ctx)
+		if collectDiagnostics {
+			return dm.remote.CleanupContext(ctx)
+		}
+		return dm.remote.CleanupResourcesContext(ctx)
 	}
 	if dm.containerID == "" {
 		dm.cleanupNodeLogDir()
@@ -1120,8 +1134,8 @@ func (dm *DockerManager) CleanupContext(ctx context.Context) error {
 	logging.LogContainerEvent("stopping", dm.containerID)
 
 	// Stop the container
-	timeout := 10
-	if dm.diagnosticsDir != "" {
+	timeout := constants.ContainerStopTimeoutSeconds
+	if collectDiagnostics && dm.diagnosticsDir != "" {
 		timeout = dockerDiagnosticsStopTimeoutSeconds
 	}
 	err := dm.client.ContainerStop(ctx, dm.containerID, container.StopOptions{
@@ -1137,7 +1151,7 @@ func (dm *DockerManager) CleanupContext(ctx context.Context) error {
 
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
-	if dm.diagnosticsDir != "" && !dm.diagnosticsDone {
+	if collectDiagnostics && dm.diagnosticsDir != "" && !dm.diagnosticsDone {
 		record, err := dm.collectDiagnostics(ctx)
 		if record != nil {
 			diagnosticsRecords = append(diagnosticsRecords, *record)

@@ -84,6 +84,15 @@ func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) 
 	return configurer.SetFileMounts(mounts)
 }
 
+func cleanupSingleHostStartFailure(ctx context.Context, dm DockerInterface) error {
+	if dm == nil {
+		return nil
+	}
+	cleanupCtx, cancel := boundedDetachedContext(ctx, constants.StartupRollbackTimeout)
+	defer cancel()
+	return dm.CleanupContext(cleanupCtx)
+}
+
 // NewTestOrchestrator creates a new test orchestrator
 func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot string) *TestOrchestrator {
 	if apiPort == "" {
@@ -192,6 +201,12 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	scenarioContent, defaultsContent []byte,
 	hooks LaunchHooks,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	o.mu.Lock()
 	locked := true
 	defer func() {
@@ -222,14 +237,23 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := configureDockerFileMounts(o.dockerManager, params.ItemFileMounts); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	// Start container in node mode
 	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
 	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, startupArgs)
 	if err != nil {
-		return fmt.Errorf("failed to start container in node mode: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to start container in node mode: %w", err),
+			cleanupSingleHostStartFailure(ctx, o.dockerManager),
+		)
 	}
 	o.containerID = containerID
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	// Create API client
 	if o.apiClient == nil {
@@ -242,7 +266,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		o.onOutput("Waiting for Spt API to become ready...")
 	}
 
-	if err := o.apiClient.WaitForAPIReady(apiReadyTimeout); err != nil {
+	if err := o.apiClient.WaitForAPIReadyContext(ctx, apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
 		diagnostics := o.containerStartupDiagnostics()
@@ -251,7 +275,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 			o.onError("Container startup diagnostics:\n" + diagnostics)
 			reportedDiagnostics = true
 		}
-		cleanupErr := o.dockerManager.CleanupContext(ctx)
+		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API failure", cleanupErr)
 		}
@@ -267,16 +291,22 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		}
 		return errors.Join(startupErr, cleanupErr)
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	if scenario.IsIntegrityWorkload(params) {
 		if err := o.apiClient.VerifyIntegrityCapability(image); err != nil {
 			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
-			cleanupErr := o.dockerManager.CleanupContext(ctx)
+			cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 			if cleanupErr != nil {
 				logging.LogError("orchestrator", "failed to cleanup container after capability failure", cleanupErr)
 			}
 			return errors.Join(err, cleanupErr)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
 	}
 
 	if o.apiClient != nil {
@@ -292,12 +322,15 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if o.onOutput != nil {
 		o.onOutput("Starting test via API...")
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	runID, err := o.apiClient.StartTest(scenarioContent, defaultsContent)
 	if err != nil {
 		// Clean up the started container since API test start failed
 		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)
-		cleanupErr := o.dockerManager.CleanupContext(ctx)
+		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API start failure", cleanupErr)
 		}

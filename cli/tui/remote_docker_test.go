@@ -117,6 +117,71 @@ func TestRemoteDockerCleanupStagingFailureRemainsRetryable(t *testing.T) {
 	}
 }
 
+func TestRemoteDockerPreservedDiagnosticsRemainManagedAndRetryCopy(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "diagnostics-container"
+	mgr.stagingDir = "/tmp/diagnostics-staging"
+	mgr.diagnosticsDir = "/tmp/spt-diagnostics/run/worker"
+	mgr.diagnosticsRole = constants.DockerRoleWorker
+	mgr.diagnosticsRoot = t.TempDir()
+	mgr.diagnosticsStopDone = true
+	mock.SetCommandSuccess(
+		"find "+mgr.diagnosticsDir+" -maxdepth 1 -type f -print",
+		mgr.diagnosticsDir+"/spt.jfr\n",
+	)
+	mock.FailureMode = "copy_from_failure"
+
+	if err := mgr.CleanupContext(context.Background()); err == nil || !strings.Contains(err.Error(), "copy from host failed") {
+		t.Fatalf("CleanupContext() error = %v, want diagnostics copy failure", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" || mgr.diagnosticsDir == "" || !mgr.HasManagedResources() {
+		t.Fatalf("copy failure ownership: container=%q staging=%q diagnostics=%q managed=%t",
+			mgr.containerID, mgr.stagingDir, mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+
+	mock.FailureMode = ""
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("diagnostics copy retry error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful copy retry retained diagnostics ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+	if record := mgr.diagnosticsRecord(); record == nil || !record.RemoteDirRemoved || record.PreservedRemoteDir {
+		t.Fatalf("successful copy retry record = %+v", record)
+	}
+}
+
+func TestRemoteDockerPreservedDiagnosticsRetryRemoteRemoval(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "diagnostics-container"
+	mgr.diagnosticsDir = "/tmp/spt-diagnostics/run/worker"
+	mgr.diagnosticsRole = constants.DockerRoleWorker
+	mgr.diagnosticsRoot = t.TempDir()
+	mgr.diagnosticsStopDone = true
+	mock.SetCommandSuccess(
+		"find "+mgr.diagnosticsDir+" -maxdepth 1 -type f -print", "",
+	)
+	mock.SetCommandFailure("rm -rf "+mgr.diagnosticsDir, "permission denied", errors.New("rm failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil || !strings.Contains(err.Error(), "remove remote diagnostics") {
+		t.Fatalf("CleanupContext() error = %v, want remote diagnostics removal failure", err)
+	}
+	if mgr.containerID != "" || mgr.diagnosticsDir == "" || !mgr.HasManagedResources() {
+		t.Fatalf("remove failure ownership: container=%q diagnostics=%q managed=%t",
+			mgr.containerID, mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+
+	mock.SetCommandSuccess("rm -rf "+mgr.diagnosticsDir, "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("remote diagnostics removal retry error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful removal retry retained ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+}
+
 func TestRemoteDockerCleanupCancellationDuringStopRetainsOwnershipForRetry(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 	mgr.containerID = "cancel-container"
@@ -322,6 +387,10 @@ func TestRemoteDocker_CleanupCollectsDiagnosticsBeforeStagingCleanup(t *testing.
 
 	if err := mgr.Cleanup(); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful diagnostics cleanup retained ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
 	}
 	if len(mock.CopiedFromFiles) != 2 {
 		t.Fatalf("copied diagnostics = %d, want 2", len(mock.CopiedFromFiles))

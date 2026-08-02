@@ -381,6 +381,50 @@ func TestOrchestratorIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *test
 	}
 }
 
+func TestOrchestratorCancellationDuringIntegrityCapabilityStopsBeforeRunAndCleansUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			cancel()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(integritySchemaJSON))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	err := orchestrator.StartTestWithContent(
+		ctx,
+		"test-image",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartTestWithContent() error = %v, want context.Canceled", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if mockDM.HasManagedResources() {
+		t.Fatal("canceled capability gate retained container resources")
+	}
+}
+
 func TestOrchestratorStartTestConfiguresItemFileMounts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

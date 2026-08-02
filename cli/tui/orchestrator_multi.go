@@ -102,8 +102,11 @@ type MultiHostOrchestrator struct {
 	// Concurrent finalization callers share one active attempt. A successful
 	// attempt is sticky; a failed/canceled attempt releases the slot for a
 	// bounded retry while hosts retain cleanup ownership.
-	finalizeMu      sync.Mutex
-	finalizeAttempt *cleanupAttempt
+	finalizeMu         sync.Mutex
+	finalizeAttempt    *cleanupAttempt
+	rollbackTimeout    time.Duration
+	diagnosticsTimeout time.Duration
+	cleanupTimeout     time.Duration
 
 	runtimeIdentityRecorder  func(DistributedRuntimeIdentityEvidence)
 	runtimeIdentityTier      string
@@ -181,6 +184,9 @@ func NewMultiHostOrchestratorWithRMI(hostInfos []*hostparse.HostInfo, minHosts i
 		rmiPortCount:        rmiConfig.PortCount,
 		preflight:           preflight.NewDefaultChecker(),
 		runtimeIdentityTier: constants.IntegrityRuntimeIdentityTierImage,
+		rollbackTimeout:     constants.StartupRollbackTimeout,
+		diagnosticsTimeout:  constants.DiagnosticsCollectionTimeout,
+		cleanupTimeout:      constants.ContainerCleanupTimeout,
 	}
 	// Default detection uses remoteip via the command executor (SSH or local)
 	o.detectAdvIP = func(ctx context.Context, host *hostparse.HostInfo) (string, error) {
@@ -568,6 +574,12 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 
 // StartContainers starts Spt containers on all ready hosts
 func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image string, additionalArgs []string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	o.mu.Lock()
 	o.image = image
 	o.mu.Unlock()
@@ -590,6 +602,10 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 		wg.Add(1)
 		go func(h *HostConnection) {
 			defer wg.Done()
+			if err := ctx.Err(); err != nil {
+				h.SetError(err)
+				return
+			}
 
 			h.SetStatus(HostStatusConnecting) // Repurpose for container starting
 
@@ -638,6 +654,9 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Count successful starts
 	runningCount := 0
@@ -758,15 +777,18 @@ func (o *MultiHostOrchestrator) WaitForAPIs(ctx context.Context, timeout time.Du
 // cleanupManagedContainersAfterStartFailure removes containers immediately when no workload was
 // submitted. There is no run to shut down or linger window to preserve in this path.
 func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
+	timeout := o.rollbackTimeout
+	if timeout <= 0 {
+		timeout = constants.StartupRollbackTimeout
 	}
+	cleanupCtx, cancel := boundedDetachedContext(ctx, timeout)
+	defer cancel()
 	var cleanupErrors []error
 	for _, host := range o.hosts {
 		if host == nil || !host.IsManaged() || host.DockerManager == nil {
 			continue
 		}
-		cleanupErr := cleanupDockerWithinContext(ctx, host.DockerManager)
+		cleanupErr := cleanupDockerWithinContext(cleanupCtx, host.DockerManager)
 		if hasManagedDockerResources(host.DockerManager) {
 			if cleanupErr != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, cleanupErr))
@@ -784,6 +806,17 @@ func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx co
 }
 
 func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
+	return manager.CleanupContext(ctx)
+}
+
+type resourceOnlyDockerCleaner interface {
+	CleanupResourcesContext(context.Context) error
+}
+
+func cleanupDockerResourcesWithinContext(ctx context.Context, manager DockerInterface) error {
+	if cleaner, ok := manager.(resourceOnlyDockerCleaner); ok {
+		return cleaner.CleanupResourcesContext(ctx)
+	}
 	return manager.CleanupContext(ctx)
 }
 
@@ -808,6 +841,10 @@ func markHostCleanupComplete(host *HostConnection) {
 
 // StopAllContainers stops all managed containers within the caller's budget.
 func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
+	return o.stopAllContainers(ctx, false)
+}
+
+func (o *MultiHostOrchestrator) stopAllContainers(ctx context.Context, resourcesOnly bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -883,7 +920,12 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 				return
 			}
 
-			err := cleanupDockerWithinContext(ctx, h.DockerManager)
+			var err error
+			if resourcesOnly {
+				err = cleanupDockerResourcesWithinContext(ctx, h.DockerManager)
+			} else {
+				err = cleanupDockerWithinContext(ctx, h.DockerManager)
+			}
 			if collector, ok := h.DockerManager.(diagnosticsCollector); ok {
 				if record := collector.diagnosticsRecord(); record != nil {
 					result.record = record
@@ -1016,12 +1058,23 @@ func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Contex
 	if attempt == nil {
 		attempt = &cleanupAttempt{done: make(chan struct{})}
 		o.finalizeAttempt = attempt
-		attemptCtx, cancelAttempt := context.WithTimeout(
-			context.WithoutCancel(ctx), constants.DiagnosticsCollectionTimeout)
+		diagnosticsTimeout := o.diagnosticsTimeout
+		if diagnosticsTimeout <= 0 {
+			diagnosticsTimeout = constants.DiagnosticsCollectionTimeout
+		}
+		cleanupTimeout := o.cleanupTimeout
+		if cleanupTimeout <= 0 {
+			cleanupTimeout = constants.ContainerCleanupTimeout
+		}
+		attemptBase := context.WithoutCancel(ctx)
 		go func(active *cleanupAttempt) {
-			defer cancelAttempt()
-			diagErr := o.CollectDiagnostics(attemptCtx)
-			stopErr := o.StopAllContainers(attemptCtx)
+			diagnosticsCtx, cancelDiagnostics := context.WithTimeout(attemptBase, diagnosticsTimeout)
+			diagErr := o.CollectDiagnostics(diagnosticsCtx)
+			cancelDiagnostics()
+
+			cleanupCtx, cancelCleanup := context.WithTimeout(attemptBase, cleanupTimeout)
+			stopErr := o.stopAllContainers(cleanupCtx, true)
+			cancelCleanup()
 			active.err = errors.Join(diagErr, stopErr)
 			if active.err != nil {
 				o.finalizeMu.Lock()
@@ -1638,6 +1691,12 @@ func (m *MultiHostTestOrchestrator) StartTest(ctx context.Context, image string,
 func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 	ctx context.Context, image string, params scenario.ScenarioParams, hooks LaunchHooks,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var err error
 	params, err = scenario.PrepareExternalItemFiles(params)
 	if err != nil {
@@ -1697,6 +1756,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			// 1) Start API-only containers on all workers so they can report idle status.
 			workers := readyHosts[1:]
 			for _, w := range workers {
+				if err := ctx.Err(); err != nil {
+					return failBeforeSubmission(err)
+				}
 				if w.DockerManager == nil {
 					continue
 				}
@@ -1717,6 +1779,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 
 			// 2) Wait for APIs on any running hosts (likely just workers for now)
 			if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return failBeforeSubmission(ctxErr)
+				}
 				// Not fatal to the primary run; continue but log
 				logging.LogError("orchestrator", "API readiness wait (workers) returned error", err)
 			}
@@ -1727,17 +1792,26 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					m.onMetrics(baseline)
 				}
 			}
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
+			}
 
 			// 3) Generate scenario and start ENTRY container on primary (no worker addrs)
 			scenarioContent, err := m.generateScenario(params)
 			if err != nil {
 				return failBeforeSubmission(fmt.Errorf("failed to generate scenario: %w", err))
 			}
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
+			}
 			m.multiHost.scenarioContent = scenarioContent
 
 			additionalArgs, err := m.buildEndpointArgs(params)
 			if err != nil {
 				return failBeforeSubmission(fmt.Errorf("failed to build endpoint args: %w", err))
+			}
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
 			}
 			additionalArgs = append(additionalArgs, startupArgs...)
 
@@ -1756,6 +1830,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			primary.Status = HostStatusRunning
 			primary.mu.Unlock()
 			primary.SetManaged(true)
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
+			}
 
 			// 4) Ensure APIs ready on all running nodes (now includes primary)
 			if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
@@ -1767,6 +1844,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					entry.APIClient.LogReadySnapshot("pre-start")
 				}
 			}
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
+			}
 
 			// 5) Start test via entry node API
 			if primary.APIClient == nil {
@@ -1775,6 +1855,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			defaultsContent, derr := m.generateDefaults(params)
 			if derr != nil {
 				return failBeforeSubmission(fmt.Errorf("failed to generate defaults: %w", derr))
+			}
+			if err := ctx.Err(); err != nil {
+				return failBeforeSubmission(err)
 			}
 			runID, serr := primary.APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
 			if serr != nil {
@@ -1881,6 +1964,12 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	scenarioContent, defaultsContent []byte,
 	hooks LaunchHooks,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	readyHosts := m.multiHost.GetReadyHosts()
 	if len(readyHosts) == 0 {
 		return fmt.Errorf("no ready hosts available to start tests")
@@ -1964,6 +2053,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
+	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
@@ -1971,6 +2063,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		if err := host.APIClient.VerifyIntegrityCapability(image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	host.APIClient.LogReadySnapshot("pre-start")
 
@@ -2029,6 +2124,9 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
+	}
 	if scenario.IsIntegrityWorkload(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
@@ -2036,6 +2134,9 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapability(image); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if m.onOutput != nil {
 		m.onOutput("Starting test via entry node API...")
@@ -2141,7 +2242,7 @@ func (m *MultiHostTestOrchestrator) CompletionCh() <-chan struct{} {
 }
 
 // attachWorkerNode marks a prestarted worker node as ready for orchestration.
-func (o *MultiHostOrchestrator) attachWorkerNode(host *HostConnection) error {
+func (o *MultiHostOrchestrator) attachWorkerNode(ctx context.Context, host *HostConnection) error {
 	if host.DockerManager == nil {
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 	}
@@ -2150,11 +2251,17 @@ func (o *MultiHostOrchestrator) attachWorkerNode(host *HostConnection) error {
 		return fmt.Errorf("no advertised IP detector configured")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), constants.AdvertisedIPDetectionTimeout)
 	defer cancel()
 	ip, derr := o.detectAdvIP(ctx, host.Info)
-	if derr != nil || strings.TrimSpace(ip) == "" {
+	if derr != nil {
 		return fmt.Errorf("advertised IP detection failed on %s: %w", host.Info.Original, derr)
+	}
+	if strings.TrimSpace(ip) == "" {
+		return fmt.Errorf("advertised IP detection returned an empty address on %s", host.Info.Original)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	advIP := strings.TrimSpace(ip)
 
@@ -2173,7 +2280,7 @@ func (o *MultiHostOrchestrator) attachWorkerNode(host *HostConnection) error {
 }
 
 // startWorkerNode starts a worker node container with RMI configuration
-func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection, additionalArgs []string) error {
+func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostConnection, additionalArgs []string) error {
 	// Check if host has a Docker manager configured
 	if host.DockerManager == nil {
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
@@ -2185,14 +2292,20 @@ func (o *MultiHostOrchestrator) startWorkerNode(host *HostConnection, additional
 	if o.detectAdvIP == nil {
 		return fmt.Errorf("no advertised IP detector configured")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), constants.AdvertisedIPDetectionTimeout)
 	defer cancel()
 	ip, derr := o.detectAdvIP(ctx, host.Info)
-	if derr != nil || strings.TrimSpace(ip) == "" {
+	if derr != nil {
 		return fmt.Errorf("advertised IP detection failed on %s: %w", host.Info.Original, derr)
+	}
+	if strings.TrimSpace(ip) == "" {
+		return fmt.Errorf("advertised IP detection returned an empty address on %s", host.Info.Original)
 	}
 	advIP = strings.TrimSpace(ip)
 	logging.LogInfo("orchestrator", "advertised IP selected", "host", host.Info.Original, "ip", advIP)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	containerID, err := host.DockerManager.StartWorkerNodeContainer(
 		o.image,
@@ -2667,6 +2780,12 @@ func (o *MultiHostOrchestrator) StartDistributedTest(ctx context.Context, image 
 // StartDistributedTestWithContent starts the RMI entry/worker topology with
 // caller-provided scenario content for later API submission.
 func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Context, image string, params scenario.ScenarioParams, scenarioContent []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	o.mu.Lock()
 	o.executionParticipantKeys = nil
 	o.mu.Unlock()
@@ -2681,9 +2800,15 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 		}
 		runtimeImage = evidence.ImageID
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	startupArgs, err := scenario.BuildEngineStartupArgs(params)
 	if err != nil {
 		return fmt.Errorf("resolve engine startup settings: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	o.mu.Lock()
@@ -2703,6 +2828,9 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	entryNode := o.hosts[0]
 	workerNodes := o.hosts[1:]
 	if err := o.configureItemFileMounts(ctx, o.hosts, params.ItemFileMounts); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -2728,9 +2856,9 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 
 				var err error
 				if attachWorkers {
-					err = o.attachWorkerNode(w)
+					err = o.attachWorkerNode(ctx, w)
 				} else {
-					err = o.startWorkerNode(w, startupArgs)
+					err = o.startWorkerNode(ctx, w, startupArgs)
 				}
 
 				if err != nil {
@@ -2742,6 +2870,9 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 			}(worker)
 		}
 		wg.Wait()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		// Check if enough workers started
 		activeWorkers := 0
@@ -2780,9 +2911,12 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 				startedWorkers = append(startedWorkers, worker)
 			}
 		}
-		if err := o.waitForAllWorkersReady(startedWorkers, constants.RMIReadinessTimeout); err != nil {
+		if err := o.waitForAllWorkersReadyContext(ctx, startedWorkers, constants.RMIReadinessTimeout); err != nil {
 			return fmt.Errorf("workers not ready for RMI: %w", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// 5. Start entry node with worker addresses
@@ -2798,6 +2932,9 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	if err := o.startEntryNode(entryNode, activeWorkers, params, startupArgs); err != nil {
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	executionParticipants := make([]string, 0, 1+len(activeWorkers))
 	executionParticipants = append(executionParticipants, runtimeIdentityHostKey(entryNode.Info))
 	for _, worker := range activeWorkers {
@@ -2812,8 +2949,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	return nil
 }
 
-// checkPort checks if a TCP port is open on the specified host
-func (o *MultiHostOrchestrator) checkPort(host string, port int, timeout time.Duration) bool {
+func (o *MultiHostOrchestrator) checkPortContext(ctx context.Context, host string, port int, timeout time.Duration) bool {
 	// Use net.JoinHostPort to be IPv6-safe
 	address := net.JoinHostPort(host, strconv.Itoa(port))
 
@@ -2821,7 +2957,8 @@ func (o *MultiHostOrchestrator) checkPort(host string, port int, timeout time.Du
 		"address", address,
 		"timeout", timeout)
 
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(normalizeContext(ctx), "tcp", address)
 	if err != nil {
 		logging.LogDebug("orchestrator", "port connection failed",
 			"address", address,
@@ -2835,12 +2972,11 @@ func (o *MultiHostOrchestrator) checkPort(host string, port int, timeout time.Du
 	return true
 }
 
-// waitForRMIReady waits for the RMI registry to be ready on a specific host
-func (o *MultiHostOrchestrator) waitForRMIReady(host *HostConnection, timeout time.Duration) error {
+func (o *MultiHostOrchestrator) waitForRMIReadyContext(ctx context.Context, host *HostConnection, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), timeout)
+	defer cancel()
 	rmiRegistryPort := constants.RMIRegistryPortInt
 	retryInterval := constants.RMIRetryInterval
-
-	deadline := time.Now().Add(timeout)
 	// Use the hostname/IP from the connection info - this is what we used for SSH
 	// and what other containers will use to reach this host via RMI
 	rmiAddress := host.Info.Host
@@ -2851,26 +2987,27 @@ func (o *MultiHostOrchestrator) waitForRMIReady(host *HostConnection, timeout ti
 		"port", rmiRegistryPort,
 		"timeout", timeout)
 
-	for time.Now().Before(deadline) {
-		if o.checkPort(rmiAddress, rmiRegistryPort, constants.PortCheckTimeout) {
+	for {
+		if o.checkPortContext(ctx, rmiAddress, rmiRegistryPort, constants.PortCheckTimeout) {
 			logging.LogInfo("orchestrator", "RMI registry ready",
 				"host", host.Info.Host,
 				"address", rmiAddress)
 			return nil
 		}
 
-		// Wait before retrying, but check if we still have time
-		if time.Now().Add(retryInterval).After(deadline) {
-			break
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return fmt.Errorf("RMI registry not ready on %s: %w", host.Info.Host, ctx.Err())
+		case <-timer.C:
 		}
-		time.Sleep(retryInterval)
 	}
-
-	return fmt.Errorf("RMI registry not ready on %s after %v", host.Info.Host, timeout)
 }
 
-// waitForAllWorkersReady waits for all worker nodes to have ready RMI registries
-func (o *MultiHostOrchestrator) waitForAllWorkersReady(workers []*HostConnection, timeout time.Duration) error {
+func (o *MultiHostOrchestrator) waitForAllWorkersReadyContext(ctx context.Context, workers []*HostConnection, timeout time.Duration) error {
 	if len(workers) == 0 {
 		logging.LogInfo("orchestrator", "no workers to check for readiness")
 		return nil
@@ -2891,7 +3028,7 @@ func (o *MultiHostOrchestrator) waitForAllWorkersReady(workers []*HostConnection
 		go func(w *HostConnection) {
 			defer wg.Done()
 
-			if err := o.waitForRMIReady(w, timeout); err != nil {
+			if err := o.waitForRMIReadyContext(ctx, w, timeout); err != nil {
 				errorsMu.Lock()
 				readinessErrors = append(readinessErrors, fmt.Errorf("worker %s: %w", w.Info.Host, err))
 				errorsMu.Unlock()
@@ -2905,6 +3042,9 @@ func (o *MultiHostOrchestrator) waitForAllWorkersReady(workers []*HostConnection
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	logging.LogInfo("orchestrator", "worker readiness check complete",
 		"ready_workers", readyWorkers,

@@ -121,7 +121,7 @@ func (m *RemoteDockerManager) ContainerID() string { return m.containerID }
 
 // HasManagedResources reports whether cleanup must retain ownership for retry.
 func (m *RemoteDockerManager) HasManagedResources() bool {
-	return m.containerID != "" || m.stagingDir != ""
+	return m.containerID != "" || m.stagingDir != "" || m.diagnosticsDir != ""
 }
 
 func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
@@ -482,6 +482,8 @@ func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnost
 			return &record, errors.New(record.Error)
 		}
 		record.RemoteDirRemoved = true
+		m.diagnosticsDir = ""
+		m.diagnosticsRole = ""
 		m.diagnosticsDone = true
 		m.diagnosticsRec = &record
 		return &record, nil
@@ -546,6 +548,8 @@ func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnost
 		return &record, errors.New(record.Error)
 	}
 	record.RemoteDirRemoved = true
+	m.diagnosticsDir = ""
+	m.diagnosticsRole = ""
 	if err := writeDiagnosticsRecordManifest(localDir, record); err != nil {
 		m.diagnosticsRec = &record
 		return &record, fmt.Errorf("write diagnostics manifest: %w", err)
@@ -594,6 +598,17 @@ func (m *RemoteDockerManager) Cleanup() error {
 
 // CleanupContext force-removes the last container and staging within the caller's budget.
 func (m *RemoteDockerManager) CleanupContext(ctx context.Context) error {
+	return m.cleanupContext(ctx, true)
+}
+
+// CleanupResourcesContext removes the container and staging without retrying
+// diagnostics. A preserved diagnostics directory remains managed for a later
+// collection/removal attempt.
+func (m *RemoteDockerManager) CleanupResourcesContext(ctx context.Context) error {
+	return m.cleanupContext(ctx, false)
+}
+
+func (m *RemoteDockerManager) cleanupContext(ctx context.Context, collectDiagnostics bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -602,26 +617,36 @@ func (m *RemoteDockerManager) CleanupContext(ctx context.Context) error {
 	}
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
-	if m.containerID != "" {
-		if m.diagnosticsDir != "" && !m.diagnosticsDone {
+	if collectDiagnostics && m.diagnosticsDir != "" && !m.diagnosticsDone {
+		if m.containerID == "" {
+			// A prior attempt already removed the container. The remote
+			// directory is now stable and remains CLI-owned until collection
+			// and removal succeed.
+			m.diagnosticsStopDone = true
+		} else {
 			if err := m.gracefulStopForDiagnostics(ctx); err != nil {
 				logging.LogWarn("remote-docker", "diagnostics graceful stop failed", "host", m.host.Original, "error", err.Error())
 				cleanupErrs = append(cleanupErrs, err)
 			}
-			record, err := m.collectDiagnostics(ctx)
-			if record != nil {
-				diagnosticsRecords = append(diagnosticsRecords, *record)
-			}
-			if err != nil {
-				logging.LogWarn("remote-docker", "diagnostics collection failed", "host", m.host.Original, "remote_dir", m.diagnosticsDir, "error", err.Error())
-				cleanupErrs = append(cleanupErrs, err)
-			}
 		}
+		record, err := m.collectDiagnostics(ctx)
+		if record != nil {
+			diagnosticsRecords = append(diagnosticsRecords, *record)
+		}
+		if err != nil {
+			logging.LogWarn("remote-docker", "diagnostics collection failed", "host", m.host.Original, "remote_dir", m.diagnosticsDir, "error", err.Error())
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	if m.containerID != "" {
 		if err := m.ops.StopContainer(ctx, m.containerID); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 			return errors.Join(cleanupErrs...)
 		}
 		m.containerID = ""
+		if m.diagnosticsDir != "" {
+			m.diagnosticsStopDone = true
+		}
 	}
 	if err := m.cleanupStaging(ctx); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
