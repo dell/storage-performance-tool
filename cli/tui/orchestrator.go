@@ -193,7 +193,12 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	hooks LaunchHooks,
 ) error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			o.mu.Unlock()
+		}
+	}()
 
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
@@ -298,8 +303,6 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		}
 		return errors.Join(fmt.Errorf("failed to start test via API: %w", err), cleanupErr)
 	}
-	hooks.NotifySubmitted()
-
 	logging.LogInfo("orchestrator", "test started successfully", "runID", runID)
 	if o.onOutput != nil {
 		o.onOutput(fmt.Sprintf("Test started with run ID: %s", runID))
@@ -309,6 +312,13 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	go o.monitorStatus(ctx)
 	go o.monitorMetrics(ctx)
 	go o.streamContainerOutput(ctx)
+
+	// Submission state is fully committed before caller-controlled notification.
+	// Keep acknowledgment synchronous, but never hold the lifecycle mutex while
+	// the hook prepares result artifacts or waits for its launch gate.
+	o.mu.Unlock()
+	locked = false
+	hooks.NotifySubmitted()
 
 	return nil
 }

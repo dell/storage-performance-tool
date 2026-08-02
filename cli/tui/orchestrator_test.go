@@ -510,6 +510,60 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 	}
 }
 
+func TestOrchestratorSubmissionHookDoesNotHoldLifecycleMutex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/run":
+			w.Header().Set("ETag", "run-hook")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	orchestrator := NewTestOrchestrator(NewMockDockerManager(), constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	hookEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	startDone := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		startDone <- orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, "image", scenario.Params{}, []byte(`Load.run({})`), nil,
+			LaunchHooks{OnSubmitted: func() {
+				close(hookEntered)
+				<-releaseHook
+			}},
+		)
+	}()
+	select {
+	case <-hookEntered:
+	case <-time.After(time.Second):
+		t.Fatal("submission hook was not entered")
+	}
+
+	mutexAcquired := make(chan struct{})
+	go func() {
+		orchestrator.mu.Lock()
+		orchestrator.mu.Unlock()
+		close(mutexAcquired)
+	}()
+	select {
+	case <-mutexAcquired:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseHook)
+		t.Fatal("submission hook retained the orchestrator lifecycle mutex")
+	}
+	close(releaseHook)
+	if err := <-startDone; err != nil {
+		t.Fatalf("StartTestWithContentAndLaunchHooks() error = %v", err)
+	}
+}
+
 // TestOrchestratorContainerStartFailure tests handling of container start failures
 func TestOrchestratorContainerStartFailure(t *testing.T) {
 	mockDM := NewMockDockerManager()
