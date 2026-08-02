@@ -13,19 +13,17 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
-	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 func TestResolveStepRolesPortablePreservesOrderedFirstMatchAcrossEvidenceSources(t *testing.T) {
 	tests := []struct {
 		name       string
-		workload   string
 		configured []string
 		manifest   []string
 		want       StepRoles
 	}{
 		{
-			name: "runtime write roles precede generated and manifest roles", workload: workload.WriteVerify,
+			name: "runtime write roles precede generated and manifest roles",
 			configured: []string{
 				"mt-001-runtime-create", "mt-002-runtime-verify",
 				"mt-001-expected-create", "mt-002-expected-verify",
@@ -34,18 +32,18 @@ func TestResolveStepRolesPortablePreservesOrderedFirstMatchAcrossEvidenceSources
 			want:     StepRoles{Create: "mt-001-runtime-create", Read: "mt-002-runtime-verify"},
 		},
 		{
-			name: "expected-only write roles", workload: workload.WriteVerify,
+			name:       "expected-only write roles",
 			configured: []string{"mt-001-expected-create", "mt-002-expected-verify"},
 			want:       StepRoles{Create: "mt-001-expected-create", Read: "mt-002-expected-verify"},
 		},
 		{
-			name: "runtime discovery roles precede manifest roles", workload: workload.ReadVerify,
+			name:       "runtime discovery roles precede manifest roles",
 			configured: []string{"mt-001-runtime-list", "mt-002-runtime-verify"},
 			manifest:   []string{"mt-001-manifest-list", "mt-002-manifest-verify"},
 			want:       StepRoles{List: "mt-001-runtime-list", Read: "mt-002-runtime-verify"},
 		},
 		{
-			name: "staged read has only verify role", workload: workload.ReadVerify,
+			name:       "staged read has only verify role",
 			configured: []string{"mt-001-runtime-verify"},
 			want:       StepRoles{Read: "mt-001-runtime-verify"},
 		},
@@ -56,7 +54,7 @@ func TestResolveStepRolesPortablePreservesOrderedFirstMatchAcrossEvidenceSources
 			for _, stepID := range test.manifest {
 				manifest.Steps = append(manifest.Steps, results.StepManifest{StepID: stepID})
 			}
-			if got := ResolveStepRoles(test.workload, test.configured, manifest); got != test.want {
+			if got := ResolveStepRoles(test.configured, manifest); got != test.want {
 				t.Fatalf("ResolveStepRoles() = %+v, want %+v", got, test.want)
 			}
 		})
@@ -64,10 +62,8 @@ func TestResolveStepRolesPortablePreservesOrderedFirstMatchAcrossEvidenceSources
 }
 
 func TestResolveStepRolesPortableDoesNotGuessMalformedPlanPositions(t *testing.T) {
-	for _, workloadName := range []string{workload.WriteVerify, workload.ReadVerify} {
-		if got := ResolveStepRoles(workloadName, []string{"step-one", "step-two"}, nil); got != (StepRoles{}) {
-			t.Fatalf("ResolveStepRoles(%s malformed plan) = %+v, want no guessed roles", workloadName, got)
-		}
+	if got := ResolveStepRoles([]string{"step-one", "step-two"}, nil); got != (StepRoles{}) {
+		t.Fatalf("ResolveStepRoles(malformed plan) = %+v, want no guessed roles", got)
 	}
 }
 

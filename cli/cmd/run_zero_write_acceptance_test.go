@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,28 +114,23 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	tracker := &fakeRunTracker{result: trackerResult}
 	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
 	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
-		return []string{createStep, readStep}, nil
+		return []string{createStep}, nil
 	}
 	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
 		return nil, nil
 	}
 
-	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/metrics/fleet/json" && r.URL.Path != "/metrics/json" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"run_id": runID, "step_id": readStep, "op_type": "READ",
-			"operations": map[string]any{"corrupt_count": 0},
-		}})
+	var metricsRequests atomic.Int32
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		metricsRequests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer metricsServer.Close()
 
 	resultsRoot := t.TempDir()
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output, onFetch: func(root string, stepIDs []string) error {
-			if len(stepIDs) != 2 || stepIDs[0] != createStep || stepIDs[1] != readStep {
+			if len(stepIDs) != 1 || stepIDs[0] != createStep {
 				return errors.New("unexpected zero-write step set")
 			}
 			if err := os.MkdirAll(root, 0o750); err != nil {
@@ -150,9 +146,7 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, createStep+".metrics.total.csv"), []byte(createMetrics), 0o600); err != nil {
 				return err
 			}
-			index := results.Manifest{Steps: []results.StepManifest{
-				{StepID: createStep}, {StepID: readStep},
-			}}
+			index := results.Manifest{Steps: []results.StepManifest{{StepID: createStep}}}
 			data, err := json.Marshal(index)
 			if err != nil {
 				return err
@@ -162,10 +156,11 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 	}
 	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
 
+	metadata := &runMetadata{ResultsRoot: resultsRoot}
 	monitor := startAutoResultsMonitor(
 		context.Background(), metricsServer.URL, "write-verify", t.TempDir(),
 		[]string{createStep, readStep}, runID, false, nil, "", false, 0,
-		scenarioPath, &runMetadata{ResultsRoot: resultsRoot}, io.Discard, io.Discard, "", nil,
+		scenarioPath, metadata, io.Discard, io.Discard, "", nil,
 		&integrity.FinalizeOptions{Workload: scenario.WorkloadTypeWriteVerify, RunID: runID},
 	)
 	monitor.Arm()
@@ -178,6 +173,17 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 
 	if outcome.TrackerErr != nil || outcome.ArtifactErr != nil || outcome.FinalizationErr != nil {
 		t.Fatalf("zero-write outcome lost primary producer cause: %+v", outcome)
+	}
+	if !tracker.requireTerminalCalled || !tracker.requireTerminalValue {
+		t.Fatalf("verification terminal policy = called %t value %t, want mandatory true",
+			tracker.requireTerminalCalled, tracker.requireTerminalValue)
+	}
+	if metricsRequests.Load() != 0 {
+		t.Fatalf("not-started READ issued %d live metrics request(s), want zero", metricsRequests.Load())
+	}
+	if strings.Join(outcome.StepIDs, ",") != createStep || strings.Join(metadata.ActualStepIDs, ",") != createStep {
+		t.Fatalf("runtime execution IDs = outcome %v metadata %v, want producer only %s",
+			outcome.StepIDs, metadata.ActualStepIDs, createStep)
 	}
 	if outcome.Tracker.Steps[readStep].Lifecycle != portcheck.StepLifecycleNotStarted {
 		t.Fatalf("READ lifecycle = %q, want not_started", outcome.Tracker.Steps[readStep].Lifecycle)

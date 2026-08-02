@@ -108,53 +108,6 @@ func TestFinalizeWriteVerifyPromotesValidatesAndDerivesRemaining(t *testing.T) {
 	}
 }
 
-func TestResolveStepRolesPreservesOrderedFirstMatchAcrossEvidenceSources(t *testing.T) {
-	tests := []struct {
-		name       string
-		workload   string
-		configured []string
-		manifest   []string
-		want       StepRoles
-	}{
-		{
-			name: "runtime write roles precede generated and manifest roles", workload: workload.WriteVerify,
-			configured: []string{
-				"mt-001-runtime-create", "mt-002-runtime-verify",
-				"mt-001-expected-create", "mt-002-expected-verify",
-			},
-			manifest: []string{"mt-001-manifest-create", "mt-002-manifest-verify"},
-			want:     StepRoles{Create: "mt-001-runtime-create", Read: "mt-002-runtime-verify"},
-		},
-		{
-			name: "expected-only write roles", workload: workload.WriteVerify,
-			configured: []string{"mt-001-expected-create", "mt-002-expected-verify"},
-			want:       StepRoles{Create: "mt-001-expected-create", Read: "mt-002-expected-verify"},
-		},
-		{
-			name: "runtime read discovery roles precede manifest", workload: workload.ReadVerify,
-			configured: []string{"mt-001-runtime-list", "mt-002-runtime-verify"},
-			manifest:   []string{"mt-001-manifest-list", "mt-002-manifest-verify"},
-			want:       StepRoles{List: "mt-001-runtime-list", Read: "mt-002-runtime-verify"},
-		},
-		{
-			name: "staged read has only verify role", workload: workload.ReadVerify,
-			configured: []string{"mt-001-runtime-verify"},
-			want:       StepRoles{Read: "mt-001-runtime-verify"},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			manifest := &results.Manifest{}
-			for _, stepID := range test.manifest {
-				manifest.Steps = append(manifest.Steps, results.StepManifest{StepID: stepID})
-			}
-			if got := ResolveStepRoles(test.workload, test.configured, manifest); got != test.want {
-				t.Fatalf("ResolveStepRoles() = %+v, want %+v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestFinalizeNotStartedReadRecordsIncompleteLifecycleWithoutMissingArtifactNoise(t *testing.T) {
 	root := t.TempDir()
 	readStep := "mt-001-verify"
@@ -220,6 +173,45 @@ func TestFinalizeFailedZeroWritePromotesProducerAndReportsEmptySelection(t *test
 		!manifest.Integrity.EmptySelection || manifest.Integrity.SelectionCount != 0 ||
 		manifest.Integrity.VerificationAttemptedCount != 0 {
 		t.Fatalf("incorrect zero-write machine summary: %+v", manifest.Integrity)
+	}
+}
+
+func TestFinalizeFailedEmptyListUsesPlannedNotStartedReadWithoutInventingExecution(t *testing.T) {
+	root := t.TempDir()
+	const runID = int64(212)
+	runtimeList := "mt-001-runtime-list"
+	plannedList := "mt-001-planned-list"
+	plannedRead := "mt-002-planned-verify"
+	writeResultsIndex(t, root, runtimeList)
+	writeCommittedFixture(t, root, runtimeList, VerifyInputName, runID, runtimeList, [][]string{canonicalHeader})
+
+	outcome, err := FinalizeResults(FinalizeOptions{
+		ResultsRoot:    root,
+		Workload:       workload.ReadVerify,
+		RunID:          runID,
+		StepIDs:        []string{runtimeList},
+		PlannedStepIDs: []string{plannedList, plannedRead},
+		StepLifecycles: map[string]string{
+			plannedList: string(results.StepLifecycleFailed),
+			plannedRead: string(results.StepLifecycleNotStarted),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed empty LIST evidence should finalize without READ noise: %v", err)
+	}
+	if outcome.Complete || outcome.SelectionCount != 0 || !outcome.EmptySelection ||
+		outcome.EmptyAllowed || outcome.VerificationAttemptedCount != 0 {
+		t.Fatalf("unexpected failed-LIST outcome: %+v", outcome)
+	}
+	for _, name := range []string{VerifyInputName, VerifyInputCompletionName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); statErr != nil {
+			t.Fatalf("canonical LIST evidence %s was not preserved: %v", name, statErr)
+		}
+	}
+	for _, name := range []string{VerifiedName, VerifiedCompletionName, VerifyRemainingName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("not-started READ artifact %s should be absent: %v", name, statErr)
+		}
 	}
 }
 

@@ -519,6 +519,41 @@ func TestRunTrackerTerminalRequiredIgnoresMatchingIdleMetricsUntilStatusTerminal
 	}
 }
 
+func TestRunTrackerTerminalRequiredBoundsIncompatibleMatchingStatus(t *testing.T) {
+	const expectedRunID = int64(818)
+	for _, state := range []string{"UNKNOWN_NEW_STATE", constants.StateIdle} {
+		t.Run(state, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"state": state, "run_id": expectedRunID, "step_id": "current-step",
+				})
+			})
+			mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode([]map[string]any{{
+					"run_id": expectedRunID, "step_id": "current-step", "timestamp": 1000,
+					"operations": map[string]any{"success_rate_last": 1},
+					"bandwidth":  map[string]any{"bytes_rate_last": 1},
+				}})
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			tracker := NewRunTracker(server.URL)
+			tracker.ExpectedRunID = expectedRunID
+			tracker.PollInterval = 2 * time.Millisecond
+			tracker.UnavailableTimeout = 15 * time.Millisecond
+			tracker.StartupTimeout = time.Second
+			tracker.RequireTerminalState = true
+			result, err := tracker.WaitForCompletion(context.Background(), []string{"current-step"})
+			if err == nil || !strings.Contains(err.Error(), "matching status for expected run 818 unavailable") ||
+				!strings.Contains(err.Error(), state) {
+				t.Fatalf("WaitForCompletion() = (%+v, %v), want bounded incompatible-state error", result, err)
+			}
+		})
+	}
+}
+
 func TestRunTrackerCancellationPreservesPartialLifecycle(t *testing.T) {
 	tracker := NewRunTracker("http://127.0.0.1:1")
 	ctx, cancel := context.WithCancel(context.Background())

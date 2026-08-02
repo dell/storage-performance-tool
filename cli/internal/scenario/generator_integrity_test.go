@@ -12,12 +12,11 @@ import (
 func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
 	tests := []struct {
 		name     string
-		workload string
 		generate func() (string, error)
 		want     func(StepPlan) integrity.StepRoles
 	}{
 		{
-			name: "write verify", workload: WorkloadTypeWriteVerify,
+			name: "write verify",
 			generate: func() (string, error) {
 				return GenerateWriteVerifyScenario(Params{
 					WorkloadType: WorkloadTypeWriteVerify, RunID: 501,
@@ -30,7 +29,7 @@ func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
 			},
 		},
 		{
-			name: "read verify discovery", workload: WorkloadTypeReadVerify,
+			name: "read verify discovery",
 			generate: func() (string, error) {
 				return GenerateReadVerifyScenario(Params{
 					WorkloadType: WorkloadTypeReadVerify, RunID: 502,
@@ -43,7 +42,7 @@ func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
 			},
 		},
 		{
-			name: "read verify staged", workload: WorkloadTypeReadVerify,
+			name: "read verify staged",
 			generate: func() (string, error) {
 				return GenerateReadVerifyScenario(Params{
 					WorkloadType: WorkloadTypeReadVerify, RunID: 503,
@@ -70,7 +69,7 @@ func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
 			for _, step := range plan.Steps {
 				ids = append(ids, step.ID)
 			}
-			if got, want := integrity.ResolveStepRoles(test.workload, ids, nil), test.want(plan); got != want {
+			if got, want := integrity.ResolveStepRoles(ids, nil), test.want(plan); got != want {
 				t.Fatalf("ResolveStepRoles(generated plan) = %+v, want %+v", got, want)
 			}
 		})

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -269,6 +270,65 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
 			}
 		})
+	}
+}
+
+func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previousGOOS := integrityRuntimeGOOS
+	integrityRuntimeGOOS = "linux"
+	t.Cleanup(func() { integrityRuntimeGOOS = previousGOOS })
+	for name, value := range map[string]string{
+		"test-hosts": "127.0.0.1", "min-hosts": "1",
+		"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+		"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+		"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+		"shutdown-on-complete": "false", "generate-only": "false", "items-file": "",
+	} {
+		setGlobalRunFlagForTest(t, name, value)
+	}
+
+	previousPort := resolvePortConflictFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		resolvePortConflictFunc = previousPort
+		startLocalHeadlessRunFunc = previousLocal
+		startAutoResultsFunc = previousAutoResults
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	const producerCause = "write verification produced zero successful objects"
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
+		_ string, _ bool, _ int, _ string, _ *runMetadata, _ io.Writer, _ io.Writer, _ string,
+		_ func(context.Context), options ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		if len(options) != 1 || options[0] == nil || options[0].Workload != WorkloadTypeWriteVerify {
+			t.Fatalf("RunE integrity options = %#v, want write-verify finalization", options)
+		}
+		outcomes := make(chan autoResultsOutcome, 1)
+		outcomes <- autoResultsOutcome{
+			Tracker: &portcheck.RunResult{
+				FinalState: constants.StateFailed, FailureStepID: "mt-001-create",
+				FailureCategory: "execution", FailureMessage: producerCause,
+			},
+			Finalization: &integrity.FinalizeOutcome{EmptySelection: true},
+		}
+		return &autoResultsMonitor{done: outcomes, armed: make(chan struct{})}
+	}
+
+	err := runCmd.RunE(runCmd, []string{WorkloadTypeWriteVerify})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+		!strings.Contains(err.Error(), producerCause) {
+		t.Fatalf("RunE() error = %#v, want exit %d preserving %q",
+			err, constants.ExitCodeWorkloadFailure, producerCause)
 	}
 }
 

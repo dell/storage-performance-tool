@@ -24,13 +24,15 @@ import (
 )
 
 type fakeRunTracker struct {
-	mu          sync.Mutex
-	called      bool
-	stepIDs     []string
-	debugCalled bool
-	debugValue  bool
-	result      *portcheck.RunResult
-	runID       int64
+	mu                    sync.Mutex
+	called                bool
+	stepIDs               []string
+	debugCalled           bool
+	debugValue            bool
+	requireTerminalCalled bool
+	requireTerminalValue  bool
+	result                *portcheck.RunResult
+	runID                 int64
 }
 
 // startAutoResults is a test-only convenience for cases that do not exercise
@@ -162,6 +164,13 @@ func (f *fakeRunTracker) SetDebug(debug bool) {
 
 func (f *fakeRunTracker) SetExpectedRunID(runID int64) { f.runID = runID }
 
+func (f *fakeRunTracker) SetRequireTerminalState(required bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requireTerminalCalled = true
+	f.requireTerminalValue = required
+}
+
 type cancelAwareRunTracker struct {
 	exited chan struct{}
 }
@@ -175,6 +184,8 @@ func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []strin
 func (*cancelAwareRunTracker) SetDebug(bool) {}
 
 func (*cancelAwareRunTracker) SetExpectedRunID(int64) {}
+
+func (*cancelAwareRunTracker) SetRequireTerminalState(bool) {}
 
 type fakeFetcher struct {
 	mu        sync.Mutex
@@ -313,6 +324,13 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("startAutoResults did not complete in time (possible hang due to stale step IDs)")
 	}
+	tracker.mu.Lock()
+	if !tracker.requireTerminalCalled || tracker.requireTerminalValue {
+		tracker.mu.Unlock()
+		t.Fatalf("ordinary terminal policy = called %t value %t, want explicit false",
+			tracker.requireTerminalCalled, tracker.requireTerminalValue)
+	}
+	tracker.mu.Unlock()
 
 	fetcher.mu.Lock()
 	defer fetcher.mu.Unlock()

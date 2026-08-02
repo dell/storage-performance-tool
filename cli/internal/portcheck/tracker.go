@@ -2,6 +2,7 @@ package portcheck
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -111,6 +112,8 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 	idleSince := time.Time{}
 	unavailableSince := time.Time{}
 	terminalStatusUnavailableSince := time.Time{}
+	lastIncompatibleState := ""
+	lastIncompatibleRunID := int64(0)
 	startupSince := t.Clock.Now()
 	t.seenActive = false
 	t.lastJSONTimestamp = 0
@@ -124,7 +127,7 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		}
 
 		// 1) Check run state
-		status, terminal, trackerAvailable := t.checkRunState(ctx)
+		status, terminal, trackerAvailable, matchingStateValid := t.checkRunState(ctx)
 		state := status.State
 		if t.Debug {
 			logging.LogDebug("auto-results", "poll",
@@ -146,8 +149,10 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			}
 		}
 		if t.RequireTerminalState {
-			if state != "" {
+			if matchingStateValid {
 				terminalStatusUnavailableSince = time.Time{}
+				lastIncompatibleState = ""
+				lastIncompatibleRunID = 0
 			} else if terminalStatusUnavailableSince.IsZero() {
 				terminalStatusUnavailableSince = t.Clock.Now()
 			} else {
@@ -156,10 +161,18 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 					unavailableTimeout = constants.AutoResultsUnavailableTimeout
 				}
 				if t.Clock.Now().Sub(terminalStatusUnavailableSince) >= unavailableTimeout {
-					return populateStepLifecycles(final, stepState, stepIDs), fmt.Errorf(
-						"matching status for expected run %d unavailable for %s",
+					message := fmt.Sprintf("matching status for expected run %d unavailable for %s",
 						t.ExpectedRunID, unavailableTimeout)
+					if lastIncompatibleState != "" {
+						message += fmt.Sprintf("; last incompatible state %q for run %d",
+							lastIncompatibleState, lastIncompatibleRunID)
+					}
+					return populateStepLifecycles(final, stepState, stepIDs), errors.New(message)
 				}
+			}
+			if state != "" && !matchingStateValid {
+				lastIncompatibleState = state
+				lastIncompatibleRunID = status.RunID
 			}
 		}
 
@@ -316,32 +329,32 @@ func populateStepLifecycles(final *RunResult, stepState map[string]*stepProbe, s
 	return final
 }
 
-func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal, available bool) {
+func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, terminal, available, matchingStateValid bool) {
 	// New contract: rely on /status only and retain its structured terminal cause.
 	if status, err := t.Client.getStatusDetail(ctx); err == nil {
 		if t.ExpectedRunID > 0 && status.RunID != t.ExpectedRunID {
 			// The endpoint is healthy, but it is describing an idle node or a
 			// retained prior run. Do not let that evidence arm or finish this run.
-			return terminalStatus{}, false, true
+			return terminalStatus{}, false, true, false
 		}
 		switch status.State {
 		case constants.StateRunning:
 			t.seenActive = true
-			return status, false, true
+			return status, false, true, true
 		case constants.StateStarting, constants.StateInitializing:
 			// A matching structured startup state proves that the submitted run
 			// exists even before it has emitted operations or step files.
 			t.seenActive = true
-			return status, false, true
+			return status, false, true, true
 		case constants.StateIdle:
-			return status, !t.RequireTerminalState && t.seenActive, true
+			return status, !t.RequireTerminalState && t.seenActive, true, !t.RequireTerminalState
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
-			return status, true, true
+			return status, true, true, true
 		default:
-			return status, false, false
+			return status, false, false, false
 		}
 	}
-	return terminalStatus{}, false, false
+	return terminalStatus{}, false, false, false
 }
 
 func isStructuredTerminalState(state string) bool {

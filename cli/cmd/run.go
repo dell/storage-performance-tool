@@ -54,6 +54,7 @@ type autoResultsRunTracker interface {
 	WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error)
 	SetDebug(bool)
 	SetExpectedRunID(int64)
+	SetRequireTerminalState(bool)
 }
 
 type runTrackerAdapter struct {
@@ -279,11 +280,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		parentCtx = monitorCtx
 		tracker := newRunTrackerFunc(baseURL)
 		tracker.SetExpectedRunID(expectedRunID)
-		if len(integrityOptions) > 0 && integrityOptions[0] != nil {
-			if terminalTracker, ok := tracker.(interface{ SetRequireTerminalState(bool) }); ok {
-				terminalTracker.SetRequireTerminalState(true)
-			}
-		}
+		verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
+		tracker.SetRequireTerminalState(verificationRun)
 		// Wait for terminal run state; step IDs discovered later via metrics/json
 		if len(expectedStepIDs) > 0 {
 			writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
@@ -427,12 +425,18 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 		}
 
-		if len(integrityOptions) > 0 && integrityOptions[0] != nil {
-			readStep := verificationReadStepID(integrityOptions[0].Workload, stepIDs)
-			if readStep == "" {
+		if verificationRun {
+			runtimeRoles := integrity.ResolveStepRoles(stepIDs, nil)
+			plannedRoles := integrity.ResolveStepRoles(expectedStepIDs, nil)
+			readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
+			if readLifecycle == portcheck.StepLifecycleNotStarted {
+				// A dependent READ which never started cannot publish runtime metrics.
+				// Its planned lifecycle remains part of finalization, while runtime
+				// evidence and ActualStepIDs stay exact.
+			} else if runtimeRoles.Read == "" {
 				outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
 			} else {
-				corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(postCtx, baseURL, readStep)
+				corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(postCtx, baseURL, runtimeRoles.Read)
 				outcome.CorruptionMetricsErr = observeErr
 				if observeErr == nil {
 					outcome.ObservedCorruptCount = &corrupt
@@ -456,7 +460,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
 			}
 		}
-		if artifactsReady && len(integrityOptions) > 0 && integrityOptions[0] != nil {
+		if artifactsReady && verificationRun {
 			options := *integrityOptions[0]
 			if outcome.Tracker != nil {
 				options.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
@@ -467,6 +471,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			options.ResultsRoot = root
 			options.BaseURL = baseURL
 			options.StepIDs = append([]string(nil), stepIDs...)
+			options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
 			options.Context = postCtx
 			finalized, finalizeErr := integrity.FinalizeResults(options)
 			outcome.Finalization = &finalized
@@ -570,8 +575,19 @@ func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOp
 	return options
 }
 
-func verificationReadStepID(workloadName string, stepIDs []string) string {
-	return integrity.ResolveStepRoles(workloadName, stepIDs, nil).Read
+func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID string) portcheck.StepLifecycle {
+	if result == nil {
+		return ""
+	}
+	for _, stepID := range []string{runtimeStepID, plannedStepID} {
+		if stepID == "" {
+			continue
+		}
+		if step, ok := result.Steps[stepID]; ok {
+			return step.Lifecycle
+		}
+	}
+	return ""
 }
 
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {

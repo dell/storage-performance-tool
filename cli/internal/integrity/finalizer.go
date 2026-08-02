@@ -52,6 +52,7 @@ type FinalizeOptions struct {
 	Workload            string
 	RunID               int64
 	StepIDs             []string
+	PlannedStepIDs      []string
 	StagedManifest      string
 	StagedCompletion    string
 	AllowEmptySelection bool
@@ -127,12 +128,16 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			finalErr = writeErr
 		}
 	}()
-	roles := ResolveStepRoles(options.Workload, options.StepIDs, manifest)
-	createStep, listStep, readStep := roles.Create, roles.List, roles.Read
+	runtimeRoles := ResolveStepRoles(options.StepIDs, manifest)
+	plannedRoles := ResolveStepRoles(options.PlannedStepIDs, nil)
+	createStep := firstStepRole(runtimeRoles.Create, plannedRoles.Create)
+	listStep := firstStepRole(runtimeRoles.List, plannedRoles.List)
+	readStep := firstStepRole(runtimeRoles.Read, plannedRoles.Read)
 	if readStep == "" {
 		return outcome, fmt.Errorf("verification READ step could not be identified")
 	}
-	readNotStarted := options.StepLifecycles[readStep] == string(results.StepLifecycleNotStarted)
+	readNotStarted := lifecycleForStepRole(options.StepLifecycles, runtimeRoles.Read, plannedRoles.Read) ==
+		string(results.StepLifecycleNotStarted)
 	readCounts := operationCounts{}
 	if !readNotStarted {
 		var metricsErr error
@@ -182,7 +187,11 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			return outcome, fmt.Errorf("verification input producer step could not be identified")
 		}
 		if readNotStarted {
-			producerLifecycle := options.StepLifecycles[producerStep]
+			producerLifecycle := lifecycleForStepRole(
+				options.StepLifecycles,
+				firstStepRole(runtimeRoles.Create, runtimeRoles.List),
+				firstStepRole(plannedRoles.Create, plannedRoles.List),
+			)
 			if producerLifecycle == string(results.StepLifecycleNotStarted) ||
 				producerLifecycle == string(results.StepLifecyclePlanned) {
 				return outcome, nil
@@ -342,8 +351,8 @@ type StepRoles struct {
 }
 
 // ResolveStepRoles preserves the first nonempty match for each role. Callers
-// place runtime-discovered IDs before generated and manifest-appended IDs.
-func ResolveStepRoles(_ string, configured []string, manifest *results.Manifest) StepRoles {
+// place runtime-discovered IDs before manifest-appended IDs.
+func ResolveStepRoles(configured []string, manifest *results.Manifest) StepRoles {
 	ids := append([]string(nil), configured...)
 	if manifest != nil {
 		for _, step := range manifest.Steps {
@@ -364,6 +373,27 @@ func ResolveStepRoles(_ string, configured []string, manifest *results.Manifest)
 		}
 	}
 	return roles
+}
+
+func firstStepRole(candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func lifecycleForStepRole(lifecycles map[string]string, runtimeStepID, plannedStepID string) string {
+	for _, stepID := range []string{runtimeStepID, plannedStepID} {
+		if stepID == "" {
+			continue
+		}
+		if lifecycle, ok := lifecycles[stepID]; ok {
+			return lifecycle
+		}
+	}
+	return ""
 }
 
 func contains(values []string, value string) bool {
