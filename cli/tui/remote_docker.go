@@ -119,6 +119,11 @@ func NewRemoteDockerManager(host *hostparse.HostInfo) (*RemoteDockerManager, err
 // ContainerID returns the last started container ID (if any)
 func (m *RemoteDockerManager) ContainerID() string { return m.containerID }
 
+// HasManagedResources reports whether cleanup must retain ownership for retry.
+func (m *RemoteDockerManager) HasManagedResources() bool {
+	return m.containerID != "" || m.stagingDir != ""
+}
+
 func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
 	if m.stagingDir == "" {
 		return nil

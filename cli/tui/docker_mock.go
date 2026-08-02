@@ -267,6 +267,11 @@ func (m *MockDockerManager) CleanupContext(ctx context.Context) error {
 	return nil
 }
 
+// HasManagedResources reports whether the mock still owns a container.
+func (m *MockDockerManager) HasManagedResources() bool {
+	return m.ContainerID() != ""
+}
+
 // Close simulates closing the Docker manager
 func (m *MockDockerManager) Close() {
 	m.mu.Lock()

@@ -82,6 +82,14 @@ type DockerManager struct {
 	fileMounts          []scenario.FileMount
 }
 
+// HasManagedResources reports container or remote staging ownership after cleanup.
+func (dm *DockerManager) HasManagedResources() bool {
+	if dm.remote != nil {
+		return dm.remote.HasManagedResources()
+	}
+	return dm.containerID != ""
+}
+
 func skipImagePull(image string) bool {
 	// Local-only dev images (spt_dev) are never in a registry; never try to pull them.
 	if constants.IsDevImage(image) {

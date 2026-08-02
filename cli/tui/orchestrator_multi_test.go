@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -265,11 +268,24 @@ func TestCleanupManagedContainersAfterStartFailureRetainsFailedHostForRetry(t *t
 
 type mountFailureDockerManager struct {
 	*MockDockerManager
-	mountErr error
+	mountErr     error
+	stagingOwned bool
 }
 
 func (m *mountFailureDockerManager) SetFileMounts([]scenario.FileMount) error {
 	return m.mountErr
+}
+
+func (m *mountFailureDockerManager) CleanupContext(ctx context.Context) error {
+	if m.failOnCleanup {
+		return errors.New("mock error: failed to cleanup remote staging")
+	}
+	m.stagingOwned = false
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *mountFailureDockerManager) HasManagedResources() bool {
+	return m.stagingOwned || m.MockDockerManager.HasManagedResources()
 }
 
 func TestItemStagingFailureRetainsManagedOwnershipWithoutContainerID(t *testing.T) {
@@ -279,6 +295,7 @@ func TestItemStagingFailureRetainsManagedOwnershipWithoutContainerID(t *testing.
 	manager := &mountFailureDockerManager{
 		MockDockerManager: NewMockDockerManager(),
 		mountErr:          errors.New("remote staging and cleanup failed"),
+		stagingOwned:      true,
 	}
 	manager.SetContainerID("")
 	manager.SetFailOnCleanup(true)
@@ -461,6 +478,39 @@ func TestMultiHostOrchestrator_StopAllContainers_DiagnosticsAfterCleanup(t *test
 	}
 }
 
+type diagnosticsOnlyCleanupErrorManager struct {
+	*MockDockerManager
+}
+
+func (m *diagnosticsOnlyCleanupErrorManager) CleanupContext(ctx context.Context) error {
+	if err := m.MockDockerManager.CleanupContext(ctx); err != nil {
+		return err
+	}
+	return errors.New("copy diagnostics: permission denied")
+}
+
+func TestStopAllContainersClearsOwnershipAfterDiagnosticsOnlyError(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &diagnosticsOnlyCleanupErrorManager{MockDockerManager: NewMockDockerManager()}
+	manager.SetContainerID("container-1")
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	err := orchestrator.StopAllContainers(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "copy diagnostics") {
+		t.Fatalf("StopAllContainers() error = %v, want diagnostics evidence error", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" || host.GetStatus() != HostStatusStopped ||
+		manager.HasManagedResources() {
+		t.Fatalf("diagnostics-only error retained false ownership: managed=%t hostID=%q status=%s resources=%t",
+			host.IsManaged(), host.ContainerID, host.GetStatus(), manager.HasManagedResources())
+	}
+}
+
 type blockingDiagnosticsDockerManager struct {
 	*MockDockerManager
 
@@ -540,6 +590,72 @@ func TestMultiHostOrchestrator_CollectDiagnosticsRunsHostsConcurrently(t *testin
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("CollectDiagnostics did not complete after host collectors were released")
+	}
+}
+
+type cancellationDrainDiagnosticsManager struct {
+	*MockDockerManager
+	host      string
+	wait      bool
+	started   chan<- struct{}
+	startOnce sync.Once
+}
+
+func (*cancellationDrainDiagnosticsManager) gracefulStopForDiagnostics(context.Context) error {
+	return nil
+}
+
+func (m *cancellationDrainDiagnosticsManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	if m.wait {
+		m.startOnce.Do(func() { m.started <- struct{}{} })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &diagnosticsRecord{Host: m.host, Role: constants.DockerRoleWorker, Collected: true}, nil
+}
+
+func (*cancellationDrainDiagnosticsManager) diagnosticsRecord() *diagnosticsRecord { return nil }
+
+func TestCollectDiagnosticsCancellationDrainsAvailableRecords(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "ready", Original: "ready"},
+		{Host: "canceled", Original: "canceled"},
+	}, 2)
+	root := t.TempDir()
+	orchestrator.SetResultsRoot(root)
+	started := make(chan struct{}, 1)
+	for index, host := range orchestrator.hosts {
+		host.SetManaged(true)
+		host.DockerManager = &cancellationDrainDiagnosticsManager{
+			MockDockerManager: NewMockDockerManager(),
+			host:              host.Info.Original,
+			wait:              index == 1,
+			started:           started,
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- orchestrator.CollectDiagnostics(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cancelable diagnostics worker did not start")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("CollectDiagnostics() error = %v, want context.Canceled", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, dockerDiagnosticsResultsDirName, dockerDiagnosticsManifestFileName))
+	if err != nil {
+		t.Fatalf("partial diagnostics manifest was not written: %v", err)
+	}
+	var manifest diagnosticsManifest
+	if err = json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Records) != 1 || manifest.Records[0].Host != "ready" {
+		t.Fatalf("partial diagnostics records = %+v, want completed host", manifest.Records)
 	}
 }
 
@@ -766,6 +882,91 @@ func TestMultiHostOrchestratorFinalizeDiagnosticsRetriesFailedCleanup(t *testing
 	}
 	if manager.GetCleanupCallCount() != 2 {
 		t.Fatalf("successful finalization reran cleanup: %d calls", manager.GetCleanupCallCount())
+	}
+}
+
+type slowFailedCleanupManager struct {
+	*MockDockerManager
+	started chan struct{}
+	release chan struct{}
+
+	mu        sync.Mutex
+	calls     int
+	active    int
+	maxActive int
+}
+
+func (m *slowFailedCleanupManager) CleanupContext(ctx context.Context) error {
+	m.mu.Lock()
+	m.calls++
+	call := m.calls
+	m.active++
+	if m.active > m.maxActive {
+		m.maxActive = m.active
+	}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.active--
+		m.mu.Unlock()
+	}()
+	if call == 1 {
+		close(m.started)
+		<-m.release
+		return errors.New("first cleanup failed after slow unwind")
+	}
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *slowFailedCleanupManager) counts() (calls, maxActive int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls, m.maxActive
+}
+
+func TestFinalizeDiagnosticsCanceledWaiterDoesNotExposeOverlappingRetry(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &slowFailedCleanupManager{
+		MockDockerManager: NewMockDockerManager(),
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	manager.SetContainerID("container-1")
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- orchestrator.FinalizeDiagnosticsAndCleanup(firstCtx) }()
+	select {
+	case <-manager.started:
+	case <-time.After(time.Second):
+		t.Fatal("first cleanup did not start")
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first waiter error = %v, want context.Canceled", err)
+	}
+
+	joinedDone := make(chan error, 1)
+	go func() { joinedDone <- orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()) }()
+	time.Sleep(25 * time.Millisecond)
+	if calls, maxActive := manager.counts(); calls != 1 || maxActive != 1 {
+		t.Fatalf("retry started before prior workers quiesced: calls=%d max_active=%d", calls, maxActive)
+	}
+	close(manager.release)
+	if err := <-joinedDone; err == nil || !strings.Contains(err.Error(), "slow unwind") {
+		t.Fatalf("joined attempt error = %v, want first cleanup failure", err)
+	}
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("retry after quiescence failed: %v", err)
+	}
+	if calls, maxActive := manager.counts(); calls != 2 || maxActive != 1 {
+		t.Fatalf("cleanup retry state: calls=%d max_active=%d, want 2/1", calls, maxActive)
 	}
 }
 

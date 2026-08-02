@@ -760,23 +760,36 @@ func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx co
 		if host == nil || !host.IsManaged() || host.DockerManager == nil {
 			continue
 		}
-		if err := cleanupDockerWithinContext(ctx, host.DockerManager); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, err))
-			continue
-		}
-		if host.DockerManager.ContainerID() != "" {
+		cleanupErr := cleanupDockerWithinContext(ctx, host.DockerManager)
+		if hasManagedDockerResources(host.DockerManager) {
+			if cleanupErr != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s: %w", host.Info.Original, cleanupErr))
+			}
 			cleanupErrors = append(cleanupErrors, fmt.Errorf(
-				"cleanup %s returned with container %s still owned",
-				host.Info.Original, host.DockerManager.ContainerID()))
+				"cleanup %s returned with managed resources still owned", host.Info.Original))
 			continue
 		}
 		markHostCleanupComplete(host)
+		if cleanupErr != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s evidence: %w", host.Info.Original, cleanupErr))
+		}
 	}
 	return errors.Join(cleanupErrors...)
 }
 
 func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
 	return manager.CleanupContext(ctx)
+}
+
+type managedDockerResourceReporter interface {
+	HasManagedResources() bool
+}
+
+func hasManagedDockerResources(manager DockerInterface) bool {
+	if reporter, ok := manager.(managedDockerResourceReporter); ok {
+		return reporter.HasManagedResources()
+	}
+	return manager.ContainerID() != ""
 }
 
 func markHostCleanupComplete(host *HostConnection) {
@@ -870,8 +883,9 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 					result.record = record
 				}
 			}
-			if err == nil && h.DockerManager.ContainerID() != "" {
-				err = fmt.Errorf("cleanup returned with container %s still present", h.DockerManager.ContainerID())
+			resourcesRemain := hasManagedDockerResources(h.DockerManager)
+			if err == nil && resourcesRemain {
+				err = fmt.Errorf("cleanup returned with managed resources still present")
 			}
 			if err != nil {
 				result.err = fmt.Errorf("%s: %w", h.Info.Original, err)
@@ -879,7 +893,8 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 					fmt.Errorf("host %s container %s: %w", h.Info.Original, containerID, err),
 					"host", h.Info.Original,
 					"container_id", containerID)
-			} else {
+			}
+			if !resourcesRemain {
 				o.notifyf("  ✅ Container stopped on %s", h.Info.Original)
 				logging.LogInfo("docker-multi", "container stopped",
 					"host", h.Info.Original,
@@ -889,16 +904,7 @@ func (o *MultiHostOrchestrator) StopAllContainers(ctx context.Context) error {
 		}(host)
 	}
 
-	waitDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(waitDone)
-	}()
-	select {
-	case <-waitDone:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	wg.Wait()
 	var records []diagnosticsRecord
 	var stopErrors []error
 	for range managedHosts {
@@ -928,6 +934,7 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
+	workerCount := 0
 	resultsCh := make(chan diagnosticsResult, len(o.hosts))
 	for _, host := range o.hosts {
 		if host == nil || !host.IsManaged() || host.DockerManager == nil {
@@ -938,6 +945,7 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 			continue
 		}
 		wg.Add(1)
+		workerCount++
 		go func(h *HostConnection, c diagnosticsCollector) {
 			defer wg.Done()
 			hostCtx, cancel := context.WithTimeout(ctx, constants.DiagnosticsCollectionTimeout)
@@ -957,20 +965,11 @@ func (o *MultiHostOrchestrator) CollectDiagnostics(ctx context.Context) error {
 		}(host, collector)
 	}
 
-	waitDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(waitDone)
-	}()
-	select {
-	case <-waitDone:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	wg.Wait()
 
 	var records []diagnosticsRecord
 	var errs []error
-	for pending := len(resultsCh); pending > 0; pending-- {
+	for pending := workerCount; pending > 0; pending-- {
 		result := <-resultsCh
 		if result.record != nil {
 			records = append(records, *result.record)
@@ -1003,14 +1002,20 @@ func (o *MultiHostOrchestrator) FinalizeDiagnosticsAndCleanup(ctx context.Contex
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	o.finalizeMu.Lock()
 	attempt := o.finalizeAttempt
 	if attempt == nil {
 		attempt = &cleanupAttempt{done: make(chan struct{})}
 		o.finalizeAttempt = attempt
+		attemptCtx, cancelAttempt := context.WithTimeout(
+			context.WithoutCancel(ctx), constants.DiagnosticsCollectionTimeout)
 		go func(active *cleanupAttempt) {
-			diagErr := o.CollectDiagnostics(ctx)
-			stopErr := o.StopAllContainers(ctx)
+			defer cancelAttempt()
+			diagErr := o.CollectDiagnostics(attemptCtx)
+			stopErr := o.StopAllContainers(attemptCtx)
 			active.err = errors.Join(diagErr, stopErr)
 			if active.err != nil {
 				o.finalizeMu.Lock()
