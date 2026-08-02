@@ -5,6 +5,8 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,6 +126,45 @@ func TestSptAPIClient_WaitForAPIReady(t *testing.T) {
 		}
 		if healthCalls != 1 {
 			t.Fatalf("expected one health probe, got %d", healthCalls)
+		}
+	})
+}
+
+func TestSptAPIClientWaitForAPIReadyContextCancelsPromptly(t *testing.T) {
+	requestSeen := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requestSeen <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := NewSptAPIClient(server.URL)
+
+	t.Run("already canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		started := time.Now()
+		err := client.WaitForAPIReadyContext(ctx, time.Second)
+		if !errors.Is(err, context.Canceled) || time.Since(started) > 100*time.Millisecond {
+			t.Fatalf("already-canceled readiness = %v after %s", err, time.Since(started))
+		}
+	})
+
+	t.Run("mid poll", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- client.WaitForAPIReadyContext(ctx, 5*time.Second) }()
+		select {
+		case <-requestSeen:
+		case <-time.After(time.Second):
+			t.Fatal("readiness probe did not start")
+		}
+		started := time.Now()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) || time.Since(started) > 100*time.Millisecond {
+			t.Fatalf("mid-poll cancellation = %v after %s", err, time.Since(started))
 		}
 	})
 }

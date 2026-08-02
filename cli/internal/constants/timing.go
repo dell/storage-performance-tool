@@ -10,6 +10,7 @@ import "time"
 const (
 	// API and connection timeouts
 	APIPollingTimeout               = 500 * time.Millisecond // Timeout for API polling requests
+	APIReadinessPollInterval        = 500 * time.Millisecond // Interval between API readiness probes
 	APIReadinessTimeout             = 30 * time.Second       // Timeout for waiting for APIs to be ready
 	PortCheckTimeout                = 2 * time.Second        // Timeout for checking if a port is open
 	AutoResultsTrackerPollInterval  = 500 * time.Millisecond // Completion-tracker polling interval

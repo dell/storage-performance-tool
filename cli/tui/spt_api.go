@@ -161,16 +161,28 @@ func NewSptAPIClient(baseURL string) *SptAPIClient {
 
 // WaitForAPIReady waits for the Spt API to become ready
 func (c *SptAPIClient) WaitForAPIReady(timeout time.Duration) error {
+	return c.WaitForAPIReadyContext(context.Background(), timeout)
+}
+
+// WaitForAPIReadyContext waits for readiness within both the caller lifecycle and timeout.
+func (c *SptAPIClient) WaitForAPIReadyContext(ctx context.Context, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	logging.LogInfo("spt-api", "waiting for API to become ready", "timeout", timeout, "url", c.baseURL)
 
-	deadline := time.Now().Add(timeout)
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	attempt := 0
 	firstReadyLogged := false
 	identityLogged := false
 
-	for time.Now().Before(deadline) {
+	for {
+		if err := readyCtx.Err(); err != nil {
+			return fmt.Errorf("spt API did not become ready after %v: %w", timeout, err)
+		}
 		attempt++
-		ready, info, body, statusCode, err := c.probeReady()
+		ready, info, body, statusCode, err := c.probeReadyContext(readyCtx)
 		if err != nil {
 			logging.LogDebug("spt-api", "readiness probe failed",
 				"attempt", attempt,
@@ -216,10 +228,19 @@ func (c *SptAPIClient) WaitForAPIReady(timeout time.Duration) error {
 			"body", truncateForLog(string(body), apiLogPreviewLen))
 
 	wait:
-		time.Sleep(500 * time.Millisecond)
+		timer := time.NewTimer(constants.APIReadinessPollInterval)
+		select {
+		case <-readyCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return fmt.Errorf("spt API did not become ready after %v: %w", timeout, readyCtx.Err())
+		case <-timer.C:
+		}
 	}
-
-	return fmt.Errorf("spt API did not become ready after %v", timeout)
 }
 
 // StartTest starts a new test run with the provided scenario and defaults

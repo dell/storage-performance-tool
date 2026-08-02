@@ -669,7 +669,10 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 }
 
 // WaitForAPIs waits for all container APIs to be ready
-func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Duration) error {
+func (o *MultiHostOrchestrator) WaitForAPIs(ctx context.Context, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	runningHosts := make([]*HostConnection, 0)
 	for _, host := range o.hosts {
 		if host.GetStatus() == HostStatusRunning {
@@ -695,7 +698,7 @@ func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Dura
 			apiURL := h.Info.GetAPIURL(o.apiPort)
 			apiClient := NewSptAPIClient(apiURL)
 
-			if err := apiClient.WaitForAPIReady(timeout); err != nil {
+			if err := apiClient.WaitForAPIReadyContext(ctx, timeout); err != nil {
 				h.SetError(fmt.Errorf("API not ready: %w", err))
 
 				apiErrorsMu.Lock()
@@ -723,6 +726,9 @@ func (o *MultiHostOrchestrator) WaitForAPIs(_ context.Context, timeout time.Dura
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Count successful APIs
 	apiReadyCount := 0
@@ -1084,6 +1090,11 @@ func (o *MultiHostOrchestrator) GetHostsInfo() []map[string]interface{} {
 type MultiHostTestOrchestrator struct {
 	multiHost *MultiHostOrchestrator
 
+	generateScenario  func(scenario.Params) (string, error)
+	buildEndpointArgs func(scenario.Params) ([]string, error)
+	generateDefaults  func(scenario.Params) ([]byte, error)
+	waitForAPIs       func(context.Context, time.Duration) error
+
 	// Callbacks
 	onStatusUpdate func(status *TestStatus)
 	onMetrics      func(update *MultiNodeMetricsUpdate) // Changed to multi-node
@@ -1145,15 +1156,19 @@ func NewMultiHostTestOrchestrator(multiHost *MultiHostOrchestrator) *MultiHostTe
 	}
 
 	return &MultiHostTestOrchestrator{
-		multiHost:     multiHost,
-		completionCh:  make(chan struct{}),
-		aggregator:    entryAggregator,
-		metricsPoller: NewAPIMetricsPoller(),         // Default implementation
-		pollInterval:  constants.MetricsPollInterval, // Default poll interval
-		pollStates:    make(map[string]*nodePollState),
-		backoffCfg:    multiNodeBackoff,
-		randSource:    rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- jitter only
-		logJSONBodies: os.Getenv("SPT_LOG_METRICS_BODY") == "1",
+		multiHost:         multiHost,
+		generateScenario:  scenario.GenerateScenario,
+		buildEndpointArgs: scenario.BuildEndpointArgs,
+		generateDefaults:  scenario.GenerateDefaults,
+		waitForAPIs:       multiHost.WaitForAPIs,
+		completionCh:      make(chan struct{}),
+		aggregator:        entryAggregator,
+		metricsPoller:     NewAPIMetricsPoller(),         // Default implementation
+		pollInterval:      constants.MetricsPollInterval, // Default poll interval
+		pollStates:        make(map[string]*nodePollState),
+		backoffCfg:        multiNodeBackoff,
+		randSource:        rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- jitter only
+		logJSONBodies:     os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
 }
 
@@ -1636,11 +1651,11 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 
 	// Determine if this is a single-host or multi-host test
 	if len(readyHosts) == 1 {
-		scenarioContent, err := scenario.GenerateScenario(params)
+		scenarioContent, err := m.generateScenario(params)
 		if err != nil {
 			return fmt.Errorf("failed to generate scenario content: %w", err)
 		}
-		defaultsContent, err := scenario.GenerateDefaults(params)
+		defaultsContent, err := m.generateDefaults(params)
 		if err != nil {
 			return fmt.Errorf("failed to generate defaults: %w", err)
 		}
@@ -1652,6 +1667,13 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 		// Behavior: run the workload only on the PRIMARY (first) host; start API-only
 		// containers on remaining hosts so they appear in the live view as idle.
 		if strings.EqualFold(params.WorkloadType, scenario.WorkloadTypeList) {
+			submitted := false
+			failBeforeSubmission := func(cause error) error {
+				if cause == nil || submitted {
+					return cause
+				}
+				return errors.Join(cause, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
+			}
 			startupArgs, err := scenario.BuildEngineStartupArgs(params)
 			if err != nil {
 				return fmt.Errorf("resolve engine startup settings: %w", err)
@@ -1694,7 +1716,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			}
 
 			// 2) Wait for APIs on any running hosts (likely just workers for now)
-			if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+			if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
 				// Not fatal to the primary run; continue but log
 				logging.LogError("orchestrator", "API readiness wait (workers) returned error", err)
 			}
@@ -1707,26 +1729,27 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			}
 
 			// 3) Generate scenario and start ENTRY container on primary (no worker addrs)
-			scenarioContent, err := scenario.GenerateScenario(params)
+			scenarioContent, err := m.generateScenario(params)
 			if err != nil {
-				return fmt.Errorf("failed to generate scenario: %w", err)
+				return failBeforeSubmission(fmt.Errorf("failed to generate scenario: %w", err))
 			}
 			m.multiHost.scenarioContent = scenarioContent
 
-			additionalArgs, err := scenario.BuildEndpointArgs(params)
+			additionalArgs, err := m.buildEndpointArgs(params)
 			if err != nil {
-				return fmt.Errorf("failed to build endpoint args: %w", err)
+				return failBeforeSubmission(fmt.Errorf("failed to build endpoint args: %w", err))
 			}
 			additionalArgs = append(additionalArgs, startupArgs...)
 
 			primary := readyHosts[0]
 			if primary.DockerManager == nil {
-				return fmt.Errorf("primary host %s has no Docker manager configured", primary.Info.Original)
+				return failBeforeSubmission(fmt.Errorf(
+					"primary host %s has no Docker manager configured", primary.Info.Original))
 			}
 			primary.SetPhase(NodePhaseContainerStarting)
 			cid, err := primary.DockerManager.StartEntryNodeContainer(image, []string{}, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
-				return err
+				return failBeforeSubmission(err)
 			}
 			primary.mu.Lock()
 			primary.ContainerID = cid
@@ -1735,8 +1758,8 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			primary.SetManaged(true)
 
 			// 4) Ensure APIs ready on all running nodes (now includes primary)
-			if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
-				return fmt.Errorf("failed waiting for APIs after LIST startup: %w", err)
+			if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+				return failBeforeSubmission(fmt.Errorf("failed waiting for APIs after LIST startup: %w", err))
 			}
 
 			if len(m.multiHost.hosts) > 0 {
@@ -1746,14 +1769,18 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			}
 
 			// 5) Start test via entry node API
-			defaultsContent, derr := scenario.GenerateDefaults(params)
+			if primary.APIClient == nil {
+				return failBeforeSubmission(fmt.Errorf("primary host %s API client not initialized", primary.Info.Original))
+			}
+			defaultsContent, derr := m.generateDefaults(params)
 			if derr != nil {
-				return fmt.Errorf("failed to generate defaults: %w", derr)
+				return failBeforeSubmission(fmt.Errorf("failed to generate defaults: %w", derr))
 			}
-			runID, serr := m.multiHost.hosts[0].APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
+			runID, serr := primary.APIClient.StartTest([]byte(m.multiHost.scenarioContent), defaultsContent)
 			if serr != nil {
-				return fmt.Errorf("failed to start LIST via entry node API: %w", serr)
+				return failBeforeSubmission(fmt.Errorf("failed to start LIST via entry node API: %w", serr))
 			}
+			submitted = true
 			hooks.NotifySubmitted()
 			if m.onOutput != nil {
 				m.onOutput(fmt.Sprintf("LIST started on primary with run ID: %s", runID))
@@ -1825,7 +1852,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 		if err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		defaultsContent, derr := scenario.GenerateDefaults(params)
+		defaultsContent, derr := m.generateDefaults(params)
 		if derr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to generate defaults: %w", derr),
@@ -1918,7 +1945,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := m.multiHost.StartContainers(ctx, runtimeImage, startupArgs); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+	if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
 		return errors.Join(
 			fmt.Errorf("failed waiting for single-host API: %w", err),
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
@@ -1976,7 +2003,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 	hooks LaunchHooks,
 ) error {
 	// Wait for APIs to be ready on all running hosts (ensures API clients set)
-	if err := m.multiHost.WaitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
+	if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
 		return errors.Join(
 			fmt.Errorf("failed waiting for APIs after distributed start: %w", err),
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),

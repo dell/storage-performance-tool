@@ -188,6 +188,51 @@ func TestMultiHostOrchestrator_WaitForAPIs_NoRunningContainers_Simple(t *testing
 	}
 }
 
+func TestMultiHostOrchestratorWaitForAPIsHonorsCallerCancellation(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "127.0.0.1", Original: "host1"}}, 1)
+	orchestrator.apiPort = "1"
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err := orchestrator.WaitForAPIs(ctx, 5*time.Second)
+	if !errors.Is(err, context.Canceled) || time.Since(started) > 100*time.Millisecond {
+		t.Fatalf("WaitForAPIs() = %v after %s, want prompt context cancellation", err, time.Since(started))
+	}
+}
+
+func TestMultiHostOrchestratorWaitForAPIsPreservesPartialReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "127.0.0.1", Original: "ready"},
+		{Host: "127.0.0.2", Original: "unavailable"},
+	}, 1)
+	orchestrator.apiPort = port
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusRunning)
+	}
+	if err = orchestrator.WaitForAPIs(context.Background(), 100*time.Millisecond); err != nil {
+		t.Fatalf("partial readiness should preserve the ready participant: %v", err)
+	}
+	if orchestrator.hosts[0].APIClient == nil || orchestrator.hosts[1].APIClient != nil {
+		t.Fatalf("partial readiness clients = ready:%p unavailable:%p",
+			orchestrator.hosts[0].APIClient, orchestrator.hosts[1].APIClient)
+	}
+}
+
 func TestMultiHostOrchestrator_StopAllContainers_NoRunning(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
@@ -2324,6 +2369,184 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 		if ws.IsActive {
 			t.Fatalf("worker should be inactive in baseline for LIST runs")
 		}
+	}
+}
+
+func TestMultiHostListPreSubmissionFailuresCleanEveryManagedContainer(t *testing.T) {
+	tests := []struct {
+		name      string
+		want      string
+		failRun   bool
+		configure func(*MultiHostTestOrchestrator, *MockDockerManager)
+	}{
+		{
+			name: "scenario generation", want: "scenario failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.generateScenario = func(scenario.Params) (string, error) {
+					return "", errors.New("scenario failure")
+				}
+			},
+		},
+		{
+			name: "endpoint arguments", want: "endpoint failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.buildEndpointArgs = func(scenario.Params) ([]string, error) {
+					return nil, errors.New("endpoint failure")
+				}
+			},
+		},
+		{
+			name: "missing primary manager", want: "no Docker manager",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.multiHost.hosts[0].DockerManager = nil
+			},
+		},
+		{
+			name: "primary start", want: "mock start entry node container failed",
+			configure: func(_ *MultiHostTestOrchestrator, primary *MockDockerManager) {
+				primary.SetFailOnStart(true)
+			},
+		},
+		{
+			name: "post-start readiness", want: "readiness failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				calls := 0
+				baseWait := wrapper.waitForAPIs
+				wrapper.waitForAPIs = func(ctx context.Context, timeout time.Duration) error {
+					calls++
+					if calls == 2 {
+						return errors.New("readiness failure")
+					}
+					return baseWait(ctx, timeout)
+				}
+			},
+		},
+		{
+			name: "defaults generation", want: "defaults failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.generateDefaults = func(scenario.Params) ([]byte, error) {
+					return nil, errors.New("defaults failure")
+				}
+			},
+		},
+		{name: "entry submission", want: "status 500", failRun: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/ready":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+				case "/run":
+					if test.failRun {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("ETag", "run-1")
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer server.Close()
+			u, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, port, err := net.SplitHostPort(u.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+				{Host: "127.0.0.1", Original: "primary"},
+				{Host: "127.0.0.1", Original: "worker"},
+			}, 2)
+			orchestrator.apiPort = port
+			primary, worker := NewMockDockerManager(), NewMockDockerManager()
+			orchestrator.hosts[0].DockerManager = primary
+			orchestrator.hosts[1].DockerManager = worker
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			wrapper := NewMultiHostTestOrchestrator(orchestrator)
+			if test.configure != nil {
+				test.configure(wrapper, primary)
+			}
+			var submitted atomic.Bool
+			err = wrapper.StartTestWithLaunchHooks(context.Background(), "image", scenario.Params{
+				WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket",
+				Endpoint: server.URL,
+			}, LaunchHooks{OnSubmitted: func() { submitted.Store(true) }})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("LIST failure = %v, want %q", err, test.want)
+			}
+			if submitted.Load() {
+				t.Fatal("failed LIST launch notified submission")
+			}
+			for _, host := range orchestrator.hosts {
+				if host.DockerManager == nil {
+					continue
+				}
+				if host.IsManaged() || host.ContainerID != "" || host.GetStatus() == HostStatusRunning {
+					t.Fatalf("%s retained cleanup ownership: managed=%t id=%q status=%s",
+						host.Info.Original, host.IsManaged(), host.ContainerID, host.GetStatus())
+				}
+			}
+		})
+	}
+}
+
+func TestMultiHostListCleanupFailureRetainsWorkerForRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "127.0.0.1", Original: "primary"},
+		{Host: "127.0.0.1", Original: "worker"},
+	}, 2)
+	orchestrator.apiPort = port
+	primary, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = primary
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	worker.SetFailOnCleanup(true)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.generateScenario = func(scenario.Params) (string, error) {
+		return "", errors.New("scenario failure")
+	}
+	err = wrapper.StartTest(context.Background(), "image", scenario.Params{
+		WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket", Endpoint: server.URL,
+	})
+	if err == nil || !strings.Contains(err.Error(), "scenario failure") ||
+		!strings.Contains(err.Error(), "failed to cleanup") {
+		t.Fatalf("LIST cleanup failure = %v, want primary cause plus cleanup failure", err)
+	}
+	host := orchestrator.hosts[1]
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed LIST cleanup lost worker retry ownership: managed=%t id=%q",
+			host.IsManaged(), host.ContainerID)
+	}
+	worker.SetFailOnCleanup(false)
+	if err = orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("LIST cleanup retry failed: %v", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" {
+		t.Fatalf("LIST cleanup retry retained worker: managed=%t id=%q", host.IsManaged(), host.ContainerID)
 	}
 }
 
