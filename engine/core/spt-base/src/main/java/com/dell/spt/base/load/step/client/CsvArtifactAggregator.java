@@ -4,6 +4,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
+import com.dell.spt.base.integrity.IntegrityManifestOrder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
@@ -38,10 +39,9 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 
 	static final int SORT_CHUNK_RECORDS = 64 * 1024;
 	private static final int MERGE_FAN_IN = 64;
-	private static final Comparator<ManifestRecord> RECORD_ORDER = Comparator
-					.comparing(ManifestRecord::bucket)
-					.thenComparing(ManifestRecord::key)
-					.thenComparing(ManifestRecord::versionId);
+	private static final Comparator<ManifestRecord> RECORD_ORDER = (left, right) -> IntegrityManifestOrder.compareIdentity(
+					left.bucket(), left.key(), left.versionId(),
+					right.bucket(), right.key(), right.versionId());
 
 	private final String loadStepId;
 	private final long runId;
@@ -295,8 +295,48 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			return true;
 		}
 
+		@Override
 		public void close() throws IOException {
 			parser.close();
+		}
+	}
+
+	private static final class ChunkCursorCollection implements AutoCloseable {
+		private final List<ChunkCursor> cursors;
+
+		private ChunkCursorCollection(final int capacity) {
+			cursors = new ArrayList<>(capacity);
+		}
+
+		private int size() {
+			return cursors.size();
+		}
+
+		private void add(final ChunkCursor cursor) {
+			cursors.add(cursor);
+		}
+
+		private ChunkCursor get(final int index) {
+			return cursors.get(index);
+		}
+
+		@Override
+		public void close() throws IOException {
+			IOException failure = null;
+			for (final ChunkCursor cursor : cursors) {
+				try {
+					cursor.close();
+				} catch (final IOException e) {
+					if (failure == null) {
+						failure = e;
+					} else {
+						failure.addSuppressed(e);
+					}
+				}
+			}
+			if (failure != null) {
+				throw failure;
+			}
 		}
 	}
 
@@ -395,14 +435,14 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final boolean includeHeader,
 					final long selectionLimit)
 					throws IOException {
-		final List<ChunkCursor> cursors = new ArrayList<>(chunks.size());
 		final PriorityQueue<MergeEntry> queue = new PriorityQueue<>((left, right) -> {
 			final int compared = RECORD_ORDER.compare(left.record(), right.record());
 			return compared != 0 ? compared : Integer.compare(left.source(), right.source());
 		});
-		try (CSVPrinter printer = new CSVPrinter(
-						Files.newBufferedWriter(target, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
-						IntegrityCsvFormat.RFC4180_LF)) {
+		try (ChunkCursorCollection cursors = new ChunkCursorCollection(chunks.size());
+						CSVPrinter printer = new CSVPrinter(
+										Files.newBufferedWriter(target, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
+										IntegrityCsvFormat.RFC4180_LF)) {
 			if (includeHeader) {
 				printer.printRecord(IntegrityManifestItemInput.HEADER);
 			}
@@ -437,22 +477,6 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 				}
 			}
 			return new MergeCounts(unique, selected);
-		} finally {
-			IOException failure = null;
-			for (final ChunkCursor cursor : cursors) {
-				try {
-					cursor.close();
-				} catch (final IOException e) {
-					if (failure == null) {
-						failure = e;
-					} else {
-						failure.addSuppressed(e);
-					}
-				}
-			}
-			if (failure != null) {
-				throw failure;
-			}
 		}
 	}
 

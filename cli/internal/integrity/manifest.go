@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -42,6 +43,11 @@ func parseManifestRecord(fields []string, recordNumber int) (ManifestRecord, err
 	}
 	if fields[0] == "" || fields[1] == "" {
 		return ManifestRecord{}, fmt.Errorf("canonical record %d has an empty bucket or key", recordNumber)
+	}
+	for index, field := range fields {
+		if !utf8.ValidString(field) {
+			return ManifestRecord{}, fmt.Errorf("canonical record %d field %d is not valid UTF-8", recordNumber, index+1)
+		}
 	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil || size < 0 {
@@ -137,59 +143,82 @@ func validateCompletionRecord(
 		return fmt.Errorf("completion record counts are inconsistent")
 	}
 
-	manifest, err := os.Open(manifestPath) // #nosec G304 -- result/staging path selected by the caller
-	if err != nil {
-		return fmt.Errorf("open committed manifest: %w", err)
-	}
-	hasher := sha256.New()
-	bytesRead, err := io.Copy(hasher, manifest)
-	if closeErr := manifest.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return fmt.Errorf("hash committed manifest: %w", err)
-	}
-	actualDigest := hex.EncodeToString(hasher.Sum(nil))
-	if marker.ManifestBytes != bytesRead || marker.ManifestSHA256 != actualDigest ||
-		len(marker.ManifestSHA256) != sha256.Size*2 || marker.ManifestSHA256 != strings.ToLower(marker.ManifestSHA256) {
-		return fmt.Errorf("completion length/digest does not match committed manifest")
-	}
-
-	count, err := validateCanonicalManifest(manifestPath)
+	evidence, err := validateCanonicalManifestEvidence(manifestPath)
 	if err != nil {
 		return err
 	}
-	if count != marker.SelectedRecordCount {
-		return fmt.Errorf("manifest has %d records but completion selected_record_count is %d", count, marker.SelectedRecordCount)
+	if marker.ManifestBytes != evidence.bytes || marker.ManifestSHA256 != evidence.sha256 ||
+		len(marker.ManifestSHA256) != sha256.Size*2 || marker.ManifestSHA256 != strings.ToLower(marker.ManifestSHA256) {
+		return fmt.Errorf("completion length/digest does not match committed manifest")
+	}
+	if evidence.count != marker.SelectedRecordCount {
+		return fmt.Errorf("manifest has %d records but completion selected_record_count is %d", evidence.count, marker.SelectedRecordCount)
 	}
 	return nil
 }
 
-func validateCanonicalManifest(path string) (int, error) {
+type canonicalManifestEvidence struct {
+	count  int
+	bytes  int64
+	sha256 string
+}
+
+type byteCounter struct{ count int64 }
+
+func (counter *byteCounter) Write(data []byte) (int, error) {
+	counter.count += int64(len(data))
+	return len(data), nil
+}
+
+func validateCanonicalManifestEvidence(path string) (canonicalManifestEvidence, error) {
+	var evidence canonicalManifestEvidence
 	file, err := os.Open(path) // #nosec G304 -- result/staging path selected by the caller
 	if err != nil {
-		return 0, err
+		return evidence, err
 	}
-	defer func() { _ = file.Close() }()
-	reader := csv.NewReader(file)
+	hasher := sha256.New()
+	counter := &byteCounter{}
+	reader := csv.NewReader(io.TeeReader(file, io.MultiWriter(hasher, counter)))
 	reader.FieldsPerRecord = len(canonicalHeader)
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
-		return 0, fmt.Errorf("manifest %s does not have the exact canonical header", filepath.Base(path))
+		_ = file.Close()
+		return evidence, fmt.Errorf("manifest %s does not have the exact canonical header", filepath.Base(path))
 	}
 	count := 0
+	var prior *ManifestRecord
 	for {
 		fields, readErr := reader.Read()
 		if errors.Is(readErr, io.EOF) {
-			return count, nil
+			if closeErr := file.Close(); closeErr != nil {
+				return evidence, fmt.Errorf("close committed manifest: %w", closeErr)
+			}
+			evidence.count = count
+			evidence.bytes = counter.count
+			evidence.sha256 = hex.EncodeToString(hasher.Sum(nil))
+			return evidence, nil
 		}
 		if readErr != nil {
-			return 0, fmt.Errorf("parse manifest record %d: %w", count+2, readErr)
+			_ = file.Close()
+			return evidence, fmt.Errorf("parse manifest record %d: %w", count+2, readErr)
 		}
 		count++
-		if _, err := parseManifestRecord(fields, count+1); err != nil {
-			return 0, err
+		record, parseErr := parseManifestRecord(fields, count+1)
+		if parseErr != nil {
+			_ = file.Close()
+			return evidence, parseErr
 		}
+		if prior != nil {
+			switch compared := prior.compare(record); {
+			case compared == 0:
+				_ = file.Close()
+				return evidence, fmt.Errorf("manifest %s has duplicate identity at record %d", filepath.Base(path), count+1)
+			case compared > 0:
+				_ = file.Close()
+				return evidence, fmt.Errorf("manifest %s is not strictly ordered at record %d", filepath.Base(path), count+1)
+			}
+		}
+		prior = &record
 	}
 }
 

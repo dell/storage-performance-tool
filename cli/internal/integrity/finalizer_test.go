@@ -29,7 +29,7 @@ func TestFinalizeWriteVerifyPromotesValidatesAndDerivesRemaining(t *testing.T) {
 	readStep := "mt-002-test-verify"
 	writeResultsIndex(t, root, createStep, readStep)
 
-	written := [][]string{{"bucket", "key", "size", "version_id"}, {"b", "z", "3", "v2"}, {"b", "a", "1", ""}}
+	written := [][]string{{"bucket", "key", "size", "version_id"}, {"b", "a", "1", ""}, {"b", "z", "3", "v2"}}
 	verified := [][]string{{"bucket", "key", "size", "version_id"}, {"b", "a", "1", ""}}
 	writeCommittedFixture(t, root, createStep, WrittenName, 101, createStep, written)
 	writeCommittedFixture(t, root, readStep, VerifiedName, 101, readStep, verified)

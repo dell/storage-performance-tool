@@ -105,8 +105,50 @@ func TestValidateCanonicalManifestPortableAcceptsQuotedNewline(t *testing.T) {
 	if err = file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := validateCanonicalManifest(path); err != nil || count != 1 {
-		t.Fatalf("validateCanonicalManifest() = (%d, %v), want one record", count, err)
+	if evidence, err := validateCanonicalManifestEvidence(path); err != nil || evidence.count != 1 {
+		t.Fatalf("validateCanonicalManifestEvidence() = (%+v, %v), want one record", evidence, err)
+	}
+}
+
+func TestValidateCanonicalManifestPortableRequiresStrictUniqueOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "out of order",
+			body: "bucket,key,size,version_id\nb,z,1,\nb,a,1,\n",
+			want: "not strictly ordered",
+		},
+		{
+			name: "duplicate identity",
+			body: "bucket,key,size,version_id\nb,a,1,\nb,a,1,\n",
+			want: "duplicate identity",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "manifest.csv")
+			if err := os.WriteFile(path, []byte(test.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := validateCanonicalManifestEvidence(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateCanonicalManifestPortableRejectsMalformedUTF8(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.csv")
+	body := append([]byte("bucket,key,size,version_id\nb,"), 0xff)
+	body = append(body, []byte(",1,\n")...)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateCanonicalManifestEvidence(path); err == nil || !strings.Contains(err.Error(), "valid UTF-8") {
+		t.Fatalf("validation error = %v, want invalid UTF-8", err)
 	}
 }
 

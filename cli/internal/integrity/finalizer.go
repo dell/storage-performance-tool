@@ -297,25 +297,8 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 		return outcome, fmt.Errorf("integrity failure rows %d do not equal CountCorrupt %d", failureCount, outcome.CorruptCount)
 	}
 
-	sortTempDir, err := os.MkdirTemp("", "spt-integrity-finalize-*")
-	if err != nil {
-		return outcome, fmt.Errorf("create private manifest sort directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(sortTempDir) }()
-	inputSorted, inputUnique, err := sortManifestBoundedContext(ctx, inputPath, sortTempDir)
-	if err != nil {
-		return outcome, fmt.Errorf("sort %s: %w", inputName, err)
-	}
-	defer func() { _ = os.Remove(inputSorted) }()
-	verifiedSorted, verifiedUnique, err := sortManifestBoundedContext(ctx, verifiedPath, sortTempDir)
-	if err != nil {
-		return outcome, fmt.Errorf("sort %s: %w", VerifiedName, err)
-	}
-	defer func() { _ = os.Remove(verifiedSorted) }()
-	if inputUnique != inputCompletion.SelectedRecordCount || verifiedUnique != verifiedCompletion.SelectedRecordCount {
-		return outcome, fmt.Errorf("canonical manifest contains duplicate identities inconsistent with its completion record")
-	}
-	remaining, err := subtractSortedManifests(ctx, inputSorted, verifiedSorted, filepath.Join(options.ResultsRoot, VerifyRemainingName))
+	remaining, err := subtractSortedManifests(
+		ctx, inputPath, verifiedPath, filepath.Join(options.ResultsRoot, VerifyRemainingName))
 	if err != nil {
 		return outcome, err
 	}

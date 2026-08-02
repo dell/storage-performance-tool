@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -89,6 +91,52 @@ class IntegrityManifestCompletionTest {
 						() -> IntegrityManifestCompletion.create(
 										manifest, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
 										"list-step", -1, 0, 0));
+	}
+
+	@Test
+	void requiresStrictUniqueCanonicalIdentityOrder() throws Exception {
+		final Path outOfOrder = tempDir.resolve("out-of-order.csv");
+		Files.writeString(
+						outOfOrder,
+						"bucket,key,size,version_id\r\nb,z,1,\r\nb,a,1,\r\n");
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										outOfOrder, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", 2, 2, 2));
+
+		final Path duplicate = tempDir.resolve("duplicate.csv");
+		Files.writeString(
+						duplicate,
+						"bucket,key,size,version_id\r\nb,a,1,\r\nb,a,1,\r\n");
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										duplicate, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", 2, 2, 2));
+	}
+
+	@Test
+	void canonicalOrderUsesUnicodeCodePoints() {
+		assertEquals(
+						-1,
+						Integer.signum(IntegrityManifestOrder.compareIdentity(
+										"b", "\uE000", "", "b", "\uD800\uDC00", "")));
+	}
+
+	@Test
+	void rejectsMalformedUtf8() throws Exception {
+		final Path manifest = tempDir.resolve("malformed-utf8.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,", StandardCharsets.UTF_8);
+		Files.write(manifest, new byte[]{(byte) 0xff
+		}, StandardOpenOption.APPEND);
+		Files.writeString(manifest, ",1,\r\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+
+		assertThrows(
+						IOException.class,
+						() -> IntegrityManifestCompletion.create(
+										manifest, 9, IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+										"list-step", 1, 1, 1));
 	}
 
 	@Test
