@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -53,6 +54,8 @@ type FinalizeOptions struct {
 	RunID               int64
 	StepIDs             []string
 	PlannedStepIDs      []string
+	Plan                integrityplan.Plan
+	RuntimeRoles        StepRoles
 	StagedManifest      string
 	StagedCompletion    string
 	AllowEmptySelection bool
@@ -91,6 +94,20 @@ type FailureSample struct {
 // FinalizeResults promotes role-specific evidence, validates commit records, derives the exact
 // remaining set, combines performance rows, and atomically updates index.json.
 func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr error) {
+	if options.Plan.Valid() {
+		if options.Workload != "" && options.Workload != options.Plan.Workload {
+			return outcome, fmt.Errorf("finalizer workload %q does not match typed plan %q",
+				options.Workload, options.Plan.Workload)
+		}
+		if options.RunID != 0 && options.RunID != options.Plan.RunID {
+			return outcome, fmt.Errorf("finalizer run id %d does not match typed plan %d",
+				options.RunID, options.Plan.RunID)
+		}
+		options.Workload = options.Plan.Workload
+		options.RunID = options.Plan.RunID
+		options.AllowEmptySelection = options.Plan.AllowEmpty
+		options.Multipart = options.Plan.Multipart
+	}
 	if options.Workload != workload.WriteVerify && options.Workload != workload.ReadVerify {
 		return outcome, fmt.Errorf("integrity finalizer does not support workload %q", options.Workload)
 	}
@@ -128,8 +145,14 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			finalErr = writeErr
 		}
 	}()
-	runtimeRoles := ResolveStepRoles(options.StepIDs, manifest)
-	plannedRoles := ResolveStepRoles(options.PlannedStepIDs, nil)
+	runtimeRoles := options.RuntimeRoles
+	if !options.Plan.Valid() && runtimeRoles == (StepRoles{}) {
+		runtimeRoles = ResolveStepRoles(options.StepIDs, manifest)
+	}
+	plannedRoles := PlannedStepRoles(options.Plan)
+	if !options.Plan.Valid() {
+		plannedRoles = ResolveStepRoles(options.PlannedStepIDs, nil)
+	}
 	createStep := firstStepRole(runtimeRoles.Create, plannedRoles.Create)
 	listStep := firstStepRole(runtimeRoles.List, plannedRoles.List)
 	readStep := firstStepRole(runtimeRoles.Read, plannedRoles.Read)
@@ -350,8 +373,73 @@ type StepRoles struct {
 	Read   string
 }
 
-// ResolveStepRoles preserves the first nonempty match for each role. Callers
-// place runtime-discovered IDs before manifest-appended IDs.
+// PlannedStepRoles projects the immutable typed plan into finalizer roles.
+func PlannedStepRoles(plan integrityplan.Plan) StepRoles {
+	roles := StepRoles{}
+	if !plan.Valid() {
+		return roles
+	}
+	if plan.Producer != nil {
+		switch plan.Producer.Role {
+		case integrityplan.StepRoleCreate:
+			roles.Create = plan.Producer.ID
+		case integrityplan.StepRoleList:
+			roles.List = plan.Producer.ID
+		}
+	}
+	if plan.Verifier.Role == integrityplan.StepRoleVerify {
+		roles.Read = plan.Verifier.ID
+	}
+	return roles
+}
+
+// ObservedStepRoles returns only typed plan roles whose exact IDs occur in
+// runtime evidence. Timestamp-reassigned runtime IDs bind through the stable
+// typed step ordinal; semantic roles are never inferred from an ID suffix.
+func ObservedStepRoles(plan integrityplan.Plan, observed []string) StepRoles {
+	if !plan.Valid() {
+		return StepRoles{}
+	}
+	byNumber := make(map[int]string, len(observed))
+	seen := make(map[string]struct{}, len(observed))
+	for _, runtimeID := range observed {
+		seen[runtimeID] = struct{}{}
+		if number, ok := integrityplan.RuntimeStepNumber(runtimeID); ok {
+			existing, exists := byNumber[number]
+			switch {
+			case !exists:
+				byNumber[number] = runtimeID
+			case existing != runtimeID:
+				// Multiple runtime identities for one ordinal are not enough
+				// evidence to bind either identity to a semantic role.
+				byNumber[number] = ""
+			}
+		}
+	}
+	resolve := func(step *integrityplan.PlannedStep) string {
+		if step == nil {
+			return ""
+		}
+		if _, exact := seen[step.ID]; exact {
+			return step.ID
+		}
+		return byNumber[step.Number]
+	}
+	roles := StepRoles{}
+	if plan.Producer != nil {
+		switch plan.Producer.Role {
+		case integrityplan.StepRoleCreate:
+			roles.Create = resolve(plan.Producer)
+		case integrityplan.StepRoleList:
+			roles.List = resolve(plan.Producer)
+		}
+	}
+	roles.Read = resolve(&plan.Verifier)
+	return roles
+}
+
+// ResolveStepRoles preserves suffix-based compatibility for legacy callers
+// that do not carry a typed plan. New verification runs use exact planned IDs.
 func ResolveStepRoles(configured []string, manifest *results.Manifest) StepRoles {
 	ids := append([]string(nil), configured...)
 	if manifest != nil {

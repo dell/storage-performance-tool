@@ -286,7 +286,7 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 		return nil
 	}
 
-	const runtimeList = "mt-001-runtime-list"
+	const runtimeList = "mt-001-20260802.190000.000-list"
 	const producerCause = "LIST failed before selecting verification objects"
 	var tracker *fakeRunTracker
 	var capturedMetadata *runMetadata

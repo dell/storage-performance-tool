@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -34,7 +35,15 @@ func TestPrepareRunBundleGeneratesEachInputOnce(t *testing.T) {
 		},
 		BuildStepPlan: func(string) (scenario.StepPlan, error) {
 			planCalls++
-			return scenario.StepPlan{Steps: []scenario.StepInfo{{ID: "step-001"}}}, nil
+			return scenario.StepPlan{Steps: []scenario.StepInfo{{ID: "step-001", Number: 2}}}, nil
+		},
+		BuildVerifyPlan: func(params scenario.Params, plan scenario.StepPlan) (integrityplan.Plan, error) {
+			return integrityplan.Plan{
+				RunID: params.RunID, Workload: params.WorkloadType,
+				Producer: &integrityplan.PlannedStep{ID: "create", Number: 1, Role: integrityplan.StepRoleCreate},
+				Verifier: integrityplan.PlannedStep{ID: plan.Steps[0].ID, Number: plan.Steps[0].Number, Role: integrityplan.StepRoleVerify},
+				Input:    integrityplan.InputWritten,
+			}, nil
 		},
 		WriteScenario:  os.WriteFile,
 		RemoveScenario: os.Remove,
@@ -57,6 +66,9 @@ func TestPrepareRunBundleGeneratesEachInputOnce(t *testing.T) {
 	}
 	if got := prepared.FileMounts(); len(got) != 1 || got[0].HostPath != "/host/input" {
 		t.Fatalf("file mounts = %+v", got)
+	}
+	if verifyPlan, ok := prepared.VerificationPlan(); !ok || verifyPlan.Verifier.ID != "step-001" {
+		t.Fatalf("typed verification plan = %+v, ok=%t", verifyPlan, ok)
 	}
 	if err := prepared.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)

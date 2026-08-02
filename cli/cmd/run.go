@@ -21,6 +21,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
@@ -448,9 +449,17 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 		}
 
+		var observedRuntimeRoles integrity.StepRoles
 		if verificationRun {
-			runtimeRoles := integrity.ResolveStepRoles(stepIDs, nil)
-			plannedRoles := integrity.ResolveStepRoles(expectedStepIDs, nil)
+			plan := integrityOptions[0].Plan
+			plannedRoles := integrity.PlannedStepRoles(plan)
+			if plan.Valid() {
+				observedRuntimeRoles = integrity.ObservedStepRoles(plan, stepIDs)
+			} else {
+				observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
+				plannedRoles = integrity.ResolveStepRoles(expectedStepIDs, nil)
+			}
+			runtimeRoles := observedRuntimeRoles
 			readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
 			// A dependent READ which never started cannot publish runtime metrics.
 			// Its planned lifecycle remains part of finalization, while runtime
@@ -496,6 +505,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			options.BaseURL = baseURL
 			options.StepIDs = append([]string(nil), stepIDs...)
 			options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
+			options.RuntimeRoles = observedRuntimeRoles
 			options.Context = artifactCtx
 			finalized, finalizeErr := integrity.FinalizeResults(options)
 			outcome.Finalization = &finalized
@@ -596,13 +606,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 	return monitor
 }
 
-func buildIntegrityFinalizeOptions(params scenario.Params) *integrity.FinalizeOptions {
+func buildIntegrityFinalizeOptions(params scenario.Params, plan integrityplan.Plan) *integrity.FinalizeOptions {
 	options := &integrity.FinalizeOptions{
-		Workload:            params.WorkloadType,
-		RunID:               params.RunID,
-		AllowEmptySelection: params.AllowEmptySelection,
+		Workload:            plan.Workload,
+		RunID:               plan.RunID,
+		AllowEmptySelection: plan.AllowEmpty,
 		MaxConsoleFailures:  params.IntegrityMaxConsoleFailures,
-		Multipart:           params.PartSize != "",
+		Multipart:           plan.Multipart,
+		Plan:                plan.Clone(),
 	}
 	for _, mount := range params.ItemFileMounts {
 		switch filepath.Base(mount.ContainerPath) {
@@ -1337,7 +1348,11 @@ Available workload types:
 		runContext := commandContext(cmd)
 		var integrityOptions *integrity.FinalizeOptions
 		if verificationRun {
-			integrityOptions = buildIntegrityFinalizeOptions(params)
+			verifyPlan, ok := prepared.VerificationPlan()
+			if !ok {
+				return fmt.Errorf("prepared verification run is missing its typed plan")
+			}
+			integrityOptions = buildIntegrityFinalizeOptions(params, verifyPlan)
 		}
 		var autoMonitor *autoResultsMonitor
 		onSubmitted := func() {

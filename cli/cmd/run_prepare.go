@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -21,6 +22,7 @@ type runPreparationDependencies struct {
 	GenerateScenario func(scenario.Params) (string, error)
 	GenerateDefaults func(scenario.Params) ([]byte, error)
 	BuildStepPlan    func(string) (scenario.StepPlan, error)
+	BuildVerifyPlan  func(scenario.Params, scenario.StepPlan) (integrityplan.Plan, error)
 	WriteScenario    func(string, []byte, os.FileMode) error
 	RemoveScenario   func(string) error
 }
@@ -31,6 +33,7 @@ var defaultRunPreparationDependencies = runPreparationDependencies{
 	GenerateScenario: scenario.GenerateScenario,
 	GenerateDefaults: scenario.GenerateDefaults,
 	BuildStepPlan:    scenario.BuildStepPlanFromScenario,
+	BuildVerifyPlan:  scenario.BuildVerificationPlan,
 	WriteScenario:    os.WriteFile,
 	RemoveScenario:   os.Remove,
 }
@@ -86,10 +89,24 @@ func prepareRunBundleWithDependencies(
 	if planErr != nil {
 		plan = scenario.StepPlan{}
 	}
+	var verifyPlan integrityplan.Plan
+	if scenario.IsIntegrityWorkload(preparedParams) {
+		if deps.BuildVerifyPlan == nil {
+			return fail(fmt.Errorf("build typed verification plan: missing builder"))
+		}
+		verifyPlan, err = deps.BuildVerifyPlan(preparedParams, plan)
+		if err != nil {
+			return fail(fmt.Errorf("build typed verification plan: %w", err))
+		}
+	}
 
 	scenarioBytes := []byte(scenarioText)
 	if err := deps.WriteScenario(scenarioPath, scenarioBytes, 0o600); err != nil {
 		return fail(fmt.Errorf("write prepared scenario: %w", err))
+	}
+	if verifyPlan.Valid() {
+		return runcontrol.NewPreparedRun(
+			preparedParams, scenarioBytes, defaultsYAML, plan, scenarioPath, cleanup, verifyPlan), nil
 	}
 	return runcontrol.NewPreparedRun(
 		preparedParams, scenarioBytes, defaultsYAML, plan, scenarioPath, cleanup), nil

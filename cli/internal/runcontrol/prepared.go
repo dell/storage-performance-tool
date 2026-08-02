@@ -8,6 +8,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -19,6 +20,7 @@ type PreparedRun struct {
 	scenarioJS   []byte
 	defaultsYAML []byte
 	plan         scenario.StepPlan
+	verifyPlan   *integrityplan.Plan
 	scenarioPath string
 	cleanup      func(context.Context) error
 
@@ -34,8 +36,9 @@ func NewPreparedRun(
 	plan scenario.StepPlan,
 	scenarioPath string,
 	cleanup func(context.Context) error,
+	verificationPlans ...integrityplan.Plan,
 ) *PreparedRun {
-	return &PreparedRun{
+	prepared := &PreparedRun{
 		params:       cloneParams(params),
 		scenarioJS:   append([]byte(nil), scenarioJS...),
 		defaultsYAML: append([]byte(nil), defaultsYAML...),
@@ -43,6 +46,11 @@ func NewPreparedRun(
 		scenarioPath: scenarioPath,
 		cleanup:      cleanup,
 	}
+	if len(verificationPlans) > 0 && verificationPlans[0].Valid() {
+		planCopy := verificationPlans[0].Clone()
+		prepared.verifyPlan = &planCopy
+	}
+	return prepared
 }
 
 // Params returns a detached snapshot of the prepared scenario parameters.
@@ -75,6 +83,14 @@ func (r *PreparedRun) Plan() scenario.StepPlan {
 		return scenario.StepPlan{}
 	}
 	return cloneStepPlan(r.plan)
+}
+
+// VerificationPlan returns the immutable typed plan for an integrity run.
+func (r *PreparedRun) VerificationPlan() (integrityplan.Plan, bool) {
+	if r == nil || r.verifyPlan == nil {
+		return integrityplan.Plan{}, false
+	}
+	return r.verifyPlan.Clone(), true
 }
 
 // ExpectedStepIDs returns the ordered step IDs used by completion tracking.
