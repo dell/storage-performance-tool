@@ -110,6 +110,7 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 
 	idleSince := time.Time{}
 	unavailableSince := time.Time{}
+	terminalStatusUnavailableSince := time.Time{}
 	startupSince := t.Clock.Now()
 	t.seenActive = false
 	t.lastJSONTimestamp = 0
@@ -142,6 +143,23 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			current.started = true
 			if state == constants.StateFailed {
 				current.failed = true
+			}
+		}
+		if t.RequireTerminalState {
+			if state != "" {
+				terminalStatusUnavailableSince = time.Time{}
+			} else if terminalStatusUnavailableSince.IsZero() {
+				terminalStatusUnavailableSince = t.Clock.Now()
+			} else {
+				unavailableTimeout := t.UnavailableTimeout
+				if unavailableTimeout <= 0 {
+					unavailableTimeout = constants.AutoResultsUnavailableTimeout
+				}
+				if t.Clock.Now().Sub(terminalStatusUnavailableSince) >= unavailableTimeout {
+					return populateStepLifecycles(final, stepState, stepIDs), fmt.Errorf(
+						"matching status for expected run %d unavailable for %s",
+						t.ExpectedRunID, unavailableTimeout)
+				}
 			}
 		}
 
@@ -198,7 +216,7 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		if t.Debug {
 			logging.LogDebug("auto-results", "idle_check", "used", usedIdle, "is_idle", isIdle)
 		}
-		if usedIdle && isIdle {
+		if !t.RequireTerminalState && usedIdle && isIdle {
 			if idleSince.IsZero() {
 				idleSince = t.Clock.Now()
 			}
@@ -250,10 +268,16 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 			}
 		}
 
-		// Exit conditions
-		if terminal || (len(stepState) > 0 && allDone && (!t.RequireTerminalState ||
-			(final.FinalState != constants.StateRunning && final.FinalState != constants.StateStarting &&
-				final.FinalState != constants.StateInitializing))) {
+		// Verification requires the matching structured status carrier. Stable
+		// files and idle metrics remain useful lifecycle evidence, but cannot
+		// substitute for COMPLETED/FAILED/STOPPED or its primary terminal cause.
+		if t.RequireTerminalState {
+			if terminal && isStructuredTerminalState(final.FinalState) {
+				break
+			}
+			continue
+		}
+		if terminal || (len(stepState) > 0 && allDone) {
 			break
 		}
 	}
@@ -310,7 +334,7 @@ func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, 
 			t.seenActive = true
 			return status, false, true
 		case constants.StateIdle:
-			return status, t.seenActive, true
+			return status, !t.RequireTerminalState && t.seenActive, true
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
 			return status, true, true
 		default:
@@ -318,6 +342,15 @@ func (t *RunTracker) checkRunState(ctx context.Context) (status terminalStatus, 
 		}
 	}
 	return terminalStatus{}, false, false
+}
+
+func isStructuredTerminalState(state string) bool {
+	switch state {
+	case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
+		return true
+	default:
+		return false
+	}
 }
 
 // checkIdle tries to infer idle state via /metrics when /run is absent or unhelpful.

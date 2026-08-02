@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 func TestRunTracker_TerminalRun(t *testing.T) {
@@ -433,6 +435,87 @@ func TestRunTrackerIgnoresRetainedPriorRunUntilExpectedRunTransitions(t *testing
 	}
 	if result.UsedIdle || result.RunID != expectedRunID || result.FinalState != "COMPLETED" {
 		t.Fatalf("prior-run evidence terminated tracking: %+v", result)
+	}
+}
+
+func TestRunTrackerTerminalRequiredRejectsStableFileWithoutMatchingStatus(t *testing.T) {
+	const expectedRunID = int64(17)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "IDLE", "run_id": 16, "step_id": "retained-step",
+		})
+	})
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]any{})
+	})
+	mux.HandleFunc("/logs/current-step/metrics.FileTotal", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			http.Error(w, "HEAD required", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Length", "64")
+		w.Header().Set("Last-Modified", "Sat, 01 Aug 2026 12:00:00 GMT")
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.ExpectedRunID = expectedRunID
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.UnavailableTimeout = 15 * time.Millisecond
+	tracker.StartupTimeout = time.Second
+	tracker.StableConfirmations = 2
+	tracker.RequireTerminalState = true
+	result, err := tracker.WaitForCompletion(context.Background(), []string{"current-step"})
+	if err == nil || !strings.Contains(err.Error(), "matching status for expected run 17 unavailable") {
+		t.Fatalf("WaitForCompletion() = (%+v, %v), want bounded matching-status error", result, err)
+	}
+	if result.FinalState != "" || result.RunID != 0 {
+		t.Fatalf("retained status leaked into current result: %+v", result)
+	}
+	if !result.Steps["current-step"].Completed {
+		t.Fatalf("stable file lifecycle evidence was lost: %+v", result.Steps["current-step"])
+	}
+}
+
+func TestRunTrackerTerminalRequiredIgnoresMatchingIdleMetricsUntilStatusTerminal(t *testing.T) {
+	const expectedRunID = int64(17)
+	var statusCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		state := "RUNNING"
+		if statusCalls.Add(1) >= 8 {
+			state = "COMPLETED"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": state, "run_id": expectedRunID, "step_id": "current-step",
+		})
+	})
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"run_id": expectedRunID, "step_id": "current-step", "timestamp": 1000, "terminal": true,
+			"operations": map[string]any{"success_rate_last": 0},
+			"bandwidth":  map[string]any{"bytes_rate_last": 0},
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.ExpectedRunID = expectedRunID
+	tracker.PollInterval = 2 * time.Millisecond
+	tracker.IdleGrace = time.Millisecond
+	tracker.UnavailableTimeout = time.Second
+	tracker.StartupTimeout = time.Second
+	tracker.RequireTerminalState = true
+	result, err := tracker.WaitForCompletion(context.Background(), []string{"current-step"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsedIdle || result.FinalState != constants.StateCompleted || result.RunID != expectedRunID {
+		t.Fatalf("idle metrics substituted for structured terminal status: %+v", result)
 	}
 }
 
