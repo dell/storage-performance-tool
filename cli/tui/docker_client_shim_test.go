@@ -118,7 +118,7 @@ func (f *fakeDockerClient) Close() error { return nil }
 func TestEnsureImageAvailable_PullsWhenMissing(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	dm := &DockerManager{client: &fakeDockerClient{inspectErr: io.EOF}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable("myimg:latest"); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), "myimg:latest"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !dm.client.(*fakeDockerClient).pulled {
@@ -129,7 +129,7 @@ func TestEnsureImageAvailable_PullsWhenMissing(t *testing.T) {
 func TestEnsureImageAvailable_SkipPullWhenPresent(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
 	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable("present"); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), "present"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if dm.client.(*fakeDockerClient).pulled {
@@ -141,7 +141,7 @@ func TestEnsureImageAvailable_DevImagePresent(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
 	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable(devImage); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), devImage); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if dm.client.(*fakeDockerClient).pulled {
@@ -248,7 +248,7 @@ func TestEnsureImageAvailable_DevImageMissing(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
 	dm := &DockerManager{client: &fakeDockerClient{inspectErr: io.EOF}, ctx: context.Background()}
-	err := dm.ensureImageAvailable(devImage)
+	err := dm.ensureImageAvailableContext(context.Background(), devImage)
 	if err == nil {
 		t.Fatal("expected error when dev image is missing locally")
 	}

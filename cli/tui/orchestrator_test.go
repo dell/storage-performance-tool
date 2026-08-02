@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -1301,5 +1302,39 @@ func TestOrchestratorCancelDuringPostReconcilesUnknownAndRollsBack(t *testing.T)
 	case <-postCanceled:
 	case <-time.After(time.Second):
 		t.Fatal("POST handler did not observe cancellation")
+	}
+}
+
+func TestAmbiguousSubmissionCleanupDefersToSessionOwner(t *testing.T) {
+	manager := NewMockDockerManager()
+	manager.SetContainerID("ambiguous-container")
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, nil)
+
+	if err := cleanupSingleHostAmbiguousSubmission(
+		context.Background(), manager, hooks); err != nil {
+		t.Fatalf("session-managed ambiguous cleanup: %v", err)
+	}
+	if !manager.HasManagedResources() || manager.GetCleanupCallCount() != 0 {
+		t.Fatalf("session-managed cleanup bypassed owner: managed=%t calls=%d",
+			manager.HasManagedResources(), manager.GetCleanupCallCount())
+	}
+
+	if err := hooks.RegisterResourceFinalizer(func(ctx context.Context) runcontrol.FinalizationOutcome {
+		err := manager.CleanupContext(ctx)
+		disposition := runcontrol.ResourceDispositionRemoved
+		if manager.HasManagedResources() {
+			disposition = runcontrol.ResourceDispositionRetained
+		}
+		return runcontrol.FinalizationOutcome{
+			Removal: runcontrol.CompletedPhase(err), Resources: disposition,
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := session.FinalizeResources(context.Background())
+	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved ||
+		manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("canonical cleanup = %+v calls=%d", outcome, manager.GetCleanupCallCount())
 	}
 }

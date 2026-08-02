@@ -5,9 +5,12 @@ Copyright © 2026 Dell Technologies
 package tui
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
 
 func TestLaunchHooksSubmissionStateIsSharedAndExactlyOnce(t *testing.T) {
@@ -56,5 +59,40 @@ func TestLaunchHooksSubmissionUnknownCanAdvanceButNotRegress(t *testing.T) {
 	hooks.NotifySubmissionUnknown()
 	if got := hooks.SubmissionState(); got != SubmissionSubmitted {
 		t.Fatalf("submission state = %s, want %s", got, SubmissionSubmitted)
+	}
+}
+
+func TestSessionLaunchHooksShareSubmissionAndFinalizerAuthority(t *testing.T) {
+	var armCalls atomic.Int32
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, func() { armCalls.Add(1) })
+	if !hooks.SessionManaged() {
+		t.Fatal("hooks are not session managed")
+	}
+	hooks.NotifySubmissionUnknown()
+	if got := session.SubmissionState(); got != runcontrol.SubmissionUnknown {
+		t.Fatalf("session submission = %s", got)
+	}
+	if hooks.ProvenNotSubmitted() || !hooks.PotentiallySubmitted() || armCalls.Load() != 1 {
+		t.Fatalf("unknown submission facts proven-not=%t potential=%t arm-calls=%d",
+			hooks.ProvenNotSubmitted(), hooks.PotentiallySubmitted(), armCalls.Load())
+	}
+	hooks.NotifySubmitted()
+	if got := session.SubmissionState(); got != runcontrol.SubmissionSubmitted {
+		t.Fatalf("session submission = %s", got)
+	}
+	if armCalls.Load() != 1 {
+		t.Fatalf("confirmed-after-unknown rearmed monitor: calls=%d", armCalls.Load())
+	}
+	if err := hooks.RegisterResourceFinalizer(func(context.Context) runcontrol.FinalizationOutcome {
+		return runcontrol.FinalizationOutcome{
+			Removal: runcontrol.CompletedPhase(nil), Resources: runcontrol.ResourceDispositionRemoved,
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := session.FinalizeResources(context.Background())
+	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved {
+		t.Fatalf("finalization = %+v", outcome)
 	}
 }

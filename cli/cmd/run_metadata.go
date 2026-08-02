@@ -48,11 +48,32 @@ type runMetadata struct {
 	RuntimeIdentity         *tui.DistributedRuntimeIdentityEvidence                 `json:"runtimeIdentity,omitempty"`
 	RuntimeIdentityError    string                                                  `json:"runtimeIdentityError,omitempty"`
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
+	Lifecycle               *runLifecycleMetadata                                   `json:"lifecycle,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
 	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
 	preparedInputs          bool                                                    `json:"-"`
 	preparedScenarioJS      []byte                                                  `json:"-"`
 	preparedDefaultsYAML    []byte                                                  `json:"-"`
+}
+
+type runLifecycleMetadata struct {
+	Workload            lifecyclePhaseMetadata         `json:"workload"`
+	Artifacts           lifecyclePhaseMetadata         `json:"artifacts"`
+	Shutdown            lifecyclePhaseMetadata         `json:"shutdown"`
+	Diagnostics         lifecyclePhaseMetadata         `json:"diagnostics"`
+	Removal             lifecyclePhaseMetadata         `json:"removal"`
+	Summary             lifecyclePhaseMetadata         `json:"summary"`
+	ResourceDisposition runcontrol.ResourceDisposition `json:"resourceDisposition"`
+}
+
+type lifecyclePhaseMetadata struct {
+	Started         bool   `json:"started"`
+	Completed       bool   `json:"completed"`
+	Error           string `json:"error,omitempty"`
+	State           string `json:"state,omitempty"`
+	FailureStepID   string `json:"failureStepId,omitempty"`
+	FailureCategory string `json:"failureCategory,omitempty"`
+	FailureMessage  string `json:"failureMessage,omitempty"`
 }
 
 type runHostMetadata struct {

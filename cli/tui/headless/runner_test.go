@@ -6,6 +6,7 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 )
@@ -832,6 +834,42 @@ func TestHeadlessRunner_ReturnsPromptlyOnEngineCompletion(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunWithParams did not return after engine reported COMPLETED " +
 			"(blocks at <-ctx.Done() waiting for auto-terminate instead of exiting on completion)")
+	}
+}
+
+func TestLocalHeadlessSessionDefersCleanupUntilSessionFinalization(t *testing.T) {
+	manager := tui.NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	session := runcontrol.NewSession()
+	hooks := tui.NewSessionLaunchHooks(session, nil)
+	runner, err := NewHeadlessRunner(manager, HeadlessOptions{LaunchHooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runner.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err = runner.runBenchmark(ctx, "", func(*tui.TestOrchestrator) error {
+		hooks.NotifySubmitted()
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runBenchmark() error = %v, want cancellation", err)
+	}
+	if got := manager.GetCleanupCallCount(); got != 0 {
+		t.Fatalf("presentation cleanup calls = %d, want 0 before evidence/finalization", got)
+	}
+	if !manager.HasManagedResources() {
+		t.Fatal("presentation adapter released resources before session finalization")
+	}
+
+	outcome := session.FinalizeResources(context.Background())
+	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved {
+		t.Fatalf("session finalization = %+v", outcome)
+	}
+	if got := manager.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("session cleanup calls = %d, want exactly 1", got)
 	}
 }
 

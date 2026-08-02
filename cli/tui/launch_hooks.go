@@ -7,6 +7,8 @@ package tui
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
 
 // LaunchState records whether the engine accepted the run submission. It is
@@ -16,30 +18,21 @@ import (
 type LaunchState struct {
 	submission atomic.Uint32
 	once       sync.Once
+	session    *runcontrol.Session
 }
 
-// SubmissionState describes what the client can prove about POST /run. Once
-// an HTTP request has been dispatched, a transport error cannot prove that the
-// server rejected it, so SubmissionUnknown is intentionally distinct from
-// SubmissionNotSubmitted.
-type SubmissionState uint32
+// SubmissionState is retained as a TUI compatibility alias while RunSession
+// owns the authoritative state for session-managed launches.
+type SubmissionState = runcontrol.SubmissionState
 
 const (
-	SubmissionNotSubmitted SubmissionState = iota
-	SubmissionSubmitted
-	SubmissionUnknown
+	// SubmissionNotSubmitted means no ambiguous POST was dispatched.
+	SubmissionNotSubmitted = runcontrol.SubmissionNotSubmitted
+	// SubmissionSubmitted means structured evidence confirmed acceptance.
+	SubmissionSubmitted = runcontrol.SubmissionSubmitted
+	// SubmissionUnknown means a dispatched POST could not be reconciled.
+	SubmissionUnknown = runcontrol.SubmissionUnknown
 )
-
-func (s SubmissionState) String() string {
-	switch s {
-	case SubmissionSubmitted:
-		return "submitted"
-	case SubmissionUnknown:
-		return "submission-unknown"
-	default:
-		return "not-submitted"
-	}
-}
 
 // LaunchHooks carries orchestration lifecycle notifications that are not part
 // of scenario configuration. Hooks run synchronously at the named boundary.
@@ -53,6 +46,14 @@ type LaunchHooks struct {
 // need to inspect submission state.
 func NewLaunchHooks(onSubmitted func()) LaunchHooks {
 	return LaunchHooks{OnSubmitted: onSubmitted, state: &LaunchState{}}
+}
+
+// NewSessionLaunchHooks binds launch notifications and resource registration
+// to the supplied RunSession.
+func NewSessionLaunchHooks(session *runcontrol.Session, onSubmitted func()) LaunchHooks {
+	return LaunchHooks{
+		OnSubmitted: onSubmitted, state: &LaunchState{session: session},
+	}
 }
 
 func ensureLaunchState(hooks LaunchHooks) LaunchHooks {
@@ -70,8 +71,16 @@ func (h LaunchHooks) NotifySubmitted() {
 		}
 		return
 	}
-	h.state.once.Do(func() {
+	transitioned := true
+	if h.state.session != nil {
+		transitioned = h.state.session.MarkSubmitted()
+	} else {
 		h.state.submission.Store(uint32(SubmissionSubmitted))
+	}
+	if !transitioned {
+		return
+	}
+	h.state.once.Do(func() {
 		if h.OnSubmitted != nil {
 			h.OnSubmitted()
 		}
@@ -86,6 +95,20 @@ func (h LaunchHooks) NotifySubmissionUnknown() {
 	if h.state == nil {
 		return
 	}
+	if h.state.session != nil {
+		if !h.state.session.MarkSubmissionUnknown() {
+			return
+		}
+		// Unknown means the POST may be live. Arm evidence collection once so
+		// cancellation salvage can retain any status/artifacts that appear,
+		// while the launcher performs bounded conservative cleanup.
+		h.state.once.Do(func() {
+			if h.OnSubmitted != nil {
+				h.OnSubmitted()
+			}
+		})
+		return
+	}
 	h.state.submission.CompareAndSwap(
 		uint32(SubmissionNotSubmitted), uint32(SubmissionUnknown))
 }
@@ -96,11 +119,40 @@ func (h LaunchHooks) Submitted() bool {
 	return h.SubmissionState() == SubmissionSubmitted
 }
 
+// ProvenNotSubmitted reports that no request with an ambiguous outcome was
+// dispatched. Only this state permits canceling an unarmed evidence monitor.
+func (h LaunchHooks) ProvenNotSubmitted() bool {
+	return h.SubmissionState() == SubmissionNotSubmitted
+}
+
+// PotentiallySubmitted includes both confirmed and unresolved submissions.
+func (h LaunchHooks) PotentiallySubmitted() bool {
+	return h.SubmissionState() != SubmissionNotSubmitted
+}
+
 // SubmissionState returns the strongest submission fact observed by these
 // hooks. A zero-value LaunchHooks reports SubmissionNotSubmitted.
 func (h LaunchHooks) SubmissionState() SubmissionState {
 	if h.state == nil {
 		return SubmissionNotSubmitted
 	}
+	if h.state.session != nil {
+		return h.state.session.SubmissionState()
+	}
 	return SubmissionState(h.state.submission.Load())
+}
+
+// SessionManaged reports whether post-submission disposal belongs to a
+// RunSession rather than this presentation adapter.
+func (h LaunchHooks) SessionManaged() bool {
+	return h.state != nil && h.state.session != nil
+}
+
+// RegisterResourceFinalizer binds launcher-owned resources to the session.
+// Compatibility/self-managed hooks intentionally ignore registration.
+func (h LaunchHooks) RegisterResourceFinalizer(finalizer runcontrol.ResourceFinalizer) error {
+	if h.state == nil || h.state.session == nil {
+		return nil
+	}
+	return h.state.session.RegisterResourceFinalizer(finalizer)
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -111,5 +112,28 @@ func TestResolveVerificationRunErrorFinalizationFailureIsExitOne(t *testing.T) {
 	var exitErr *ExitCodeError
 	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure {
 		t.Fatalf("error = %#v, want exit %d", err, constants.ExitCodeWorkloadFailure)
+	}
+}
+
+func TestResolveVerificationRunErrorPreservesResourceCleanupFailure(t *testing.T) {
+	cleanupErr := errors.New("container removal failed")
+	outcome := autoResultsOutcome{
+		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+		Finalization: &integrity.FinalizeOutcome{Complete: true},
+		ResourceFinalization: &runcontrol.FinalizationOutcome{
+			Diagnostics: runcontrol.CompletedPhase(nil),
+			Removal:     runcontrol.CompletedPhase(cleanupErr),
+			Resources:   runcontrol.ResourceDispositionRetained,
+		},
+	}
+	err := resolveVerificationRunError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure {
+		t.Fatalf("error = %#v, want exit %d", err, constants.ExitCodeWorkloadFailure)
+	}
+	if !strings.Contains(err.Error(), cleanupErr.Error()) ||
+		!strings.Contains(err.Error(), "resources remain managed") {
+		t.Fatalf("cleanup outcome was not preserved: %v", err)
 	}
 }

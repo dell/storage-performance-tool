@@ -215,6 +215,10 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 
 	// Start the distributed test on all hosts via orchestrator wrapper
 	testOrchestrator := tui.NewMultiHostTestOrchestrator(r.orchestrator)
+	if err := r.launchHooks.RegisterResourceFinalizer(
+		r.orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	testOrchestrator.SetExpectedStepIDs(r.expectedStepIDs)
 	// Standardize progress output in headless mode as well
 	r.orchestrator.SetNotifier(func(msg string) {
@@ -234,7 +238,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	}
 	if err != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
-		if stopErr := stopAllContainersAfterRun(ctx, r.orchestrator); stopErr != nil {
+		if stopErr := stopMultiHostAfterLaunchError(ctx, r.orchestrator, r.launchHooks); stopErr != nil {
 			r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 			if err == nil {
 				err = stopErr
@@ -268,9 +272,16 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		} else {
 			r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
 		}
+	} else if r.launchHooks.SessionManaged() {
+		r.output("SHUTDOWN", "Normal completion detected; RunSession owns evidence and resource finalization")
+		return nil
 	} else if r.delegateNormalShutdown {
 		r.output("SHUTDOWN", "Normal completion detected; auto-results will fetch artifacts and stop containers")
 		return nil
+	}
+
+	if r.launchHooks.SessionManaged() {
+		return err
 	}
 
 	// Stop all containers
@@ -302,6 +313,13 @@ func multiHostShutdownResult(runErr, stopErr error) error {
 		return &AutoTerminateError{CleanupComplete: true}
 	}
 	return runErr
+}
+
+func stopMultiHostAfterLaunchError(ctx context.Context, orchestrator *tui.MultiHostOrchestrator, hooks tui.LaunchHooks) error {
+	if hooks.SessionManaged() {
+		return nil
+	}
+	return stopAllContainersAfterRun(ctx, orchestrator)
 }
 
 // Close cleans up resources
@@ -491,6 +509,10 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	// Create the orchestrator for API-based control
 	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort, r.resultsRoot)
 	r.orchestrator.SetNetworkMode(r.networkMode)
+	if err := r.launchHooks.RegisterResourceFinalizer(
+		r.orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 
 	// Set up callbacks to handle orchestrator events
 	r.orchestrator.SetCallbacks(
@@ -546,7 +568,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	if err := startTest(r.orchestrator); err != nil {
 		r.output("ERROR", "Failed to start test: %v", err)
 		// Try to clean up any partially created resources
-		if stopErr := r.orchestrator.StopTest(); stopErr != nil {
+		if stopErr := stopLocalAfterLaunchError(r.orchestrator, r.launchHooks); stopErr != nil {
 			r.output("ERROR", "Failed to cleanup after start failure: %v", stopErr)
 		} else {
 			r.output("CLEANUP", "Cleaned up after start failure")
@@ -563,6 +585,10 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	select {
 	case <-ctx.Done():
 	case <-r.orchestrator.CompletionCh():
+	}
+	if r.launchHooks.SessionManaged() {
+		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")
+		return ctx.Err()
 	}
 
 	// Stop the test gracefully
@@ -586,6 +612,13 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 
 	r.output("COMPLETE", "Benchmark completed")
 	return nil
+}
+
+func stopLocalAfterLaunchError(orchestrator *tui.TestOrchestrator, hooks tui.LaunchHooks) error {
+	if hooks.SessionManaged() || orchestrator == nil {
+		return nil
+	}
+	return orchestrator.StopTest()
 }
 
 // output writes a formatted message to both console and trace file

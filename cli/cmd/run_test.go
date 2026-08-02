@@ -340,7 +340,14 @@ func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
 func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 	for _, remote := range []bool{false, true} {
 		for _, headlessMode := range []bool{false, true} {
-			for _, submitted := range []bool{false, true} {
+			for _, submission := range []struct {
+				name  string
+				state tui.SubmissionState
+			}{
+				{name: "pre-submission", state: tui.SubmissionNotSubmitted},
+				{name: "post-submission", state: tui.SubmissionSubmitted},
+				{name: "ambiguous-submission", state: tui.SubmissionUnknown},
+			} {
 				name := "local"
 				hosts := "127.0.0.1"
 				if remote {
@@ -352,11 +359,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 				} else {
 					name += "/tui"
 				}
-				if submitted {
-					name += "/post-submission"
-				} else {
-					name += "/pre-submission"
-				}
+				name += "/" + submission.name
 				t.Run(name, func(t *testing.T) {
 					t.Chdir(t.TempDir())
 					for flag, value := range map[string]string{
@@ -413,25 +416,40 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						}
 					}
 					launch := func(hooks tui.LaunchHooks) error {
-						if submitted {
+						switch submission.state {
+						case tui.SubmissionSubmitted:
 							hooks.NotifySubmitted()
+						case tui.SubmissionUnknown:
+							hooks.NotifySubmissionUnknown()
 						}
 						return launchErr
 					}
 					startLocalHeadlessRunFunc = func(_ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
 						return launch(options.LaunchHooks)
 					}
 					startMultiHostHeadlessRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
 						return launch(options.LaunchHooks)
 					}
 					startLocalTUIRunFunc = func(_ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
 						return launch(options.LaunchHooks)
 					}
 					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
 						return launch(options.LaunchHooks)
 					}
 
@@ -470,7 +488,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						t.Fatalf("RunE() error = %#v, want structured launcher failure", err)
 					}
 					wantCancel := int32(1)
-					if submitted {
+					if submission.state != tui.SubmissionNotSubmitted {
 						wantCancel = 0
 					}
 					if cancelCalls.Load() != wantCancel {

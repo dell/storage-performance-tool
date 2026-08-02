@@ -174,11 +174,6 @@ func NewDockerManager() (*DockerManager, error) {
 	}, nil
 }
 
-// ensureImageAvailable checks for the image locally and pulls it if missing
-func (dm *DockerManager) ensureImageAvailable(imageName string) error {
-	return dm.ensureImageAvailableContext(dm.ctx, imageName)
-}
-
 func (dm *DockerManager) ensureImageAvailableContext(ctx context.Context, imageName string) error {
 	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
@@ -203,10 +198,6 @@ func (dm *DockerManager) ensureImageAvailableContext(ctx context.Context, imageN
 
 	logging.LogInfo("docker", "Cached Docker image missing; pulling despite skip request", "image", imageName)
 	return dm.pullImageContext(ctx, imageName)
-}
-
-func (dm *DockerManager) pullImage(imageName string) error {
-	return dm.pullImageContext(dm.ctx, imageName)
 }
 
 func (dm *DockerManager) pullImageContext(ctx context.Context, imageName string) error {
@@ -408,7 +399,7 @@ func (dm *DockerManager) gracefulStopForDiagnostics(ctx context.Context) error {
 		return nil
 	}
 	timeout := dockerDiagnosticsStopTimeoutSeconds
-	err := dm.client.ContainerStop(dm.ctx, dm.containerID, container.StopOptions{
+	err := dm.client.ContainerStop(ctx, dm.containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
 	if err != nil && !isContainerAlreadyStoppedOrGone(err) {
@@ -515,6 +506,7 @@ func (dm *DockerManager) StartContainer(image string, cmd []string) (string, err
 	return dm.StartContainerContext(dm.ctx, image, cmd)
 }
 
+// StartContainerContext creates and starts a container within the caller's context.
 func (dm *DockerManager) StartContainerContext(ctx context.Context, image string, cmd []string) (string, error) {
 	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
@@ -567,6 +559,7 @@ func (dm *DockerManager) StartContainerWithScenario(image string, scenarioPath s
 	return dm.StartContainerWithScenarioContext(dm.ctx, image, scenarioPath, additionalArgs)
 }
 
+// StartContainerWithScenarioContext starts a scenario container within the caller's context.
 func (dm *DockerManager) StartContainerWithScenarioContext(
 	ctx context.Context, image string, scenarioPath string, additionalArgs []string,
 ) (string, error) {
@@ -638,6 +631,7 @@ func (dm *DockerManager) StartContainerInNodeMode(image string, apiPort string, 
 	return dm.StartContainerInNodeModeContext(dm.ctx, image, apiPort, networkMode, additionalArgs)
 }
 
+// StartContainerInNodeModeContext starts an API node within the caller's context.
 func (dm *DockerManager) StartContainerInNodeModeContext(
 	ctx context.Context, image string, apiPort string, networkMode string, additionalArgs []string,
 ) (string, error) {
@@ -766,6 +760,7 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	return dm.StartWorkerNodeContainerContext(dm.ctx, image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
+// StartWorkerNodeContainerContext starts an RMI worker within the caller's context.
 func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
 	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
@@ -897,6 +892,7 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	return dm.StartEntryNodeContainerContext(dm.ctx, image, workerAddresses, additionalArgs, networkMode)
 }
 
+// StartEntryNodeContainerContext starts an RMI entry node within the caller's context.
 func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
 	ctx = normalizeContext(ctx)
 	if dm.remote != nil {

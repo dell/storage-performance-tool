@@ -1301,7 +1301,7 @@ func TestStartEntryNode_UsesAdvertisedIPForWorkerAddresses(t *testing.T) {
 
 	// Call startEntryNode directly to avoid network waits
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB", ObjectCount: 1}
-	if err := o.startEntryNode(primary, []*HostConnection{worker}, params, nil); err != nil {
+	if err := o.startEntryNodeContext(context.Background(), primary, []*HostConnection{worker}, params, nil); err != nil {
 		t.Fatalf("startEntryNode error: %v", err)
 	}
 

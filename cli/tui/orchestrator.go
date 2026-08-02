@@ -30,15 +30,22 @@ const (
 
 // TestOrchestrator manages the complete lifecycle of an API-based Spt test
 type TestOrchestrator struct {
-	dockerManager DockerInterface
-	apiClient     *SptAPIClient
-	containerID   string
-	scenarioPath  string
-	keepScenario  bool
-	apiPort       string // Configurable API port
-	networkMode   string
-	mu            sync.Mutex
-	compatOnce    sync.Once
+	dockerManager      DockerInterface
+	apiClient          *SptAPIClient
+	containerID        string
+	scenarioPath       string
+	keepScenario       bool
+	apiPort            string // Configurable API port
+	networkMode        string
+	resultsRoot        string
+	mu                 sync.Mutex
+	compatOnce         sync.Once
+	stopOnce           sync.Once
+	stoppedOnce        sync.Once
+	finalizeMu         sync.Mutex
+	finalizeAttempt    *cleanupAttempt
+	diagnosticsTimeout time.Duration
+	cleanupTimeout     time.Duration
 
 	// Callbacks for status updates
 	onStatusUpdate func(status *TestStatus)
@@ -89,6 +96,13 @@ func cleanupSingleHostStartFailure(ctx context.Context, dm DockerInterface) erro
 	return dm.CleanupContext(cleanupCtx)
 }
 
+func cleanupSingleHostAmbiguousSubmission(ctx context.Context, dm DockerInterface, hooks LaunchHooks) error {
+	if hooks.SessionManaged() {
+		return nil
+	}
+	return cleanupSingleHostStartFailure(ctx, dm)
+}
+
 // NewTestOrchestrator creates a new test orchestrator
 func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot string) *TestOrchestrator {
 	if apiPort == "" {
@@ -100,6 +114,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot 
 	return &TestOrchestrator{
 		dockerManager:         dm,
 		apiPort:               apiPort,
+		resultsRoot:           nodeLogResultsRoot,
 		networkMode:           constants.DefaultNetworkMode,
 		stopCh:                make(chan struct{}),
 		stoppedCh:             make(chan struct{}),
@@ -326,8 +341,9 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	submission, submitErr := o.apiClient.StartTestContext(ctx, scenarioContent, defaultsContent, params.RunID)
 	if submission.Submission == SubmissionUnknown {
 		hooks.NotifySubmissionUnknown()
-		logging.LogError("orchestrator", "API test submission remains ambiguous; cleaning up conservatively", submitErr)
-		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
+		logging.LogError("orchestrator", "API test submission remains ambiguous; preserving conservative cleanup ownership", submitErr)
+		cleanupErr := cleanupSingleHostAmbiguousSubmission(
+			ctx, o.dockerManager, hooks)
 		return errors.Join(fmt.Errorf("failed to establish whether the engine accepted POST /run: %w", submitErr), cleanupErr)
 	}
 	if submission.Submission == SubmissionNotSubmitted {
@@ -600,7 +616,7 @@ func (o *TestOrchestrator) StopTest() error {
 	defer o.mu.Unlock()
 
 	// Signal monitoring goroutines to stop
-	close(o.stopCh)
+	o.stopOnce.Do(func() { close(o.stopCh) })
 
 	// Stop the node via API
 	if o.apiClient != nil {
@@ -644,7 +660,7 @@ func (o *TestOrchestrator) StopTest() error {
 		_ = os.Remove(o.scenarioPath)
 	}
 
-	close(o.stoppedCh)
+	o.stoppedOnce.Do(func() { close(o.stoppedCh) })
 	return nil
 }
 

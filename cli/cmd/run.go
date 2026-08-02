@@ -91,13 +91,17 @@ type autoResultsOutcome struct {
 	ShutdownErr          error
 	ResourceFinalization *runcontrol.FinalizationOutcome
 	StepIDs              []string
+	ArtifactStarted      bool
+	ArtifactCompleted    bool
+	ShutdownStarted      bool
+	SummaryStarted       bool
+	SummaryCompleted     bool
 }
 
 type postRunBudgets struct {
 	Artifacts     time.Duration
 	CancelSalvage time.Duration
 	Shutdown      time.Duration
-	Finalization  time.Duration
 	Summary       time.Duration
 }
 
@@ -105,7 +109,6 @@ var autoResultsPhaseBudgets = postRunBudgets{
 	Artifacts:     constants.AutoResultsArtifactTimeout,
 	CancelSalvage: constants.AutoResultsCancelCleanupTimeout,
 	Shutdown:      constants.AutoResultsShutdownTimeout,
-	Finalization:  constants.DiagnosticsFinalizationTimeout,
 	Summary:       constants.AutoResultsSummaryTimeout,
 }
 
@@ -388,6 +391,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		// variables once this function's goroutine finishes.
 		pollWG.Wait()
 		phaseBase := context.WithoutCancel(parentCtx)
+		outcome.ArtifactStarted = true
 		artifactBudget := autoResultsPhaseBudgets.Artifacts
 		if parentCtx.Err() != nil || outcome.TrackerErr != nil {
 			artifactBudget = autoResultsPhaseBudgets.CancelSalvage
@@ -521,6 +525,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 		}
 		writeProgress("Auto-results: results saved to %s\n", root)
+		outcome.ArtifactCompleted = true
 
 		// Optional graceful shutdown has a fresh budget that artifact retrieval
 		// cannot consume.
@@ -537,6 +542,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			case <-settleTimer.C:
 			}
 			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
+			outcome.ShutdownStarted = true
 			writeProgress("Auto-results: requesting shutdown on all hosts...\n")
 			if lingerSec <= 0 {
 				lingerSec = int(constants.APILingerDefault / time.Second)
@@ -550,26 +556,29 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
 			}
+		}
 
-			// Diagnostics and mandatory removal use their own independent budgets
-			// inside the canonical finalizer. The outer budget only bounds this
-			// monitor's wait for both phases.
-			if preSummaryHook != nil {
-				finalizationCtx, cancelFinalization := context.WithTimeout(
-					phaseBase, autoResultsPhaseBudgets.Finalization)
-				preSummaryHook(finalizationCtx)
-				cancelFinalization()
-				if metadata != nil && metadata.resourceFinalization != nil {
-					finalization := *metadata.resourceFinalization
-					outcome.ResourceFinalization = &finalization
-				}
+		// Diagnostics and mandatory removal are required even when graceful API
+		// shutdown is disabled. Their canonical finalizer owns independent bounded
+		// phase contexts, so summary waits for the complete bounded attempt.
+		if preSummaryHook != nil {
+			preSummaryHook(phaseBase)
+			if metadata != nil && metadata.resourceFinalization != nil {
+				finalization := *metadata.resourceFinalization
+				outcome.ResourceFinalization = &finalization
 			}
+		}
+
+		updateRunLifecycleMetadata(metadata, &outcome)
+		if err := writeRunMetadata(metadata, root); err != nil {
+			logging.LogError("auto-results", "write pre-summary lifecycle metadata", err)
 		}
 
 		writer := summaryOut
 		if writer == nil {
 			writer = io.Discard
 		}
+		outcome.SummaryStarted = true
 		summaryCtx, cancelSummary := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Summary)
 		if err := generateRunSummaryFunc(summaryCtx, root, writer); err != nil {
 			outcome.SummaryErr = err
@@ -577,6 +586,12 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
 		cancelSummary()
+		outcome.SummaryCompleted = true
+		updateRunLifecycleMetadata(metadata, &outcome)
+		if err := writeRunMetadata(metadata, root); err != nil {
+			outcome.SummaryErr = errors.Join(outcome.SummaryErr, fmt.Errorf("write final lifecycle metadata: %w", err))
+			logging.LogError("auto-results", "write final lifecycle metadata", err)
+		}
 	}()
 	return monitor
 }
@@ -668,6 +683,17 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	}
 	if outcome.ArtifactErr != nil {
 		reasons = append(reasons, "artifact retrieval: "+outcome.ArtifactErr.Error())
+	}
+	if outcome.ShutdownErr != nil {
+		reasons = append(reasons, "graceful shutdown: "+outcome.ShutdownErr.Error())
+	}
+	if outcome.ResourceFinalization != nil {
+		if finalizationErr := outcome.ResourceFinalization.Error(); finalizationErr != nil {
+			reasons = append(reasons, "resource finalization: "+finalizationErr.Error())
+		}
+		if outcome.ResourceFinalization.Resources == runcontrol.ResourceDispositionRetained {
+			reasons = append(reasons, "resources remain managed for cleanup retry")
+		}
 	}
 	if outcome.FinalizationErr != nil {
 		reasons = append(reasons, "integrity result finalization: "+outcome.FinalizationErr.Error())
@@ -1290,11 +1316,15 @@ Available workload types:
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
 		}
-		finalizeMultiHost := func(ctx context.Context) {
-			if multiHostOrchestrator == nil || plannedResultsRoot == "" {
+		var runSession *runcontrol.Session
+		if resultsOpts.AutoResults {
+			runSession = runcontrol.NewSession()
+		}
+		finalizeRunSession := func(ctx context.Context) {
+			if runSession == nil {
 				return
 			}
-			finalization := multiHostOrchestrator.FinalizeDiagnosticsAndCleanupOutcome(ctx)
+			finalization := runSession.FinalizeResources(ctx)
 			if metadata != nil {
 				metadata.resourceFinalization = &finalization
 			}
@@ -1310,14 +1340,18 @@ Available workload types:
 			integrityOptions = buildIntegrityFinalizeOptions(params)
 		}
 		var autoMonitor *autoResultsMonitor
-		launchHooks := tui.NewLaunchHooks(func() {
+		onSubmitted := func() {
 			if autoMonitor != nil {
 				autoMonitor.Arm()
 			}
-		})
+		}
+		launchHooks := tui.NewLaunchHooks(onSubmitted)
+		if runSession != nil {
+			launchHooks = tui.NewSessionLaunchHooks(runSession, onSubmitted)
+		}
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
-				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeMultiHost, integrityOptions)
+				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
 			}
 		}
 		var autoOutcome autoResultsOutcome
@@ -1429,7 +1463,7 @@ Available workload types:
 				}
 
 				err := startMultiHostHeadlessRunFunc(orchestrator, sptImage, scenarioPath, params, options)
-				if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+				if err != nil && autoMonitor != nil && launchHooks.ProvenNotSubmitted() {
 					autoMonitor.Cancel()
 				}
 				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
@@ -1438,16 +1472,6 @@ Available workload types:
 					return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 				}
 				autoResultsComplete := waitForAutoResults(delegateShutdownToAutoResults || verificationRun)
-				// finalizeMultiHost normally already ran as startAutoResults'
-				// pre-summary hook by the time we get here; calling it again
-				// is a safe, near-instant no-op (FinalizeDiagnosticsAndCleanup
-				// runs at most once). This remains the fallback path for
-				// AutoResults-without-ShutdownOnComplete, and for auto-terminate
-				// (which bypasses startAutoResults' shutdown step below via the
-				// autoTerminated return above).
-				if autoResultsComplete && delegateShutdownToAutoResults {
-					finalizeMultiHost(runContext)
-				}
 				if !autoResultsComplete && delegateShutdownToAutoResults {
 					logger.Warn("Timed out waiting for auto-results cancellation cleanup; existing cleanup continues within its own budget")
 				}
@@ -1470,13 +1494,10 @@ Available workload types:
 					ScenarioContent:      prepared.ScenarioJS(),
 					DefaultsContent:      prepared.DefaultsYAML(),
 				})
-			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+			if err != nil && autoMonitor != nil && launchHooks.ProvenNotSubmitted() {
 				autoMonitor.Cancel()
 			}
-			autoResultsComplete := waitForAutoResults(verificationRun)
-			if autoResultsComplete && resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete {
-				finalizeMultiHost(runContext)
-			}
+			waitForAutoResults(verificationRun)
 			finalizeTraceArtifact()
 			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
 		}
@@ -1500,7 +1521,7 @@ Available workload types:
 			}
 
 			err := startLocalHeadlessRunFunc(sptImage, scenarioPath, params, options)
-			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+			if err != nil && autoMonitor != nil && launchHooks.ProvenNotSubmitted() {
 				autoMonitor.Cancel()
 			}
 			waitForAutoResults(verificationRun)
@@ -1527,7 +1548,7 @@ Available workload types:
 				ScenarioContent:      prepared.ScenarioJS(),
 				DefaultsContent:      prepared.DefaultsYAML(),
 			})
-		if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+		if err != nil && autoMonitor != nil && launchHooks.ProvenNotSubmitted() {
 			autoMonitor.Cancel()
 		}
 		waitForAutoResults(verificationRun)

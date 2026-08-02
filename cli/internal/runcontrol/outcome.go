@@ -12,9 +12,13 @@ import "errors"
 type ResourceDisposition string
 
 const (
-	ResourceDispositionUnknown  ResourceDisposition = "unknown"
+	// ResourceDispositionUnknown means final ownership could not be established.
+	ResourceDispositionUnknown ResourceDisposition = "unknown"
+	// ResourceDispositionNotOwned means the launcher never acquired resources.
 	ResourceDispositionNotOwned ResourceDisposition = "not-owned"
-	ResourceDispositionRemoved  ResourceDisposition = "removed"
+	// ResourceDispositionRemoved means all launcher-owned resources were released.
+	ResourceDispositionRemoved ResourceDisposition = "removed"
+	// ResourceDispositionRetained means cleanup ownership remains available for retry.
 	ResourceDispositionRetained ResourceDisposition = "retained-for-retry"
 )
 

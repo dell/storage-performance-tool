@@ -1042,13 +1042,11 @@ func TestWriteRunMetadataCapturesAvailableRuntimeIdentity(t *testing.T) {
 	}
 }
 
-// TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled guards the
-// other half of the contract: the hook drives diagnostics collection and
-// full container/staging cleanup, which must only happen when the run
-// actually asked for delegated shutdown (shutdownOn/--shutdown-on-complete).
-// Running it unconditionally would tear down containers out from under a
-// user who explicitly asked to keep them running after completion.
-func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) {
+// TestStartAutoResults_FinalizesResourcesWhenGracefulShutdownDisabled proves
+// --shutdown-on-complete controls the graceful API request, not mandatory
+// launcher-owned container and staging disposal. Resource finalization remains
+// ordered after evidence and before summary.
+func TestStartAutoResults_FinalizesResourcesWhenGracefulShutdownDisabled(t *testing.T) {
 	origRunTracker := newRunTrackerFunc
 	origDiscover := discoverStepIDsFunc
 	origFleetDiscover := discoverFleetStepIDsFunc
@@ -1083,8 +1081,8 @@ func TestStartAutoResults_SkipsPreSummaryHookWhenShutdownDisabled(t *testing.T) 
 		t.Fatal("startAutoResults did not complete in time")
 	}
 
-	if atomic.LoadInt32(&hookCalled) != 0 {
-		t.Fatalf("preSummaryHook called %d times with shutdown disabled, want 0", hookCalled)
+	if atomic.LoadInt32(&hookCalled) != 1 {
+		t.Fatalf("preSummaryHook called %d times with shutdown disabled, want 1", hookCalled)
 	}
 }
 
@@ -1128,7 +1126,7 @@ func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
 	}
 }
 
-func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *testing.T) {
+func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t *testing.T) {
 	origRunTracker := newRunTrackerFunc
 	origDiscover := discoverStepIDsFunc
 	origFleetDiscover := discoverFleetStepIDsFunc
@@ -1191,7 +1189,12 @@ func TestStartAutoResultsCancellationUsesBoundedCleanupContextWithShutdown(t *te
 	}
 	var hookCalled int32
 	hook := func(ctx context.Context) {
-		assertCleanupContext("pre-summary hook", ctx, constants.DiagnosticsFinalizationTimeout)
+		if err := ctx.Err(); err != nil {
+			t.Errorf("pre-summary hook context is already canceled: %v", err)
+		}
+		if _, ok := ctx.Deadline(); ok {
+			t.Error("pre-summary hook inherited an aggregate deadline; canonical finalizer must own independent phase budgets")
+		}
 		atomic.AddInt32(&hookCalled, 1)
 	}
 
@@ -1238,7 +1241,6 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 		Artifacts:     20 * time.Millisecond,
 		CancelSalvage: 20 * time.Millisecond,
 		Shutdown:      time.Second,
-		Finalization:  time.Second,
 		Summary:       time.Second,
 	}
 	stepID := "mt-001-20260802.120000.000-create"
@@ -1323,5 +1325,35 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 	}
 	if outcome.SummaryErr != nil {
 		t.Fatalf("summary error = %v, want nil after finalization", outcome.SummaryErr)
+	}
+	storedBytes, err := os.ReadFile(filepath.Join(
+		metadata.ResultsRoot, constants.ResultsMetadataFileName))
+	if err != nil {
+		t.Fatalf("read final lifecycle metadata: %v", err)
+	}
+	var stored runMetadata
+	if err := json.Unmarshal(storedBytes, &stored); err != nil {
+		t.Fatalf("decode final lifecycle metadata: %v", err)
+	}
+	if stored.Lifecycle == nil {
+		t.Fatal("final metadata omitted lifecycle outcome")
+	}
+	if !stored.Lifecycle.Artifacts.Started || !stored.Lifecycle.Artifacts.Completed ||
+		!strings.Contains(stored.Lifecycle.Artifacts.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("stored artifact phase = %+v, want completed timeout", stored.Lifecycle.Artifacts)
+	}
+	if !stored.Lifecycle.Shutdown.Started || !stored.Lifecycle.Shutdown.Completed ||
+		stored.Lifecycle.Shutdown.Error != "" {
+		t.Fatalf("stored shutdown phase = %+v, want successful independent shutdown", stored.Lifecycle.Shutdown)
+	}
+	if !stored.Lifecycle.Removal.Started || !stored.Lifecycle.Removal.Completed ||
+		!strings.Contains(stored.Lifecycle.Removal.Error, cleanupErr.Error()) {
+		t.Fatalf("stored removal phase = %+v, want retained cleanup failure", stored.Lifecycle.Removal)
+	}
+	if stored.Lifecycle.ResourceDisposition != runcontrol.ResourceDispositionRetained {
+		t.Fatalf("stored disposition = %q, want retained", stored.Lifecycle.ResourceDisposition)
+	}
+	if !stored.Lifecycle.Summary.Started || !stored.Lifecycle.Summary.Completed {
+		t.Fatalf("stored summary phase = %+v, want completed", stored.Lifecycle.Summary)
 	}
 }

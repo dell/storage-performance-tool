@@ -159,6 +159,7 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	return m.SetFileMountsContext(context.Background(), mounts)
 }
 
+// SetFileMountsContext stages remote bind-mount inputs within the caller's context.
 func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
 	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
@@ -264,6 +265,7 @@ func (m *RemoteDockerManager) StartContainer(_ string, _ []string) (string, erro
 	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
 }
 
+// StartContainerContext reports that generic remote starts are unsupported.
 func (m *RemoteDockerManager) StartContainerContext(_ context.Context, _ string, _ []string) (string, error) {
 	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
 }
@@ -273,6 +275,7 @@ func (m *RemoteDockerManager) StartContainerWithScenario(_ string, _ string, _ [
 	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
 }
 
+// StartContainerWithScenarioContext reports that remote scenario starts are unsupported.
 func (m *RemoteDockerManager) StartContainerWithScenarioContext(_ context.Context, _ string, _ string, _ []string) (string, error) {
 	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
 }
@@ -282,6 +285,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 	return m.StartContainerInNodeModeContext(context.Background(), image, apiPort, networkMode, additionalArgs)
 }
 
+// StartContainerInNodeModeContext starts a remote API node within the caller's context.
 func (m *RemoteDockerManager) StartContainerInNodeModeContext(
 	ctx context.Context, image string, apiPort string, networkMode string, additionalArgs []string,
 ) (string, error) {
@@ -337,6 +341,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 		context.Background(), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
+// StartWorkerNodeContainerContext starts a remote RMI worker within the caller's context.
 func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
 	ctx = normalizeContext(ctx)
 	// Detect advertised IP on the remote host if not explicitly provided
@@ -411,6 +416,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		context.Background(), image, workerAddresses, additionalArgs, networkMode)
 }
 
+// StartEntryNodeContainerContext starts a remote RMI entry node within the caller's context.
 func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
 	ctx = normalizeContext(ctx)
 	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs

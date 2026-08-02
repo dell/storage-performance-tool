@@ -172,8 +172,8 @@ type multiNodeMetricsMsg MultiNodeMetricsUpdate
 // tuiLaunchResult crosses the startup-goroutine boundary explicitly. A
 // launcher error alone cannot identify whether POST /run was already accepted.
 type tuiLaunchResult struct {
-	Submitted bool
-	Err       error
+	Submission SubmissionState
+	Err        error
 }
 
 var errTUIExitedBeforeSubmission = errors.New("TUI exited before the run was submitted")
@@ -192,14 +192,14 @@ func startTUILaunch(
 		defer timer.Stop()
 		select {
 		case <-launchCtx.Done():
-			resultCh <- tuiLaunchResult{Submitted: hooks.Submitted(), Err: launchCtx.Err()}
+			resultCh <- tuiLaunchResult{Submission: hooks.SubmissionState(), Err: launchCtx.Err()}
 			p.Quit()
 			return
 		case <-timer.C:
 		}
 
 		err := start(launchCtx)
-		resultCh <- tuiLaunchResult{Submitted: hooks.Submitted(), Err: err}
+		resultCh <- tuiLaunchResult{Submission: hooks.SubmissionState(), Err: err}
 		if err != nil {
 			if reportFailure != nil {
 				reportFailure(err)
@@ -223,10 +223,11 @@ func finishTUILaunch(
 	select {
 	case result := <-resultCh:
 		launchErr = result.Err
-		if result.Submitted && !hooks.Submitted() {
+		if result.Submission != SubmissionNotSubmitted &&
+			hooks.SubmissionState() == SubmissionNotSubmitted {
 			launchErr = errors.Join(launchErr, errors.New("TUI launch submission state was lost"))
 		}
-		if !result.Submitted && launchErr == nil {
+		if result.Submission == SubmissionNotSubmitted && launchErr == nil {
 			launchErr = errTUIExitedBeforeSubmission
 		}
 	case <-timer.C:
@@ -1104,6 +1105,10 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 	// Create the orchestrator for API-based control
 	orchestrator := NewTestOrchestrator(dm, apiPort, resultsRoot)
 	orchestrator.SetNetworkMode(networkMode)
+	if err := launchHooks.RegisterResourceFinalizer(
+		orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	model.orchestrator = orchestrator
 
 	model.dockerManager = dm
@@ -1174,7 +1179,7 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 
 	// Stop the test and cleanup via orchestrator
 	var stopErr error
-	if orchestrator != nil && launchHooks.Submitted() {
+	if orchestrator != nil && launchHooks.Submitted() && !launchHooks.SessionManaged() {
 		fmt.Println("Stopping Spt test...")
 		if stopErr = orchestrator.StopTest(); stopErr != nil {
 			fmt.Printf("Warning: Failed to stop test cleanly: %v\n", stopErr)
@@ -1185,7 +1190,7 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 	}
 
 	// Cleanup scenario file if needed (the orchestrator handles its own, this is for the input file)
-	if scenarioPath != "" && !params.KeepScenario {
+	if scenarioPath != "" && !params.KeepScenario && !launchHooks.SessionManaged() {
 		logging.GetLogger().Debug("Cleaning up input scenario file", "file", scenarioPath)
 		_ = os.Remove(scenarioPath)
 	}
@@ -1264,6 +1269,10 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 
 	// Create a multi-host aware test orchestrator wrapper
 	// This will coordinate with the MultiHostOrchestrator
+	if err := launchHooks.RegisterResourceFinalizer(
+		orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	multiOrchestrator := newMultiHostTUITestOrchestrator(orchestrator)
 	model.orchestrator = multiOrchestrator
 	// Provide baseline generator so Model.Init can emit it safely at startup
@@ -1350,7 +1359,7 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 
 	// Stop all containers and cleanup
 	var stopErr error
-	if orchestrator != nil {
+	if orchestrator != nil && !launchHooks.SessionManaged() {
 		fmt.Printf("Stopping containers on %d hosts...\n", orchestrator.GetHostCount())
 		cleanupCtx, cancelCleanup := boundedDetachedContext(runCtx, constants.ContainerCleanupTimeout)
 		stopErr = orchestrator.StopAllContainers(cleanupCtx)
@@ -1364,7 +1373,7 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 	}
 
 	// Cleanup scenario file if needed
-	if scenarioPath != "" && !params.KeepScenario {
+	if scenarioPath != "" && !params.KeepScenario && !launchHooks.SessionManaged() {
 		logging.GetLogger().Debug("Cleaning up input scenario file", "file", scenarioPath)
 		_ = os.Remove(scenarioPath)
 	}
@@ -1426,6 +1435,10 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 
 	orchestrator := NewTestOrchestrator(dm, apiPort, resultsRoot)
 	orchestrator.SetNetworkMode(networkMode)
+	if err := launchHooks.RegisterResourceFinalizer(
+		orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	model.orchestrator = orchestrator
 	model.dockerManager = dm
 
@@ -1491,7 +1504,7 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 	launchErr := finishTUILaunch(runCtx, programErr, launchResult, launchHooks)
 
 	var stopErr error
-	if orchestrator != nil && launchHooks.Submitted() {
+	if orchestrator != nil && launchHooks.Submitted() && !launchHooks.SessionManaged() {
 		fmt.Println("Stopping Spt test...")
 		if stopErr = orchestrator.StopTest(); stopErr != nil {
 			fmt.Printf("Warning: Failed to stop test cleanly: %v\n", stopErr)
@@ -1501,7 +1514,7 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 		}
 	}
 
-	if scenarioPath != "" && !params.KeepScenario {
+	if scenarioPath != "" && !params.KeepScenario && !launchHooks.SessionManaged() {
 		logging.GetLogger().Debug("Cleaning up input scenario file", "file", scenarioPath)
 		_ = os.Remove(scenarioPath)
 	}
@@ -1550,6 +1563,10 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 	}
 	model.dockerManager = readyHosts[0].DockerManager
 
+	if err := launchHooks.RegisterResourceFinalizer(
+		orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	multiOrchestrator := newMultiHostTUITestOrchestrator(orchestrator)
 	model.orchestrator = multiOrchestrator
 	model.baselineFn = multiOrchestrator.BuildBaselineUpdate
@@ -1624,7 +1641,7 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 	launchErr := finishTUILaunch(runCtx, programErr, launchResult, launchHooks)
 
 	var stopErr error
-	if orchestrator != nil {
+	if orchestrator != nil && !launchHooks.SessionManaged() {
 		fmt.Printf("Stopping containers on %d hosts...\n", orchestrator.GetHostCount())
 		cleanupCtx, cancelCleanup := boundedDetachedContext(runCtx, constants.ContainerCleanupTimeout)
 		stopErr = orchestrator.StopAllContainers(cleanupCtx)
@@ -1637,7 +1654,7 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 		}
 	}
 
-	if scenarioPath != "" && !params.KeepScenario {
+	if scenarioPath != "" && !params.KeepScenario && !launchHooks.SessionManaged() {
 		logging.GetLogger().Debug("Cleaning up input scenario file", "file", scenarioPath)
 		_ = os.Remove(scenarioPath)
 	}

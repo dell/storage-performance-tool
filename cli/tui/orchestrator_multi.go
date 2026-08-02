@@ -807,6 +807,13 @@ func (o *MultiHostOrchestrator) cleanupManagedContainersAfterStartFailure(ctx co
 	return errors.Join(cleanupErrors...)
 }
 
+func (o *MultiHostOrchestrator) cleanupAmbiguousSubmission(ctx context.Context, hooks LaunchHooks) error {
+	if hooks.SessionManaged() {
+		return nil
+	}
+	return o.cleanupManagedContainersAfterStartFailure(ctx)
+}
+
 func cleanupDockerWithinContext(ctx context.Context, manager DockerInterface) error {
 	return manager.CleanupContext(ctx)
 }
@@ -1906,8 +1913,10 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 				ctx, []byte(m.multiHost.scenarioContent), defaultsContent, params.RunID)
 			if submission.Submission == SubmissionUnknown {
 				hooks.NotifySubmissionUnknown()
-				return failBeforeSubmission(fmt.Errorf(
-					"LIST submission remains ambiguous after POST /run: %w", submitErr))
+				return errors.Join(
+					fmt.Errorf("LIST submission remains ambiguous after POST /run: %w", submitErr),
+					m.multiHost.cleanupAmbiguousSubmission(ctx, hooks),
+				)
 			}
 			if submission.Submission == SubmissionNotSubmitted {
 				return failBeforeSubmission(fmt.Errorf("failed to start LIST via entry node API: %w", submitErr))
@@ -2130,7 +2139,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		hooks.NotifySubmissionUnknown()
 		return errors.Join(
 			fmt.Errorf("host API submission remains ambiguous after POST /run: %w", submitErr),
-			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+			m.multiHost.cleanupAmbiguousSubmission(ctx, hooks),
 		)
 	}
 	if submission.Submission == SubmissionNotSubmitted {
@@ -2211,7 +2220,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 		hooks.NotifySubmissionUnknown()
 		return errors.Join(
 			fmt.Errorf("entry node API submission remains ambiguous after POST /run: %w", submitErr),
-			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
+			m.multiHost.cleanupAmbiguousSubmission(ctx, hooks),
 		)
 	}
 	if submission.Submission == SubmissionNotSubmitted {
@@ -2409,16 +2418,6 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 	host.SetManaged(true)
 
 	return nil
-}
-
-// startEntryNode starts an entry node container with worker addresses and scenario
-func (o *MultiHostOrchestrator) startEntryNode(
-	primary *HostConnection,
-	workers []*HostConnection,
-	params scenario.ScenarioParams,
-	startupArgs []string,
-) error {
-	return o.startEntryNodeContext(context.Background(), primary, workers, params, startupArgs)
 }
 
 func (o *MultiHostOrchestrator) startEntryNodeContext(
