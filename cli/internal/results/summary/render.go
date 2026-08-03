@@ -105,7 +105,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
-	r.renderCompactIntegrity(sb, summary)
+	r.renderIntegrity(sb, summary)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -234,27 +234,6 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	}
 	r.writeBullet(b, "Additional passes", fmt.Sprintf("%d full payload passes", digest.AdditionalPayloadPasses))
 	b.WriteString("\n")
-}
-
-func (r *Renderer) renderCompactIntegrity(b *strings.Builder, summary *RunSummary) {
-	if summary.Integrity == nil {
-		return
-	}
-	i := summary.Integrity
-	d := i.DigestPerformance
-	fmt.Fprintf(b, "Integrity finalization: %s\n", map[bool]string{true: "complete", false: "incomplete"}[i.Complete])
-	if i.FinalizationError != "" {
-		fmt.Fprintf(b, "Integrity finalization error: %s\n", i.FinalizationError)
-	}
-	fmt.Fprintf(b, "Integrity: selected %d, attempted %d, verified %d, remaining %d, corrupt %d\n",
-		i.SelectionCount, i.VerificationAttemptedCount, i.VerifiedCount, i.RemainingCount, i.CorruptCount)
-	fmt.Fprintf(b, "Integrity empty selection: %t (allowed: %t)\n", i.EmptySelection, i.EmptyAllowed)
-	fmt.Fprintf(b, "Digest work: %d objects, %s, %.6f cumulative worker seconds, %.3f MiB/s mean worker rate",
-		d.Objects, formatBytesHuman(d.Bytes), d.HashWorkerSeconds, d.MeanWorkerHashMiBPerSecond)
-	if d.InitialWriteDelaySecondsMaxNode != nil {
-		fmt.Fprintf(b, ", %.6f s maximum-node initial write delay", *d.InitialWriteDelaySecondsMaxNode)
-	}
-	fmt.Fprintf(b, ", %d additional full payload passes\n", d.AdditionalPayloadPasses)
 }
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {

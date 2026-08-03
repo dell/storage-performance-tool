@@ -121,9 +121,20 @@ func TestRendererReportsIntegrityDigestCostSeparately(t *testing.T) {
 	}
 	mustNotContain(t, report, "overhead")
 	compact := NewRenderer(RenderOptions{}).CompactSnippet(summary)
-	mustContain(t, compact, "Integrity empty selection: false (allowed: false)")
-	mustContain(t, compact, "Integrity finalization: incomplete")
-	mustContain(t, compact, "Integrity finalization error: completion marker mismatch")
+	for _, want := range []string{
+		"Integrity Verification",
+		"Finalization       incomplete",
+		"Finalization error completion marker mismatch",
+		"Selection          selected 4, attempted 4, verified 3, remaining 1, corrupt 1",
+		"Empty selection    false (allowed: false)",
+	} {
+		mustContain(t, compact, want)
+	}
+	performanceAt := strings.Index(compact, "Performance by Phase")
+	integrityAt := strings.Index(compact, "Integrity Verification")
+	if performanceAt < 0 || integrityAt <= performanceAt {
+		t.Fatalf("integrity section does not follow performance table:\n%s", compact)
+	}
 }
 
 func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {
