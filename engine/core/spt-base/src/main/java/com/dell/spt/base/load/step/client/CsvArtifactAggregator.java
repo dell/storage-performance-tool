@@ -194,12 +194,12 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 				emittedCount = Math.addExact(emittedCount, readEmissionCount(countPath));
 			}
 			if (emittedCount != counts.source()) {
-				Files.deleteIfExists(staging);
-				throw terminal(
+				final IntegrityTerminalException failure = terminal(
 								Category.AGGREGATION,
 								"LIST emitted " + emittedCount + " records but parsed "
 												+ counts.source() + " manifest rows",
 								null);
+				throw preserveEmissionCountFailure(failure, () -> Files.deleteIfExists(staging));
 			}
 		}
 		IntegrityManifestCompletion.atomicMove(staging, manifestPath);
@@ -447,6 +447,15 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final FailurePreservingCleanup.IOAction cleanup)
 					throws IOException {
 		return FailurePreservingCleanup.onFailure(operation, cleanup);
+	}
+
+	static IntegrityTerminalException preserveEmissionCountFailure(
+					final IntegrityTerminalException failure,
+					final FailurePreservingCleanup.IOAction cleanup)
+					throws IOException {
+		return FailurePreservingCleanup.onFailure(() -> {
+			throw failure;
+		}, cleanup);
 	}
 
 	private static MergeCounts mergeSortedChunks(
