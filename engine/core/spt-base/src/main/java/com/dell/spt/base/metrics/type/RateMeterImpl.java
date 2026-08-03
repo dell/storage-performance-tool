@@ -79,8 +79,8 @@ public class RateMeterImpl implements RateMeter<RateMetricSnapshot> {
 		if (count.sum() == 0) {
 			return 0.0;
 		} else {
-			final double elapsed = TimeUnit.MILLISECONDS.toSeconds(clock.millis() - startTimeMillis);
-			return (elapsed == 0) ? 0 : count.sum() / elapsed;
+			final long elapsedMillis = clock.millis() - startTimeMillis;
+			return elapsedMillis <= 0 ? 0.0 : count.sum() * (double) TICK_INTERVAL_MILLIS / elapsedMillis;
 		}
 	}
 
