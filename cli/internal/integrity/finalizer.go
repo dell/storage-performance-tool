@@ -808,8 +808,7 @@ func readFailureArtifact(filePath string, maxSamples int) (int64, []FailureSampl
 		return 0, nil, err
 	}
 	defer func() { _ = file.Close() }()
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = len(failureHeader)
+	reader := newIdentityCSVReader(file)
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, failureHeader) {
 		return 0, nil, fmt.Errorf("%s has an invalid header", IntegrityFailuresName)
@@ -827,6 +826,11 @@ func readFailureArtifact(filePath string, maxSamples int) (int64, []FailureSampl
 		}
 		if readErr != nil {
 			return 0, nil, fmt.Errorf("parse %s row %d: %w", IntegrityFailuresName, count+2, readErr)
+		}
+		if len(row) != len(failureHeader) {
+			return 0, nil, fmt.Errorf(
+				"%s row %d has %d fields, want %d",
+				IntegrityFailuresName, count+2, len(row), len(failureHeader))
 		}
 		count++
 		if _, ok := allowedReasons[row[8]]; !ok {
