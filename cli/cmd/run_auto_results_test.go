@@ -174,10 +174,14 @@ func (f *fakeRunTracker) SetRequireTerminalState(required bool) {
 }
 
 type cancelAwareRunTracker struct {
-	exited chan struct{}
+	started chan struct{}
+	exited  chan struct{}
 }
 
 func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []string) (*portcheck.RunResult, error) {
+	if t.started != nil {
+		close(t.started)
+	}
 	defer close(t.exited)
 	<-ctx.Done()
 	return &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{}}, ctx.Err()
@@ -460,6 +464,272 @@ func TestAutoResultsCleanupOnlySkipsEngineEvidenceAndFinalizes(t *testing.T) {
 	var preservedIdentity *tui.SubmissionIdentityError
 	if !errors.As(resolved, &preservedIdentity) || !errors.Is(resolved, cleanupErr) {
 		t.Fatalf("resolved cleanup-only error = %v, want identity primary and cleanup cause", resolved)
+	}
+}
+
+func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
+	tests := []struct {
+		name       string
+		cancelWins bool
+	}{
+		{name: "cancel wins before arm", cancelWins: true},
+		{name: "arm wins before cancel"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			origRunTracker := newRunTrackerFunc
+			origDiscover := discoverStepIDsFunc
+			origFleetDiscover := discoverFleetStepIDsFunc
+			origFetcher := newResultsFetcherFunc
+			origSummary := generateRunSummaryFunc
+			origMakeResultsDir := makeResultsDirFunc
+			t.Cleanup(func() {
+				newRunTrackerFunc = origRunTracker
+				discoverStepIDsFunc = origDiscover
+				discoverFleetStepIDsFunc = origFleetDiscover
+				newResultsFetcherFunc = origFetcher
+				generateRunSummaryFunc = origSummary
+				makeResultsDirFunc = origMakeResultsDir
+			})
+
+			setupEntered := make(chan struct{})
+			releaseSetup := make(chan struct{})
+			var setupEnteredOnce sync.Once
+			var releaseSetupOnce sync.Once
+			releaseMonitorSetup := func() {
+				releaseSetupOnce.Do(func() { close(releaseSetup) })
+			}
+			makeResultsDirFunc = func(string, os.FileMode) error {
+				setupEnteredOnce.Do(func() { close(setupEntered) })
+				<-releaseSetup
+				return nil
+			}
+
+			tracker := &cancelAwareRunTracker{
+				started: make(chan struct{}),
+				exited:  make(chan struct{}),
+			}
+			var trackerCreates, discoveries, fetches atomic.Int32
+			newRunTrackerFunc = func(string) autoResultsRunTracker {
+				trackerCreates.Add(1)
+				return tracker
+			}
+			discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+				discoveries.Add(1)
+				return []string{"verify"}, nil
+			}
+			discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+				discoveries.Add(1)
+				return nil, nil
+			}
+			newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
+				fetches.Add(1)
+				return &fakeFetcher{output: output}
+			}
+			generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+
+			session := runcontrol.NewSession()
+			finalizerStarted := make(chan struct{})
+			releaseFinalizer := make(chan struct{})
+			var finalizerStartOnce sync.Once
+			var releaseFinalizerOnce sync.Once
+			var finalizerCalls atomic.Int32
+			releaseFinalization := func() {
+				releaseFinalizerOnce.Do(func() { close(releaseFinalizer) })
+			}
+			if err := session.RegisterResourceFinalizer(func(context.Context) runcontrol.FinalizationOutcome {
+				finalizerCalls.Add(1)
+				finalizerStartOnce.Do(func() { close(finalizerStarted) })
+				<-releaseFinalizer
+				return runcontrol.FinalizationOutcome{
+					Removal:   runcontrol.CompletedPhase(nil),
+					Resources: runcontrol.ResourceDispositionRemoved,
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			metadata := &runMetadata{ResultsRoot: t.TempDir()}
+			preSummaryHook := func(ctx context.Context) {
+				finalized := session.FinalizeResources(ctx)
+				metadata.resourceFinalization = &finalized
+			}
+			monitor := startAutoResultsMonitor(
+				context.Background(), "http://example", "mt", t.TempDir(),
+				[]string{"verify"}, 77, false, nil, "", false, 0, "", metadata,
+				io.Discard, io.Discard, "", preSummaryHook,
+			)
+			monitorJoined := false
+			t.Cleanup(func() {
+				monitor.Cancel()
+				releaseMonitorSetup()
+				releaseFinalization()
+				if !monitorJoined {
+					select {
+					case <-monitor.done:
+					case <-time.After(time.Second):
+						t.Error("monitor cleanup did not join")
+					}
+				}
+			})
+			select {
+			case <-setupEntered:
+			case <-time.After(time.Second):
+				t.Fatal("monitor did not reach the pre-gate setup barrier")
+			}
+
+			armCalling := make(chan struct{})
+			armReturned := make(chan struct{})
+			startArm := func() {
+				close(armCalling)
+				monitor.Arm()
+				close(armReturned)
+			}
+			if test.cancelWins {
+				// Resolve the production gate first, while setup still prevents
+				// the monitor from acknowledging blocked Arm callers.
+				monitor.Cancel()
+				go startArm()
+				<-armCalling
+			} else {
+				// Observe Arm closing the real production gate before allowing
+				// Cancel to resolve its competing transition.
+				go startArm()
+				<-armCalling
+				select {
+				case <-monitor.armed:
+				case <-time.After(time.Second):
+					t.Fatal("Arm did not close the production gate")
+				}
+				monitor.Cancel()
+			}
+
+			const gateCallers = 16
+			gateStart := make(chan struct{})
+			gateEntered := make(chan struct{})
+			var gateGroup sync.WaitGroup
+			for i := range gateCallers {
+				gateGroup.Add(1)
+				go func(call int) {
+					defer gateGroup.Done()
+					<-gateStart
+					gateEntered <- struct{}{}
+					if call%2 == 0 {
+						monitor.Arm()
+					} else {
+						monitor.Cancel()
+					}
+				}(i)
+			}
+			close(gateStart)
+			for range gateCallers {
+				<-gateEntered
+			}
+			select {
+			case <-armReturned:
+				t.Fatal("Arm returned before the monitor acknowledged the gate")
+			default:
+			}
+			releaseMonitorSetup()
+			waitForTestWaitGroup(t, &gateGroup, "concurrent arm/cancel callers")
+			select {
+			case <-armReturned:
+			case <-time.After(time.Second):
+				t.Fatal("Arm did not return after gate acknowledgement")
+			}
+			if got := monitor.cleanupOnly.Load(); got != test.cancelWins {
+				t.Fatalf("cleanup-only = %t, want %t", got, test.cancelWins)
+			}
+			if !test.cancelWins {
+				select {
+				case <-tracker.started:
+				case <-time.After(time.Second):
+					t.Fatal("tracker did not start after Arm")
+				}
+				select {
+				case <-tracker.exited:
+				case <-time.After(time.Second):
+					t.Fatal("tracker did not observe cancellation")
+				}
+			}
+			select {
+			case <-finalizerStarted:
+			case <-time.After(time.Second):
+				t.Fatal("monitor did not enter finalization")
+			}
+
+			const joiners = 12
+			joinEntered := make(chan struct{})
+			joinOutcomes := make([]runcontrol.FinalizationOutcome, joiners)
+			var joinGroup sync.WaitGroup
+			for i := range joiners {
+				joinGroup.Add(1)
+				go func(index int) {
+					defer joinGroup.Done()
+					joinEntered <- struct{}{}
+					joinOutcomes[index] = session.FinalizeResources(context.Background())
+				}(i)
+			}
+			for range joiners {
+				<-joinEntered
+			}
+			releaseFinalization()
+			waitForTestWaitGroup(t, &joinGroup, "resource-finalization joiners")
+
+			var outcome autoResultsOutcome
+			select {
+			case outcome = <-monitor.done:
+				monitorJoined = true
+			case <-time.After(time.Second):
+				t.Fatal("monitor did not complete")
+			}
+			expectedTrackers := int32(1)
+			if test.cancelWins {
+				expectedTrackers = 0
+			}
+			if trackerCreates.Load() != expectedTrackers {
+				t.Fatalf("tracker constructions = %d, want %d",
+					trackerCreates.Load(), expectedTrackers)
+			}
+			if test.cancelWins {
+				if discoveries.Load() != 0 || fetches.Load() != 0 {
+					t.Fatalf("cancel-wins evidence calls discovery=%d fetch=%d",
+						discoveries.Load(), fetches.Load())
+				}
+			} else if discoveries.Load() == 0 || fetches.Load() != 1 {
+				t.Fatalf("arm-wins evidence calls discovery=%d fetch=%d",
+					discoveries.Load(), fetches.Load())
+			}
+			if finalizerCalls.Load() != 1 {
+				t.Fatalf("finalizer calls = %d, want 1", finalizerCalls.Load())
+			}
+			for i, finalized := range joinOutcomes {
+				if finalized.Error() != nil ||
+					finalized.Resources != runcontrol.ResourceDispositionRemoved {
+					t.Fatalf("joiner %d outcome = %+v", i, finalized)
+				}
+			}
+			if !errors.Is(outcome.TrackerErr, context.Canceled) ||
+				outcome.Lifecycle.Workload.Started == test.cancelWins ||
+				outcome.Lifecycle.Artifacts.Started == test.cancelWins ||
+				outcome.Lifecycle.Resources != runcontrol.ResourceDispositionRemoved {
+				t.Fatalf("monitor outcome = %+v", outcome)
+			}
+		})
+	}
+}
+
+func waitForTestWaitGroup(t *testing.T, group *sync.WaitGroup, description string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not complete", description)
 	}
 }
 

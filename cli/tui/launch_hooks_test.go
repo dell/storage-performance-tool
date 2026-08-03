@@ -92,6 +92,54 @@ func TestAcceptedForCleanupDoesNotArmNormalEvidence(t *testing.T) {
 	}
 }
 
+func TestAcceptedForCleanupConcurrentUpgradeIsMonotonic(t *testing.T) {
+	var armCalls atomic.Int32
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, func() { armCalls.Add(1) })
+	copiedHooks := hooks
+
+	const callers = 48
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for i := range callers {
+		group.Add(1)
+		go func(call int) {
+			defer group.Done()
+			<-start
+			switch call % 3 {
+			case 0:
+				copiedHooks.NotifyAcceptedForCleanup()
+			case 1:
+				copiedHooks.NotifySubmissionUnknown()
+			default:
+				copiedHooks.NotifySubmitted()
+			}
+		}(i)
+	}
+	close(start)
+	group.Wait()
+
+	if got := session.SubmissionState(); got != runcontrol.SubmissionSubmitted {
+		t.Fatalf("raced submission state = %s, want submitted", got)
+	}
+	if !hooks.NormalEvidencePermitted() {
+		t.Fatal("authoritative submitted notification did not establish evidence trust")
+	}
+	if calls := armCalls.Load(); calls != 1 {
+		t.Fatalf("raced submission callback calls = %d, want exactly 1", calls)
+	}
+
+	// Weaker facts arriving after the authoritative upgrade cannot regress
+	// cleanup ownership, evidence permission, or callback cardinality.
+	copiedHooks.NotifySubmissionUnknown()
+	copiedHooks.NotifyAcceptedForCleanup()
+	if got := session.SubmissionState(); got != runcontrol.SubmissionSubmitted ||
+		!hooks.NormalEvidencePermitted() || armCalls.Load() != 1 {
+		t.Fatalf("weaker notification regressed state=%s trusted=%t calls=%d",
+			got, hooks.NormalEvidencePermitted(), armCalls.Load())
+	}
+}
+
 func TestSessionLaunchHooksShareSubmissionAndFinalizerAuthority(t *testing.T) {
 	var armCalls atomic.Int32
 	session := runcontrol.NewSession()

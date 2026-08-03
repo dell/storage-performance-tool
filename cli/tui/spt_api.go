@@ -376,6 +376,10 @@ func (c *SptAPIClient) StartTestContext(
 			if expectedRunID > 0 {
 				runID, identityPresent, identityErr := acceptedResponseRunID(
 					etag, bodyData, expectedRunID)
+				if bodyErr != nil {
+					identityErr = errors.Join(identityErr,
+						fmt.Errorf("read successful response identity: %w", bodyErr))
+				}
 				if identityErr != nil {
 					c.clearRunID()
 					return StartTestOutcome{Submission: SubmissionSubmitted},
@@ -383,9 +387,6 @@ func (c *SptAPIClient) StartTestContext(
 				}
 				if !identityPresent {
 					cause := errors.New("successful response omitted run identity")
-					if bodyErr != nil {
-						cause = fmt.Errorf("read successful response identity: %w", bodyErr)
-					}
 					c.clearRunID()
 					return c.reconcileAcceptedSubmissionIdentity(ctx, expectedRunID, cause)
 				}
@@ -495,11 +496,14 @@ func parseBodyRunIDs(body []byte) ([]responseRunIdentity, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, nil
 	}
+	if !json.Valid(body) {
+		return nil, errors.New("successful response body is malformed or incomplete JSON")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	first, err := decoder.Token()
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("decode successful response body: %w", err)
 	}
 	start, ok := first.(json.Delim)
 	if !ok || start != '{' {
@@ -511,15 +515,15 @@ func parseBodyRunIDs(body []byte) ([]responseRunIdentity, error) {
 	for decoder.More() {
 		keyToken, tokenErr := decoder.Token()
 		if tokenErr != nil {
-			return nil, nil
+			return nil, fmt.Errorf("decode successful response field: %w", tokenErr)
 		}
 		name, ok := keyToken.(string)
 		if !ok {
-			return nil, nil
+			return nil, errors.New("successful response object contained a non-string field name")
 		}
 		var raw json.RawMessage
 		if decodeErr := decoder.Decode(&raw); decodeErr != nil {
-			return nil, nil
+			return nil, fmt.Errorf("decode successful response field %q: %w", name, decodeErr)
 		}
 
 		source := ""
@@ -541,12 +545,19 @@ func parseBodyRunIDs(body []byte) ([]responseRunIdentity, error) {
 		}
 		evidence = append(evidence, responseRunIdentity{source: source, value: runID})
 	}
-	if _, err = decoder.Token(); err != nil {
-		return nil, nil
+	end, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("close successful response object: %w", err)
+	}
+	if end != json.Delim('}') {
+		return nil, errors.New("successful response object has an invalid closing delimiter")
 	}
 	var trailing json.RawMessage
 	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, nil
+		if err == nil {
+			return nil, errors.New("successful response body contains a trailing JSON value")
+		}
+		return nil, fmt.Errorf("decode trailing successful response content: %w", err)
 	}
 	return evidence, nil
 }

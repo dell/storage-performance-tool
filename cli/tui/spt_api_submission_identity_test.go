@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,6 +30,7 @@ func TestAcceptedResponseIdentityMatchesConfiguredRun(t *testing.T) {
 		{name: "legacy body string", body: `{"runId":"77"}`},
 		{name: "canonical body number", body: `{"run_id":77}`},
 		{name: "canonical body string", body: `{"run_id":"77"}`},
+		{name: "trailing whitespace", body: "{\"run_id\":77}\n\t "},
 		{name: "all matching", etag: "77", body: `{"run_id":77,"runId":"77"}`},
 		{name: "nested identity ignored", body: `{"metadata":{"run_id":78},"run_id":77}`},
 	}
@@ -89,6 +91,98 @@ func TestAcceptedResponseIdentityRejectsInvalidConfiguredRun(t *testing.T) {
 			}
 			if stopErr := client.StopTest(); !errors.Is(stopErr, ErrRunOwnershipUnknown) {
 				t.Fatalf("StopTest() error = %v, want %v", stopErr, ErrRunOwnershipUnknown)
+			}
+		})
+	}
+}
+
+func TestAcceptedResponseMalformedBodyCannotReconcileIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		etag string
+		body string
+	}{
+		{name: "truncated after mismatch", body: `{"run_id":78,`},
+		{name: "trailing bytes after mismatch", body: `{"run_id":78} trailing`},
+		{name: "second JSON value", body: `{"run_id":77} {"run_id":77}`},
+		{name: "matching ETag with partial contradiction", etag: "77", body: `{"run_id":78,`},
+		{name: "truncated after matching identity", body: `{"run_id":77`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := acceptedIdentityServer(
+				t, test.etag, test.body, `{"state":"RUNNING","run_id":77}`)
+			client := NewSptAPIClient(server.URL)
+			client.submissionReconcileTimeout = 100 * time.Millisecond
+			client.submissionReconcilePollInterval = time.Millisecond
+
+			outcome, err := client.StartTestContext(
+				context.Background(), []byte("scenario"), []byte("defaults"), 77)
+			var identityErr *SubmissionIdentityError
+			if !errors.As(err, &identityErr) {
+				t.Fatalf("error = %v, want SubmissionIdentityError", err)
+			}
+			if outcome.Submission != SubmissionSubmitted || outcome.RunID != "" {
+				t.Fatalf("outcome = %+v, want submitted without trusted identity", outcome)
+			}
+			if got := client.getRunID(); got != "" {
+				t.Fatalf("malformed response established owned run ID %q", got)
+			}
+		})
+	}
+}
+
+func TestAcceptedResponseBodyReadFailureCannotEstablishIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		etag string
+		body string
+	}{
+		{name: "matching identity prefix", body: `{"run_id":77}`},
+		{name: "matching identity and ETag", etag: "77", body: `{"run_id":77}`},
+		{name: "matching ETag and partial contradiction", etag: "77", body: `{"run_id":78,`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var statusCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(
+				writer http.ResponseWriter, request *http.Request,
+			) {
+				switch request.URL.Path {
+				case "/run":
+					if test.etag != "" {
+						writer.Header().Set("ETag", test.etag)
+					}
+					writer.Header().Set("Content-Length", "64")
+					writer.WriteHeader(http.StatusAccepted)
+					_, _ = writer.Write([]byte(test.body))
+				case "/status":
+					statusCalls.Add(1)
+					_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":77}`))
+				default:
+					writer.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			client := NewSptAPIClient(server.URL)
+			outcome, err := client.StartTestContext(
+				context.Background(), []byte("scenario"), []byte("defaults"), 77)
+			var identityErr *SubmissionIdentityError
+			if !errors.As(err, &identityErr) {
+				t.Fatalf("error = %v, want SubmissionIdentityError", err)
+			}
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("error = %v, want unexpected EOF cause", err)
+			}
+			if outcome.Submission != SubmissionSubmitted || outcome.RunID != "" {
+				t.Fatalf("outcome = %+v, want submitted without trusted identity", outcome)
+			}
+			if got := client.getRunID(); got != "" {
+				t.Fatalf("truncated response established owned run ID %q", got)
+			}
+			if calls := statusCalls.Load(); calls != 0 {
+				t.Fatalf("truncated response reconciled through status %d time(s)", calls)
 			}
 		})
 	}
@@ -167,7 +261,7 @@ func TestAcceptedResponseIdentityPreservesUnconfiguredCompatibility(t *testing.T
 	}
 }
 
-func TestAcceptedIdentityErrorRetainsSubmittedCleanupOwnership(t *testing.T) {
+func TestIncompleteAcceptedResponseRetainsSubmittedCleanupOwnership(t *testing.T) {
 	var statusCalls atomic.Int32
 	var metricsCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(
@@ -183,8 +277,10 @@ func TestAcceptedIdentityErrorRetainsSubmittedCleanupOwnership(t *testing.T) {
 		case request.URL.Path == "/run" && request.Method == http.MethodHead:
 			writer.WriteHeader(http.StatusNoContent)
 		case request.URL.Path == "/run" && request.Method == http.MethodPost:
-			writer.Header().Set("ETag", "78")
+			writer.Header().Set("ETag", "77")
+			writer.Header().Set("Content-Length", "64")
 			writer.WriteHeader(http.StatusAccepted)
+			_, _ = writer.Write([]byte(`{"run_id":77}`))
 		case request.URL.Path == "/status":
 			statusCalls.Add(1)
 			writer.WriteHeader(http.StatusOK)
