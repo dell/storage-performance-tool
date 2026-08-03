@@ -2,6 +2,8 @@ package com.dell.spt.base.load.step.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,6 +11,8 @@ import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.file.FileManager;
+
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -166,5 +170,63 @@ class CsvArtifactAggregatorTest {
 										"read-step", List.of(FileManager.INSTANCE), List.of(),
 										manifest.toString(), 103, 0, com.dell.spt.base.item.op.OpType.READ).close());
 		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void chunkCleanupFailureIsSuppressedBehindPrimaryWriteFailure() {
+		final IOException primary = new IOException("chunk write failed");
+		final IOException cleanup = new IOException("chunk delete failed");
+
+		final IOException thrown = assertThrows(
+						IOException.class,
+						() -> CsvArtifactAggregator.completeChunkWrite(
+										() -> {
+											throw primary;
+										},
+										() -> {
+											throw cleanup;
+										}));
+
+		assertSame(primary, thrown);
+		assertEquals(1, thrown.getSuppressed().length);
+		assertSame(cleanup, thrown.getSuppressed()[0]);
+	}
+
+	@Test
+	void aggregationCleanupFailureIsSuppressedBehindPrimaryFailure() throws Exception {
+		final Path source = tempDir.resolve("invalid-source.csv");
+		Files.writeString(source, "not,a,canonical,header\n");
+		final IOException cleanup = new IOException("temp cleanup failed");
+
+		final IOException thrown = assertThrows(
+						IOException.class,
+						() -> CsvArtifactAggregator.aggregateBoundedForTest(
+										List.of(source), tempDir.resolve("staging.csv"), 0, () -> {
+											throw cleanup;
+										}));
+
+		assertTrue(thrown.getMessage().contains("noncanonical header"));
+		assertEquals(1, thrown.getSuppressed().length);
+		assertSame(cleanup, thrown.getSuppressed()[0]);
+	}
+
+	@Test
+	void aggregationCleanupOnlyFailureIsReportedNormally() throws Exception {
+		final Path source = tempDir.resolve("valid-source.csv");
+		Files.writeString(
+						source,
+						"bucket,key,size,version_id\n"
+										+ "b,key,1,\n");
+		final Path staging = Files.createFile(tempDir.resolve("staging.csv"));
+		final IOException cleanup = new IOException("temp cleanup failed");
+
+		final IOException thrown = assertThrows(
+						IOException.class,
+						() -> CsvArtifactAggregator.aggregateBoundedForTest(
+										List.of(source), staging, 0, () -> {
+											throw cleanup;
+										}));
+
+		assertSame(cleanup, thrown);
 	}
 }

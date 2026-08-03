@@ -1,14 +1,20 @@
 package com.dell.spt.base.integrity;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -20,7 +26,7 @@ class IntegrityManifestCompletionTest {
 	@Test
 	void publishesAndValidatesIdentityBoundRecord() throws Exception {
 		final Path manifest = tempDir.resolve("written.csv");
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,\"k,1\",3,v1\r\n");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,\"k,1\",3,v1\n");
 		final var completion = IntegrityManifestCompletion.create(
 						manifest,
 						42,
@@ -38,9 +44,54 @@ class IntegrityManifestCompletionTest {
 	}
 
 	@Test
+	void publicationCleanupFailureIsSuppressedBehindPrimaryFailure() throws Exception {
+		final Path manifest = tempDir.resolve("completion-failure.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,k,1,\n");
+		final var completion = IntegrityManifestCompletion.create(
+						manifest,
+						42,
+						IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+						"create-step",
+						1,
+						1,
+						1);
+		final IOException primary = new IOException("publication");
+		final IOException cleanup = new IOException("cleanup");
+		final CrashDurableFilePublisher.Operations operations = new CrashDurableFilePublisher.Operations() {
+			@Override
+			public void syncFile(final Path path) {}
+
+			@Override
+			public void createLinkNoReplace(final Path source, final Path target)
+							throws IOException {
+				throw primary;
+			}
+
+			@Override
+			public void delete(final Path path) {}
+
+			@Override
+			public void syncDirectory(final Path path) {}
+		};
+
+		final IOException thrown = assertThrows(
+						IOException.class,
+						() -> completion.publish(
+										manifest,
+										operations,
+										() -> {
+											throw cleanup;
+										}));
+
+		assertSame(primary, thrown);
+		assertEquals(1, thrown.getSuppressed().length);
+		assertSame(cleanup, thrown.getSuppressed()[0]);
+	}
+
+	@Test
 	void rejectsChangedManifestAndWrongRun() throws Exception {
 		final Path manifest = tempDir.resolve("verified.csv");
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,3,\r\n");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,k,3,\n");
 		IntegrityManifestCompletion.create(
 						manifest,
 						7,
@@ -55,7 +106,7 @@ class IntegrityManifestCompletionTest {
 						IOException.class,
 						() -> IntegrityManifestCompletion.validate(
 										manifest, 8, IntegrityInputProvenance.ENGINE_STEP, "read-step"));
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,4,\r\n");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,k,4,\n");
 		assertThrows(
 						IOException.class,
 						() -> IntegrityManifestCompletion.validate(
@@ -65,7 +116,7 @@ class IntegrityManifestCompletionTest {
 	@Test
 	void ignoresCompletionStagingFileAfterInterruptedPublication() throws Exception {
 		final Path manifest = tempDir.resolve("written.csv");
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,3,\r\n");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,k,3,\n");
 		final Path marker = IntegrityManifestCompletion.completionPath(manifest);
 		Files.writeString(
 						marker.resolveSibling("." + marker.getFileName() + ".staging"),
@@ -80,7 +131,7 @@ class IntegrityManifestCompletionTest {
 	@Test
 	void rejectsInconsistentPublicCounts() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,1,\r\n");
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,k,1,\n");
 		assertThrows(
 						IOException.class,
 						() -> IntegrityManifestCompletion.create(
@@ -98,7 +149,7 @@ class IntegrityManifestCompletionTest {
 		final Path outOfOrder = tempDir.resolve("out-of-order.csv");
 		Files.writeString(
 						outOfOrder,
-						"bucket,key,size,version_id\r\nb,z,1,\r\nb,a,1,\r\n");
+						"bucket,key,size,version_id\nb,z,1,\nb,a,1,\n");
 		assertThrows(
 						IOException.class,
 						() -> IntegrityManifestCompletion.create(
@@ -108,7 +159,7 @@ class IntegrityManifestCompletionTest {
 		final Path duplicate = tempDir.resolve("duplicate.csv");
 		Files.writeString(
 						duplicate,
-						"bucket,key,size,version_id\r\nb,a,1,\r\nb,a,1,\r\n");
+						"bucket,key,size,version_id\nb,a,1,\nb,a,1,\n");
 		assertThrows(
 						IOException.class,
 						() -> IntegrityManifestCompletion.create(
@@ -127,10 +178,10 @@ class IntegrityManifestCompletionTest {
 	@Test
 	void rejectsMalformedUtf8() throws Exception {
 		final Path manifest = tempDir.resolve("malformed-utf8.csv");
-		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,", StandardCharsets.UTF_8);
+		Files.writeString(manifest, "bucket,key,size,version_id\nb,", StandardCharsets.UTF_8);
 		Files.write(manifest, new byte[]{(byte) 0xff
 		}, StandardOpenOption.APPEND);
-		Files.writeString(manifest, ",1,\r\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+		Files.writeString(manifest, ",1,\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
 
 		assertThrows(
 						IOException.class,
@@ -194,17 +245,44 @@ class IntegrityManifestCompletionTest {
 						"mt-001-20260730.120000.000-list");
 	}
 
+	@Test
+	void sharedPhysicalCanonicalCorpusHasExpectedResults() throws Exception {
+		final Path fixture = sharedIntegrityFixture("canonical-v1", "cases.json");
+		final List<Map<String, Object>> cases = new ObjectMapper().readValue(
+						fixture.toFile(), new TypeReference<>() {});
+		for (final Map<String, Object> test : cases) {
+			final String name = (String) test.get("name");
+			final boolean expected = (Boolean) test.get("accept");
+			final Path manifest = tempDir.resolve(name + ".csv");
+			Files.write(manifest, Base64.getDecoder().decode((String) test.get("base64")));
+			boolean accepted = true;
+			try {
+				IntegrityManifestValidator.validate(manifest);
+			} catch (final IOException e) {
+				accepted = false;
+			}
+			assertEquals(expected, accepted, name);
+		}
+	}
+
 	private static Path sharedCompletionFixture(final String variant) {
+		return sharedIntegrityFixture("completion-v1", variant);
+	}
+
+	private static Path sharedIntegrityFixture(final String... parts) {
 		Path cursor = Path.of("").toAbsolutePath();
 		while (cursor != null) {
-			final Path candidate = cursor.resolve(
-							Path.of("testdata", "integrity", "completion-v1", variant));
-			if (Files.isDirectory(candidate)) {
+			Path candidate = cursor.resolve(Path.of("testdata", "integrity"));
+			for (final String part : parts) {
+				candidate = candidate.resolve(part);
+			}
+			if (Files.exists(candidate)) {
 				return candidate;
 			}
 			cursor = cursor.getParent();
 		}
-		throw new AssertionError("shared completion fixture not found: " + variant);
+		throw new AssertionError(
+						"shared integrity fixture not found: " + String.join("/", parts));
 	}
 
 	@Test

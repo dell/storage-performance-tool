@@ -4,18 +4,21 @@ import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.Reader;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.DigestInputStream;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Iterator;
-import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.csv.CSVRecord;
 
 /** One-pass structural and content validator for canonical integrity manifests. */
@@ -25,8 +28,10 @@ final class IntegrityManifestValidator {
 
 	static Evidence validate(final Path path) throws IOException {
 		final MessageDigest digest;
+		final MessageDigest canonicalDigest;
 		try {
 			digest = MessageDigest.getInstance("SHA-256");
+			canonicalDigest = MessageDigest.getInstance("SHA-256");
 		} catch (final NoSuchAlgorithmException e) {
 			throw new AssertionError(e);
 		}
@@ -37,16 +42,26 @@ final class IntegrityManifestValidator {
 										StandardCharsets.UTF_8.newDecoder()
 														.onMalformedInput(CodingErrorAction.REPORT)
 														.onUnmappableCharacter(CodingErrorAction.REPORT));
-						CSVParser parser = CSVFormat.RFC4180.parse(reader)) {
+						CountingDigestOutputStream canonicalOutput = new CountingDigestOutputStream(
+										OutputStream.nullOutputStream(), canonicalDigest);
+						OutputStreamWriter canonicalWriter = new OutputStreamWriter(canonicalOutput, StandardCharsets.UTF_8);
+						CSVPrinter canonical = new CSVPrinter(canonicalWriter, IntegrityCsvFormat.RFC4180_LF);
+						CSVParser parser = IntegrityCsvFormat.RFC4180_LF.parse(reader)) {
 			final Iterator<CSVRecord> records = parser.iterator();
-			if (!records.hasNext() || !IntegrityManifestItemInput.HEADER.equals(records.next().toList())) {
+			if (!records.hasNext()) {
 				throw new IOException("integrity input manifest has a noncanonical header: " + path);
 			}
+			final CSVRecord header = records.next();
+			if (!IntegrityManifestItemInput.HEADER.equals(header.toList())) {
+				throw new IOException("integrity input manifest has a noncanonical header: " + path);
+			}
+			canonical.printRecord(header.toList());
 			long rows = 0;
 			ManifestIdentity prior = null;
 			while (records.hasNext()) {
 				final CSVRecord record = records.next();
 				final ManifestIdentity current = parseIdentity(record, path);
+				canonical.printRecord(record.toList());
 				rows = Math.addExact(rows, 1);
 				if (prior != null) {
 					final int compared = IntegrityManifestOrder.compareIdentity(
@@ -65,8 +80,15 @@ final class IntegrityManifestValidator {
 				}
 				prior = current;
 			}
-			return new Evidence(
-							rows, hashing.count(), HexFormat.of().formatHex(digest.digest()));
+			canonical.flush();
+			final byte[] rawHash = digest.digest();
+			final byte[] canonicalHash = canonicalDigest.digest();
+			if (hashing.count() != canonicalOutput.count()
+							|| !MessageDigest.isEqual(rawHash, canonicalHash)) {
+				throw new IOException(
+								"integrity manifest is not in canonical physical CSV form: " + path);
+			}
+			return new Evidence(rows, hashing.count(), HexFormat.of().formatHex(rawHash));
 		} catch (final RuntimeException e) {
 			throw new IOException("invalid canonical integrity manifest " + path, e);
 		}
@@ -89,6 +111,11 @@ final class IntegrityManifestValidator {
 		if (size < 0) {
 			throw new IOException(
 							"negative integrity manifest size at record " + record.getRecordNumber());
+		}
+		if (!Long.toString(size).equals(record.get(2))) {
+			throw new IOException(
+							"noncanonical integrity manifest size at record "
+											+ record.getRecordNumber());
 		}
 		return new ManifestIdentity(record.get(0), record.get(1), record.get(3));
 	}
@@ -129,6 +156,30 @@ final class IntegrityManifestValidator {
 			this.bucket = bucket;
 			this.key = key;
 			this.versionId = versionId;
+		}
+	}
+
+	private static final class CountingDigestOutputStream extends DigestOutputStream {
+		private long count;
+
+		private CountingDigestOutputStream(final OutputStream output, final MessageDigest digest) {
+			super(output, digest);
+		}
+
+		@Override
+		public void write(final int value) throws IOException {
+			super.write(value);
+			count++;
+		}
+
+		@Override
+		public void write(final byte[] data, final int offset, final int length) throws IOException {
+			super.write(data, offset, length);
+			count = Math.addExact(count, length);
+		}
+
+		private long count() {
+			return count;
 		}
 	}
 

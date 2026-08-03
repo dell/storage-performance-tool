@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.client;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
+import com.dell.spt.base.integrity.FailurePreservingCleanup;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityManifestOrder;
@@ -345,18 +346,48 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 	private static AggregationCounts aggregateBounded(
 					final List<Path> sources, final Path staging, final long selectionLimit)
 					throws IOException {
+		return aggregateBounded(sources, staging, selectionLimit, null);
+	}
+
+	static void aggregateBoundedForTest(
+					final List<Path> sources,
+					final Path staging,
+					final long selectionLimit,
+					final FailurePreservingCleanup.IOAction injectedCleanup)
+					throws IOException {
+		aggregateBounded(sources, staging, selectionLimit, injectedCleanup);
+	}
+
+	private static AggregationCounts aggregateBounded(
+					final List<Path> sources,
+					final Path staging,
+					final long selectionLimit,
+					final FailurePreservingCleanup.IOAction injectedCleanup)
+					throws IOException {
 		final Path tempDir = Files.createTempDirectory("spt-integrity-aggregate-");
+		return FailurePreservingCleanup.always(
+						() -> aggregateInTempDir(sources, staging, selectionLimit, tempDir),
+						() -> {
+							deleteTempTree(tempDir);
+							if (injectedCleanup != null) {
+								injectedCleanup.run();
+							}
+						});
+	}
+
+	private static AggregationCounts aggregateInTempDir(
+					final List<Path> sources,
+					final Path staging,
+					final long selectionLimit,
+					final Path tempDir)
+					throws IOException {
 		final List<Path> chunks = new ArrayList<>();
 		long sourceCount = 0;
-		try {
-			for (final Path source : sources) {
-				sourceCount = Math.addExact(sourceCount, createSortedChunks(source, tempDir, chunks));
-			}
-			final MergeCounts merged = mergeSortedChunks(tempDir, chunks, staging, selectionLimit);
-			return new AggregationCounts(sourceCount, merged.unique(), merged.selected());
-		} finally {
-			deleteTempTree(tempDir);
+		for (final Path source : sources) {
+			sourceCount = Math.addExact(sourceCount, createSortedChunks(source, tempDir, chunks));
 		}
+		final MergeCounts merged = mergeSortedChunks(tempDir, chunks, staging, selectionLimit);
+		return new AggregationCounts(sourceCount, merged.unique(), merged.selected());
 	}
 
 	private static long createSortedChunks(
@@ -390,26 +421,32 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final Path tempDir, final List<ManifestRecord> records) throws IOException {
 		records.sort(RECORD_ORDER);
 		final Path chunk = Files.createTempFile(tempDir, "chunk-", ".csv");
-		boolean success = false;
-		try (CSVPrinter printer = new CSVPrinter(
-						Files.newBufferedWriter(chunk, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
-						IntegrityCsvFormat.RFC4180_LF)) {
-			ManifestRecord prior = null;
-			for (final ManifestRecord record : records) {
-				if (prior != null && RECORD_ORDER.compare(prior, record) == 0) {
-					requireSameSize(prior, record);
-					continue;
-				}
-				printer.printRecord(record.bucket(), record.key(), record.size(), record.versionId());
-				prior = record;
-			}
-			success = true;
-		} finally {
-			if (!success) {
-				Files.deleteIfExists(chunk);
-			}
-		}
-		return chunk;
+		return completeChunkWrite(
+						() -> {
+							try (CSVPrinter printer = new CSVPrinter(
+											Files.newBufferedWriter(
+															chunk, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING),
+											IntegrityCsvFormat.RFC4180_LF)) {
+								ManifestRecord prior = null;
+								for (final ManifestRecord record : records) {
+									if (prior != null && RECORD_ORDER.compare(prior, record) == 0) {
+										requireSameSize(prior, record);
+										continue;
+									}
+									printer.printRecord(record.bucket(), record.key(), record.size(), record.versionId());
+									prior = record;
+								}
+							}
+							return chunk;
+						},
+						() -> Files.deleteIfExists(chunk));
+	}
+
+	static <T> T completeChunkWrite(
+					final FailurePreservingCleanup.IOSupplier<T> operation,
+					final FailurePreservingCleanup.IOAction cleanup)
+					throws IOException {
+		return FailurePreservingCleanup.onFailure(operation, cleanup);
 	}
 
 	private static MergeCounts mergeSortedChunks(

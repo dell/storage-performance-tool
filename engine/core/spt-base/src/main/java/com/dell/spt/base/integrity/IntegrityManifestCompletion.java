@@ -177,6 +177,14 @@ public final class IntegrityManifestCompletion {
 					final Path manifest,
 					final CrashDurableFilePublisher.Operations testOperations)
 					throws IOException {
+		publish(manifest, testOperations, null);
+	}
+
+	void publish(
+					final Path manifest,
+					final CrashDurableFilePublisher.Operations testOperations,
+					final FailurePreservingCleanup.IOAction testCleanup)
+					throws IOException {
 		final Path marker = completionPath(manifest);
 		if (Files.exists(marker)) {
 			throw new IOException("refusing to replace existing completion record " + marker);
@@ -184,20 +192,18 @@ public final class IntegrityManifestCompletion {
 		final Path parent = marker.toAbsolutePath().getParent();
 		Files.createDirectories(parent);
 		final Path staging = Files.createTempFile(parent, "." + marker.getFileName(), ".staging");
-		boolean committed = false;
-		try {
-			JSON.writerWithDefaultPrettyPrinter().writeValue(staging.toFile(), this);
-			if (testOperations == null) {
-				atomicMove(staging, marker);
-			} else {
-				CrashDurableFilePublisher.publish(staging, marker, testOperations);
-			}
-			committed = true;
-		} finally {
-			if (!committed) {
-				Files.deleteIfExists(staging);
-			}
-		}
+		final FailurePreservingCleanup.IOAction cleanup = testCleanup == null ? () -> Files.deleteIfExists(staging) : testCleanup;
+		FailurePreservingCleanup.onFailure(
+						() -> {
+							JSON.writerWithDefaultPrettyPrinter().writeValue(staging.toFile(), this);
+							if (testOperations == null) {
+								atomicMove(staging, marker);
+							} else {
+								CrashDurableFilePublisher.publish(staging, marker, testOperations);
+							}
+							return null;
+						},
+						cleanup);
 	}
 
 	public static IntegrityManifestCompletion validate(
