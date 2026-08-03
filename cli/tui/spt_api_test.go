@@ -322,6 +322,7 @@ func TestSptAPIClient_StopTest(t *testing.T) {
 			defer server.Close()
 
 			client := NewSptAPIClient(server.URL)
+			client.SetRunID("test-run")
 			err := client.StopTest()
 
 			if tt.expectError && err == nil {

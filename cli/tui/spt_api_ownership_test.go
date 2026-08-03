@@ -51,17 +51,21 @@ func TestReconciliationDoesNotAdoptUnrelatedRunForStop(t *testing.T) {
 	}
 }
 
-func TestStatusObservationNeverAdoptsUnattributedRunID(t *testing.T) {
+func TestPublicStatusObservationNeverAdoptsUnattributedRunID(t *testing.T) {
 	tests := []struct {
-		name       string
-		statusCode int
-		payload    string
+		name          string
+		statusCode    int
+		payload       string
+		observedRunID string
+		wantError     bool
 	}{
-		{name: "different numeric", payload: `{"state":"RUNNING","run_id":78}`},
+		{name: "different numeric", payload: `{"state":"RUNNING","run_id":78}`, observedRunID: "78"},
 		{name: "missing", payload: `{"state":"RUNNING"}`},
-		{name: "malformed numeric", payload: `{"state":"RUNNING","run_id":"bad"}`},
-		{name: "malformed json", payload: `{"state":`},
-		{name: "legacy nonnumeric", payload: `{"state":"RUNNING","runId":"legacy"}`},
+		{name: "malformed numeric", payload: `{"state":"RUNNING","run_id":"bad"}`, wantError: true},
+		{name: "malformed json", payload: `{"state":`, wantError: true},
+		{name: "legacy nonnumeric", payload: `{"state":"RUNNING","runId":"legacy"}`, observedRunID: "legacy"},
+		{name: "different terminal", payload: `{"state":"COMPLETED","run_id":78}`, observedRunID: "78"},
+		{name: "different unattributable state", payload: `{"state":"UNKNOWN","run_id":78}`, observedRunID: "78"},
 		{name: "not found", statusCode: http.StatusNotFound},
 	}
 	for _, test := range tests {
@@ -78,7 +82,19 @@ func TestStatusObservationNeverAdoptsUnattributedRunID(t *testing.T) {
 
 			client := NewSptAPIClient(server.URL)
 			client.SetRunID("77")
-			_, _ = client.observeStatusContext(context.Background())
+			status, err := client.GetStatusContext(context.Background())
+			if test.wantError {
+				if err == nil {
+					t.Fatal("GetStatusContext() succeeded, want error")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("GetStatusContext() error = %v", err)
+				}
+				if status.RunID != test.observedRunID {
+					t.Fatalf("observed run ID = %q, want %q", status.RunID, test.observedRunID)
+				}
+			}
 			if got := client.getRunID(); got != "77" {
 				t.Fatalf("observation changed owned run ID to %q", got)
 			}
@@ -86,7 +102,58 @@ func TestStatusObservationNeverAdoptsUnattributedRunID(t *testing.T) {
 	}
 }
 
-func TestConcurrentStatusObservationDoesNotChangeOwnership(t *testing.T) {
+func TestOrdinaryStatusPollingDoesNotRetargetStop(t *testing.T) {
+	var stoppedRunID string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/status":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
+		case request.URL.Path == "/run" && request.Method == http.MethodDelete:
+			stoppedRunID = request.URL.Query().Get("runId")
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.SetRunID("77")
+	status, err := client.GetStatusContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RunID != "78" {
+		t.Fatalf("observed run ID = %q, want 78", status.RunID)
+	}
+	if err = client.StopTest(); err != nil {
+		t.Fatal(err)
+	}
+	if stoppedRunID != "77" {
+		t.Fatalf("stop targeted run ID %q, want owned run 77", stoppedRunID)
+	}
+}
+
+func TestStopWithoutOwnedRunIDRefusesObservedTarget(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
+	}))
+	defer server.Close()
+
+	err := NewSptAPIClient(server.URL).StopTest()
+	if !errors.Is(err, ErrRunOwnershipUnknown) {
+		t.Fatalf("StopTest() error = %v, want %v", err, ErrRunOwnershipUnknown)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("StopTest() sent %d requests without an owned run ID", got)
+	}
+}
+
+func TestConcurrentPublicStatusObservationDoesNotChangeOwnership(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
@@ -101,7 +168,7 @@ func TestConcurrentStatusObservationDoesNotChangeOwnership(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			for attempt := 0; attempt < 8; attempt++ {
-				_, _ = client.observeStatusContext(context.Background())
+				_, _ = client.GetStatusContext(context.Background())
 				_ = client.getRunID()
 			}
 		}()
@@ -135,7 +202,7 @@ func TestConcurrentReconciliationAdoptsOnlyExpectedRun(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			for attempt := 0; attempt < 8; attempt++ {
-				_, _ = client.observeStatusContext(context.Background())
+				_, _ = client.GetStatusContext(context.Background())
 			}
 		}()
 	}

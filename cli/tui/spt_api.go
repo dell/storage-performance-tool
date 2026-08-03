@@ -29,6 +29,11 @@ const apiLogPreviewLen = 160
 // ErrMetricsIncompatible indicates that the metrics payload cannot be consumed by this client.
 var ErrMetricsIncompatible = errors.New("spt metrics payload incompatible with this client")
 
+// ErrRunOwnershipUnknown prevents destructive run operations when the client
+// has not established ownership through a confirmed submission or bounded
+// submission reconciliation.
+var ErrRunOwnershipUnknown = errors.New("cannot stop test without a session-owned run ID")
+
 // SptAPIClient handles communication with the Spt REST API
 type SptAPIClient struct {
 	baseURL                         string
@@ -460,19 +465,17 @@ func (c *SptAPIClient) GetStatus() (*TestStatus, error) {
 	return c.GetStatusContext(context.Background())
 }
 
-// GetStatusContext retrieves status within the caller's cancellation budget
-// and adopts an authoritative payload run ID for display compatibility.
+// GetStatusContext retrieves observed status within the caller's cancellation
+// budget. Observing another run never changes this client's owned run ID.
 func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error) {
-	return c.getStatusContext(ctx, true)
+	return c.getStatusContext(ctx)
 }
 
 func (c *SptAPIClient) observeStatusContext(ctx context.Context) (*TestStatus, error) {
-	return c.getStatusContext(ctx, false)
+	return c.getStatusContext(ctx)
 }
 
-func (c *SptAPIClient) getStatusContext(
-	ctx context.Context, adoptRunID bool,
-) (*TestStatus, error) {
+func (c *SptAPIClient) getStatusContext(ctx context.Context) (*TestStatus, error) {
 	// Try the /status endpoint first
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/status", nil)
 	if err != nil {
@@ -487,14 +490,10 @@ func (c *SptAPIClient) getStatusContext(
 	// Handle different response codes
 	if resp.StatusCode == 404 {
 		// No test running
-		status := &TestStatus{
+		return &TestStatus{
 			State:   constants.StateIdle,
 			Message: "No test running",
-		}
-		if adoptRunID {
-			status.RunID = c.getRunID()
-		}
-		return status, nil
+		}, nil
 	}
 
 	if resp.StatusCode != 200 {
@@ -513,9 +512,6 @@ func (c *SptAPIClient) getStatusContext(
 	}
 
 	status := &TestStatus{}
-	if adoptRunID {
-		status.RunID = c.getRunID()
-	}
 
 	// Extract fields from JSON
 	if statusData.State != "" {
@@ -533,10 +529,6 @@ func (c *SptAPIClient) getStatusContext(
 		status.RunID = legacyRunID
 		status.runIDFromPayload = true
 	}
-	if adoptRunID && status.runIDFromPayload {
-		c.setRunID(status.RunID)
-	}
-
 	if statusData.Progress != nil {
 		status.Progress = *statusData.Progress
 	}
@@ -549,12 +541,8 @@ func (c *SptAPIClient) getStatusContext(
 // StopTest stops the currently running test gracefully
 func (c *SptAPIClient) StopTest() error {
 	runID := c.getRunID()
-
-	// If we don't have a run ID, try to get it from HEAD request
 	if runID == "" {
-		if status, err := c.GetStatus(); err == nil && status.RunID != "" {
-			runID = status.RunID
-		}
+		return ErrRunOwnershipUnknown
 	}
 
 	logging.LogInfo("spt-api", "stopping test", "runID", runID)
