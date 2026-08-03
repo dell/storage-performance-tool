@@ -53,8 +53,11 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 				Provenance: constants.IntegrityProvenanceEngineStep, ExpectedProducerID: createID,
 			},
 		},
-		DeleteIntegrity: integrityTemplateData{
-			Provenance: constants.IntegrityProvenanceEngineStep, ExpectedProducerID: readID,
+		DeleteStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance: constants.IntegrityProvenanceEngineStep, ExpectedProducerID: readID,
+			},
 		},
 		BucketPath:       bucketPath,
 		ObjectSize:       params.ObjectSize,

@@ -105,8 +105,13 @@ func TestGenerateWriteVerifyScenarioContract(t *testing.T) {
 	if len(configs) != 3 {
 		t.Fatalf("expected CREATE, READ, and DELETE configs, got %d", len(configs))
 	}
-	if gotDriver := generatedConfigValue(t, configs[0], "storage", "driver", "type"); gotDriver != "s3-aws" {
-		t.Fatalf("CREATE driver = %#v, want s3-aws", gotDriver)
+	for i, phase := range []string{"CREATE", "READ", "DELETE"} {
+		if gotDriver := generatedConfigValue(t, configs[i], "storage", "driver", "type"); gotDriver != "s3-aws" {
+			t.Fatalf("%s driver = %#v, want s3-aws", phase, gotDriver)
+		}
+		if gotConcurrency := generatedConfigValue(t, configs[i], "storage", "driver", "limit", "concurrency"); gotConcurrency != float64(2) {
+			t.Fatalf("%s concurrency = %#v, want 2", phase, gotConcurrency)
+		}
 	}
 	if gotCount := generatedConfigValue(t, configs[0], "load", "op", "limit", "count"); gotCount != float64(3) {
 		t.Fatalf("CREATE count = %#v, want 3", gotCount)

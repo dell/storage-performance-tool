@@ -24,7 +24,7 @@ type writeVerifyScenarioData struct {
 	DeleteStep       string
 	CreateStorage    integrityStorageTemplateData
 	ReadStorage      integrityStorageTemplateData
-	DeleteIntegrity  integrityTemplateData
+	DeleteStorage    integrityStorageTemplateData
 	BucketPath       string
 	ObjectSize       string
 	PartSize         string
@@ -98,9 +98,7 @@ ReadLoad.config({
 }).run();
 {{if .Cleanup}}
 DeleteLoad.config({
-  "storage": {
-    {{template "integrity" .DeleteIntegrity}}
-  },
+  {{template "storage" .DeleteStorage}},
   "item": {"type": "data", "input": {"file": verifiedFile}},
   "load": {"op": {"type": "delete"}, "step": {"id": {{jsq .DeleteStep}}}},
   {{template "summary"}}
