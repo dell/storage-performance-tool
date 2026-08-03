@@ -28,7 +28,7 @@ func TestLaunchHooksSubmissionStateIsSharedAndExactlyOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	if !hooks.Submitted() || !copyOfHooks.Submitted() {
+	if !hooks.Submitted() || !copyOfHooks.Submitted() || !hooks.NormalEvidencePermitted() {
 		t.Fatal("submission state was not shared across copied hooks")
 	}
 	if calls.Load() != 1 {
@@ -51,6 +51,9 @@ func TestZeroValueLaunchHooksRemainCompatible(t *testing.T) {
 func TestLaunchHooksSubmissionUnknownCanAdvanceButNotRegress(t *testing.T) {
 	hooks := NewLaunchHooks(nil)
 	hooks.NotifySubmissionUnknown()
+	if hooks.NormalEvidencePermitted() {
+		t.Fatal("unknown submission permitted ordinary evidence")
+	}
 	if got := hooks.SubmissionState(); got != SubmissionUnknown {
 		t.Fatalf("submission state = %s, want %s", got, SubmissionUnknown)
 	}
@@ -59,6 +62,33 @@ func TestLaunchHooksSubmissionUnknownCanAdvanceButNotRegress(t *testing.T) {
 	hooks.NotifySubmissionUnknown()
 	if got := hooks.SubmissionState(); got != SubmissionSubmitted {
 		t.Fatalf("submission state = %s, want %s", got, SubmissionSubmitted)
+	}
+	if !hooks.NormalEvidencePermitted() {
+		t.Fatal("confirmed submission did not permit ordinary evidence")
+	}
+}
+
+func TestAcceptedForCleanupDoesNotArmNormalEvidence(t *testing.T) {
+	var armCalls atomic.Int32
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, func() { armCalls.Add(1) })
+
+	hooks.NotifyAcceptedForCleanup()
+	if got := session.SubmissionState(); got != runcontrol.SubmissionSubmitted {
+		t.Fatalf("session submission = %s, want submitted", got)
+	}
+	if hooks.NormalEvidencePermitted() || armCalls.Load() != 0 {
+		t.Fatalf("accepted-for-cleanup trusted=%t arm-calls=%d",
+			hooks.NormalEvidencePermitted(), armCalls.Load())
+	}
+
+	// A later authoritative confirmation may upgrade trust without losing the
+	// exactly-once callback guarantee.
+	hooks.NotifySubmitted()
+	hooks.NotifySubmitted()
+	if !hooks.NormalEvidencePermitted() || armCalls.Load() != 1 {
+		t.Fatalf("validated upgrade trusted=%t arm-calls=%d",
+			hooks.NormalEvidencePermitted(), armCalls.Load())
 	}
 }
 

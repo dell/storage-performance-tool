@@ -30,6 +30,7 @@ func TestAcceptedResponseIdentityMatchesConfiguredRun(t *testing.T) {
 		{name: "canonical body number", body: `{"run_id":77}`},
 		{name: "canonical body string", body: `{"run_id":"77"}`},
 		{name: "all matching", etag: "77", body: `{"run_id":77,"runId":"77"}`},
+		{name: "nested identity ignored", body: `{"metadata":{"run_id":78},"run_id":77}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -64,6 +65,11 @@ func TestAcceptedResponseIdentityRejectsInvalidConfiguredRun(t *testing.T) {
 		{name: "malformed quoted ETag", etag: `"77`},
 		{name: "nonnumeric canonical body", body: `{"run_id":"not-a-run"}`},
 		{name: "null legacy body", body: `{"runId":null}`},
+		{name: "duplicate canonical conflict", body: `{"run_id":78,"run_id":77}`},
+		{name: "duplicate canonical identical", body: `{"run_id":77,"run_id":77}`},
+		{name: "duplicate legacy conflict", body: `{"runId":78,"runId":77}`},
+		{name: "duplicate legacy identical", body: `{"runId":77,"runId":77}`},
+		{name: "escaped duplicate canonical", body: `{"run_id":77,"\u0072un_id":77}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -136,6 +142,7 @@ func TestAcceptedResponseIdentityPreservesUnconfiguredCompatibility(t *testing.T
 	}{
 		{name: "legacy ETag", etag: "legacy-etag", wantRunID: "legacy-etag"},
 		{name: "legacy body", body: `{"runId":"legacy-body"}`, wantRunID: "legacy-body"},
+		{name: "legacy duplicate remains compatibility scoped", body: `{"runId":"first","runId":"legacy-body"}`, wantRunID: "legacy-body"},
 		{name: "missing identity uses compatibility fallback"},
 	}
 	for _, test := range tests {
@@ -194,7 +201,8 @@ func TestAcceptedIdentityErrorRetainsSubmittedCleanupOwnership(t *testing.T) {
 	orchestrator := NewTestOrchestrator(manager, "", "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 	session := runcontrol.NewSession()
-	hooks := NewSessionLaunchHooks(session, nil)
+	var normalEvidenceArms atomic.Int32
+	hooks := NewSessionLaunchHooks(session, func() { normalEvidenceArms.Add(1) })
 	if err := hooks.RegisterResourceFinalizer(func(ctx context.Context) runcontrol.FinalizationOutcome {
 		cleanupErr := manager.CleanupContext(ctx)
 		disposition := runcontrol.ResourceDispositionRemoved
@@ -222,6 +230,10 @@ func TestAcceptedIdentityErrorRetainsSubmittedCleanupOwnership(t *testing.T) {
 	}
 	if state := session.SubmissionState(); state != runcontrol.SubmissionSubmitted {
 		t.Fatalf("session submission = %s, want submitted", state)
+	}
+	if hooks.NormalEvidencePermitted() || normalEvidenceArms.Load() != 0 {
+		t.Fatalf("identity-invalid launch trusted=%t normal evidence arms=%d",
+			hooks.NormalEvidencePermitted(), normalEvidenceArms.Load())
 	}
 	if !manager.HasManagedResources() || manager.GetCleanupCallCount() != 0 {
 		t.Fatalf("accepted launch was prematurely cleaned: managed=%t calls=%d",

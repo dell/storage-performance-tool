@@ -5,20 +5,21 @@ Copyright © 2026 Dell Technologies
 package tui
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
 
-// LaunchState records whether the engine accepted the run submission. It is
-// shared by value-copied LaunchHooks so launchers and their callers agree on
-// the pre-/post-submission boundary even when the launcher later returns an
-// unrelated UI, signal, or cleanup error.
+// LaunchState records cleanup ownership and whether ordinary run evidence is
+// trusted. It is shared by value-copied LaunchHooks so launchers and callers
+// agree on both facts after an unrelated UI, signal, or cleanup error.
 type LaunchState struct {
-	submission atomic.Uint32
-	once       sync.Once
-	session    *runcontrol.Session
+	submission            atomic.Uint32
+	normalEvidenceTrusted atomic.Bool
+	once                  sync.Once
+	session               *runcontrol.Session
 }
 
 // SubmissionState is retained as a TUI compatibility alias while RunSession
@@ -63,7 +64,8 @@ func ensureLaunchState(hooks LaunchHooks) LaunchHooks {
 	return hooks
 }
 
-// NotifySubmitted reports that the engine accepted the /run submission.
+// NotifySubmitted reports that the engine accepted the /run submission and
+// established the trusted identity required for ordinary evidence.
 func (h LaunchHooks) NotifySubmitted() {
 	if h.state == nil {
 		if h.OnSubmitted != nil {
@@ -71,20 +73,42 @@ func (h LaunchHooks) NotifySubmitted() {
 		}
 		return
 	}
-	transitioned := true
+	// Trust in ordinary run evidence is distinct from cleanup ownership. Set it
+	// before the synchronous callback arms result monitoring.
+	h.state.normalEvidenceTrusted.Store(true)
 	if h.state.session != nil {
-		transitioned = h.state.session.MarkSubmitted()
+		h.state.session.MarkSubmitted()
 	} else {
 		h.state.submission.Store(uint32(SubmissionSubmitted))
-	}
-	if !transitioned {
-		return
 	}
 	h.state.once.Do(func() {
 		if h.OnSubmitted != nil {
 			h.OnSubmitted()
 		}
 	})
+}
+
+// NotifyAcceptedForCleanup reports that the engine accepted POST /run, but
+// its response did not establish a trusted run identity. It retains cleanup
+// ownership without arming the normal evidence monitor.
+func (h LaunchHooks) NotifyAcceptedForCleanup() {
+	if h.state == nil {
+		return
+	}
+	if h.state.session != nil {
+		h.state.session.MarkSubmitted()
+	} else {
+		h.state.submission.Store(uint32(SubmissionSubmitted))
+	}
+}
+
+func notifyAcceptedSubmission(hooks LaunchHooks, submissionErr error) {
+	var identityErr *SubmissionIdentityError
+	if errors.As(submissionErr, &identityErr) {
+		hooks.NotifyAcceptedForCleanup()
+		return
+	}
+	hooks.NotifySubmitted()
 }
 
 // NotifySubmissionUnknown records that POST /run may have reached the engine,
@@ -113,14 +137,14 @@ func (h LaunchHooks) NotifySubmissionUnknown() {
 		uint32(SubmissionNotSubmitted), uint32(SubmissionUnknown))
 }
 
-// Submitted reports whether NotifySubmitted crossed the accepted-POST
-// boundary for this launch.
+// Submitted reports confirmed POST acceptance, including an identity-invalid
+// response retained only for cleanup.
 func (h LaunchHooks) Submitted() bool {
 	return h.SubmissionState() == SubmissionSubmitted
 }
 
 // ProvenNotSubmitted reports that no request with an ambiguous outcome was
-// dispatched. Only this state permits canceling an unarmed evidence monitor.
+// dispatched. Evidence permission is reported separately.
 func (h LaunchHooks) ProvenNotSubmitted() bool {
 	return h.SubmissionState() == SubmissionNotSubmitted
 }
@@ -128,6 +152,13 @@ func (h LaunchHooks) ProvenNotSubmitted() bool {
 // PotentiallySubmitted includes both confirmed and unresolved submissions.
 func (h LaunchHooks) PotentiallySubmitted() bool {
 	return h.SubmissionState() != SubmissionNotSubmitted
+}
+
+// NormalEvidencePermitted reports whether the launch established the trusted
+// run identity required for ordinary completion tracking and artifact use.
+// Accepted-for-cleanup and unresolved submissions deliberately return false.
+func (h LaunchHooks) NormalEvidencePermitted() bool {
+	return h.state != nil && h.state.normalEvidenceTrusted.Load()
 }
 
 // SubmissionState returns the strongest submission fact observed by these

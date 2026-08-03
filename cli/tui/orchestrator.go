@@ -373,12 +373,21 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	// the hook prepares result artifacts or waits for its launch gate.
 	o.mu.Unlock()
 	locked = false
-	hooks.NotifySubmitted()
+	notifyAcceptedSubmission(hooks, submitErr)
 	if submitErr != nil {
 		return fmt.Errorf("engine submission was confirmed after POST /run returned an error: %w", submitErr)
 	}
 
 	return nil
+}
+
+func isPresentationTerminalState(state string) bool {
+	switch state {
+	case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
+		return true
+	default:
+		return false
+	}
 }
 
 // monitorStatus polls the test status periodically
@@ -404,7 +413,7 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 			}
 
 			// Check if test has completed
-			if status != nil && (status.State == constants.StateCompleted || status.State == constants.StateFailed) {
+			if status != nil && isPresentationTerminalState(status.State) {
 				if !o.apiClient.statusMatchesOwnedRun(status) {
 					logging.LogDebug(
 						"orchestrator", "ignoring terminal status not attributed to owned run",

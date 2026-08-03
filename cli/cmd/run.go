@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
@@ -115,11 +116,12 @@ var autoResultsPhaseBudgets = postRunBudgets{
 // autoResultsMonitor separates monitor construction from the launch boundary.
 // No engine evidence is consumed until Arm is called.
 type autoResultsMonitor struct {
-	done    chan autoResultsOutcome
-	armed   chan struct{}
-	armAck  chan struct{}
-	armOnce sync.Once
-	cancel  context.CancelFunc
+	done        chan autoResultsOutcome
+	armed       chan struct{}
+	armAck      chan struct{}
+	armOnce     sync.Once
+	cleanupOnly atomic.Bool
+	cancel      context.CancelFunc
 }
 
 func (m *autoResultsMonitor) Arm() {
@@ -133,8 +135,19 @@ func (m *autoResultsMonitor) Arm() {
 }
 
 func (m *autoResultsMonitor) Cancel() {
-	if m != nil && m.cancel != nil {
+	if m == nil {
+		return
+	}
+	resolveCleanupOnly := false
+	m.armOnce.Do(func() {
+		m.cleanupOnly.Store(true)
+		resolveCleanupOnly = true
+	})
+	if m.cancel != nil {
 		m.cancel()
+	}
+	if resolveCleanupOnly && m.armed != nil {
+		close(m.armed)
 	}
 }
 
@@ -300,280 +313,285 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				logging.LogError("auto-results", "archive prepared inputs", archiveErr, "dest", root)
 			}
 		}
-		select {
-		case <-monitor.armed:
+		<-monitor.armed
+		if monitor.armAck != nil {
 			close(monitor.armAck)
-			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
-		case <-monitorCtx.Done():
-			close(monitor.armAck)
-			outcome.TrackerErr = monitorCtx.Err()
 		}
 		parentCtx = monitorCtx
-		tracker := newRunTrackerFunc(baseURL)
-		tracker.SetExpectedRunID(expectedRunID)
-		verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
-		tracker.SetRequireTerminalState(verificationRun)
-		// Wait for terminal run state; step IDs discovered later via metrics/json
-		if len(expectedStepIDs) > 0 {
-			writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
-		}
-		tracker.SetDebug(debug)
-		// While we wait, continuously discover step IDs so we have exact IDs on completion
-		var discovered []string
-		var fleetDiscovered []string
-		var mu sync.Mutex
-		seen := make(map[string]struct{})
-		fleetSeen := make(map[string]struct{})
-		stopCh := make(chan struct{})
-		var pollWG sync.WaitGroup
-		pollWG.Add(1)
-		go func() {
-			defer pollWG.Done()
-			ticker := time.NewTicker(constants.AutoResultsDiscoveryInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopCh:
-					return
-				case <-parentCtx.Done():
-					return
-				case <-ticker.C:
-					if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
-						mu.Lock()
-						updated := false
-						for _, id := range ids {
-							if id == "" {
-								continue
-							}
-							if _, ok := seen[id]; ok {
-								continue
-							}
-							seen[id] = struct{}{}
-							discovered = append(discovered, id)
-							updated = true
-						}
-						snapshot := append([]string(nil), discovered...)
-						mu.Unlock()
-						if debug && updated && len(snapshot) > 0 {
-							logging.LogDebug("auto-results", "discover", "steps", strings.Join(snapshot, ","))
-						}
-					}
-					// Also poll fleet endpoint for distributed step IDs
-					if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
-						mu.Lock()
-						updated := false
-						for _, id := range fids {
-							if id == "" {
-								continue
-							}
-							if _, ok := fleetSeen[id]; ok {
-								continue
-							}
-							fleetSeen[id] = struct{}{}
-							fleetDiscovered = append(fleetDiscovered, id)
-							updated = true
-						}
-						snapshot := append([]string(nil), fleetDiscovered...)
-						mu.Unlock()
-						if debug && updated && len(snapshot) > 0 {
-							logging.LogDebug("auto-results", "discover-fleet", "steps", strings.Join(snapshot, ","))
-						}
-					}
-				}
-			}
-		}()
-		outcome.Lifecycle.Workload.Started = true
-		outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(parentCtx, expectedStepIDs)
-		outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
-		if metadata != nil && outcome.Tracker != nil {
-			metadata.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
-			for stepID, step := range outcome.Tracker.Steps {
-				metadata.StepLifecycles[stepID] = string(step.Lifecycle)
-			}
-		}
-		if outcome.TrackerErr != nil {
-			logging.LogError("auto-results", "completion tracking failed", outcome.TrackerErr)
-		}
-		close(stopCh)
-		// Wait for the polling goroutine to actually observe stopCh and return
-		// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
-		// otherwise a still-in-flight tick could race a caller's test-time
-		// reassignment of those (package-level, test-injectable) function
-		// variables once this function's goroutine finishes.
-		pollWG.Wait()
 		phaseBase := context.WithoutCancel(parentCtx)
-		outcome.Lifecycle.Artifacts.Started = true
-		artifactBudget := autoResultsPhaseBudgets.Artifacts
-		if parentCtx.Err() != nil || outcome.TrackerErr != nil {
-			artifactBudget = autoResultsPhaseBudgets.CancelSalvage
-		}
-		artifactCtx, cancelArtifacts := context.WithTimeout(phaseBase, artifactBudget)
-		defer cancelArtifacts()
-		// One final fleet discovery after completion (may not have been picked up during polling)
-		if fids, err := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
-			mu.Lock()
-			for _, id := range fids {
-				if id == "" {
-					continue
-				}
-				if _, ok := fleetSeen[id]; ok {
-					continue
-				}
-				fleetSeen[id] = struct{}{}
-				fleetDiscovered = append(fleetDiscovered, id)
-			}
-			mu.Unlock()
-		}
-		writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
-
-		// Discovery is already filtered to expectedRunID. Fleet and node metrics
-		// therefore describe execution facts and may legitimately use IDs that
-		// differ from the CLI-generated plan.
-		mu.Lock()
-		cachedDiscovered := append([]string(nil), discovered...)
-		cachedFleet := append([]string(nil), fleetDiscovered...)
-		mu.Unlock()
-		stepIDs, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, cachedFleet, cachedDiscovered)
-		var discoverErr error
-		if len(runtimeStepIDs) == 0 {
-			nodeFallback, nodeErr := discoverStepIDsFunc(artifactCtx, baseURL, expectedRunID)
-			fleetFallback, fleetErr := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID)
-			stepIDs, runtimeStepIDs = selectResultStepIDs(expectedStepIDs, fleetFallback, nodeFallback)
-			if nodeErr != nil || fleetErr != nil {
-				discoverErr = errors.Join(nodeErr, fleetErr)
-			}
-		}
-		outcome.StepIDs = append([]string(nil), stepIDs...)
-		artifactsReady := len(stepIDs) > 0
-		if len(stepIDs) == 0 {
-			var logErr error
-			if discoverErr != nil {
-				logErr = fmt.Errorf("discover step IDs: %w", discoverErr)
-			} else {
-				logErr = fmt.Errorf("no steps reported by metrics/json or metrics/fleet/json")
-			}
-			outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, logErr)
-			logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
-			writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
+		cleanupOnly := monitor.cleanupOnly.Load()
+		if cleanupOnly {
+			outcome.TrackerErr = monitorCtx.Err()
+			writeProgress("Auto-results: launch did not establish trusted evidence; skipping ordinary tracking and finalizing resources.\n")
 		} else {
-			writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
-		}
-
-		var observedRuntimeRoles integrity.StepRoles
-		var plannedRoles integrity.StepRoles
-		if verificationRun {
-			plan := integrityOptions[0].Plan
-			plannedRoles = integrity.PlannedStepRoles(plan)
-			if plan.Valid() {
-				allowMissingVerifier := stepRoleLifecycle(
-					outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleNotStarted
-				binding, bindErr := integrity.BindObservedStepRoles(plan, runtimeStepIDs, allowMissingVerifier)
-				if bindErr != nil {
-					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, bindErr)
-					outcome.CorruptionMetricsErr = bindErr
-					artifactsReady = false
-				} else {
-					observedRuntimeRoles = binding.Roles
-				}
-			} else {
-				observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
-				plannedRoles = integrity.ResolveStepRoles(expectedStepIDs, nil)
+			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
+			tracker := newRunTrackerFunc(baseURL)
+			tracker.SetExpectedRunID(expectedRunID)
+			verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
+			tracker.SetRequireTerminalState(verificationRun)
+			// Wait for terminal run state; step IDs discovered later via metrics/json
+			if len(expectedStepIDs) > 0 {
+				writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
 			}
-			runtimeRoles := observedRuntimeRoles
-			readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
-			// A dependent READ which never started cannot publish runtime metrics.
-			// Its planned lifecycle remains part of finalization, while runtime
-			// evidence and ActualStepIDs stay exact.
-			if readLifecycle != portcheck.StepLifecycleNotStarted {
-				if runtimeRoles.Read == "" {
-					outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
+			tracker.SetDebug(debug)
+			// While we wait, continuously discover step IDs so we have exact IDs on completion
+			var discovered []string
+			var fleetDiscovered []string
+			var mu sync.Mutex
+			seen := make(map[string]struct{})
+			fleetSeen := make(map[string]struct{})
+			stopCh := make(chan struct{})
+			var pollWG sync.WaitGroup
+			pollWG.Add(1)
+			go func() {
+				defer pollWG.Done()
+				ticker := time.NewTicker(constants.AutoResultsDiscoveryInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopCh:
+						return
+					case <-parentCtx.Done():
+						return
+					case <-ticker.C:
+						if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
+							mu.Lock()
+							updated := false
+							for _, id := range ids {
+								if id == "" {
+									continue
+								}
+								if _, ok := seen[id]; ok {
+									continue
+								}
+								seen[id] = struct{}{}
+								discovered = append(discovered, id)
+								updated = true
+							}
+							snapshot := append([]string(nil), discovered...)
+							mu.Unlock()
+							if debug && updated && len(snapshot) > 0 {
+								logging.LogDebug("auto-results", "discover", "steps", strings.Join(snapshot, ","))
+							}
+						}
+						// Also poll fleet endpoint for distributed step IDs
+						if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
+							mu.Lock()
+							updated := false
+							for _, id := range fids {
+								if id == "" {
+									continue
+								}
+								if _, ok := fleetSeen[id]; ok {
+									continue
+								}
+								fleetSeen[id] = struct{}{}
+								fleetDiscovered = append(fleetDiscovered, id)
+								updated = true
+							}
+							snapshot := append([]string(nil), fleetDiscovered...)
+							mu.Unlock()
+							if debug && updated && len(snapshot) > 0 {
+								logging.LogDebug("auto-results", "discover-fleet", "steps", strings.Join(snapshot, ","))
+							}
+						}
+					}
+				}
+			}()
+			outcome.Lifecycle.Workload.Started = true
+			outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(parentCtx, expectedStepIDs)
+			outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
+			if metadata != nil && outcome.Tracker != nil {
+				metadata.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
+				for stepID, step := range outcome.Tracker.Steps {
+					metadata.StepLifecycles[stepID] = string(step.Lifecycle)
+				}
+			}
+			if outcome.TrackerErr != nil {
+				logging.LogError("auto-results", "completion tracking failed", outcome.TrackerErr)
+			}
+			close(stopCh)
+			// Wait for the polling goroutine to actually observe stopCh and return
+			// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
+			// otherwise a still-in-flight tick could race a caller's test-time
+			// reassignment of those (package-level, test-injectable) function
+			// variables once this function's goroutine finishes.
+			pollWG.Wait()
+			outcome.Lifecycle.Artifacts.Started = true
+			artifactBudget := autoResultsPhaseBudgets.Artifacts
+			if parentCtx.Err() != nil || outcome.TrackerErr != nil {
+				artifactBudget = autoResultsPhaseBudgets.CancelSalvage
+			}
+			artifactCtx, cancelArtifacts := context.WithTimeout(phaseBase, artifactBudget)
+			defer cancelArtifacts()
+			// One final fleet discovery after completion (may not have been picked up during polling)
+			if fids, err := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
+				mu.Lock()
+				for _, id := range fids {
+					if id == "" {
+						continue
+					}
+					if _, ok := fleetSeen[id]; ok {
+						continue
+					}
+					fleetSeen[id] = struct{}{}
+					fleetDiscovered = append(fleetDiscovered, id)
+				}
+				mu.Unlock()
+			}
+			writeProgress("Auto-results: completion detected; fetching artifacts to %s...\n", root)
+
+			// Discovery is already filtered to expectedRunID. Fleet and node metrics
+			// therefore describe execution facts and may legitimately use IDs that
+			// differ from the CLI-generated plan.
+			mu.Lock()
+			cachedDiscovered := append([]string(nil), discovered...)
+			cachedFleet := append([]string(nil), fleetDiscovered...)
+			mu.Unlock()
+			stepIDs, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, cachedFleet, cachedDiscovered)
+			var discoverErr error
+			if len(runtimeStepIDs) == 0 {
+				nodeFallback, nodeErr := discoverStepIDsFunc(artifactCtx, baseURL, expectedRunID)
+				fleetFallback, fleetErr := discoverFleetStepIDsFunc(artifactCtx, baseURL, expectedRunID)
+				stepIDs, runtimeStepIDs = selectResultStepIDs(expectedStepIDs, fleetFallback, nodeFallback)
+				if nodeErr != nil || fleetErr != nil {
+					discoverErr = errors.Join(nodeErr, fleetErr)
+				}
+			}
+			outcome.StepIDs = append([]string(nil), stepIDs...)
+			artifactsReady := len(stepIDs) > 0
+			if len(stepIDs) == 0 {
+				var logErr error
+				if discoverErr != nil {
+					logErr = fmt.Errorf("discover step IDs: %w", discoverErr)
 				} else {
-					corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
-					outcome.CorruptionMetricsErr = observeErr
-					if observeErr == nil {
-						outcome.ObservedCorruptCount = &corrupt
+					logErr = fmt.Errorf("no steps reported by metrics/json or metrics/fleet/json")
+				}
+				outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, logErr)
+				logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
+				writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
+			} else {
+				writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
+			}
+
+			var observedRuntimeRoles integrity.StepRoles
+			var plannedRoles integrity.StepRoles
+			if verificationRun {
+				plan := integrityOptions[0].Plan
+				plannedRoles = integrity.PlannedStepRoles(plan)
+				if plan.Valid() {
+					allowMissingVerifier := stepRoleLifecycle(
+						outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+					binding, bindErr := integrity.BindObservedStepRoles(plan, runtimeStepIDs, allowMissingVerifier)
+					if bindErr != nil {
+						outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, bindErr)
+						outcome.CorruptionMetricsErr = bindErr
+						artifactsReady = false
+					} else {
+						observedRuntimeRoles = binding.Roles
+					}
+				} else {
+					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
+					plannedRoles = integrity.ResolveStepRoles(expectedStepIDs, nil)
+				}
+				runtimeRoles := observedRuntimeRoles
+				readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
+				// A dependent READ which never started cannot publish runtime metrics.
+				// Its planned lifecycle remains part of finalization, while runtime
+				// evidence and ActualStepIDs stay exact.
+				if readLifecycle != portcheck.StepLifecycleNotStarted {
+					if runtimeRoles.Read == "" {
+						outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
+					} else {
+						corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
+						outcome.CorruptionMetricsErr = observeErr
+						if observeErr == nil {
+							outcome.ObservedCorruptCount = &corrupt
+						}
 					}
 				}
 			}
-		}
 
-		if metadata != nil {
-			metadata.ActualStepIDs = append([]string(nil), stepIDs...)
-			metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
-			if err := writeRunMetadata(metadata, root); err != nil {
-				logging.LogError("auto-results", "write run metadata", err, "dest", root)
-			}
-		}
-		if artifactsReady {
-			fetch := newResultsFetcherFunc(baseURL, root)
-			if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
-				outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
-				artifactsReady = false
-				logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
-				writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
-			}
-		}
-		if artifactsReady && verificationRun {
-			options := *integrityOptions[0]
-			if outcome.Tracker != nil {
-				options.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
-				for stepID, step := range outcome.Tracker.Steps {
-					options.StepLifecycles[stepID] = string(step.Lifecycle)
+			if metadata != nil {
+				metadata.ActualStepIDs = append([]string(nil), stepIDs...)
+				metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
+				if err := writeRunMetadata(metadata, root); err != nil {
+					logging.LogError("auto-results", "write run metadata", err, "dest", root)
 				}
 			}
-			options.ResultsRoot = root
-			options.BaseURL = baseURL
-			options.StepIDs = append([]string(nil), stepIDs...)
-			options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
-			options.ObservedStepIDs = append([]string(nil), runtimeStepIDs...)
-			options.AllowPlannedRoleFallback = len(runtimeStepIDs) == 0
-			options.AllowMissingRuntimeVerifier = stepRoleLifecycle(
-				outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read) == portcheck.StepLifecycleNotStarted
-			options.Context = artifactCtx
-			finalized, finalizeErr := integrity.FinalizeResults(options)
-			outcome.Finalization = &finalized
-			outcome.FinalizationErr = finalizeErr
-			if finalizeErr != nil {
-				logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
-				writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
-			} else {
-				writeProgress("Integrity: selected=%d attempted=%d verified=%d remaining=%d corrupt=%d\n",
-					finalized.SelectionCount, finalized.VerificationAttemptedCount, finalized.VerifiedCount, finalized.RemainingCount, finalized.CorruptCount)
-				digest := finalized.DigestPerformance
-				writeProgress("Integrity digest work: objects=%d bytes=%d worker_seconds=%.6f mean_worker_mib_per_second=%.3f additional_payload_passes=%d\n",
-					digest.Objects, digest.Bytes, digest.HashWorkerSeconds, digest.MeanWorkerHashMiBPerSecond, digest.AdditionalPayloadPasses)
-				if digest.InitialWriteDelaySecondsMaxNode != nil {
-					writeProgress("Integrity initial write delay: maximum_node_seconds=%.6f\n", *digest.InitialWriteDelaySecondsMaxNode)
+			if artifactsReady {
+				fetch := newResultsFetcherFunc(baseURL, root)
+				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
+					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
+					artifactsReady = false
+					logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
+					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
 				}
-				for _, sample := range finalized.FailureSamples {
-					writeProgress("Integrity failure: key=%q version=%q returned_version=%q reason=%s expected_digest=%s actual_digest=%s expected_size=%s actual_size=%s request_id=%q\n",
-						sample.Key, sample.RequestedVersion, sample.ReturnedVersion, sample.Reason, sample.ExpectedDigest, sample.ActualDigest, sample.ExpectedSize, sample.ActualSize, sample.RequestID)
+			}
+			if artifactsReady && verificationRun {
+				options := *integrityOptions[0]
+				if outcome.Tracker != nil {
+					options.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
+					for stepID, step := range outcome.Tracker.Steps {
+						options.StepLifecycles[stepID] = string(step.Lifecycle)
+					}
 				}
-				writeProgress("Integrity artifacts: %s\n", root)
+				options.ResultsRoot = root
+				options.BaseURL = baseURL
+				options.StepIDs = append([]string(nil), stepIDs...)
+				options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
+				options.ObservedStepIDs = append([]string(nil), runtimeStepIDs...)
+				options.AllowPlannedRoleFallback = len(runtimeStepIDs) == 0
+				options.AllowMissingRuntimeVerifier = stepRoleLifecycle(
+					outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+				options.Context = artifactCtx
+				finalized, finalizeErr := integrity.FinalizeResults(options)
+				outcome.Finalization = &finalized
+				outcome.FinalizationErr = finalizeErr
+				if finalizeErr != nil {
+					logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
+					writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
+				} else {
+					writeProgress("Integrity: selected=%d attempted=%d verified=%d remaining=%d corrupt=%d\n",
+						finalized.SelectionCount, finalized.VerificationAttemptedCount, finalized.VerifiedCount, finalized.RemainingCount, finalized.CorruptCount)
+					digest := finalized.DigestPerformance
+					writeProgress("Integrity digest work: objects=%d bytes=%d worker_seconds=%.6f mean_worker_mib_per_second=%.3f additional_payload_passes=%d\n",
+						digest.Objects, digest.Bytes, digest.HashWorkerSeconds, digest.MeanWorkerHashMiBPerSecond, digest.AdditionalPayloadPasses)
+					if digest.InitialWriteDelaySecondsMaxNode != nil {
+						writeProgress("Integrity initial write delay: maximum_node_seconds=%.6f\n", *digest.InitialWriteDelaySecondsMaxNode)
+					}
+					for _, sample := range finalized.FailureSamples {
+						writeProgress("Integrity failure: key=%q version=%q returned_version=%q reason=%s expected_digest=%s actual_digest=%s expected_size=%s actual_size=%s request_id=%q\n",
+							sample.Key, sample.RequestedVersion, sample.ReturnedVersion, sample.Reason, sample.ExpectedDigest, sample.ActualDigest, sample.ExpectedSize, sample.ActualSize, sample.RequestID)
+					}
+					writeProgress("Integrity artifacts: %s\n", root)
+				}
 			}
-		}
-		if traceFile != "" {
-			if err := appendTraceToResultsManifest(root, traceFile); err != nil {
-				logging.LogError("auto-results", "trace artifact append failed", err, "trace_file", traceFile, "out", root)
+			if traceFile != "" {
+				if err := appendTraceToResultsManifest(root, traceFile); err != nil {
+					logging.LogError("auto-results", "trace artifact append failed", err, "trace_file", traceFile, "out", root)
+				}
 			}
+			writeProgress("Auto-results: results saved to %s\n", root)
+			outcome.Lifecycle.Artifacts.Completed = true
+			outcome.Lifecycle.Artifacts.Err = errors.Join(outcome.ArtifactErr, outcome.CorruptionMetricsErr, outcome.FinalizationErr)
 		}
-		writeProgress("Auto-results: results saved to %s\n", root)
-		outcome.Lifecycle.Artifacts.Completed = true
-		outcome.Lifecycle.Artifacts.Err = errors.Join(outcome.ArtifactErr, outcome.CorruptionMetricsErr, outcome.FinalizationErr)
 
 		// Optional graceful shutdown has a fresh budget that artifact retrieval
 		// cannot consume.
 		if shutdownOn {
-			settleTimer := time.NewTimer(constants.AutoResultsShutdownSettleDelay)
-			select {
-			case <-phaseBase.Done():
-				if !settleTimer.Stop() {
-					select {
-					case <-settleTimer.C:
-					default:
+			if !cleanupOnly {
+				settleTimer := time.NewTimer(constants.AutoResultsShutdownSettleDelay)
+				select {
+				case <-phaseBase.Done():
+					if !settleTimer.Stop() {
+						select {
+						case <-settleTimer.C:
+						default:
+						}
 					}
+				case <-settleTimer.C:
 				}
-			case <-settleTimer.C:
 			}
 			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
 			outcome.Lifecycle.Shutdown.Started = true
@@ -708,18 +726,24 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 		if runErr != nil {
 			message += "; run also failed: " + runErr.Error()
 		}
-		return &ExitCodeError{Code: constants.ExitCodeIntegrityCorruption, Msg: message}
+		return &ExitCodeError{
+			Code: constants.ExitCodeIntegrityCorruption, Msg: message,
+			Cause: errors.Join(runErr, outcome.FinalizationErr),
+		}
 	}
 
 	var reasons []string
+	var causes []error
 	if runErr != nil {
 		reasons = append(reasons, runErr.Error())
+		causes = append(causes, runErr)
 	}
 	if !received {
 		reasons = append(reasons, "automatic verification results did not complete")
 	}
 	if outcome.TrackerErr != nil {
 		reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
+		causes = append(causes, outcome.TrackerErr)
 	}
 	if outcome.Tracker == nil {
 		reasons = append(reasons, "terminal engine status was not captured")
@@ -732,25 +756,31 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	}
 	if outcome.CorruptionMetricsErr != nil {
 		reasons = append(reasons, "live corruption metrics: "+outcome.CorruptionMetricsErr.Error())
+		causes = append(causes, outcome.CorruptionMetricsErr)
 	}
 	if outcome.ArtifactErr != nil {
 		reasons = append(reasons, "artifact retrieval: "+outcome.ArtifactErr.Error())
+		causes = append(causes, outcome.ArtifactErr)
 	}
 	if outcome.ShutdownErr != nil {
 		reasons = append(reasons, "graceful shutdown: "+outcome.ShutdownErr.Error())
+		causes = append(causes, outcome.ShutdownErr)
 	}
 	if finalizationErr := errors.Join(
 		outcome.Lifecycle.Diagnostics.Err, outcome.Lifecycle.Removal.Err); finalizationErr != nil {
 		reasons = append(reasons, "resource finalization: "+finalizationErr.Error())
+		causes = append(causes, finalizationErr)
 	}
 	if outcome.Lifecycle.Resources == runcontrol.ResourceDispositionRetained {
 		reasons = append(reasons, "resources remain managed for cleanup retry")
 	}
 	if outcome.Lifecycle.PreparedInputs.Err != nil {
 		reasons = append(reasons, "prepared input cleanup: "+outcome.Lifecycle.PreparedInputs.Err.Error())
+		causes = append(causes, outcome.Lifecycle.PreparedInputs.Err)
 	}
 	if outcome.FinalizationErr != nil {
 		reasons = append(reasons, "integrity result finalization: "+outcome.FinalizationErr.Error())
+		causes = append(causes, outcome.FinalizationErr)
 	}
 	if outcome.Finalization == nil {
 		reasons = append(reasons, "integrity result finalization did not produce an outcome")
@@ -768,9 +798,13 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	}
 	if outcome.SummaryErr != nil {
 		reasons = append(reasons, "summary generation: "+outcome.SummaryErr.Error())
+		causes = append(causes, outcome.SummaryErr)
 	}
 	if len(reasons) > 0 {
-		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: strings.Join(reasons, "; ")}
+		return &ExitCodeError{
+			Code: constants.ExitCodeWorkloadFailure, Msg: strings.Join(reasons, "; "),
+			Cause: errors.Join(causes...),
+		}
 	}
 	return nil
 }
@@ -1524,7 +1558,7 @@ Available workload types:
 				}
 
 				err := startMultiHostHeadlessRunFunc(orchestrator, sptImage, scenarioPath, params, options)
-				if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+				if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 					autoMonitor.Cancel()
 				}
 				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
@@ -1553,7 +1587,7 @@ Available workload types:
 					ScenarioContent:      prepared.ScenarioJS(),
 					DefaultsContent:      prepared.DefaultsYAML(),
 				})
-			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+			if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 				autoMonitor.Cancel()
 			}
 			waitForAutoResults()
@@ -1580,7 +1614,7 @@ Available workload types:
 			}
 
 			err := startLocalHeadlessRunFunc(sptImage, scenarioPath, params, options)
-			if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+			if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 				autoMonitor.Cancel()
 			}
 			waitForAutoResults()
@@ -1607,7 +1641,7 @@ Available workload types:
 				ScenarioContent:      prepared.ScenarioJS(),
 				DefaultsContent:      prepared.DefaultsYAML(),
 			})
-		if err != nil && autoMonitor != nil && !launchHooks.Submitted() {
+		if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 			autoMonitor.Cancel()
 		}
 		waitForAutoResults()

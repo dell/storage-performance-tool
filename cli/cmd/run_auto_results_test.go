@@ -21,6 +21,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 )
 
@@ -347,6 +348,118 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 				t.Fatalf("stale ID %q from prior run leaked into FetchArtifactsForSteps call; got %v", id, fetcher.stepIDs)
 			}
 		}
+	}
+}
+
+func TestAutoResultsCleanupOnlySkipsEngineEvidenceAndFinalizes(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	t.Cleanup(func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	})
+
+	var trackerCreates, discoveries, fetches atomic.Int32
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		trackerCreates.Add(1)
+		return &fakeRunTracker{}
+	}
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		discoveries.Add(1)
+		return nil, nil
+	}
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		discoveries.Add(1)
+		return nil, nil
+	}
+	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
+		fetches.Add(1)
+		return &fakeFetcher{output: output}
+	}
+
+	var shutdowns, finalizations, summaries atomic.Int32
+	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool) error {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("shutdown received canceled context: %v", err)
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("shutdown did not receive an independent deadline")
+		}
+		shutdowns.Add(1)
+		return nil
+	}
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		summaries.Add(1)
+		return nil
+	}
+	cleanupErr := errors.New("mandatory removal failed")
+	metadata := &runMetadata{ResultsRoot: t.TempDir()}
+	preSummaryHook := func(ctx context.Context) {
+		if err := ctx.Err(); err != nil {
+			t.Errorf("finalizer received canceled context: %v", err)
+		}
+		finalizations.Add(1)
+		metadata.resourceFinalization = &runcontrol.FinalizationOutcome{
+			Diagnostics: runcontrol.CompletedPhase(nil),
+			Removal:     runcontrol.CompletedPhase(cleanupErr),
+			Resources:   runcontrol.ResourceDispositionRetained,
+		}
+	}
+
+	monitor := startAutoResultsMonitor(
+		context.Background(), "http://example", "mt", t.TempDir(), []string{"verify"}, 77,
+		false, nil, "9999", true, 1, "", metadata, io.Discard, io.Discard, "",
+		preSummaryHook, &integrity.FinalizeOptions{RunID: 77},
+	)
+	monitor.Cancel()
+
+	var outcome autoResultsOutcome
+	select {
+	case outcome = <-monitor.done:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup-only coordinator did not return promptly")
+	}
+	if trackerCreates.Load() != 0 || discoveries.Load() != 0 || fetches.Load() != 0 {
+		t.Fatalf("cleanup-only evidence calls tracker=%d discovery=%d fetch=%d",
+			trackerCreates.Load(), discoveries.Load(), fetches.Load())
+	}
+	if shutdowns.Load() != 1 || finalizations.Load() != 1 || summaries.Load() != 1 {
+		t.Fatalf("cleanup-only phases shutdown=%d finalization=%d summary=%d",
+			shutdowns.Load(), finalizations.Load(), summaries.Load())
+	}
+	if outcome.Lifecycle.Workload.Started || outcome.Lifecycle.Artifacts.Started {
+		t.Fatalf("untrusted evidence phases started: %+v", outcome.Lifecycle)
+	}
+	if !outcome.Lifecycle.Shutdown.Completed || !outcome.Lifecycle.Removal.Completed ||
+		outcome.Lifecycle.Resources != runcontrol.ResourceDispositionRetained ||
+		!errors.Is(outcome.Lifecycle.Removal.Err, cleanupErr) {
+		t.Fatalf("cleanup-only lifecycle = %+v", outcome.Lifecycle)
+	}
+	if metadata.Lifecycle == nil || !metadata.Lifecycle.Shutdown.Completed ||
+		!metadata.Lifecycle.Removal.Completed {
+		t.Fatalf("machine-readable lifecycle = %+v", metadata.Lifecycle)
+	}
+
+	identityErr := &tui.SubmissionIdentityError{
+		ExpectedRunID: 77, Cause: errors.New("response run ID mismatch"),
+	}
+	resolved := resolveVerificationRunError(identityErr, outcome, true, scenario.Params{
+		WorkloadType: scenario.WorkloadTypeWriteVerify, RunID: 77,
+	})
+	var preservedIdentity *tui.SubmissionIdentityError
+	if !errors.As(resolved, &preservedIdentity) || !errors.Is(resolved, cleanupErr) {
+		t.Fatalf("resolved cleanup-only error = %v, want identity primary and cleanup cause", resolved)
 	}
 }
 

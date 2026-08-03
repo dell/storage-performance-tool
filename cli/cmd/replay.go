@@ -329,7 +329,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 			err = normalizedErr
-			waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
+			waitForReplayAutoResults(replayMonitor, err, launchHooks)
 			finalizeTraceArtifact()
 			return err
 		}
@@ -352,7 +352,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks)
 		finalizeTraceArtifact()
 		return err
 	}
@@ -369,7 +369,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks)
 		finalizeTraceArtifact()
 		return err
 	}
@@ -391,20 +391,20 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
+	waitForReplayAutoResults(replayMonitor, err, launchHooks)
 	finalizeTraceArtifact()
 	return err
 }
 
 func waitForReplayAutoResults(
-	monitor *autoResultsMonitor, launchErr error, submission tui.SubmissionState,
+	monitor *autoResultsMonitor, launchErr error, hooks tui.LaunchHooks,
 ) {
 	if monitor == nil {
 		return
 	}
-	if launchErr != nil && submission != tui.SubmissionSubmitted {
-		// Unsubmitted and unresolved submissions must enter bounded salvage and
-		// cleanup rather than wait indefinitely for a workload terminal state.
+	if launchErr != nil && !hooks.NormalEvidencePermitted() {
+		// Untrusted accepted, unsubmitted, and unresolved launches must enter
+		// bounded cleanup/salvage rather than wait for ordinary completion.
 		monitor.Cancel()
 	}
 	// Each coordinator phase owns its own timeout, so this join cannot let one

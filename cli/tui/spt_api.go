@@ -495,27 +495,58 @@ func parseBodyRunIDs(body []byte) ([]responseRunIdentity, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, nil
 	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	first, err := decoder.Token()
+	if err != nil {
 		return nil, nil
 	}
+	start, ok := first.(json.Delim)
+	if !ok || start != '{' {
+		return nil, nil
+	}
+
 	evidence := make([]responseRunIdentity, 0, 2)
-	for _, field := range []struct {
-		name   string
-		source string
-	}{
-		{name: "run_id", source: "response run_id"},
-		{name: "runId", source: "response runId"},
-	} {
-		raw, present := payload[field.name]
-		if !present {
+	seen := make(map[string]struct{}, 2)
+	for decoder.More() {
+		keyToken, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return nil, nil
+		}
+		name, ok := keyToken.(string)
+		if !ok {
+			return nil, nil
+		}
+		var raw json.RawMessage
+		if decodeErr := decoder.Decode(&raw); decodeErr != nil {
+			return nil, nil
+		}
+
+		source := ""
+		switch name {
+		case "run_id":
+			source = "response run_id"
+		case "runId":
+			source = "response runId"
+		default:
 			continue
 		}
-		runID, err := parseJSONRunID(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s is malformed: %w", field.source, err)
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("%s appears more than once", source)
 		}
-		evidence = append(evidence, responseRunIdentity{source: field.source, value: runID})
+		seen[name] = struct{}{}
+		runID, parseErr := parseJSONRunID(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("%s is malformed: %w", source, parseErr)
+		}
+		evidence = append(evidence, responseRunIdentity{source: source, value: runID})
+	}
+	if _, err = decoder.Token(); err != nil {
+		return nil, nil
+	}
+	var trailing json.RawMessage
+	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, nil
 	}
 	return evidence, nil
 }

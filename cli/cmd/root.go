@@ -75,12 +75,17 @@ It provides a user-friendly interface to execute various benchmark tests (e.g., 
 
 // ExitCodeError carries a specific process exit code for command failures.
 type ExitCodeError struct {
-	Code int
-	Msg  string
+	Code  int
+	Msg   string
+	Cause error
 }
 
 func (e *ExitCodeError) Error() string {
 	return e.Msg
+}
+
+func (e *ExitCodeError) Unwrap() error {
+	return e.Cause
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

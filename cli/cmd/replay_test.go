@@ -580,6 +580,17 @@ func TestConfirmReplayLaunchNoTTY(t *testing.T) {
 	}
 }
 
+func replayTestLaunchHooks(state tui.SubmissionState) tui.LaunchHooks {
+	hooks := tui.NewLaunchHooks(nil)
+	switch state {
+	case tui.SubmissionSubmitted:
+		hooks.NotifySubmitted()
+	case tui.SubmissionUnknown:
+		hooks.NotifySubmissionUnknown()
+	}
+	return hooks
+}
+
 func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) {
 	for _, launchErr := range []error{
 		errors.New("pre-submission launch failure"),
@@ -598,7 +609,7 @@ func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) 
 				},
 			}
 			started := time.Now()
-			waitForReplayAutoResults(monitor, launchErr, tui.SubmissionNotSubmitted)
+			waitForReplayAutoResults(monitor, launchErr, replayTestLaunchHooks(tui.SubmissionNotSubmitted))
 			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
 				t.Fatalf("failed launch teardown calls=%d elapsed=%s",
 					cancelCalls.Load(), time.Since(started))
@@ -612,7 +623,7 @@ func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	waitForReplayAutoResults(monitor, nil, tui.SubmissionSubmitted)
+	waitForReplayAutoResults(monitor, nil, replayTestLaunchHooks(tui.SubmissionSubmitted))
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("successful launch canceled monitor %d time(s)", cancelCalls.Load())
 	}
@@ -623,7 +634,7 @@ func TestWaitForReplayAutoResultsPreservesArmedMonitorAfterLaunchError(t *testin
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), tui.SubmissionSubmitted)
+	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), replayTestLaunchHooks(tui.SubmissionSubmitted))
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("post-submission launch error canceled monitor %d time(s)", cancelCalls.Load())
 	}
@@ -641,9 +652,27 @@ func TestWaitForReplayAutoResultsCancelsAmbiguousSubmissionExactlyOnce(t *testin
 		},
 	}
 	waitForReplayAutoResults(
-		monitor, errors.New("ambiguous submission"), tui.SubmissionUnknown)
+		monitor, errors.New("ambiguous submission"), replayTestLaunchHooks(tui.SubmissionUnknown))
 	if cancelCalls.Load() != 1 {
 		t.Fatalf("ambiguous submission cleanup calls = %d, want 1", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsCancelsAcceptedForCleanup(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	var cancelCalls atomic.Int32
+	monitor := &autoResultsMonitor{
+		done: done,
+		cancel: func() {
+			cancelCalls.Add(1)
+			done <- autoResultsOutcome{}
+		},
+	}
+	hooks := tui.NewLaunchHooks(nil)
+	hooks.NotifyAcceptedForCleanup()
+	waitForReplayAutoResults(monitor, errors.New("invalid response identity"), hooks)
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("accepted-for-cleanup cancellation calls = %d, want 1", cancelCalls.Load())
 	}
 }
 
@@ -651,7 +680,7 @@ func TestWaitForReplayAutoResultsJoinsCoordinator(t *testing.T) {
 	done := make(chan autoResultsOutcome)
 	returned := make(chan struct{})
 	go func() {
-		waitForReplayAutoResults(&autoResultsMonitor{done: done}, nil, tui.SubmissionSubmitted)
+		waitForReplayAutoResults(&autoResultsMonitor{done: done}, nil, replayTestLaunchHooks(tui.SubmissionSubmitted))
 		close(returned)
 	}()
 	select {

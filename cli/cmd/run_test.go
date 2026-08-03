@@ -453,22 +453,27 @@ func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
 }
 
 func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
-	for _, remote := range []bool{false, true} {
+	topologies := []struct {
+		name, hosts, minHosts string
+	}{
+		{name: "local", hosts: "127.0.0.1", minHosts: "1"},
+		{name: "remote", hosts: "qa-entry.example", minHosts: "1"},
+		{name: "distributed", hosts: "qa-entry.example,qa-worker.example", minHosts: "2"},
+	}
+	for _, topology := range topologies {
 		for _, headlessMode := range []bool{false, true} {
 			for _, submission := range []struct {
-				name  string
-				state tui.SubmissionState
+				name               string
+				state              tui.SubmissionState
+				acceptedForCleanup bool
 			}{
 				{name: "pre-submission", state: tui.SubmissionNotSubmitted},
 				{name: "post-submission", state: tui.SubmissionSubmitted},
 				{name: "ambiguous-submission", state: tui.SubmissionUnknown},
+				{name: "accepted-for-cleanup", state: tui.SubmissionSubmitted, acceptedForCleanup: true},
 			} {
-				name := "local"
-				hosts := "127.0.0.1"
-				if remote {
-					name = "remote"
-					hosts = "qa-entry.example"
-				}
+				name := topology.name
+				hosts := topology.hosts
 				if headlessMode {
 					name += "/headless"
 				} else {
@@ -478,7 +483,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					t.Chdir(t.TempDir())
 					for flag, value := range map[string]string{
-						"test-hosts": hosts, "min-hosts": "1",
+						"test-hosts": hosts, "min-hosts": topology.minHosts,
 						"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
 						"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
 						"duration": "", "threads": "1", "headless": fmt.Sprint(headlessMode),
@@ -516,7 +521,12 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
 					}
 
-					launchErr := errors.New("launcher failed")
+					var launchErr error = errors.New("launcher failed")
+					if submission.acceptedForCleanup {
+						launchErr = &tui.SubmissionIdentityError{
+							ExpectedRunID: 77, Cause: errors.New("response run ID mismatch"),
+						}
+					}
 					assertPreparedContent := func(path string, scenarioContent, defaultsContent []byte) {
 						t.Helper()
 						onDisk, readErr := os.ReadFile(path)
@@ -531,6 +541,10 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						}
 					}
 					launch := func(hooks tui.LaunchHooks) error {
+						if submission.acceptedForCleanup {
+							hooks.NotifyAcceptedForCleanup()
+							return launchErr
+						}
 						switch submission.state {
 						case tui.SubmissionSubmitted:
 							hooks.NotifySubmitted()
@@ -604,8 +618,14 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					if !errors.As(err, &exitErr) || !strings.Contains(err.Error(), launchErr.Error()) {
 						t.Fatalf("RunE() error = %#v, want structured launcher failure", err)
 					}
+					if submission.acceptedForCleanup {
+						var identityErr *tui.SubmissionIdentityError
+						if !errors.As(err, &identityErr) {
+							t.Fatalf("RunE() error = %#v, want preserved SubmissionIdentityError", err)
+						}
+					}
 					wantCancel := int32(1)
-					if submission.state == tui.SubmissionSubmitted {
+					if submission.state == tui.SubmissionSubmitted && !submission.acceptedForCleanup {
 						wantCancel = 0
 					}
 					if cancelCalls.Load() != wantCancel {

@@ -73,7 +73,7 @@ func TestMonitorStatusRejectsTerminalStateForDifferentOwnedRun(t *testing.T) {
 }
 
 func TestMonitorStatusCompletesOnlyAfterMatchingOwnedRun(t *testing.T) {
-	for _, state := range []string{"COMPLETED", "FAILED"} {
+	for _, state := range []string{"COMPLETED", "FAILED", "STOPPED"} {
 		t.Run(state, func(t *testing.T) {
 			var matching atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(
@@ -194,6 +194,55 @@ func TestMonitorStatusMissingRunIDUsesExplicitCompatibilityPolicy(t *testing.T) 
 	})
 }
 
+func TestMonitorStatusMissingRunIDStoppedUsesExplicitCompatibilityPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter, request *http.Request,
+	) {
+		if request.URL.Path != "/status" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"state":"STOPPED"}`))
+	}))
+	defer server.Close()
+
+	t.Run("configured identity requires attribution", func(t *testing.T) {
+		orchestrator := NewTestOrchestrator(nil, "", "")
+		orchestrator.statusInterval = 5 * time.Millisecond
+		orchestrator.apiClient = NewSptAPIClient(server.URL)
+		orchestrator.apiClient.SetRunID("77")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			orchestrator.monitorStatus(ctx)
+		}()
+		select {
+		case <-orchestrator.CompletionCh():
+			t.Fatal("unattributed STOPPED status completed configured run 77")
+		case <-time.After(30 * time.Millisecond):
+		}
+		cancel()
+		<-done
+	})
+
+	t.Run("legacy unconfigured caller permits missing identity", func(t *testing.T) {
+		orchestrator := NewTestOrchestrator(nil, "", "")
+		orchestrator.statusInterval = 5 * time.Millisecond
+		orchestrator.apiClient = NewSptAPIClient(server.URL)
+		orchestrator.apiClient.setCompatibilityRunID("legacy-run")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go orchestrator.monitorStatus(ctx)
+		select {
+		case <-orchestrator.CompletionCh():
+		case <-time.After(time.Second):
+			t.Fatal("legacy missing-ID STOPPED policy was not preserved")
+		}
+	})
+}
+
 func TestWaitForLingerUsesOwnedRunAttributionAndAllowsIdle(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -201,6 +250,7 @@ func TestWaitForLingerUsesOwnedRunAttributionAndAllowsIdle(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "matching terminal", body: `{"state":"COMPLETED","run_id":77}`},
+		{name: "matching stopped", body: `{"state":"STOPPED","run_id":77}`},
 		{name: "different terminal", body: `{"state":"COMPLETED","run_id":78}`, wantErr: true},
 		{name: "idle after shutdown", body: `{"state":"IDLE"}`},
 	}
@@ -233,7 +283,7 @@ func TestWaitForLingerUsesOwnedRunAttributionAndAllowsIdle(t *testing.T) {
 	}
 }
 
-func TestStatusOwnershipConcurrentPollingReconciliationAndCancellation(t *testing.T) {
+func TestStoppedStatusOwnershipConcurrentPollingReconciliationAndCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter, request *http.Request,
 	) {
@@ -242,7 +292,7 @@ func TestStatusOwnershipConcurrentPollingReconciliationAndCancellation(t *testin
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"state":"COMPLETED","run_id":77}`))
+		_, _ = writer.Write([]byte(`{"state":"STOPPED","run_id":77}`))
 	}))
 	defer server.Close()
 

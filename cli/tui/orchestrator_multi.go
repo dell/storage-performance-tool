@@ -1922,7 +1922,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 				return failBeforeSubmission(fmt.Errorf("failed to start LIST via entry node API: %w", submitErr))
 			}
 			submitted = true
-			hooks.NotifySubmitted()
+			notifyAcceptedSubmission(hooks, submitErr)
 			if submitErr != nil {
 				return fmt.Errorf("LIST submission was confirmed after POST /run returned an error: %w", submitErr)
 			}
@@ -2148,7 +2148,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
-	hooks.NotifySubmitted()
+	notifyAcceptedSubmission(hooks, submitErr)
 	if submitErr != nil {
 		return fmt.Errorf("host API submission was confirmed after POST /run returned an error: %w", submitErr)
 	}
@@ -2229,7 +2229,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 			m.multiHost.cleanupManagedContainersAfterStartFailure(ctx),
 		)
 	}
-	hooks.NotifySubmitted()
+	notifyAcceptedSubmission(hooks, submitErr)
 	if submitErr != nil {
 		return fmt.Errorf("entry node submission was confirmed after POST /run returned an error: %w", submitErr)
 	}
