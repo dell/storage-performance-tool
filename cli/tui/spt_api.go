@@ -39,6 +39,7 @@ type SptAPIClient struct {
 	baseURL                         string
 	httpClient                      *http.Client
 	runID                           string
+	requireStatusAttribution        bool
 	submissionReconcileTimeout      time.Duration
 	submissionReconcilePollInterval time.Duration
 	startRetryDelay                 time.Duration
@@ -65,6 +66,21 @@ func (e *AmbiguousSubmissionError) Error() string {
 }
 
 func (e *AmbiguousSubmissionError) Unwrap() error { return e.Cause }
+
+// SubmissionIdentityError means POST /run was accepted, but its response did
+// not establish the configured run identity. The submission remains cleanup
+// owned even though the launch must not proceed.
+type SubmissionIdentityError struct {
+	ExpectedRunID int64
+	Cause         error
+}
+
+func (e *SubmissionIdentityError) Error() string {
+	return fmt.Sprintf("accepted submission did not establish configured run %d identity: %v",
+		e.ExpectedRunID, e.Cause)
+}
+
+func (e *SubmissionIdentityError) Unwrap() error { return e.Cause }
 
 // HTTPStatusError is returned when the Spt API responds with a non-200 status code.
 type HTTPStatusError struct {
@@ -354,10 +370,31 @@ func (c *SptAPIClient) StartTestContext(
 
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated ||
 			resp.StatusCode == http.StatusAccepted {
-			bodyData, _ := io.ReadAll(resp.Body)
+			bodyData, bodyErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			runID := acceptedRunID(resp.Header.Get("ETag"), bodyData, expectedRunID)
-			c.setRunID(runID)
+			etag := resp.Header.Get("ETag")
+			if expectedRunID > 0 {
+				runID, identityPresent, identityErr := acceptedResponseRunID(
+					etag, bodyData, expectedRunID)
+				if identityErr != nil {
+					c.clearRunID()
+					return StartTestOutcome{Submission: SubmissionSubmitted},
+						&SubmissionIdentityError{ExpectedRunID: expectedRunID, Cause: identityErr}
+				}
+				if !identityPresent {
+					cause := errors.New("successful response omitted run identity")
+					if bodyErr != nil {
+						cause = fmt.Errorf("read successful response identity: %w", bodyErr)
+					}
+					c.clearRunID()
+					return c.reconcileAcceptedSubmissionIdentity(ctx, expectedRunID, cause)
+				}
+				c.setRunID(runID)
+				logging.LogInfo("spt-api", "test started successfully", "runID", runID)
+				return StartTestOutcome{RunID: runID, Submission: SubmissionSubmitted}, nil
+			}
+			runID := acceptedRunID(etag, bodyData, expectedRunID)
+			c.setCompatibilityRunID(runID)
 			logging.LogInfo("spt-api", "test started successfully", "runID", runID)
 			return StartTestOutcome{RunID: runID, Submission: SubmissionSubmitted}, nil
 		}
@@ -406,6 +443,103 @@ func acceptedRunID(etag string, body []byte, expectedRunID int64) string {
 	return fmt.Sprintf("run-%d", time.Now().Unix())
 }
 
+type responseRunIdentity struct {
+	source string
+	value  int64
+}
+
+func acceptedResponseRunID(etag string, body []byte, expectedRunID int64) (string, bool, error) {
+	evidence := make([]responseRunIdentity, 0, 3)
+	if value, present, err := parseETagRunID(etag); err != nil {
+		return "", true, err
+	} else if present {
+		evidence = append(evidence, responseRunIdentity{source: "ETag", value: value})
+	}
+	bodyEvidence, err := parseBodyRunIDs(body)
+	if err != nil {
+		return "", true, err
+	}
+	evidence = append(evidence, bodyEvidence...)
+	if len(evidence) == 0 {
+		return "", false, nil
+	}
+	for _, identity := range evidence {
+		if identity.value != expectedRunID {
+			return "", true, fmt.Errorf(
+				"%s run ID %d does not match expected run ID %d",
+				identity.source, identity.value, expectedRunID)
+		}
+	}
+	return strconv.FormatInt(expectedRunID, 10), true, nil
+}
+
+func parseETagRunID(etag string) (int64, bool, error) {
+	value := strings.TrimSpace(etag)
+	if value == "" {
+		return 0, false, nil
+	}
+	if strings.HasPrefix(value, `"`) || strings.HasSuffix(value, `"`) {
+		if len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
+			return 0, true, fmt.Errorf("ETag run identity is malformed")
+		}
+		value = value[1 : len(value)-1]
+	}
+	runID, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || runID <= 0 {
+		return 0, true, fmt.Errorf("ETag run identity is not a positive integer")
+	}
+	return runID, true, nil
+}
+
+func parseBodyRunIDs(body []byte) ([]responseRunIdentity, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, nil
+	}
+	evidence := make([]responseRunIdentity, 0, 2)
+	for _, field := range []struct {
+		name   string
+		source string
+	}{
+		{name: "run_id", source: "response run_id"},
+		{name: "runId", source: "response runId"},
+	} {
+		raw, present := payload[field.name]
+		if !present {
+			continue
+		}
+		runID, err := parseJSONRunID(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s is malformed: %w", field.source, err)
+		}
+		evidence = append(evidence, responseRunIdentity{source: field.source, value: runID})
+	}
+	return evidence, nil
+}
+
+func parseJSONRunID(raw json.RawMessage) (int64, error) {
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err == nil {
+		runID, parseErr := strconv.ParseInt(number.String(), 10, 64)
+		if parseErr == nil && runID > 0 {
+			return runID, nil
+		}
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		runID, parseErr := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+		if parseErr == nil && runID > 0 {
+			return runID, nil
+		}
+	}
+	return 0, errors.New("run identity is not a positive integer")
+}
+
 func (c *SptAPIClient) reconcileAmbiguousSubmission(
 	launchCtx context.Context, expectedRunID int64, cause error,
 ) (StartTestOutcome, error) {
@@ -434,6 +568,34 @@ func (c *SptAPIClient) reconcileAmbiguousSubmission(
 	}
 }
 
+func (c *SptAPIClient) reconcileAcceptedSubmissionIdentity(
+	launchCtx context.Context, expectedRunID int64, cause error,
+) (StartTestOutcome, error) {
+	outcome := StartTestOutcome{Submission: SubmissionSubmitted}
+	reconcileBase := context.WithoutCancel(normalizeContext(launchCtx))
+	reconcileCtx, cancel := context.WithTimeout(reconcileBase, c.submissionReconcileTimeout)
+	defer cancel()
+	ticker := time.NewTicker(c.submissionReconcilePollInterval)
+	defer ticker.Stop()
+	for {
+		status, err := c.observeStatusContext(reconcileCtx)
+		if err == nil && statusMatchesSubmission(status, expectedRunID) {
+			outcome.RunID = strconv.FormatInt(expectedRunID, 10)
+			c.setRunID(outcome.RunID)
+			return outcome, nil
+		}
+		select {
+		case <-reconcileCtx.Done():
+			return outcome, &SubmissionIdentityError{
+				ExpectedRunID: expectedRunID,
+				Cause: errors.Join(cause, fmt.Errorf(
+					"bounded /status reconciliation: %w", reconcileCtx.Err())),
+			}
+		case <-ticker.C:
+		}
+	}
+}
+
 func statusMatchesSubmission(status *TestStatus, expectedRunID int64) bool {
 	if status == nil {
 		return false
@@ -457,7 +619,36 @@ func statusMatchesSubmission(status *TestStatus, expectedRunID int64) bool {
 func (c *SptAPIClient) setRunID(runID string) {
 	c.mu.Lock()
 	c.runID = runID
+	c.requireStatusAttribution = true
 	c.mu.Unlock()
+}
+
+func (c *SptAPIClient) setCompatibilityRunID(runID string) {
+	c.mu.Lock()
+	c.runID = runID
+	c.requireStatusAttribution = false
+	c.mu.Unlock()
+}
+
+func (c *SptAPIClient) clearRunID() {
+	c.mu.Lock()
+	c.runID = ""
+	c.requireStatusAttribution = false
+	c.mu.Unlock()
+}
+
+func (c *SptAPIClient) statusMatchesOwnedRun(status *TestStatus) bool {
+	if status == nil {
+		return false
+	}
+	c.mu.Lock()
+	ownedRunID := c.runID
+	requireAttribution := c.requireStatusAttribution
+	c.mu.Unlock()
+	if !status.runIDFromPayload {
+		return !requireAttribution
+	}
+	return ownedRunID != "" && strings.TrimSpace(status.RunID) == ownedRunID
 }
 
 // GetStatus retrieves the current test status
@@ -571,10 +762,8 @@ func (c *SptAPIClient) StopTest() error {
 		return fmt.Errorf("failed to stop test (status %d): %s", resp.StatusCode, string(bodyData))
 	}
 
-	// Clear the stored run ID
-	c.mu.Lock()
-	c.runID = ""
-	c.mu.Unlock()
+	// Clear the stored run identity.
+	c.clearRunID()
 
 	logging.LogInfo("spt-api", "test stopped successfully")
 	return nil
@@ -965,7 +1154,16 @@ func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Dur
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
 		switch st.State {
-		case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
+		case constants.StateIdle:
+			// IDLE (including /status 404) is node-level evidence that shutdown
+			// has removed the active run and intentionally needs no run ID.
+			sawTerminal = true
+		case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
+			if !c.statusMatchesOwnedRun(st) {
+				return fmt.Errorf(
+					"terminal status for observed run %q does not match the owned run",
+					st.RunID)
+			}
 			sawTerminal = true
 		default:
 			return fmt.Errorf("non-terminal state during linger: %s", st.State)
@@ -998,7 +1196,5 @@ func (c *SptAPIClient) getRunID() string {
 
 // SetRunID sets the run ID (useful for testing)
 func (c *SptAPIClient) SetRunID(runID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.runID = runID
+	c.setRunID(runID)
 }

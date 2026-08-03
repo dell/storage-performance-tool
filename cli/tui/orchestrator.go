@@ -46,6 +46,7 @@ type TestOrchestrator struct {
 	finalizeAttempt    *cleanupAttempt
 	diagnosticsTimeout time.Duration
 	cleanupTimeout     time.Duration
+	statusInterval     time.Duration
 
 	// Callbacks for status updates
 	onStatusUpdate func(status *TestStatus)
@@ -122,6 +123,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot 
 		lastSuccessfulMetrics: time.Now(),
 		metricsState:          newNodePollState(),
 		metricsBackoffCfg:     singleNodeBackoff,
+		statusInterval:        defaultStatusInterval,
 		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- non-crypto jitter source
 		logJSONBodies:         os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
@@ -381,7 +383,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 
 // monitorStatus polls the test status periodically
 func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
-	ticker := time.NewTicker(defaultStatusInterval)
+	ticker := time.NewTicker(o.statusInterval)
 	defer ticker.Stop()
 
 	for {
@@ -403,6 +405,13 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 
 			// Check if test has completed
 			if status != nil && (status.State == constants.StateCompleted || status.State == constants.StateFailed) {
+				if !o.apiClient.statusMatchesOwnedRun(status) {
+					logging.LogDebug(
+						"orchestrator", "ignoring terminal status not attributed to owned run",
+						"state", status.State, "observed_run_id", status.RunID,
+						"owned_run_id", o.apiClient.getRunID())
+					continue
+				}
 				logging.LogInfo("orchestrator", "test finished", "state", status.State)
 				if o.onOutput != nil {
 					o.onOutput(fmt.Sprintf("Test %s", status.State))
