@@ -147,7 +147,7 @@ func (c *DefaultChecker) InspectImageIdentity(
 		return identity, fmt.Errorf("inspect image identity on %s returned invalid JSON evidence", host.Original)
 	}
 	identity.ID = strings.TrimSpace(records[0].ID)
-	encodedID := strings.TrimPrefix(identity.ID, "sha256:")
+	encodedID := strings.TrimPrefix(identity.ID, constants.DockerImageIDPrefix)
 	if len(encodedID) != 64 {
 		return ImageIdentity{}, fmt.Errorf("inspect image identity on %s returned invalid ID %q", host.Original, identity.ID)
 	}

@@ -17,6 +17,7 @@ import (
 func TestDockerIntegration_E2E_ContainerLifecycle(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
 	mock := command.NewMockCommandExecutor()
+	mock.SetCommandSuccess("docker images -q "+constants.DefaultSptImage, "sha256:abc123")
 	startCmd := "docker run -d --name integration-test -e TEST_ENV=integration -p 8080:8080/tcp " + constants.DefaultSptImage + " --help"
 	mock.SetCommandSuccess(startCmd, "integration123abc")
 	mock.SetCommandSuccess("docker ps -q --filter id=integration123abc", "integration123abc")
@@ -84,6 +85,7 @@ func TestDockerIntegration_E2E_PortConflictDetection(t *testing.T) {
 func TestDockerIntegration_E2E_WorkerNodeDeployment(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
 	mock := command.NewMockCommandExecutor()
+	mock.SetCommandSuccess("docker images -q "+constants.DefaultSptImage, "sha256:abc123")
 	mock.SetCommandResponse("sh -c "+constants.PortSnapshotCommand, command.MockResponse{Stdout: "", Stderr: "", Error: nil})
 	mock.SetCommandSuccess("docker ps -a --format "+constants.DockerConflictFormat, "")
 	workerCmd := "docker run -d --name integration-worker -e JAVA_OPTS=-Djava.rmi.server.hostname=localhost -e JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=localhost --network host " + constants.DefaultSptImage + " --run-node=true --run-port=9999 --load-step-node-port=1099"

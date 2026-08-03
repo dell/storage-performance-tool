@@ -25,6 +25,11 @@ type DockerOperationsImpl struct {
 }
 
 func shouldSkipImagePull(image string) bool {
+	// Content-addressed local image IDs cannot be pulled from a registry. Integrity
+	// runs deliberately bind container launch to the ID established by preflight.
+	if isImmutableImageID(image) {
+		return true
+	}
 	// Local-only dev images (spt_dev) are never in a registry; skip the pull so the
 	// run uses the image distributed via engine/tools/push-worker-image.sh.
 	if constants.IsDevImage(image) {
@@ -39,6 +44,10 @@ func shouldSkipImagePull(image string) bool {
 		return false
 	}
 	return parsed
+}
+
+func isImmutableImageID(image string) bool {
+	return strings.HasPrefix(strings.TrimSpace(image), constants.DockerImageIDPrefix)
 }
 
 func missingDevImageError(image string, host *hostparse.HostInfo) error {
@@ -63,23 +72,9 @@ func NewDockerOperations(executor CommandExecutor, host *hostparse.HostInfo) Doc
 // StartContainer starts a container and returns container ID plus detailed command results
 func (d *DockerOperationsImpl) StartContainer(ctx context.Context, config ContainerConfig) (string, CommandResult, error) {
 	// Build the docker run command
-	skipPull := shouldSkipImagePull(config.Image)
-	if !skipPull {
-		if _, err := d.PullImage(ctx, config.Image); err != nil {
-			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdPull + " " + config.Image, Error: err}
-			return "", result, fmt.Errorf("failed to pull image %s: %w", config.Image, err)
-		}
-	} else if available, err := d.IsImageAvailable(ctx, config.Image); err == nil && !available {
-		if constants.IsDevImage(config.Image) {
-			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdImages + " -q " + config.Image}
-			result.Error = missingDevImageError(config.Image, d.host)
-			return "", result, result.Error
-		}
-		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", config.Image)
-		if _, perr := d.PullImage(ctx, config.Image); perr != nil {
-			result := CommandResult{Command: constants.DockerCommand + " " + constants.DockerCmdPull + " " + config.Image, Error: perr}
-			return "", result, fmt.Errorf("image %s not available and pull failed: %w", config.Image, perr)
-		}
+	if err := d.prepareImageForLaunch(ctx, config.Image); err != nil {
+		result := CommandResult{Error: err}
+		return "", result, err
 	}
 
 	dockerCmd := d.builder.BuildRunCommand(config)
@@ -313,19 +308,8 @@ func (d *DockerOperationsImpl) StartContainerWithBuilder(ctx context.Context, im
 // StartWorkerNodeContainer starts a worker node container with RMI configuration
 func (d *DockerOperationsImpl) StartWorkerNodeContainer(ctx context.Context, image, containerName, rmiHostname string, rmiPortStart, rmiPortCount int) (string, error) {
 	// Ensure image is available locally; attempt auto-pull if not
-	skipPull := shouldSkipImagePull(image)
-	if !skipPull {
-		if _, err := d.PullImage(ctx, image); err != nil {
-			return "", fmt.Errorf("failed to pull image %s: %w", image, err)
-		}
-	} else if available, err := d.IsImageAvailable(ctx, image); err == nil && !available {
-		if constants.IsDevImage(image) {
-			return "", missingDevImageError(image, d.host)
-		}
-		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", image)
-		if _, perr := d.PullImage(ctx, image); perr != nil {
-			return "", fmt.Errorf("image %s not available and pull failed: %w", image, perr)
-		}
+	if err := d.prepareImageForLaunch(ctx, image); err != nil {
+		return "", err
 	}
 
 	dockerCmd := d.builder.BuildWorkerNodeCommand(image, containerName, rmiHostname, rmiPortStart, rmiPortCount)
@@ -353,19 +337,8 @@ func (d *DockerOperationsImpl) StartWorkerNodeContainer(ctx context.Context, ima
 // StartEntryNodeContainer starts an entry node container with worker addresses
 func (d *DockerOperationsImpl) StartEntryNodeContainer(ctx context.Context, image, containerName string, workerAddresses []string, networkMode NetworkMode) (string, error) {
 	// Ensure image is available locally; attempt auto-pull if not
-	skipPull := shouldSkipImagePull(image)
-	if !skipPull {
-		if _, err := d.PullImage(ctx, image); err != nil {
-			return "", fmt.Errorf("failed to pull image %s: %w", image, err)
-		}
-	} else if available, err := d.IsImageAvailable(ctx, image); err == nil && !available {
-		if constants.IsDevImage(image) {
-			return "", missingDevImageError(image, d.host)
-		}
-		logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", image)
-		if _, perr := d.PullImage(ctx, image); perr != nil {
-			return "", fmt.Errorf("image %s not available and pull failed: %w", image, perr)
-		}
+	if err := d.prepareImageForLaunch(ctx, image); err != nil {
+		return "", err
 	}
 
 	dockerCmd := d.builder.BuildEntryNodeCommand(image, containerName, workerAddresses, networkMode)
@@ -471,9 +444,43 @@ func (d *DockerOperationsImpl) PullImage(ctx context.Context, image string) (Com
 	return result, nil
 }
 
-// IsImageAvailable checks if a Docker image exists locally (any version)
+func (d *DockerOperationsImpl) prepareImageForLaunch(ctx context.Context, image string) error {
+	if !shouldSkipImagePull(image) {
+		if _, err := d.PullImage(ctx, image); err != nil {
+			return fmt.Errorf("failed to pull image %s: %w", image, err)
+		}
+		return nil
+	}
+
+	available, err := d.IsImageAvailable(ctx, image)
+	if err != nil {
+		return err
+	}
+	if available {
+		return nil
+	}
+	if isImmutableImageID(image) {
+		return fmt.Errorf("immutable image %s is not available on %s", image, d.host.Host)
+	}
+	if constants.IsDevImage(image) {
+		return missingDevImageError(image, d.host)
+	}
+
+	logging.LogInfo("docker-command", "Docker image not found locally; pulling despite skip", "host", d.host.Host, "image", image)
+	if _, err := d.PullImage(ctx, image); err != nil {
+		return fmt.Errorf("image %s not available and pull failed: %w", image, err)
+	}
+	return nil
+}
+
+// IsImageAvailable checks if a Docker image exists locally. Immutable image IDs
+// require inspect because `docker images -q <sha256-ID>` treats the ID as a
+// repository filter and may return no output for an image that exists.
 func (d *DockerOperationsImpl) IsImageAvailable(ctx context.Context, image string) (bool, error) {
 	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdImages, constants.DockerFlagQuiet, image}
+	if isImmutableImageID(image) {
+		dockerCmd = []string{constants.DockerCommand, constants.DockerCmdImage, constants.DockerCmdInspect, image}
+	}
 
 	logging.LogDebug("docker-command", "checking if Docker image exists locally",
 		"host", d.host.Host,
@@ -485,7 +492,7 @@ func (d *DockerOperationsImpl) IsImageAvailable(ctx context.Context, image strin
 			d.host.Host, err, stderr)
 	}
 
-	available := strings.TrimSpace(stdout) != ""
+	available := isImmutableImageID(image) || strings.TrimSpace(stdout) != ""
 	logging.LogDebug("docker-command", "Docker image availability check result",
 		"host", d.host.Host,
 		"image", image,

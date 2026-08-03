@@ -7,18 +7,19 @@ package constants
 
 // Docker command constants
 const (
-	DockerCommand    = "docker"
-	DockerCmdPull    = "pull"
-	DockerCmdRun     = "run"
-	DockerCmdExec    = "exec"
-	DockerCmdPS      = "ps"
-	DockerCmdRM      = "rm"
-	DockerCmdLogs    = "logs"
-	DockerCmdImages  = "images"
-	DockerCmdImage   = "image"
-	DockerCmdInspect = "inspect"
-	DockerCmdVersion = "version"
-	DockerCmdStop    = "stop"
+	DockerCommand       = "docker"
+	DockerCmdPull       = "pull"
+	DockerCmdRun        = "run"
+	DockerCmdExec       = "exec"
+	DockerCmdPS         = "ps"
+	DockerCmdRM         = "rm"
+	DockerCmdLogs       = "logs"
+	DockerCmdImages     = "images"
+	DockerCmdImage      = "image"
+	DockerCmdInspect    = "inspect"
+	DockerCmdVersion    = "version"
+	DockerImageIDPrefix = "sha256:"
+	DockerCmdStop       = "stop"
 )
 
 // Docker CLI flag constants
