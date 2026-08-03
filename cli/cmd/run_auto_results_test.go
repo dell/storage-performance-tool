@@ -1219,6 +1219,120 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 	}
 }
 
+func TestStartAutoResultsKeepsPreparedInputsThroughConsumersAndReportsCleanupFailure(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	defer func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+	}()
+
+	stepID := "mt-001-create"
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		return &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateCompleted}}
+	}
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return []string{stepID}, nil
+	}
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return nil, nil
+	}
+
+	workspace := t.TempDir()
+	preparedPath := filepath.Join(workspace, "prepared.js")
+	if err := os.WriteFile(preparedPath, []byte("exact scenario"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertPreparedPresent := func(stage string) error {
+		if _, err := os.Stat(preparedPath); err != nil {
+			return errors.New(stage + " observed prepared input missing: " + err.Error())
+		}
+		return nil
+	}
+	var fetchErr error
+	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{
+			output: outputDir,
+			onFetch: func(_ string, _ []string) error {
+				fetchErr = assertPreparedPresent("artifact fetch")
+				return fetchErr
+			},
+		}
+	}
+	finalizerChecked := false
+	preSummaryHook := func(context.Context) {
+		if err := assertPreparedPresent("resource finalizer"); err != nil {
+			fetchErr = errors.Join(fetchErr, err)
+		}
+		finalizerChecked = true
+	}
+	cleanupErr := errors.New("prepared input removal failed")
+	cleanupCalls := 0
+	metadata := &runMetadata{
+		preparedInputs:       true,
+		preparedScenarioJS:   []byte("exact scenario"),
+		preparedDefaultsYAML: []byte("exact private defaults"),
+		preparedCleanup: func(ctx context.Context) error {
+			cleanupCalls++
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := os.Remove(preparedPath); err != nil {
+				return err
+			}
+			return cleanupErr
+		},
+	}
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := os.Stat(preparedPath); !os.IsNotExist(err) {
+			return errors.New("summary ran before prepared input cleanup")
+		}
+		return nil
+	}
+
+	done := startAutoResults(
+		context.Background(), "http://example", "mt", filepath.Join(workspace, "results"),
+		[]string{stepID}, false, nil, "9999", false, 0, preparedPath, metadata,
+		io.Discard, io.Discard, "", preSummaryHook)
+	outcome := <-done
+	if fetchErr != nil {
+		t.Fatal(fetchErr)
+	}
+	if !finalizerChecked {
+		t.Fatal("resource finalizer did not inspect prepared input")
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("prepared cleanup calls = %d, want 1", cleanupCalls)
+	}
+	if !errors.Is(outcome.Lifecycle.PreparedInputs.Err, cleanupErr) {
+		t.Fatalf("prepared cleanup outcome = %+v, want %v", outcome.Lifecycle.PreparedInputs, cleanupErr)
+	}
+	if len(metadata.preparedScenarioJS) != 0 || len(metadata.preparedDefaultsYAML) != 0 {
+		t.Fatal("private prepared bytes retained after cleanup")
+	}
+	storedBytes, err := os.ReadFile(filepath.Join(metadata.ResultsRoot, constants.ResultsMetadataFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored runMetadata
+	if err = json.Unmarshal(storedBytes, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Lifecycle == nil || !stored.Lifecycle.PreparedInputs.Completed ||
+		!strings.Contains(stored.Lifecycle.PreparedInputs.Error, cleanupErr.Error()) {
+		t.Fatalf("stored prepared-input phase = %+v", stored.Lifecycle)
+	}
+}
+
 func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 	origRunTracker := newRunTrackerFunc
 	origDiscover := discoverStepIDsFunc
@@ -1316,12 +1430,11 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 	if outcome.ShutdownErr != nil {
 		t.Fatalf("shutdown error = %v, want nil", outcome.ShutdownErr)
 	}
-	if outcome.ResourceFinalization == nil ||
-		!errors.Is(outcome.ResourceFinalization.Removal.Err, cleanupErr) {
-		t.Fatalf("resource finalization = %+v, want retained cleanup error", outcome.ResourceFinalization)
+	if !errors.Is(outcome.Lifecycle.Removal.Err, cleanupErr) {
+		t.Fatalf("resource finalization = %+v, want retained cleanup error", outcome.Lifecycle)
 	}
-	if outcome.ResourceFinalization.Resources != runcontrol.ResourceDispositionRetained {
-		t.Fatalf("resource disposition = %q, want retained", outcome.ResourceFinalization.Resources)
+	if outcome.Lifecycle.Resources != runcontrol.ResourceDispositionRetained {
+		t.Fatalf("resource disposition = %q, want retained", outcome.Lifecycle.Resources)
 	}
 	if outcome.SummaryErr != nil {
 		t.Fatalf("summary error = %v, want nil after finalization", outcome.SummaryErr)

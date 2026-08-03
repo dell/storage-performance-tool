@@ -12,11 +12,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
@@ -278,6 +280,96 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 	}
 }
 
+func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for name, value := range map[string]string{
+		"test-hosts": "127.0.0.1", "min-hosts": "1",
+		"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+		"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+		"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+		"shutdown-on-complete": "false", "generate-only": "false", "items-file": "",
+	} {
+		setGlobalRunFlagForTest(t, name, value)
+	}
+
+	previousPort := resolvePortConflictFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		resolvePortConflictFunc = previousPort
+		startLocalHeadlessRunFunc = previousLocal
+		startAutoResultsFunc = previousAutoResults
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+
+	finalizerStarted := make(chan struct{})
+	releaseFinalizer := make(chan struct{})
+	startLocalHeadlessRunFunc = func(
+		_ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+	) error {
+		if err := options.LaunchHooks.RegisterResourceFinalizer(
+			func(ctx context.Context) runcontrol.FinalizationOutcome {
+				if err := ctx.Err(); err != nil {
+					t.Errorf("finalizer received canceled context: %v", err)
+				}
+				close(finalizerStarted)
+				<-releaseFinalizer
+				return runcontrol.FinalizationOutcome{
+					Removal:   runcontrol.CompletedPhase(nil),
+					Resources: runcontrol.ResourceDispositionRemoved,
+				}
+			}); err != nil {
+			t.Fatalf("register finalizer: %v", err)
+		}
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool,
+		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, _ *runMetadata,
+		_ io.Writer, _ io.Writer, _ string, preSummaryHook func(context.Context),
+		_ ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		monitor := &autoResultsMonitor{
+			done:  make(chan autoResultsOutcome, 1),
+			armed: make(chan struct{}),
+		}
+		go func() {
+			<-monitor.armed
+			preSummaryHook(context.Background())
+			monitor.done <- autoResultsOutcome{
+				Lifecycle: runcontrol.Outcome{Resources: runcontrol.ResourceDispositionRemoved},
+				Tracker:   &portcheck.RunResult{FinalState: constants.StateCompleted},
+			}
+		}()
+		return monitor
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- runCmd.RunE(runCmd, []string{WorkloadTypeWrite}) }()
+	select {
+	case <-finalizerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("session finalizer did not start")
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("ordinary command returned before finalizer completed: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseFinalizer)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("RunE() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary command did not return after finalizer completed")
+	}
+}
+
 func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
 	t.Chdir(t.TempDir())
 	previousGOOS := integrityRuntimeGOOS
@@ -488,7 +580,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						t.Fatalf("RunE() error = %#v, want structured launcher failure", err)
 					}
 					wantCancel := int32(1)
-					if submission.state != tui.SubmissionNotSubmitted {
+					if submission.state == tui.SubmissionSubmitted {
 						wantCancel = 0
 					}
 					if cancelCalls.Load() != wantCancel {

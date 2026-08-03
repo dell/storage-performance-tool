@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,10 +85,14 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 }
 
 // CleanupPreparedItemFiles removes only private staging directories created by this package.
-func CleanupPreparedItemFiles(params Params) {
+func CleanupPreparedItemFiles(params Params) error {
+	var cleanupErrs []error
 	for _, dir := range params.ItemStagingDirs {
 		if strings.HasPrefix(filepath.Base(dir), "spt-integrity-input-") {
-			_ = os.RemoveAll(dir)
+			if err := os.RemoveAll(dir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove prepared item staging %q: %w", dir, err))
+			}
 		}
 	}
+	return errors.Join(cleanupErrs...)
 }

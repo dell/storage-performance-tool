@@ -120,7 +120,7 @@ func TestResolveVerificationRunErrorPreservesResourceCleanupFailure(t *testing.T
 	outcome := autoResultsOutcome{
 		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
 		Finalization: &integrity.FinalizeOutcome{Complete: true},
-		ResourceFinalization: &runcontrol.FinalizationOutcome{
+		Lifecycle: runcontrol.Outcome{
 			Diagnostics: runcontrol.CompletedPhase(nil),
 			Removal:     runcontrol.CompletedPhase(cleanupErr),
 			Resources:   runcontrol.ResourceDispositionRetained,

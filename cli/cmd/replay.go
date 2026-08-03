@@ -50,7 +50,6 @@ var (
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		return orchestrator.ConnectHosts(ctx)
 	}
-	replayAutoResultsWaitTimeout = constants.ReplayAutoResultsWaitTimeout
 )
 
 func runReplay(cmd *cobra.Command, _ []string) error {
@@ -330,15 +329,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 			err = normalizedErr
-			if err != nil && launchHooks.ProvenNotSubmitted() &&
-				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				if replayMonitor != nil {
-					replayMonitor.Cancel()
-				}
-				finalizeTraceArtifact()
-				return err
-			}
-			waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
+			waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
 			finalizeTraceArtifact()
 			return err
 		}
@@ -361,7 +352,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -378,7 +369,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
+		waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
 		finalizeTraceArtifact()
 		return err
 	}
@@ -400,28 +391,25 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err, launchHooks.PotentiallySubmitted())
+	waitForReplayAutoResults(replayMonitor, err, launchHooks.SubmissionState())
 	finalizeTraceArtifact()
 	return err
 }
 
-func waitForReplayAutoResults(monitor *autoResultsMonitor, launchErr error, potentiallySubmitted bool) {
+func waitForReplayAutoResults(
+	monitor *autoResultsMonitor, launchErr error, submission tui.SubmissionState,
+) {
 	if monitor == nil {
 		return
 	}
-	if launchErr != nil && !potentiallySubmitted {
-		// A proven pre-submission failure never armed the monitor. Cancel its
-		// launch gate before waiting so the original error returns promptly.
+	if launchErr != nil && submission != tui.SubmissionSubmitted {
+		// Unsubmitted and unresolved submissions must enter bounded salvage and
+		// cleanup rather than wait indefinitely for a workload terminal state.
 		monitor.Cancel()
 	}
-	timer := time.NewTimer(replayAutoResultsWaitTimeout)
-	defer timer.Stop()
-	select {
-	case <-monitor.done:
-		return
-	case <-timer.C:
-		logging.GetLogger().Warn("Timed out waiting for replay auto-results")
-	}
+	// Each coordinator phase owns its own timeout, so this join cannot let one
+	// phase consume another phase's cleanup budget.
+	<-monitor.done
 }
 
 type replayContainerCleaner interface {

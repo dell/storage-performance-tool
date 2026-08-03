@@ -52,15 +52,16 @@ func (o FinalizationOutcome) Error() error {
 // Outcome accumulates the whole run without treating one phase error as proof
 // that later phases did not run.
 type Outcome struct {
-	LaunchErr    error
-	Presentation PhaseOutcome
-	Workload     PhaseOutcome
-	Artifacts    PhaseOutcome
-	Diagnostics  PhaseOutcome
-	Shutdown     PhaseOutcome
-	Removal      PhaseOutcome
-	Summary      PhaseOutcome
-	Resources    ResourceDisposition
+	LaunchErr      error
+	Presentation   PhaseOutcome
+	Workload       PhaseOutcome
+	Artifacts      PhaseOutcome
+	Diagnostics    PhaseOutcome
+	Shutdown       PhaseOutcome
+	Removal        PhaseOutcome
+	PreparedInputs PhaseOutcome
+	Summary        PhaseOutcome
+	Resources      ResourceDisposition
 }
 
 // Error returns all retained lifecycle failures in execution order.
@@ -73,6 +74,7 @@ func (o Outcome) Error() error {
 		o.Diagnostics.Err,
 		o.Shutdown.Err,
 		o.Removal.Err,
+		o.PreparedInputs.Err,
 		o.Summary.Err,
 	)
 }
@@ -84,5 +86,6 @@ func (o *Outcome) MergeFinalization(final FinalizationOutcome) {
 	}
 	o.Diagnostics = final.Diagnostics
 	o.Removal = final.Removal
+	o.Removal.Err = errors.Join(final.Removal.Err, final.WaitErr)
 	o.Resources = final.Resources
 }

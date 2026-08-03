@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +36,8 @@ type runMetadata struct {
 	ResultsRoot             string                                                  `json:"resultsRoot"`
 	ScenarioFile            string                                                  `json:"scenarioFile"`
 	ScenarioStoredPath      string                                                  `json:"scenarioStoredPath,omitempty"`
-	DefaultsStoredPath      string                                                  `json:"defaultsStoredPath,omitempty"`
+	PreparedDefaultsSHA256  string                                                  `json:"preparedDefaultsSha256,omitempty"`
+	PreparedDefaultsBytes   int                                                     `json:"preparedDefaultsBytes,omitempty"`
 	ScenarioParams          scenario.Params                                         `json:"scenarioParams"`
 	Hosts                   []runHostMetadata                                       `json:"hosts"`
 	TestHosts               string                                                  `json:"testHosts"`
@@ -51,6 +54,7 @@ type runMetadata struct {
 	Lifecycle               *runLifecycleMetadata                                   `json:"lifecycle,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
 	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
+	preparedCleanup         func(context.Context) error                             `json:"-"`
 	preparedInputs          bool                                                    `json:"-"`
 	preparedScenarioJS      []byte                                                  `json:"-"`
 	preparedDefaultsYAML    []byte                                                  `json:"-"`
@@ -62,6 +66,7 @@ type runLifecycleMetadata struct {
 	Shutdown            lifecyclePhaseMetadata         `json:"shutdown"`
 	Diagnostics         lifecyclePhaseMetadata         `json:"diagnostics"`
 	Removal             lifecyclePhaseMetadata         `json:"removal"`
+	PreparedInputs      lifecyclePhaseMetadata         `json:"preparedInputs"`
 	Summary             lifecyclePhaseMetadata         `json:"summary"`
 	ResourceDisposition runcontrol.ResourceDisposition `json:"resourceDisposition"`
 }
@@ -69,6 +74,7 @@ type runLifecycleMetadata struct {
 type lifecyclePhaseMetadata struct {
 	Started         bool   `json:"started"`
 	Completed       bool   `json:"completed"`
+	TimedOut        bool   `json:"timedOut"`
 	Error           string `json:"error,omitempty"`
 	State           string `json:"state,omitempty"`
 	FailureStepID   string `json:"failureStepId,omitempty"`
@@ -355,12 +361,9 @@ func archivePreparedRunInputs(meta *runMetadata, scenarioPath, destDir string) e
 	} else {
 		meta.ScenarioStoredPath = scenarioName
 	}
-	if err := writePreparedInputDurable(
-		filepath.Join(destDir, constants.ResultsPreparedDefaultsFileName), meta.preparedDefaultsYAML, 0o600); err != nil {
-		archiveErrs = append(archiveErrs, fmt.Errorf("archive prepared defaults: %w", err))
-	} else {
-		meta.DefaultsStoredPath = constants.ResultsPreparedDefaultsFileName
-	}
+	defaultsDigest := sha256.Sum256(meta.preparedDefaultsYAML)
+	meta.PreparedDefaultsSHA256 = fmt.Sprintf("%x", defaultsDigest)
+	meta.PreparedDefaultsBytes = len(meta.preparedDefaultsYAML)
 	return errors.Join(archiveErrs...)
 }
 

@@ -598,7 +598,7 @@ func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) 
 				},
 			}
 			started := time.Now()
-			waitForReplayAutoResults(monitor, launchErr, false)
+			waitForReplayAutoResults(monitor, launchErr, tui.SubmissionNotSubmitted)
 			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
 				t.Fatalf("failed launch teardown calls=%d elapsed=%s",
 					cancelCalls.Load(), time.Since(started))
@@ -612,7 +612,7 @@ func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	waitForReplayAutoResults(monitor, nil, true)
+	waitForReplayAutoResults(monitor, nil, tui.SubmissionSubmitted)
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("successful launch canceled monitor %d time(s)", cancelCalls.Load())
 	}
@@ -623,25 +623,51 @@ func TestWaitForReplayAutoResultsPreservesArmedMonitorAfterLaunchError(t *testin
 	done <- autoResultsOutcome{}
 	var cancelCalls atomic.Int32
 	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
-	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), true)
+	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), tui.SubmissionSubmitted)
 	if cancelCalls.Load() != 0 {
 		t.Fatalf("post-submission launch error canceled monitor %d time(s)", cancelCalls.Load())
 	}
 }
 
-func TestWaitForReplayAutoResultsTimeoutIsDeterministic(t *testing.T) {
-	originalTimeout := replayAutoResultsWaitTimeout
-	replayAutoResultsWaitTimeout = 5 * time.Millisecond
-	t.Cleanup(func() { replayAutoResultsWaitTimeout = originalTimeout })
-
-	started := time.Now()
-	waitForReplayAutoResults(&autoResultsMonitor{done: make(chan autoResultsOutcome)}, nil, true)
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
-		t.Fatalf("deterministic replay timeout took %s", elapsed)
+func TestWaitForReplayAutoResultsCancelsAmbiguousSubmissionExactlyOnce(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	var cancelCalls atomic.Int32
+	var once sync.Once
+	monitor := &autoResultsMonitor{
+		done: done,
+		cancel: func() {
+			cancelCalls.Add(1)
+			once.Do(func() { done <- autoResultsOutcome{} })
+		},
+	}
+	waitForReplayAutoResults(
+		monitor, errors.New("ambiguous submission"), tui.SubmissionUnknown)
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("ambiguous submission cleanup calls = %d, want 1", cancelCalls.Load())
 	}
 }
 
-func TestReplayCommandFailedLaunchTearsDownAutoResultsPromptly(t *testing.T) {
+func TestWaitForReplayAutoResultsJoinsCoordinator(t *testing.T) {
+	done := make(chan autoResultsOutcome)
+	returned := make(chan struct{})
+	go func() {
+		waitForReplayAutoResults(&autoResultsMonitor{done: done}, nil, tui.SubmissionSubmitted)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("replay returned before coordinator completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+	done <- autoResultsOutcome{}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("replay did not return after coordinator completion")
+	}
+}
+
+func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 	server := newReplayArchiveServer(t)
 	defer server.Close()
 	tests := []struct {
@@ -743,7 +769,7 @@ func TestReplayCommandFailedLaunchTearsDownAutoResultsPromptly(t *testing.T) {
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("Execute() error = %v, want %v", err, test.wantErr)
 			}
-			if pathCalls.Load() != 1 || time.Since(started) > time.Second {
+			if pathCalls.Load() != 1 || time.Since(started) > 2*time.Second {
 				t.Fatalf("replay failure path calls=%d elapsed=%s", pathCalls.Load(), time.Since(started))
 			}
 			if sessionManagedCalls.Load() != 1 {

@@ -24,7 +24,7 @@ func TestPrepareRunBundleGeneratesEachInputOnce(t *testing.T) {
 			params.ItemFileMounts = []scenario.FileMount{{HostPath: "/host/input", ContainerPath: "/input"}}
 			return params, nil
 		},
-		CleanupExternal: func(scenario.Params) { cleanupCalls++ },
+		CleanupExternal: func(scenario.Params) error { cleanupCalls++; return nil },
 		GenerateScenario: func(scenario.Params) (string, error) {
 			scenarioCalls++
 			return "exact scenario", nil
@@ -89,7 +89,7 @@ func TestPrepareRunBundleBlocksVerificationWhenPlanFails(t *testing.T) {
 	var cleanupCalls, writeCalls int
 	deps := runPreparationDependencies{
 		PrepareExternal:  func(params scenario.Params) (scenario.Params, error) { return params, nil },
-		CleanupExternal:  func(scenario.Params) { cleanupCalls++ },
+		CleanupExternal:  func(scenario.Params) error { cleanupCalls++; return nil },
 		GenerateScenario: func(scenario.Params) (string, error) { return "scenario", nil },
 		GenerateDefaults: func(scenario.Params) ([]byte, error) { return []byte("defaults"), nil },
 		BuildStepPlan:    func(string) (scenario.StepPlan, error) { return scenario.StepPlan{}, planErr },
@@ -109,5 +109,43 @@ func TestPrepareRunBundleBlocksVerificationWhenPlanFails(t *testing.T) {
 	}
 	if cleanupCalls != 1 {
 		t.Fatalf("external cleanup calls = %d, want 1", cleanupCalls)
+	}
+}
+
+func TestPrepareRunBundleCleanupPreservesAllRemovalFailuresExactlyOnce(t *testing.T) {
+	externalErr := errors.New("external staging removal failed")
+	scenarioErr := errors.New("scenario removal failed")
+	var externalCalls, scenarioCalls int
+	path := filepath.Join(t.TempDir(), "prepared.js")
+	deps := runPreparationDependencies{
+		PrepareExternal: func(params scenario.Params) (scenario.Params, error) { return params, nil },
+		CleanupExternal: func(scenario.Params) error {
+			externalCalls++
+			return externalErr
+		},
+		GenerateScenario: func(scenario.Params) (string, error) { return "scenario", nil },
+		GenerateDefaults: func(scenario.Params) ([]byte, error) { return []byte("defaults"), nil },
+		BuildStepPlan:    func(string) (scenario.StepPlan, error) { return scenario.StepPlan{}, nil },
+		WriteScenario:    os.WriteFile,
+		RemoveScenario: func(string) error {
+			scenarioCalls++
+			return scenarioErr
+		},
+	}
+	prepared, err := prepareRunBundleWithDependencies(
+		scenario.Params{WorkloadType: WorkloadTypeMock}, path, false, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := prepared.Cleanup(context.Background())
+	second := prepared.Cleanup(context.Background())
+	if !errors.Is(first, externalErr) || !errors.Is(first, scenarioErr) {
+		t.Fatalf("cleanup error = %v, want both removal failures", first)
+	}
+	if !errors.Is(second, externalErr) || !errors.Is(second, scenarioErr) {
+		t.Fatalf("second cleanup error = %v, want stable joined result", second)
+	}
+	if externalCalls != 1 || scenarioCalls != 1 {
+		t.Fatalf("cleanup calls external/scenario = %d/%d, want 1/1", externalCalls, scenarioCalls)
 	}
 }

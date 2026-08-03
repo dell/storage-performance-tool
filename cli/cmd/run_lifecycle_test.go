@@ -5,6 +5,7 @@ Copyright © 2026 Dell Technologies
 package cmd
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -17,19 +18,19 @@ func TestUpdateRunLifecycleMetadataPreservesIndependentOutcomes(t *testing.T) {
 	artifactErr := errors.New("artifact failed")
 	diagnosticsErr := errors.New("diagnostics timed out")
 	removalErr := errors.New("remove failed")
+	preparedErr := errors.New("prepared input removal failed")
 	meta := &runMetadata{}
 	outcome := &autoResultsOutcome{
-		Tracker:           &portcheck.RunResult{FinalState: constants.StateFailed, FailureStepID: "read", FailureCategory: "integrity", FailureMessage: "corrupt"},
-		ArtifactErr:       artifactErr,
-		ArtifactStarted:   true,
-		ArtifactCompleted: true,
-		ShutdownStarted:   true,
-		SummaryStarted:    true,
-		SummaryCompleted:  true,
-		ResourceFinalization: &runcontrol.FinalizationOutcome{
-			Diagnostics: runcontrol.CompletedPhase(diagnosticsErr),
-			Removal:     runcontrol.CompletedPhase(removalErr),
-			Resources:   runcontrol.ResourceDispositionRetained,
+		Tracker: &portcheck.RunResult{FinalState: constants.StateFailed, FailureStepID: "read", FailureCategory: "integrity", FailureMessage: "corrupt"},
+		Lifecycle: runcontrol.Outcome{
+			Workload:       runcontrol.CompletedPhase(nil),
+			Artifacts:      runcontrol.CompletedPhase(artifactErr),
+			Shutdown:       runcontrol.CompletedPhase(nil),
+			Diagnostics:    runcontrol.CompletedPhase(diagnosticsErr),
+			Removal:        runcontrol.CompletedPhase(removalErr),
+			PreparedInputs: runcontrol.CompletedPhase(preparedErr),
+			Summary:        runcontrol.CompletedPhase(nil),
+			Resources:      runcontrol.ResourceDispositionRetained,
 		},
 	}
 	updateRunLifecycleMetadata(meta, outcome)
@@ -42,10 +43,22 @@ func TestUpdateRunLifecycleMetadataPreservesIndependentOutcomes(t *testing.T) {
 	}
 	if meta.Lifecycle.Artifacts.Error != artifactErr.Error() ||
 		meta.Lifecycle.Diagnostics.Error != diagnosticsErr.Error() ||
-		meta.Lifecycle.Removal.Error != removalErr.Error() {
+		meta.Lifecycle.Removal.Error != removalErr.Error() ||
+		meta.Lifecycle.PreparedInputs.Error != preparedErr.Error() {
 		t.Fatalf("phase outcomes = %+v", meta.Lifecycle)
 	}
 	if meta.Lifecycle.ResourceDisposition != runcontrol.ResourceDispositionRetained {
 		t.Fatalf("resource disposition = %q", meta.Lifecycle.ResourceDisposition)
+	}
+}
+
+func TestLifecyclePhaseMetadataIdentifiesJoinedDeadline(t *testing.T) {
+	phase := lifecyclePhaseFromOutcome(runcontrol.CompletedPhase(
+		errors.Join(errors.New("artifact request failed"), context.DeadlineExceeded)))
+	if !phase.Started || !phase.Completed || !phase.TimedOut {
+		t.Fatalf("deadline phase = %+v, want completed timeout", phase)
+	}
+	if phase.Error == "" {
+		t.Fatal("deadline phase omitted failure detail")
 	}
 }
