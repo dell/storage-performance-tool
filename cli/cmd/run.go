@@ -29,6 +29,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -2130,7 +2131,9 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 		path, _, _ := strings.Cut(override, "=")
 		path = strings.TrimSpace(path)
 		if path == itemNamingShardsPath || path == strings.ReplaceAll(itemNamingShardsPath, ".", "-") {
-			return fmt.Errorf("--%s conflicts with engine override %q", flagPrefixShards, override)
+			return fmt.Errorf(
+				"--%s conflicts with engine override %q",
+				flagPrefixShards, secretmask.EngineOverride(override))
 		}
 	}
 	params.PrefixShards = shardCount

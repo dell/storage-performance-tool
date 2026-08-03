@@ -2,6 +2,7 @@ package secretmask
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,10 +46,24 @@ func TestEngineOverrideListMasksEnvironmentSnapshot(t *testing.T) {
 	}
 }
 
-func TestEngineOverridePreservesMalformedAndNonSensitiveValues(t *testing.T) {
-	for _, value := range []string{"missing-equals", "storage.auth.version=4", "item.naming.prefix=a=b"} {
+func TestEngineOverridePreservesNonSensitiveValues(t *testing.T) {
+	for _, value := range []string{"storage.auth.version=4", "item.naming.prefix=a=b"} {
 		if got := EngineOverride(value); got != value {
 			t.Fatalf("EngineOverride(%q) = %q", value, got)
+		}
+	}
+}
+
+func TestEngineOverrideDoesNotEchoMalformedValues(t *testing.T) {
+	for _, value := range []string{
+		"MALFORMED_CREDENTIAL_7e31",
+		"=EMPTY_PATH_CREDENTIAL_964a",
+	} {
+		if got := EngineOverride(value); got != invalidEngineOverride {
+			t.Fatalf("EngineOverride(%q) = %q, want %q", value, got, invalidEngineOverride)
+		}
+		if strings.Contains(EngineOverride(value), value) {
+			t.Fatalf("EngineOverride(%q) echoed unclassified input", value)
 		}
 	}
 }

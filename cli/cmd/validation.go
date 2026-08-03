@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/spf13/cobra"
@@ -229,7 +230,9 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		path, value, _ := strings.Cut(override, "=")
 		normalized := strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
 		if _, excluded := integrityExcludedEngineOverridePaths[normalized]; excluded {
-			return fmt.Errorf("engine override %q is excluded from verification workloads", path+"="+value)
+			return fmt.Errorf(
+				"engine override %q is excluded from verification workloads",
+				secretmask.EngineOverride(path+"="+value))
 		}
 	}
 	if workloadType != WorkloadTypeReadVerify {

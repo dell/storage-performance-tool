@@ -5,12 +5,18 @@ import (
 	"unicode"
 )
 
+const invalidEngineOverride = "<invalid-engine-override>"
+
 // EngineOverride masks the value of a credential-bearing path=value override.
 // It splits only the first equals sign so arbitrary non-sensitive values remain
-// byte-for-byte useful in retained metadata.
+// byte-for-byte useful in retained metadata. Malformed entries are unclassified
+// and therefore never echoed into diagnostics or retained command artifacts.
 func EngineOverride(override string) string {
 	path, _, hasValue := strings.Cut(override, "=")
-	if !hasValue || !isSensitiveEnginePath(path) {
+	if !hasValue || strings.TrimSpace(path) == "" {
+		return invalidEngineOverride
+	}
+	if !isSensitiveEnginePath(path) {
 		return override
 	}
 	return path + "=" + masked
