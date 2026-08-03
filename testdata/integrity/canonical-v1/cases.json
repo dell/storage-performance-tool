@@ -1,0 +1,77 @@
+[
+  {
+    "name": "canonical_lf",
+    "accept": true,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixhLDEsCg=="
+  },
+  {
+    "name": "canonical_quoted_newline",
+    "accept": true,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwibGluZQprZXks6ZuqIiwzLAo="
+  },
+  {
+    "name": "canonical_quoted_comma",
+    "accept": true,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiYSxiIiwxLAo="
+  },
+  {
+    "name": "blank_physical_record",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKCmIsYSwxLAo="
+  },
+  {
+    "name": "crlf_records",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQNCmIsYSwxLA0K"
+  },
+  {
+    "name": "malformed_utf8",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiz/LDEsCg=="
+  },
+  {
+    "name": "quoted_header",
+    "accept": false,
+    "base64": "ImJ1Y2tldCIsa2V5LHNpemUsdmVyc2lvbl9pZApiLGEsMSwK"
+  },
+  {
+    "name": "duplicate_identity",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixhLDEsCmIsYSwxLAo="
+  },
+  {
+    "name": "out_of_order",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYix6LDEsCmIsYSwxLAo="
+  },
+  {
+    "name": "noncanonical_size",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixhLDAxLAo="
+  },
+  {
+    "name": "missing_final_lf",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixhLDEs"
+  },
+  {
+    "name": "canonical_quoted_trailing_space",
+    "accept": true,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwia2V5ICIsMSwK"
+  },
+  {
+    "name": "unquoted_trailing_space",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixrZXkgLDEsCg=="
+  },
+  {
+    "name": "canonical_unquoted_backslash_dot",
+    "accept": true,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixcLiwxLAo="
+  },
+  {
+    "name": "quoted_backslash_dot",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiXC4iLDEsCg=="
+  }
+]

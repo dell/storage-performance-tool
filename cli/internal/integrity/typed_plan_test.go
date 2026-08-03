@@ -38,13 +38,16 @@ func TestObservedStepRolesMatchesOnlyExactTypedIDs(t *testing.T) {
 		},
 	}
 	observed := []string{"mt-001-20260802.190000.000-create", "mt-002-20260802.190000.000-verify"}
-	got := ObservedStepRoles(plan, observed)
-	if got != (StepRoles{Create: observed[0], Read: observed[1]}) {
-		t.Fatalf("observed typed roles = %+v", got)
+	binding, err := BindObservedStepRoles(plan, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Roles != (StepRoles{Create: observed[0], Read: observed[1]}) {
+		t.Fatalf("observed typed roles = %+v", binding.Roles)
 	}
 }
 
-func TestObservedStepRolesDoesNotBindAmbiguousRuntimeOrdinal(t *testing.T) {
+func TestObservedStepRolesRejectsAmbiguousRuntimeOrdinal(t *testing.T) {
 	plan := integrityplan.Plan{
 		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
@@ -55,8 +58,65 @@ func TestObservedStepRolesDoesNotBindAmbiguousRuntimeOrdinal(t *testing.T) {
 		"mt-001-20260802.190000.000-verify",
 		"mt-001-20260802.190001.000-other",
 	}
-	if got := ObservedStepRoles(plan, observed); got != (StepRoles{}) {
-		t.Fatalf("ambiguous ordinal bound typed role: %+v", got)
+	if _, err := BindObservedStepRoles(plan, observed); err == nil {
+		t.Fatal("ambiguous ordinal unexpectedly bound a typed role")
+	}
+}
+
+func TestObservedStepRolesRejectsExactIdentityWithOrdinalConflict(t *testing.T) {
+	plan := integrityplan.Plan{
+		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		Verifier: integrityplan.PlannedStep{
+			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
+		},
+	}
+	observed := []string{"planned-reader", "mt-001-20260802.190001.000-other"}
+	if _, err := BindObservedStepRoles(plan, observed); err == nil {
+		t.Fatal("exact identity overrode conflicting ordinal evidence")
+	}
+}
+
+func TestObservedStepRolesRejectsDuplicateIdentityEvidence(t *testing.T) {
+	plan := integrityplan.Plan{
+		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		Verifier: integrityplan.PlannedStep{
+			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
+		},
+	}
+	if _, err := BindObservedStepRoles(plan, []string{"planned-reader", "planned-reader"}); err == nil {
+		t.Fatal("duplicate runtime identity unexpectedly accepted")
+	}
+}
+
+func TestObservedStepRolesDistinguishesMissingCompatibilityEvidence(t *testing.T) {
+	plan := integrityplan.Plan{
+		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		Verifier: integrityplan.PlannedStep{
+			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
+		},
+	}
+	binding, err := BindObservedStepRoles(plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Evidence || binding.Roles != (StepRoles{}) {
+		t.Fatalf("missing evidence binding = %+v", binding)
+	}
+}
+
+func TestFinalizeResultsRejectsAmbiguousRuntimeIdentityBeforeArtifacts(t *testing.T) {
+	plan := integrityplan.Plan{
+		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		Verifier: integrityplan.PlannedStep{
+			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
+		},
+	}
+	_, err := FinalizeResults(FinalizeOptions{
+		Plan: plan, ResultsRoot: t.TempDir(),
+		ObservedStepIDs: []string{"planned-reader", "mt-001-20260802.190001.000-other"},
+	})
+	if err == nil {
+		t.Fatal("finalizer accepted ambiguous runtime identity evidence")
 	}
 }
 

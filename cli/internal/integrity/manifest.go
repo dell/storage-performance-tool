@@ -1,6 +1,7 @@
 package integrity
 
 import (
+	"bytes"
 	"container/heap"
 	"context"
 	"crypto/sha256"
@@ -178,12 +179,19 @@ func validateCanonicalManifestEvidence(path string) (canonicalManifestEvidence, 
 	}
 	hasher := sha256.New()
 	counter := &byteCounter{}
+	canonicalHasher := sha256.New()
+	canonicalCounter := &byteCounter{}
+	canonicalWriter := newCanonicalCSVWriter(io.MultiWriter(canonicalHasher, canonicalCounter))
 	reader := csv.NewReader(io.TeeReader(file, io.MultiWriter(hasher, counter)))
 	reader.FieldsPerRecord = len(canonicalHeader)
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
 		_ = file.Close()
 		return evidence, fmt.Errorf("manifest %s does not have the exact canonical header", filepath.Base(path))
+	}
+	if err := canonicalWriter.Write(header); err != nil {
+		_ = file.Close()
+		return evidence, fmt.Errorf("canonicalize manifest header: %w", err)
 	}
 	count := 0
 	var prior *ManifestRecord
@@ -192,6 +200,14 @@ func validateCanonicalManifestEvidence(path string) (canonicalManifestEvidence, 
 		if errors.Is(readErr, io.EOF) {
 			if closeErr := file.Close(); closeErr != nil {
 				return evidence, fmt.Errorf("close committed manifest: %w", closeErr)
+			}
+			canonicalWriter.Flush()
+			if writeErr := canonicalWriter.Error(); writeErr != nil {
+				return evidence, fmt.Errorf("canonicalize committed manifest: %w", writeErr)
+			}
+			if counter.count != canonicalCounter.count ||
+				!bytes.Equal(hasher.Sum(nil), canonicalHasher.Sum(nil)) {
+				return evidence, fmt.Errorf("manifest %s is not in canonical physical CSV form", filepath.Base(path))
 			}
 			evidence.count = count
 			evidence.bytes = counter.count
@@ -207,6 +223,14 @@ func validateCanonicalManifestEvidence(path string) (canonicalManifestEvidence, 
 		if parseErr != nil {
 			_ = file.Close()
 			return evidence, parseErr
+		}
+		if fields[2] != strconv.FormatInt(record.size, 10) {
+			_ = file.Close()
+			return evidence, fmt.Errorf("canonical record %d has noncanonical size %q", count+1, fields[2])
+		}
+		if writeErr := canonicalWriter.Write(fields); writeErr != nil {
+			_ = file.Close()
+			return evidence, fmt.Errorf("canonicalize manifest record %d: %w", count+1, writeErr)
 		}
 		if prior != nil {
 			switch compared := prior.compare(record); {
@@ -301,7 +325,7 @@ func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) 
 		return "", err
 	}
 	path := file.Name()
-	writer := csv.NewWriter(file)
+	writer := newCanonicalCSVWriter(file)
 	var prior *ManifestRecord
 	for i := range records {
 		record := records[i]
@@ -401,7 +425,7 @@ func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []
 			_ = os.Remove(outPath)
 		}
 	}()
-	writer := csv.NewWriter(out)
+	writer := newCanonicalCSVWriter(out)
 	if includeHeader {
 		if err = writer.Write(canonicalHeader); err != nil {
 			_ = out.Close()

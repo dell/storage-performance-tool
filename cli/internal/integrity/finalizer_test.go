@@ -903,7 +903,6 @@ func writeCSVFixture(t *testing.T, path string, records [][]string) {
 		t.Fatal(err)
 	}
 	writer := csv.NewWriter(file)
-	writer.UseCRLF = true
 	if err = writer.WriteAll(records); err != nil {
 		_ = file.Close()
 		t.Fatal(err)

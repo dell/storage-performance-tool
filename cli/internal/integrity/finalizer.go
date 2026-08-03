@@ -47,21 +47,23 @@ var performanceHeader = []string{
 
 // FinalizeOptions binds the generated step roles and any CLI-staged input to one result run.
 type FinalizeOptions struct {
-	Context             context.Context
-	ResultsRoot         string
-	BaseURL             string
-	Workload            string
-	RunID               int64
-	StepIDs             []string
-	PlannedStepIDs      []string
-	Plan                integrityplan.Plan
-	RuntimeRoles        StepRoles
-	StagedManifest      string
-	StagedCompletion    string
-	AllowEmptySelection bool
-	MaxConsoleFailures  int
-	Multipart           bool
-	StepLifecycles      map[string]string
+	Context                     context.Context
+	ResultsRoot                 string
+	BaseURL                     string
+	Workload                    string
+	RunID                       int64
+	StepIDs                     []string
+	PlannedStepIDs              []string
+	Plan                        integrityplan.Plan
+	ObservedStepIDs             []string
+	AllowPlannedRoleFallback    bool
+	AllowMissingRuntimeVerifier bool
+	StagedManifest              string
+	StagedCompletion            string
+	AllowEmptySelection         bool
+	MaxConsoleFailures          int
+	Multipart                   bool
+	StepLifecycles              map[string]string
 }
 
 // FinalizeOutcome is the integrity-specific machine outcome used by console reporting and exit policy.
@@ -121,6 +123,18 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	if err := ctx.Err(); err != nil {
 		return outcome, err
 	}
+	runtimeRoles := StepRoles{}
+	if options.Plan.Valid() {
+		binding, bindErr := BindObservedStepRoles(
+			options.Plan, options.ObservedStepIDs, options.AllowMissingRuntimeVerifier)
+		if bindErr != nil {
+			return outcome, bindErr
+		}
+		if !binding.Evidence && !options.AllowPlannedRoleFallback {
+			return outcome, fmt.Errorf("typed verification plan has no runtime step identity evidence")
+		}
+		runtimeRoles = binding.Roles
+	}
 	reconciled := false
 	manifest, err := readResultsManifest(options.ResultsRoot)
 	if err != nil {
@@ -145,8 +159,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			finalErr = writeErr
 		}
 	}()
-	runtimeRoles := options.RuntimeRoles
-	if !options.Plan.Valid() && runtimeRoles == (StepRoles{}) {
+	if !options.Plan.Valid() {
 		runtimeRoles = ResolveStepRoles(options.StepIDs, manifest)
 	}
 	plannedRoles := PlannedStepRoles(options.Plan)
@@ -376,26 +389,47 @@ func PlannedStepRoles(plan integrityplan.Plan) StepRoles {
 	return roles
 }
 
-// ObservedStepRoles returns only typed plan roles whose exact IDs occur in
-// runtime evidence. Timestamp-reassigned runtime IDs bind through the stable
-// typed step ordinal; semantic roles are never inferred from an ID suffix.
-func ObservedStepRoles(plan integrityplan.Plan, observed []string) StepRoles {
+// RuntimeRoleBinding distinguishes absent compatibility evidence from a
+// successful typed binding. Contradictory runtime evidence is always an error.
+type RuntimeRoleBinding struct {
+	Roles    StepRoles
+	Evidence bool
+}
+
+// BindObservedStepRoles binds typed roles only after validating the complete
+// runtime identity set. Timestamp-reassigned IDs bind through stable ordinals;
+// semantic roles are never inferred from an ID suffix.
+func BindObservedStepRoles(
+	plan integrityplan.Plan, observed []string, allowMissingVerifier ...bool,
+) (RuntimeRoleBinding, error) {
 	if !plan.Valid() {
-		return StepRoles{}
+		return RuntimeRoleBinding{}, fmt.Errorf("runtime role binding requires a valid typed plan")
 	}
 	byNumber := make(map[int]string, len(observed))
-	seen := make(map[string]struct{}, len(observed))
+	counts := make(map[string]int, len(observed))
+	plannedNumbers := make(map[string]int, 3)
+	for _, step := range []*integrityplan.PlannedStep{plan.Producer, &plan.Verifier, plan.Cleanup} {
+		if step != nil {
+			plannedNumbers[step.ID] = step.Number
+		}
+	}
 	for _, runtimeID := range observed {
-		seen[runtimeID] = struct{}{}
-		if number, ok := integrityplan.RuntimeStepNumber(runtimeID); ok {
+		counts[runtimeID]++
+		if counts[runtimeID] > 1 {
+			return RuntimeRoleBinding{}, fmt.Errorf("duplicate runtime step identity %q", runtimeID)
+		}
+		number, ok := plannedNumbers[runtimeID]
+		if !ok {
+			number, ok = integrityplan.RuntimeStepNumber(runtimeID)
+		}
+		if ok {
 			existing, exists := byNumber[number]
-			switch {
-			case !exists:
+			if !exists {
 				byNumber[number] = runtimeID
-			case existing != runtimeID:
-				// Multiple runtime identities for one ordinal are not enough
-				// evidence to bind either identity to a semantic role.
-				byNumber[number] = ""
+			} else if existing != runtimeID {
+				return RuntimeRoleBinding{}, fmt.Errorf(
+					"conflicting runtime step identities %q and %q for ordinal %d",
+					existing, runtimeID, number)
 			}
 		}
 	}
@@ -403,7 +437,7 @@ func ObservedStepRoles(plan integrityplan.Plan, observed []string) StepRoles {
 		if step == nil {
 			return ""
 		}
-		if _, exact := seen[step.ID]; exact {
+		if counts[step.ID] == 1 {
 			return step.ID
 		}
 		return byNumber[step.Number]
@@ -418,7 +452,11 @@ func ObservedStepRoles(plan integrityplan.Plan, observed []string) StepRoles {
 		}
 	}
 	roles.Read = resolve(&plan.Verifier)
-	return roles
+	missingVerifierAllowed := len(allowMissingVerifier) > 0 && allowMissingVerifier[0]
+	if len(observed) > 0 && roles.Read == "" && !missingVerifierAllowed {
+		return RuntimeRoleBinding{}, fmt.Errorf("runtime evidence is missing the required verification step")
+	}
+	return RuntimeRoleBinding{Roles: roles, Evidence: len(observed) > 0}, nil
 }
 
 // ResolveStepRoles preserves suffix-based compatibility for legacy callers
@@ -675,7 +713,7 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 		return 0, err
 	}
 	tmpPath := tmp.Name()
-	writer := csv.NewWriter(tmp)
+	writer := newCanonicalCSVWriter(tmp)
 	if err = writer.Write(canonicalHeader); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
@@ -946,7 +984,7 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 		return summary, err
 	}
 	tmpPath := tmp.Name()
-	writer := csv.NewWriter(tmp)
+	writer := newCanonicalCSVWriter(tmp)
 	if err = writer.Write(performanceHeader); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)

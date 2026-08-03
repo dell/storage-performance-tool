@@ -2,6 +2,7 @@ package integrity
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -149,6 +150,59 @@ func TestValidateCanonicalManifestPortableRejectsMalformedUTF8(t *testing.T) {
 	}
 	if _, err := validateCanonicalManifestEvidence(path); err == nil || !strings.Contains(err.Error(), "valid UTF-8") {
 		t.Fatalf("validation error = %v, want invalid UTF-8", err)
+	}
+}
+
+func TestValidateCanonicalManifestSharedPhysicalCorpus(t *testing.T) {
+	type canonicalCase struct {
+		Name   string `json:"name"`
+		Accept bool   `json:"accept"`
+		Base64 string `json:"base64"`
+	}
+	fixture := sharedIntegrityFixtureFile(t, "canonical-v1", "cases.json")
+	encoded, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []canonicalCase
+	if err = json.Unmarshal(encoded, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range cases {
+		t.Run(test.Name, func(t *testing.T) {
+			body, decodeErr := base64.StdEncoding.DecodeString(test.Base64)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			path := filepath.Join(t.TempDir(), "manifest.csv")
+			if writeErr := os.WriteFile(path, body, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			_, validateErr := validateCanonicalManifestEvidence(path)
+			if (validateErr == nil) != test.Accept {
+				t.Fatalf("accept = %t, want %t; error = %v", validateErr == nil, test.Accept, validateErr)
+			}
+		})
+	}
+}
+
+func sharedIntegrityFixtureFile(t *testing.T, parts ...string) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		candidateParts := append([]string{dir, "testdata", "integrity"}, parts...)
+		candidate := filepath.Join(candidateParts...)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("shared integrity fixture %q not found", filepath.Join(parts...))
+		}
+		dir = parent
 	}
 }
 

@@ -88,12 +88,23 @@ type healthResponse struct {
 	ClusterID string `json:"cluster_id"`
 }
 
+// statusResponse mirrors StatusServlet's canonical wire contract. RunID is a
+// numeric snake_case field; LegacyRunID is accepted only for older engines.
+type statusResponse struct {
+	State       string   `json:"state"`
+	Progress    *float64 `json:"progress"`
+	Message     string   `json:"message"`
+	RunID       *int64   `json:"run_id"`
+	LegacyRunID string   `json:"runId"`
+}
+
 // TestStatus represents the status of a running test
 type TestStatus struct {
-	State    string  // RUNNING, COMPLETED, FAILED, IDLE
-	Progress float64 // Progress percentage if available
-	Message  string  // Status message or error
-	RunID    string  // Current run ID
+	State            string  // RUNNING, COMPLETED, FAILED, IDLE
+	Progress         float64 // Progress percentage if available
+	Message          string  // Status message or error
+	RunID            string  // Current run ID
+	runIDFromPayload bool
 }
 
 // JSONMetricsStep represents a single load step's metrics from the JSON endpoint
@@ -422,6 +433,9 @@ func statusMatchesSubmission(status *TestStatus, expectedRunID int64) bool {
 	if status == nil {
 		return false
 	}
+	if !status.runIDFromPayload {
+		return false
+	}
 	runID, err := strconv.ParseInt(strings.TrimSpace(status.RunID), 10, 64)
 	if err != nil || runID != expectedRunID {
 		return false
@@ -479,7 +493,7 @@ func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var statusData map[string]interface{}
+	var statusData statusResponse
 	if err := json.Unmarshal(bodyData, &statusData); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
@@ -489,26 +503,27 @@ func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error
 	}
 
 	// Extract fields from JSON
-	if state, ok := statusData["state"].(string); ok {
-		status.State = state
+	if statusData.State != "" {
+		status.State = statusData.State
 	} else {
 		status.State = constants.UIStateUnknown
 	}
 
-	if msg, ok := statusData["message"].(string); ok {
-		status.Message = msg
+	status.Message = statusData.Message
+
+	if statusData.RunID != nil {
+		status.RunID = strconv.FormatInt(*statusData.RunID, 10)
+		status.runIDFromPayload = true
+	} else if legacyRunID := strings.TrimSpace(statusData.LegacyRunID); legacyRunID != "" {
+		status.RunID = legacyRunID
+		status.runIDFromPayload = true
+	}
+	if status.RunID != "" {
+		c.setRunID(status.RunID)
 	}
 
-	if runID, ok := statusData["runId"].(string); ok && runID != "" {
-		status.RunID = runID
-		// Update stored run ID
-		c.mu.Lock()
-		c.runID = runID
-		c.mu.Unlock()
-	}
-
-	if progress, ok := statusData["progress"].(float64); ok {
-		status.Progress = progress
+	if statusData.Progress != nil {
+		status.Progress = *statusData.Progress
 	}
 
 	return status, nil
