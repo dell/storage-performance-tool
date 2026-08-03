@@ -50,8 +50,9 @@ func canonicalCSVFieldNeedsQuotes(field string) bool {
 	if field == "" {
 		return false
 	}
-	// Commons CSV quotes leading/trailing ASCII control or space characters.
-	if field[0] <= ' ' || field[len(field)-1] <= ' ' {
+	// Commons CSV quotes a leading byte through '#' and a trailing ASCII
+	// control or space character.
+	if field[0] <= '#' || field[len(field)-1] <= ' ' {
 		return true
 	}
 	return strings.ContainsAny(field, ",\"\r\n")

@@ -777,7 +777,7 @@ func subtractSortedManifests(ctx context.Context, inputPath, verifiedPath, desti
 
 type sortedManifest struct {
 	file   *os.File
-	reader *csv.Reader
+	reader csvRecordReader
 }
 
 func openSortedManifest(path string) (*sortedManifest, error) {
@@ -785,8 +785,7 @@ func openSortedManifest(path string) (*sortedManifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = len(canonicalHeader)
+	reader := newIdentityCSVReader(file)
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
 		_ = file.Close()

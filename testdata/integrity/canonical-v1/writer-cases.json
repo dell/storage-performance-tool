@@ -1,0 +1,72 @@
+[
+  {
+    "name": "leading_bang",
+    "fields": ["b", "!key", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiIWtleSIsMSwK"
+  },
+  {
+    "name": "leading_hash",
+    "fields": ["b", "#key", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiI2tleSIsMSwK"
+  },
+  {
+    "name": "leading_quote",
+    "fields": ["b", "\"key", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiIiJrZXkiLDEsCg=="
+  },
+  {
+    "name": "embedded_lf",
+    "fields": ["b", "line\nkey", "3", "version"],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwibGluZQprZXkiLDMsdmVyc2lvbgo="
+  },
+  {
+    "name": "embedded_crlf",
+    "fields": ["b", "line\r\nkey", "3", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwibGluZQ0Ka2V5IiwzLAo="
+  },
+  {
+    "name": "standalone_cr",
+    "fields": ["b", "line\rkey", "3", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwibGluZQ1rZXkiLDMsCg=="
+  },
+  {
+    "name": "comma_and_doubled_quote",
+    "fields": ["b", "a,\"b", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiYSwiImIiLDEsCg=="
+  },
+  {
+    "name": "bucket_leading_hash",
+    "fields": ["#bucket", "key", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKIiNidWNrZXQiLGtleSwxLAo="
+  },
+  {
+    "name": "version_leading_hash",
+    "fields": ["b", "key", "1", "#version"],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYixrZXksMSwiI3ZlcnNpb24iCg=="
+  },
+  {
+    "name": "leading_and_trailing_tab",
+    "fields": ["b", "\tkey", "1", "v\t"],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiCWtleSIsMSwidgkiCg=="
+  },
+  {
+    "name": "leading_and_trailing_space",
+    "fields": ["b", " key ", "1", ""],
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwiIGtleSAiLDEsCg=="
+  },
+  {
+    "name": "malformed_unclosed_quote",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwidW5jbG9zZWQsMSwK"
+  },
+  {
+    "name": "noncanonical_unquoted_hash",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwja2V5LDEsCg=="
+  },
+  {
+    "name": "noncanonical_overquoted_key",
+    "accept": false,
+    "base64": "YnVja2V0LGtleSxzaXplLHZlcnNpb25faWQKYiwia2V5IiwxLAo="
+  }
+]

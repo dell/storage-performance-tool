@@ -86,6 +86,43 @@ func TestStageInputManifestEmitsExactSharedLFBytes(t *testing.T) {
 	}
 }
 
+func TestStageInputManifestPreservesEmbeddedCRLFIdentity(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.csv")
+	content := "bucket,key,size,version_id\r\n" +
+		"b,plain,1,v1\r\n" +
+		"b,\"line\r\nkey\",2,v2\r\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, manifest, _, err := StageInputManifest(source, 125)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	if _, err = validateCanonicalManifestEvidence(manifest); err != nil {
+		t.Fatalf("staged canonical manifest rejected: %v", err)
+	}
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "b,\"line\r\nkey\",2,v2\n") {
+		t.Fatalf("staged manifest did not preserve embedded CRLF: %q", data)
+	}
+	reader := newCanonicalCSVReader(strings.NewReader(string(data)))
+	if _, err = reader.Read(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := reader.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[1] != "line\r\nkey" {
+		t.Fatalf("staged key = %q, want exact embedded CRLF", first[1])
+	}
+}
+
 func TestStageInputManifestRejectsLegacyAndConflictingDuplicates(t *testing.T) {
 	cases := map[string]string{
 		"legacy":        "key,0,1,0/0\n",

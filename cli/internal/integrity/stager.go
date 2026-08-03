@@ -3,7 +3,6 @@ package integrity
 
 import (
 	"crypto/sha256"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -80,8 +79,7 @@ func stageInputManifestWithOperations(
 		return "", "", "", fmt.Errorf("open input manifest: %w", err)
 	}
 	defer func() { _ = in.Close() }()
-	reader := csv.NewReader(in)
-	reader.FieldsPerRecord = len(canonicalHeader)
+	reader := newIdentityCSVReader(in)
 	header, err := reader.Read()
 	if err != nil {
 		return "", "", "", fmt.Errorf("read canonical header: %w", err)

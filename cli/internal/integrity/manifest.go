@@ -5,7 +5,6 @@ import (
 	"container/heap"
 	"context"
 	"crypto/sha256"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -182,8 +181,7 @@ func validateCanonicalManifestEvidence(path string) (canonicalManifestEvidence, 
 	canonicalHasher := sha256.New()
 	canonicalCounter := &byteCounter{}
 	canonicalWriter := newCanonicalCSVWriter(io.MultiWriter(canonicalHasher, canonicalCounter))
-	reader := csv.NewReader(io.TeeReader(file, io.MultiWriter(hasher, counter)))
-	reader.FieldsPerRecord = len(canonicalHeader)
+	reader := newCanonicalCSVReader(io.TeeReader(file, io.MultiWriter(hasher, counter)))
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
 		_ = file.Close()
@@ -260,8 +258,7 @@ func sortManifestBoundedContext(ctx context.Context, path, tempDir string) (sort
 	if err != nil {
 		return "", 0, err
 	}
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = len(canonicalHeader)
+	reader := newCanonicalCSVReader(file)
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
 		_ = file.Close()
@@ -359,7 +356,7 @@ func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) 
 
 type mergeSource struct {
 	file   *os.File
-	reader *csv.Reader
+	reader csvRecordReader
 }
 
 type mergeItem struct {
@@ -451,8 +448,7 @@ func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []
 			_ = out.Close()
 			return "", 0, openErr
 		}
-		source := mergeSource{file: file, reader: csv.NewReader(file)}
-		source.reader.FieldsPerRecord = len(canonicalHeader)
+		source := mergeSource{file: file, reader: newCanonicalCSVReader(file)}
 		sources = append(sources, source)
 		if record, readErr := readMergeRecord(source.reader); readErr == nil {
 			heap.Push(queue, mergeItem{record: record, source: len(sources) - 1})
@@ -505,7 +501,7 @@ func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []
 	return outPath, count, nil
 }
 
-func readMergeRecord(reader *csv.Reader) (ManifestRecord, error) {
+func readMergeRecord(reader csvRecordReader) (ManifestRecord, error) {
 	fields, err := reader.Read()
 	if err != nil {
 		return ManifestRecord{}, err
