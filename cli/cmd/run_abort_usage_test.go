@@ -3,11 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/tui"
 )
 
 // fakeAbortResolve simulates a detected port conflict where the user chooses Abort.
@@ -21,40 +22,67 @@ func fakeAbortResolve(ctx context.Context, port string, forceMode bool) (*portch
 }
 
 func TestAbortDoesNotPrintUsage(t *testing.T) {
-	// Ensure we don't accidentally start any interactive UI in tests
+	// Do not let a developer's cli/.env select real remote hosts. Keep a hostile
+	// HOSTS value in the process environment to prove that the explicit local
+	// flag wins and that this test cannot cross the remote launch boundary.
+	t.Chdir(t.TempDir())
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv("HOSTS", "test-not-connect.invalid")
+	setGlobalRunFlagForTest(t, "test-hosts", "127.0.0.1")
+
+	// Ensure we don't accidentally start any interactive UI in tests.
 	prevTesting := isTesting
 	isTesting = true
-	defer func() { isTesting = prevTesting }()
+	t.Cleanup(func() { isTesting = prevTesting })
 
-	// Swap the resolver with our fake abort and restore afterward
+	// Swap the resolver with our fake abort and restore afterward.
 	prevResolver := resolvePortConflictFunc
-	resolvePortConflictFunc = fakeAbortResolve
-	defer func() { resolvePortConflictFunc = prevResolver }()
+	resolverCalls := 0
+	resolvePortConflictFunc = func(ctx context.Context, port string, forceMode bool) (*portcheck.ResolutionResult, error) {
+		resolverCalls++
+		return fakeAbortResolve(ctx, port, forceMode)
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
 
-	// Capture output
+	prevConnect := connectMultiHostOrchestratorFunc
+	remoteOrchestratorCalls := 0
+	errRemoteOrchestratorReached := errors.New("remote orchestrator must not be reached")
+	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+		remoteOrchestratorCalls++
+		return errRemoteOrchestratorReached
+	}
+	t.Cleanup(func() { connectMultiHostOrchestratorFunc = prevConnect })
+
+	// Capture output.
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
 	rootCmd.SetArgs([]string{"run", "mock", "--headless"})
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
 
-	// Execute and expect an error due to abort
 	_, err := rootCmd.ExecuteC()
-	if err == nil {
-		t.Fatalf("expected error from abort resolution, got nil")
+	if err == nil || err.Error() != "operation cancelled by user" {
+		t.Fatalf("ExecuteC() error = %v, want operation cancelled by user", err)
+	}
+	if errors.Is(err, errRemoteOrchestratorReached) {
+		t.Fatalf("ExecuteC() reached remote orchestrator: %v", err)
+	}
+	if resolverCalls != 1 {
+		t.Fatalf("port conflict resolver calls = %d, want 1", resolverCalls)
+	}
+	if remoteOrchestratorCalls != 0 {
+		t.Fatalf("remote orchestrator calls = %d, want 0", remoteOrchestratorCalls)
 	}
 
 	out := buf.String()
-
-	// Ensure helpful abort messaging is present
 	if !strings.Contains(out, "Operation cancelled") && !strings.Contains(out, "cancelled") {
 		t.Errorf("expected abort message in output; got: %s", out)
 	}
-
-	// Critically: ensure Cobra usage/help is NOT printed
 	if strings.Contains(out, "Usage:") {
 		t.Errorf("unexpected usage/help output after abort: %s", out)
 	}
-
-	// Minor timeout to allow any deferred cleanup to complete
-	time.Sleep(50 * time.Millisecond)
 }

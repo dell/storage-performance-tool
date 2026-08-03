@@ -36,8 +36,14 @@ func TestRunVerify_InvalidNetworkMode(t *testing.T) {
 
 func TestRunVerify_MinHostsGreaterThanHosts(t *testing.T) {
 	cmd := newVerifyTestCmd()
-	// Default hosts => localhost only; set min-hosts to 2 to trigger validation error
-	cmd.Flags().Set("min-hosts", "2")
+	// Set localhost explicitly so a developer HOSTS environment variable cannot
+	// turn this validation-only test into a real distributed verification.
+	if err := cmd.Flags().Set("test-hosts", "127.0.0.1"); err != nil {
+		t.Fatalf("set test-hosts: %v", err)
+	}
+	if err := cmd.Flags().Set("min-hosts", "2"); err != nil {
+		t.Fatalf("set min-hosts: %v", err)
+	}
 	if err := runVerify(cmd, nil); err == nil {
 		t.Fatalf("expected error for min-hosts > hosts, got nil")
 	} else if !strings.Contains(err.Error(), "min-hosts (2) cannot be greater") {
