@@ -335,6 +335,7 @@ func TestSptAPIClient_StopTest(t *testing.T) {
 }
 
 func TestSptAPIClient_StartTestContextPostsExactRealGeneratedDefaults(t *testing.T) {
+	const overrideSecret = "EXACT_POST_OVERRIDE_SECRET_c421"
 	params := scenario.Params{
 		WorkloadType: scenario.WorkloadTypeWriteVerify,
 		Endpoint:     "http://s3.example:9000",
@@ -342,10 +343,16 @@ func TestSptAPIClient_StartTestContextPostsExactRealGeneratedDefaults(t *testing
 		SecretKey:    "EXACT_POST_SECRET_91bc",
 		Bucket:       "qualification",
 		Threads:      1,
+		EngineOverrides: []string{
+			"storage.auth.secret=" + overrideSecret,
+		},
 	}
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(defaults, []byte(overrideSecret)) {
+		t.Fatal("real generated defaults do not contain the exact override credential")
 	}
 	var postedDefaults []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
