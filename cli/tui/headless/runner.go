@@ -8,6 +8,7 @@ package headless
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -428,29 +429,24 @@ func (r *HeadlessRunner) runDryModeWithParams(image string, scenarioPath string,
 	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
 	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
 
-	// Generate and display scenario content
+	// Generate scenario content and disclose only its identity. Scenario and
+	// defaults bytes may contain credentials supplied through overrides.
 	scenarioContent, err := scenario.GenerateScenario(params)
 	if err != nil {
 		r.output("ERROR", "Failed to generate scenario: %v", err)
 		return err
 	}
 
-	r.output("DRY-RUN", "Generated scenario content:")
-	r.output("DRY-RUN", "%s", scenarioContent)
+	r.outputDryRunContentIdentity("Generated scenario content", []byte(scenarioContent))
 
-	// Generate and display defaults configuration
+	// Generate defaults configuration and disclose only its identity.
 	defaultsContent, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		r.output("ERROR", "Failed to generate defaults: %v", err)
 		return err
 	}
 
-	if defaultsContent != nil {
-		r.output("DRY-RUN", "Defaults configuration:")
-		r.output("DRY-RUN", "%s", string(defaultsContent))
-	} else {
-		r.output("DRY-RUN", "Defaults configuration: (none - mock workload)")
-	}
+	r.outputDryRunContentIdentity("Generated defaults configuration", defaultsContent)
 
 	r.output("DRY-RUN", "Would start container with --run-node")
 	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
@@ -469,15 +465,8 @@ func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string
 	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
 	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
 
-	r.output("DRY-RUN", "Provided scenario content:")
-	r.output("DRY-RUN", "%s", string(scenarioContent))
-
-	if defaultsContent != nil {
-		r.output("DRY-RUN", "Provided defaults configuration:")
-		r.output("DRY-RUN", "%s", string(defaultsContent))
-	} else {
-		r.output("DRY-RUN", "Defaults configuration: (none)")
-	}
+	r.outputDryRunContentIdentity("Provided scenario content", scenarioContent)
+	r.outputDryRunContentIdentity("Provided defaults configuration", defaultsContent)
 
 	r.output("DRY-RUN", "Would start container with --run-node")
 	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
@@ -487,6 +476,11 @@ func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string
 	r.output("DRY-RUN", "Would POST /shutdown for graceful node termination")
 
 	r.output("COMPLETE", "Dry run completed")
+}
+
+func (r *HeadlessRunner) outputDryRunContentIdentity(label string, content []byte) {
+	digest := sha256.Sum256(content)
+	r.output("DRY-RUN", "%s: bytes=%d sha256=%x", label, len(content), digest)
 }
 
 // runBenchmark removed as unused (dead code); use runBenchmarkWithParams instead
