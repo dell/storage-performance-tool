@@ -179,6 +179,15 @@ func (h LaunchHooks) SessionManaged() bool {
 	return h.state != nil && h.state.session != nil
 }
 
+// WorkloadTerminal returns the authoritative terminal-workload signal.
+// Compatibility hooks return nil and retain presentation-owned completion.
+func (h LaunchHooks) WorkloadTerminal() <-chan struct{} {
+	if h.state == nil || h.state.session == nil {
+		return nil
+	}
+	return h.state.session.WorkloadTerminal()
+}
+
 // RegisterResourceFinalizer binds launcher-owned resources to the session.
 // Compatibility/self-managed hooks intentionally ignore registration.
 func (h LaunchHooks) RegisterResourceFinalizer(finalizer runcontrol.ResourceFinalizer) error {

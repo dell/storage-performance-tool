@@ -24,6 +24,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
@@ -168,12 +169,20 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 		scenarioPath, metadata, io.Discard, io.Discard, "", nil,
 		&integrity.FinalizeOptions{Workload: scenario.WorkloadTypeWriteVerify, RunID: runID},
 	)
+	session := runcontrol.NewSession()
+	monitor.BindSession(session)
 	monitor.Arm()
 	var outcome autoResultsOutcome
 	select {
 	case outcome = <-monitor.done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("zero-write auto-results processing did not complete")
+	}
+
+	select {
+	case <-session.WorkloadTerminal():
+	default:
+		t.Fatal("auto-results tracker did not broadcast terminal workload state")
 	}
 
 	if outcome.TrackerErr != nil || outcome.ArtifactErr != nil || outcome.FinalizationErr != nil {
@@ -283,7 +292,12 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 	}
 	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
 		options.LaunchHooks.NotifySubmitted()
-		return nil
+		select {
+		case <-options.LaunchHooks.WorkloadTerminal():
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("headless presentation did not receive authoritative terminal signal")
+		}
 	}
 
 	const runtimeList = "mt-001-20260802.190000.000-list"

@@ -1014,6 +1014,38 @@ func TestLocalHeadlessSessionDefersCleanupUntilSessionFinalization(t *testing.T)
 	}
 }
 
+func TestLocalHeadlessSessionReturnsOnAuthoritativeWorkloadTerminal(t *testing.T) {
+	manager := tui.NewMockDockerManager()
+	session := runcontrol.NewSession()
+	hooks := tui.NewSessionLaunchHooks(session, nil)
+	runner, err := NewHeadlessRunner(manager, HeadlessOptions{LaunchHooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runner.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.runBenchmark(context.Background(), "", func(*tui.TestOrchestrator) error {
+			hooks.NotifySubmitted()
+			return nil
+		})
+	}()
+	session.MarkWorkloadTerminal()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runBenchmark() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session-managed headless presentation did not return on authoritative terminal signal")
+	}
+	if got := manager.GetCleanupCallCount(); got != 0 {
+		t.Fatalf("presentation cleanup calls = %d, want session-owned cleanup", got)
+	}
+}
+
 // Helper function to check if Docker is available
 func isDockerAvailable() bool { //nolint:unused
 	// Try to create a Docker manager

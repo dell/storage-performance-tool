@@ -122,6 +122,8 @@ type autoResultsMonitor struct {
 	armOnce     sync.Once
 	cleanupOnly atomic.Bool
 	cancel      context.CancelFunc
+	sessionMu   sync.RWMutex
+	session     *runcontrol.Session
 }
 
 func (m *autoResultsMonitor) Arm() {
@@ -148,6 +150,29 @@ func (m *autoResultsMonitor) Cancel() {
 	}
 	if resolveCleanupOnly && m.armed != nil {
 		close(m.armed)
+	}
+}
+
+// BindSession connects tracker completion to presentation adapters without
+// transferring resource-disposal authority away from the run session.
+func (m *autoResultsMonitor) BindSession(session *runcontrol.Session) {
+	if m == nil {
+		return
+	}
+	m.sessionMu.Lock()
+	m.session = session
+	m.sessionMu.Unlock()
+}
+
+func (m *autoResultsMonitor) markWorkloadTerminal() {
+	if m == nil {
+		return
+	}
+	m.sessionMu.RLock()
+	session := m.session
+	m.sessionMu.RUnlock()
+	if session != nil {
+		session.MarkWorkloadTerminal()
 	}
 }
 
@@ -401,6 +426,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			outcome.Lifecycle.Workload.Started = true
 			outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(parentCtx, expectedStepIDs)
 			outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
+			monitor.markWorkloadTerminal()
 			if metadata != nil && outcome.Tracker != nil {
 				metadata.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
 				for stepID, step := range outcome.Tracker.Steps {
@@ -1467,6 +1493,7 @@ Available workload types:
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
 				if autoMonitor != nil {
+					autoMonitor.BindSession(runSession)
 					preparedCleanupDelegated = true
 				}
 			}

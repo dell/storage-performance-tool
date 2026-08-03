@@ -47,10 +47,12 @@ type finalizationAttempt struct {
 	outcome FinalizationOutcome
 }
 
-// Session is the presentation-neutral authority for accepted submission and
-// post-submission resource disposal.
+// Session is the presentation-neutral authority for accepted submission,
+// terminal workload notification, and post-submission resource disposal.
 type Session struct {
 	submission atomic.Uint32
+	terminal   chan struct{}
+	termOnce   sync.Once
 
 	mu        sync.Mutex
 	finalizer ResourceFinalizer
@@ -59,7 +61,27 @@ type Session struct {
 
 // NewSession creates an unsubmitted session with no registered resources.
 func NewSession() *Session {
-	return &Session{}
+	return &Session{terminal: make(chan struct{})}
+}
+
+// MarkWorkloadTerminal broadcasts that authoritative completion tracking has
+// resolved the workload, whether successfully or with an error. Presentation
+// adapters consume this signal only to stop waiting and release their polling
+// resources; the coordinator still owns evidence collection and finalization.
+func (s *Session) MarkWorkloadTerminal() {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	s.termOnce.Do(func() { close(s.terminal) })
+}
+
+// WorkloadTerminal returns the broadcast channel closed by
+// MarkWorkloadTerminal. A nil or zero-value session returns a nil channel.
+func (s *Session) WorkloadTerminal() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.terminal
 }
 
 // MarkSubmitted advances the session to a confirmed accepted submission. It

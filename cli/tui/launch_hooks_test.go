@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
@@ -172,5 +173,24 @@ func TestSessionLaunchHooksShareSubmissionAndFinalizerAuthority(t *testing.T) {
 	outcome := session.FinalizeResources(context.Background())
 	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved {
 		t.Fatalf("finalization = %+v", outcome)
+	}
+}
+
+func TestSessionLaunchHooksExposeAuthoritativeWorkloadTerminal(t *testing.T) {
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, nil)
+	if terminal := NewLaunchHooks(nil).WorkloadTerminal(); terminal != nil {
+		t.Fatal("compatibility hooks exposed a session terminal channel")
+	}
+	select {
+	case <-hooks.WorkloadTerminal():
+		t.Fatal("terminal signal closed before tracker completion")
+	default:
+	}
+	session.MarkWorkloadTerminal()
+	select {
+	case <-hooks.WorkloadTerminal():
+	case <-time.After(time.Second):
+		t.Fatal("launch hooks did not expose session terminal signal")
 	}
 }

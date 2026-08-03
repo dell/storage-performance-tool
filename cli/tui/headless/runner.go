@@ -213,6 +213,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 
 	// Start the distributed test on all hosts via orchestrator wrapper
 	testOrchestrator := tui.NewMultiHostTestOrchestrator(r.orchestrator)
@@ -259,6 +260,8 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 			done <- ctx.Err()
 		case <-testOrchestrator.CompletionCh():
 			done <- nil
+		case <-r.launchHooks.WorkloadTerminal():
+			done <- nil
 		case sig := <-sigChan:
 			r.output("SIGNAL", fmt.Sprintf("Received signal: %v", sig))
 			done <- fmt.Errorf("interrupted by signal: %v", sig)
@@ -274,6 +277,11 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 			r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
 		}
 	} else if r.launchHooks.SessionManaged() {
+		// Release presentation-only metrics and log polling; resource
+		// finalization remains owned by the RunSession.
+		if stopErr := testOrchestrator.StopTest(); stopErr != nil {
+			return fmt.Errorf("stop multi-host presentation monitoring: %w", stopErr)
+		}
 		r.output("SHUTDOWN", "Normal completion detected; RunSession owns evidence and resource finalization")
 		return nil
 	} else if r.delegateNormalShutdown {
@@ -579,6 +587,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	select {
 	case <-ctx.Done():
 	case <-r.orchestrator.CompletionCh():
+	case <-r.launchHooks.WorkloadTerminal():
 	}
 	if r.launchHooks.SessionManaged() {
 		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")

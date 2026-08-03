@@ -7,6 +7,7 @@ package runcontrol
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,31 @@ func TestSessionSubmissionStateNeverRegresses(t *testing.T) {
 	}
 	if got := session.SubmissionState(); got != SubmissionSubmitted {
 		t.Fatalf("submission = %s", got)
+	}
+}
+
+func TestSessionWorkloadTerminalBroadcastIsIdempotent(t *testing.T) {
+	session := NewSession()
+	select {
+	case <-session.WorkloadTerminal():
+		t.Fatal("terminal signal closed before authoritative completion")
+	default:
+	}
+
+	var group sync.WaitGroup
+	for range 32 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			session.MarkWorkloadTerminal()
+		}()
+	}
+	group.Wait()
+
+	select {
+	case <-session.WorkloadTerminal():
+	case <-time.After(time.Second):
+		t.Fatal("terminal signal was not broadcast")
 	}
 }
 
