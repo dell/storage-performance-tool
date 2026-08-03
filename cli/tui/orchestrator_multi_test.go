@@ -91,6 +91,81 @@ func (f identityPreflight) InspectImageIdentity(
 	return f.identities[host.Original], nil
 }
 
+func TestMultiHostOrchestrator_ConnectHostsRequiresDesignatedEntry(t *testing.T) {
+	tests := []struct {
+		name           string
+		failHost       string
+		minHosts       int
+		wantEntryError bool
+	}{
+		{name: "entry failure is fatal despite quorum", failHost: "entry", minHosts: 1, wantEntryError: true},
+		{name: "worker failure is tolerated at quorum", failHost: "worker-2", minHosts: 2},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{
+				{Host: "entry", Original: "entry"},
+				{Host: "worker-1", Original: "worker-1"},
+				{Host: "worker-2", Original: "worker-2"},
+			}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, test.minHosts)
+			orchestrator.preflight = identityPreflight{}
+			orchestrator.SetNotifier(func(string) {})
+
+			failErr := errors.New("connection unavailable")
+			var managerCalls atomic.Int64
+			orchestrator.newDockerManagerForHost = func(
+				ctx context.Context,
+				host *hostparse.HostInfo,
+			) (*DockerManager, error) {
+				managerCalls.Add(1)
+				if host.Original == test.failHost {
+					return nil, failErr
+				}
+				managerCtx, cancel := context.WithCancel(ctx)
+				return &DockerManager{ctx: managerCtx, cancel: cancel, hostInfo: host}, nil
+			}
+
+			err := orchestrator.ConnectHosts(context.Background())
+			if test.wantEntryError {
+				if err == nil {
+					t.Fatal("ConnectHosts() error = nil, want designated-entry failure")
+				}
+				if !errors.Is(err, failErr) {
+					t.Fatalf("ConnectHosts() error = %v, want wrapped connection failure", err)
+				}
+				if !strings.Contains(err.Error(), "designated entry host entry is unavailable") {
+					t.Fatalf("ConnectHosts() error = %v, want designated-entry diagnostic", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ConnectHosts() error = %v, want worker failure tolerated", err)
+			}
+
+			if calls := managerCalls.Load(); calls != int64(len(hostInfos)) {
+				t.Fatalf("Docker manager calls = %d, want %d", calls, len(hostInfos))
+			}
+			if got := len(orchestrator.GetReadyHosts()); got != 2 {
+				t.Fatalf("ready hosts = %d, want 2", got)
+			}
+			if test.wantEntryError {
+				if orchestrator.hosts[0].DockerManager != nil {
+					t.Fatal("failed entry unexpectedly retained a Docker manager")
+				}
+			} else if orchestrator.hosts[0].DockerManager == nil {
+				t.Fatal("successful entry has no Docker manager")
+			}
+
+			for _, host := range orchestrator.hosts {
+				if host.DockerManager != nil {
+					host.DockerManager.Close()
+				}
+			}
+
+		})
+	}
+}
 func TestMultiHostOrchestrator_NewMultiHostTestOrchestrator(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},

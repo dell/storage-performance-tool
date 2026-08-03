@@ -89,9 +89,12 @@ type MultiHostOrchestrator struct {
 	rmiPortStart int
 	rmiPortCount int
 
-	mu           sync.Mutex
-	preflight    preflight.Checker
-	forceCleanup bool
+	// Connection factory is instance-scoped so host-role failure behavior can be
+	// tested without Docker or SSH.
+	newDockerManagerForHost func(context.Context, *hostparse.HostInfo) (*DockerManager, error)
+	mu                      sync.Mutex
+	preflight               preflight.Checker
+	forceCleanup            bool
 
 	// Detection hook for advertised IP (overridable in tests)
 	detectAdvIP func(ctx context.Context, host *hostparse.HostInfo) (string, error)
@@ -177,17 +180,18 @@ func NewMultiHostOrchestratorWithRMI(hostInfos []*hostparse.HostInfo, minHosts i
 	}
 
 	o := &MultiHostOrchestrator{
-		hosts:               hosts,
-		minHosts:            minHosts,
-		apiPort:             constants.SptAPIPort, // Use Spt standard port on all hosts
-		networkMode:         rmiConfig.NetworkMode,
-		rmiPortStart:        rmiConfig.PortStart,
-		rmiPortCount:        rmiConfig.PortCount,
-		preflight:           preflight.NewDefaultChecker(),
-		runtimeIdentityTier: constants.IntegrityRuntimeIdentityTierImage,
-		rollbackTimeout:     constants.StartupRollbackTimeout,
-		diagnosticsTimeout:  constants.DiagnosticsCollectionTimeout,
-		cleanupTimeout:      constants.ContainerCleanupTimeout,
+		hosts:                   hosts,
+		minHosts:                minHosts,
+		apiPort:                 constants.SptAPIPort, // Use Spt standard port on all hosts
+		networkMode:             rmiConfig.NetworkMode,
+		rmiPortStart:            rmiConfig.PortStart,
+		rmiPortCount:            rmiConfig.PortCount,
+		preflight:               preflight.NewDefaultChecker(),
+		runtimeIdentityTier:     constants.IntegrityRuntimeIdentityTierImage,
+		newDockerManagerForHost: NewDockerManagerForHost,
+		rollbackTimeout:         constants.StartupRollbackTimeout,
+		diagnosticsTimeout:      constants.DiagnosticsCollectionTimeout,
+		cleanupTimeout:          constants.ContainerCleanupTimeout,
 	}
 	// Default detection uses remoteip via the command executor (SSH or local)
 	o.detectAdvIP = func(ctx context.Context, host *hostparse.HostInfo) (string, error) {
@@ -372,7 +376,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 			logging.LogInfo("docker-multi", "attempting connection",
 				"host", h.Info.Original)
 
-			dm, err := NewDockerManagerForHost(ctx, h.Info)
+			dm, err := o.newDockerManagerForHost(ctx, h.Info)
 			if err != nil {
 				h.SetError(err)
 
@@ -525,6 +529,18 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 		for _, err := range connectErrors {
 			o.notify(err)
 		}
+	}
+
+	// Host ordering defines execution roles: the first configured host is the
+	// entry node, while min-hosts only permits worker loss. Continuing without
+	// the designated entry would leave startup, API monitoring, and teardown
+	// addressing different host sets.
+	if entryHost != nil && entryHost.GetStatus() != HostStatusReady {
+		entryErr := entryHost.GetError()
+		if entryErr == nil {
+			entryErr = fmt.Errorf("host did not become ready")
+		}
+		return fmt.Errorf("designated entry host %s is unavailable: %w", entryHost.Info.Original, entryErr)
 	}
 
 	// Check if we met minimum hosts requirement

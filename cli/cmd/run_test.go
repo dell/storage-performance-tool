@@ -181,15 +181,18 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 		minHosts    string
 		shutdown    string
 		wantLocal   int
+		wantAuto    int
+		connectErr  error
 		wantMulti   int
 		wantConnect int
 		wantPrepare int
 		wantPort    int
 	}{
-		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1},
-		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1},
-		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1},
-		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1},
+		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1, wantAuto: 1},
+		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
+		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
+		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "entry connection failure stops verification launch", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "1", shutdown: "false", wantConnect: 1, connectErr: errors.New("designated entry unavailable")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -231,7 +234,7 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			}
 			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
 				connectCalls++
-				return nil
+				return test.connectErr
 			}
 			prepareDistributedIntegrityRuntimeIdentityFunc = func(
 				context.Context, *tui.MultiHostOrchestrator, string,
@@ -273,18 +276,23 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				return monitor
 			}
 
-			if err := runCmd.RunE(runCmd, []string{test.workload}); err != nil {
-				t.Fatalf("RunE() error = %v", err)
+			runErr := runCmd.RunE(runCmd, []string{test.workload})
+			if test.connectErr != nil {
+				if !errors.Is(runErr, test.connectErr) {
+					t.Fatalf("RunE() error = %v, want connection failure", runErr)
+				}
+			} else if runErr != nil {
+				t.Fatalf("RunE() error = %v", runErr)
 			}
 			if localCalls != test.wantLocal || multiCalls != test.wantMulti ||
 				connectCalls != test.wantConnect || prepareCalls != test.wantPrepare ||
-				portCalls != test.wantPort || autoResultsCalls != 1 {
+				portCalls != test.wantPort || autoResultsCalls != test.wantAuto {
 				t.Fatalf(
 					"route calls local=%d multi=%d connect=%d prepare=%d port=%d auto-results=%d",
 					localCalls, multiCalls, connectCalls, prepareCalls, portCalls, autoResultsCalls,
 				)
 			}
-			if autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name {
+			if test.wantAuto > 0 && (autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name) {
 				t.Fatalf("auto-results context = %#v, want command context marker %q", autoResultsContext, test.name)
 			}
 			if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
