@@ -414,7 +414,7 @@ func (c *SptAPIClient) reconcileAmbiguousSubmission(
 	ticker := time.NewTicker(c.submissionReconcilePollInterval)
 	defer ticker.Stop()
 	for {
-		status, err := c.GetStatusContext(reconcileCtx)
+		status, err := c.observeStatusContext(reconcileCtx)
 		if err == nil && statusMatchesSubmission(status, expectedRunID) {
 			outcome.RunID = strconv.FormatInt(expectedRunID, 10)
 			outcome.Submission = SubmissionSubmitted
@@ -460,8 +460,19 @@ func (c *SptAPIClient) GetStatus() (*TestStatus, error) {
 	return c.GetStatusContext(context.Background())
 }
 
-// GetStatusContext retrieves status within the caller's cancellation budget.
+// GetStatusContext retrieves status within the caller's cancellation budget
+// and adopts an authoritative payload run ID for display compatibility.
 func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error) {
+	return c.getStatusContext(ctx, true)
+}
+
+func (c *SptAPIClient) observeStatusContext(ctx context.Context) (*TestStatus, error) {
+	return c.getStatusContext(ctx, false)
+}
+
+func (c *SptAPIClient) getStatusContext(
+	ctx context.Context, adoptRunID bool,
+) (*TestStatus, error) {
 	// Try the /status endpoint first
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/status", nil)
 	if err != nil {
@@ -476,11 +487,14 @@ func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error
 	// Handle different response codes
 	if resp.StatusCode == 404 {
 		// No test running
-		return &TestStatus{
+		status := &TestStatus{
 			State:   constants.StateIdle,
 			Message: "No test running",
-			RunID:   c.getRunID(),
-		}, nil
+		}
+		if adoptRunID {
+			status.RunID = c.getRunID()
+		}
+		return status, nil
 	}
 
 	if resp.StatusCode != 200 {
@@ -498,8 +512,9 @@ func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	status := &TestStatus{
-		RunID: c.getRunID(),
+	status := &TestStatus{}
+	if adoptRunID {
+		status.RunID = c.getRunID()
 	}
 
 	// Extract fields from JSON
@@ -518,7 +533,7 @@ func (c *SptAPIClient) GetStatusContext(ctx context.Context) (*TestStatus, error
 		status.RunID = legacyRunID
 		status.runIDFromPayload = true
 	}
-	if status.RunID != "" {
+	if adoptRunID && status.runIDFromPayload {
 		c.setRunID(status.RunID)
 	}
 

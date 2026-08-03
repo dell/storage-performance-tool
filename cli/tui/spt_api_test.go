@@ -594,6 +594,9 @@ func TestSptAPIClient_StartTestContextReconcilesMatchingRunID(t *testing.T) {
 	if !errors.Is(result.err, context.Canceled) {
 		t.Fatalf("error = %v, want original context cancellation", result.err)
 	}
+	if got := client.getRunID(); got != "77" {
+		t.Fatalf("reconciled ownership = %q, want 77", got)
+	}
 }
 
 func TestSptAPIClient_GetStatusParsesStatusServletPayload(t *testing.T) {
