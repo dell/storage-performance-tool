@@ -124,9 +124,6 @@ const (
 
 // Template keys for tables scenarios
 const (
-	templateKeyTablesEndpoint         = "TablesEndpoint"
-	templateKeyTablesAccessKey        = "TablesAccessKey"
-	templateKeyTablesSecretKey        = "TablesSecretKey"
 	templateKeyTablesBucket           = "TablesBucket"
 	templateKeyTablesNamespace        = "TablesNamespace"
 	templateKeyTablesTableName        = "TablesTableName"

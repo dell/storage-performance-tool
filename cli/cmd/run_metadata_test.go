@@ -255,6 +255,7 @@ func TestArchivePreparedRunInputsArchivesScenarioAndDefaultsIdentity(t *testing.
 func TestPreparedResultTreeExcludesCredentialsFromRealGeneratedDefaults(t *testing.T) {
 	const accessKey = "ROUND11_ACCESS_KEY_NEVER_ARCHIVE_7f3a"
 	const secretKey = "ROUND11_SECRET_KEY_NEVER_ARCHIVE_91bc"
+	const overrideSecret = "ROUND12_OVERRIDE_SECRET_NEVER_ARCHIVE_c421"
 	params := scenario.Params{
 		WorkloadType: scenario.WorkloadTypeWriteVerify,
 		Endpoint:     "http://s3.example:9000",
@@ -262,12 +263,16 @@ func TestPreparedResultTreeExcludesCredentialsFromRealGeneratedDefaults(t *testi
 		SecretKey:    secretKey,
 		Bucket:       "qualification",
 		Threads:      1,
+		EngineOverrides: []string{
+			"storage.auth.secret=" + overrideSecret,
+			"storage.driver.threads=8",
+		},
 	}
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(defaults), accessKey) || !strings.Contains(string(defaults), secretKey) {
+	if !strings.Contains(string(defaults), accessKey) || !strings.Contains(string(defaults), overrideSecret) {
 		t.Fatal("real generated defaults did not contain the distinctive credentials")
 	}
 
@@ -311,8 +316,76 @@ func TestPreparedResultTreeExcludesCredentialsFromRealGeneratedDefaults(t *testi
 		if readErr != nil {
 			return readErr
 		}
+		for _, credential := range []string{accessKey, secretKey, overrideSecret} {
+			if strings.Contains(string(content), credential) {
+				return errors.New("credential leaked into result artifact " + filepath.Base(path))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedTablesResultTreeExcludesCredentials(t *testing.T) {
+	const accessKey = "ROUND12_TABLES_ACCESS_NEVER_ARCHIVE_7f3a"
+	const secretKey = "ROUND12_TABLES_SECRET_NEVER_ARCHIVE_91bc"
+	params := scenario.Params{
+		WorkloadType: scenario.WorkloadTypeTables,
+		Endpoint:     "http://s3.example:9000",
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		Threads:      1,
+		Tables: scenario.TablesParams{
+			TestVector:        "tps",
+			TableBucket:       "qualification",
+			Namespace:         "ns",
+			TableName:         "table",
+			ConcurrentWriters: 1,
+		},
+	}
+	scenarioJS, err := scenario.GenerateTablesScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults, err := scenario.GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(scenarioJS, accessKey) || strings.Contains(scenarioJS, secretKey) {
+		t.Fatal("real generated Tables scenario contains credentials")
+	}
+	if !strings.Contains(string(defaults), accessKey) || !strings.Contains(string(defaults), secretKey) {
+		t.Fatal("real generated Tables defaults did not contain launch credentials")
+	}
+
+	resultsRoot := t.TempDir()
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: scenario.WorkloadTypeTables,
+		Params:       params,
+		ScenarioPath: "prepared-tables.js",
+	})
+	meta.preparedInputs = true
+	meta.preparedScenarioJS = []byte(scenarioJS)
+	meta.preparedDefaultsYAML = defaults
+	if err = archivePreparedRunInputs(meta, "prepared-tables.js", resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeRunMetadata(meta, resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	err = filepath.WalkDir(resultsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
 		if strings.Contains(string(content), accessKey) || strings.Contains(string(content), secretKey) {
-			return errors.New("credential leaked into result artifact " + filepath.Base(path))
+			return errors.New("Tables credential leaked into result artifact " + filepath.Base(path))
 		}
 		return nil
 	})

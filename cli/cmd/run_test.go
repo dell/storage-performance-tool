@@ -24,6 +24,13 @@ import (
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
 
+func cleanupPreparedForMonitorTest(metadata *runMetadata) runcontrol.PhaseOutcome {
+	if metadata == nil || metadata.preparedCleanup == nil {
+		return runcontrol.PhaseOutcome{}
+	}
+	return runcontrol.CompletedPhase(metadata.preparedCleanup(context.Background()))
+}
+
 func TestDeriveBaseURLSingleHost(t *testing.T) {
 	got := deriveBaseURL("8080", nil)
 	want := "http://localhost:8080"
@@ -246,17 +253,24 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			}
 			startAutoResultsFunc = func(
 				ctx context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
-				_ string, _ bool, _ int, _ string, _ *runMetadata, _ io.Writer, _ io.Writer, _ string,
+				_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
 				_ func(context.Context), _ ...*integrity.FinalizeOptions,
 			) *autoResultsMonitor {
 				autoResultsCalls++
 				autoResultsContext = ctx
-				outcomes := make(chan autoResultsOutcome, 1)
-				outcomes <- autoResultsOutcome{
-					Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
-					Finalization: &integrity.FinalizeOutcome{Complete: true},
+				monitor := &autoResultsMonitor{
+					done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
 				}
-				return &autoResultsMonitor{done: outcomes, armed: make(chan struct{})}
+				go func() {
+					<-monitor.armed
+					outcome := autoResultsOutcome{
+						Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+						Finalization: &integrity.FinalizeOutcome{Complete: true},
+					}
+					outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+					monitor.done <- outcome
+				}()
+				return monitor
 			}
 
 			if err := runCmd.RunE(runCmd, []string{test.workload}); err != nil {
@@ -328,7 +342,7 @@ func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
 	}
 	startAutoResultsFunc = func(
 		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool,
-		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, _ *runMetadata,
+		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, metadata *runMetadata,
 		_ io.Writer, _ io.Writer, _ string, preSummaryHook func(context.Context),
 		_ ...*integrity.FinalizeOptions,
 	) *autoResultsMonitor {
@@ -339,10 +353,12 @@ func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
 		go func() {
 			<-monitor.armed
 			preSummaryHook(context.Background())
-			monitor.done <- autoResultsOutcome{
+			outcome := autoResultsOutcome{
 				Lifecycle: runcontrol.Outcome{Resources: runcontrol.ResourceDispositionRemoved},
 				Tracker:   &portcheck.RunResult{FinalState: constants.StateCompleted},
 			}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
 		}()
 		return monitor
 	}
@@ -403,21 +419,28 @@ func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
 	const producerCause = "write verification produced zero successful objects"
 	startAutoResultsFunc = func(
 		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
-		_ string, _ bool, _ int, _ string, _ *runMetadata, _ io.Writer, _ io.Writer, _ string,
+		_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
 		_ func(context.Context), options ...*integrity.FinalizeOptions,
 	) *autoResultsMonitor {
 		if len(options) != 1 || options[0] == nil || options[0].Workload != WorkloadTypeWriteVerify {
 			t.Fatalf("RunE integrity options = %#v, want write-verify finalization", options)
 		}
-		outcomes := make(chan autoResultsOutcome, 1)
-		outcomes <- autoResultsOutcome{
-			Tracker: &portcheck.RunResult{
-				FinalState: constants.StateFailed, FailureStepID: "mt-001-create",
-				FailureCategory: "execution", FailureMessage: producerCause,
-			},
-			Finalization: &integrity.FinalizeOutcome{EmptySelection: true},
+		monitor := &autoResultsMonitor{
+			done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
 		}
-		return &autoResultsMonitor{done: outcomes, armed: make(chan struct{})}
+		go func() {
+			<-monitor.armed
+			outcome := autoResultsOutcome{
+				Tracker: &portcheck.RunResult{
+					FinalState: constants.StateFailed, FailureStepID: "mt-001-create",
+					FailureCategory: "execution", FailureMessage: producerCause,
+				},
+				Finalization: &integrity.FinalizeOutcome{EmptySelection: true},
+			}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
+		}()
+		return monitor
 	}
 
 	err := runCmd.RunE(runCmd, []string{WorkloadTypeWriteVerify})
@@ -547,9 +570,9 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 
 					var cancelCalls atomic.Int32
 					startAutoResultsFunc = func(
-						context.Context, string, string, string, []string, int64, bool, []*hostparse.HostInfo,
-						string, bool, int, string, *runMetadata, io.Writer, io.Writer, string,
-						func(context.Context), ...*integrity.FinalizeOptions,
+						_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
+						_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
+						_ func(context.Context), _ ...*integrity.FinalizeOptions,
 					) *autoResultsMonitor {
 						done := make(chan autoResultsOutcome, 1)
 						armed := make(chan struct{})
@@ -560,10 +583,12 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 							case <-armed:
 							case <-canceled:
 							}
-							done <- autoResultsOutcome{
+							outcome := autoResultsOutcome{
 								Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
 								Finalization: &integrity.FinalizeOutcome{Complete: true},
 							}
+							outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+							done <- outcome
 						}()
 						return &autoResultsMonitor{
 							done: done, armed: armed,

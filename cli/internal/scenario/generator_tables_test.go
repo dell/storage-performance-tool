@@ -44,8 +44,6 @@ func TestGenerateTablesScenario_TPS(t *testing.T) {
 	checks := []string{
 		`"type": "s3-tables"`,
 		`"concurrency": concurrency`,
-		`"uid": "testkey"`,
-		`"secret": "testsecret"`,
 		`"bucket": bucket`,
 		`"namespace": namespace`,
 		`"tableName": tableName`,

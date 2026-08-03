@@ -24,7 +24,7 @@ func TestPrepareRunBundleGeneratesEachInputOnce(t *testing.T) {
 			params.ItemFileMounts = []scenario.FileMount{{HostPath: "/host/input", ContainerPath: "/input"}}
 			return params, nil
 		},
-		CleanupExternal: func(scenario.Params) error { cleanupCalls++; return nil },
+		CleanupExternal: func(context.Context, scenario.Params) error { cleanupCalls++; return nil },
 		GenerateScenario: func(scenario.Params) (string, error) {
 			scenarioCalls++
 			return "exact scenario", nil
@@ -89,7 +89,7 @@ func TestPrepareRunBundleBlocksVerificationWhenPlanFails(t *testing.T) {
 	var cleanupCalls, writeCalls int
 	deps := runPreparationDependencies{
 		PrepareExternal:  func(params scenario.Params) (scenario.Params, error) { return params, nil },
-		CleanupExternal:  func(scenario.Params) error { cleanupCalls++; return nil },
+		CleanupExternal:  func(context.Context, scenario.Params) error { cleanupCalls++; return nil },
 		GenerateScenario: func(scenario.Params) (string, error) { return "scenario", nil },
 		GenerateDefaults: func(scenario.Params) ([]byte, error) { return []byte("defaults"), nil },
 		BuildStepPlan:    func(string) (scenario.StepPlan, error) { return scenario.StepPlan{}, planErr },
@@ -119,7 +119,7 @@ func TestPrepareRunBundleCleanupPreservesAllRemovalFailuresExactlyOnce(t *testin
 	path := filepath.Join(t.TempDir(), "prepared.js")
 	deps := runPreparationDependencies{
 		PrepareExternal: func(params scenario.Params) (scenario.Params, error) { return params, nil },
-		CleanupExternal: func(scenario.Params) error {
+		CleanupExternal: func(context.Context, scenario.Params) error {
 			externalCalls++
 			return externalErr
 		},

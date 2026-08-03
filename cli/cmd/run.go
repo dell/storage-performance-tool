@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,8 +166,10 @@ var (
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
-	generateRunSummaryFunc = generateRunSummary
-	requestShutdownAllFunc = requestShutdownAll
+	makeResultsDirFunc           = os.MkdirAll
+	archivePreparedRunInputsFunc = archivePreparedRunInputs
+	generateRunSummaryFunc       = generateRunSummary
+	requestShutdownAllFunc       = requestShutdownAll
 )
 
 var integrityRuntimeGOOS = runtime.GOOS
@@ -285,10 +288,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			metadata.BaseURL = baseURL
 		}
 		// ensure results directory exists early so we can stage metadata
-		if err := os.MkdirAll(root, 0o750); err != nil {
+		if err := makeResultsDirFunc(root, 0o750); err != nil {
+			outcome.ArtifactErr = errors.Join(
+				outcome.ArtifactErr, fmt.Errorf("create results directory: %w", err))
 			logging.LogError("auto-results", "create results dir", err, "path", root)
 		} else {
-			if archiveErr := archivePreparedRunInputs(metadata, scenarioPath, root); archiveErr != nil {
+			if archiveErr := archivePreparedRunInputsFunc(metadata, scenarioPath, root); archiveErr != nil {
+				outcome.ArtifactErr = errors.Join(
+					outcome.ArtifactErr, fmt.Errorf("archive prepared inputs: %w", archiveErr))
 				logging.LogError("auto-results", "archive prepared inputs", archiveErr, "dest", root)
 			}
 		}
@@ -444,7 +451,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			} else {
 				logErr = fmt.Errorf("no steps reported by metrics/json or metrics/fleet/json")
 			}
-			outcome.ArtifactErr = logErr
+			outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, logErr)
 			logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
 			writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
 		} else {
@@ -499,7 +506,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		if artifactsReady {
 			fetch := newResultsFetcherFunc(baseURL, root)
 			if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
-				outcome.ArtifactErr = ferr
+				outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
 				artifactsReady = false
 				logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
 				writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
@@ -1098,6 +1105,24 @@ func checkPortConflicts(cmd *cobra.Command) error {
 	return nil
 }
 
+func joinFallbackPreparedCleanup(
+	parent context.Context, runErr error, prepared *runcontrol.PreparedRun,
+) error {
+	if prepared == nil {
+		return runErr
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(parent), constants.ContainerCleanupTimeout)
+	defer cancel()
+	if cleanupErr := prepared.Cleanup(cleanupCtx); cleanupErr != nil {
+		return errors.Join(runErr, fmt.Errorf("cleanup prepared run: %w", cleanupErr))
+	}
+	return runErr
+}
+
 // runCmd represents the run command
 var runCmd = &cobra.Command{
 	Use:   "run <type>",
@@ -1126,7 +1151,7 @@ Available workload types:
 		return applyEnvDefaultsToRunFlags(cmd)
 	},
 	PreRunE: ValidateRunCommand,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		workloadType := args[0]
 
 		// Validate workload type
@@ -1159,9 +1184,10 @@ Available workload types:
 		if err != nil {
 			return err
 		}
+		preparedCleanupDelegated := false
 		defer func() {
-			if cleanupErr := prepared.Cleanup(context.Background()); cleanupErr != nil {
-				logging.GetLogger().Debug("Failed to clean up prepared run", "error", cleanupErr.Error())
+			if !preparedCleanupDelegated {
+				runErr = joinFallbackPreparedCleanup(commandContext(cmd), runErr, prepared)
 			}
 		}()
 		params = prepared.Params()
@@ -1172,11 +1198,13 @@ Available workload types:
 			fmt.Println(notice)
 		}
 
-		// Log scenario content in debug mode
+		// Log scenario identity without retaining potentially sensitive content.
 		logger := logging.GetLogger()
+		scenarioDigest := sha256.Sum256(prepared.ScenarioJS())
 		logger.Debug("Generated scenario file",
 			"file", scenarioPath,
-			"content", scenarioContent)
+			"bytes", len(prepared.ScenarioJS()),
+			"sha256", fmt.Sprintf("%x", scenarioDigest))
 
 		// Phase 1: Parse results options (flags) and log them for visibility
 		resultsOpts := buildResultsOptions(cmd)
@@ -1403,6 +1431,9 @@ Available workload types:
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
+				if autoMonitor != nil {
+					preparedCleanupDelegated = true
+				}
 			}
 		}
 		var autoOutcome autoResultsOutcome

@@ -9,6 +9,9 @@ func TestSanitizeArgsMasksSensitiveFlags(t *testing.T) {
 		"--access-key", "OPENKEY",
 		"-s", "short",
 		"-a=value",
+		"--engine-override", "storage.auth.secret=override-secret",
+		"--engine-override=storage-auth-uid=override-access",
+		"--engine-override", "storage.driver.threads=8",
 	}
 	got := SanitizeArgs(args)
 	want := []string{
@@ -17,6 +20,9 @@ func TestSanitizeArgsMasksSensitiveFlags(t *testing.T) {
 		"--access-key", "***",
 		"-s", "***",
 		"-a=***",
+		"--engine-override", "storage.auth.secret=***",
+		"--engine-override=storage-auth-uid=***",
+		"--engine-override", "storage.driver.threads=8",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("sanitized args length %d, want %d", len(got), len(want))

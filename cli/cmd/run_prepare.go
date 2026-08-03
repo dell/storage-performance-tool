@@ -18,7 +18,7 @@ import (
 
 type runPreparationDependencies struct {
 	PrepareExternal  func(scenario.Params) (scenario.Params, error)
-	CleanupExternal  func(scenario.Params) error
+	CleanupExternal  func(context.Context, scenario.Params) error
 	GenerateScenario func(scenario.Params) (string, error)
 	GenerateDefaults func(scenario.Params) ([]byte, error)
 	BuildStepPlan    func(string) (scenario.StepPlan, error)
@@ -58,13 +58,25 @@ func prepareRunBundleWithDependencies(
 
 	var cleanupOnce sync.Once
 	var cleanupErr error
-	cleanup := func(context.Context) error {
+	cleanup := func(ctx context.Context) error {
 		cleanupOnce.Do(func() {
+			if ctx == nil {
+				ctx = context.Background()
+			}
 			var cleanupErrs []error
+			if err := ctx.Err(); err != nil {
+				cleanupErr = fmt.Errorf("prepared run cleanup canceled: %w", err)
+				return
+			}
 			if deps.CleanupExternal != nil {
-				cleanupErrs = append(cleanupErrs, deps.CleanupExternal(preparedParams))
+				cleanupErrs = append(cleanupErrs, deps.CleanupExternal(ctx, preparedParams))
 			}
 			if preserveScenario || scenarioPath == "" {
+				cleanupErr = errors.Join(cleanupErrs...)
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("prepared run cleanup canceled: %w", err))
 				cleanupErr = errors.Join(cleanupErrs...)
 				return
 			}

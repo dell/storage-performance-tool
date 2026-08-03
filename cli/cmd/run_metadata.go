@@ -17,6 +17,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -212,6 +213,7 @@ func maskScenarioParams(p scenario.Params) scenario.Params {
 	clone := p
 	clone.AccessKey = maskSecret(clone.AccessKey)
 	clone.SecretKey = maskSecret(clone.SecretKey)
+	clone.EngineOverrides = secretmask.EngineOverrides(clone.EngineOverrides)
 	return clone
 }
 
@@ -243,7 +245,15 @@ func captureChangedFlags(cmd *cobra.Command) map[string]string {
 			return
 		}
 		val := f.Value.String()
-		if isSensitiveFlag(f.Name) {
+		switch {
+		case f.Name == flagEngineOverride:
+			overrides, err := cmd.Flags().GetStringArray(f.Name)
+			if err != nil {
+				val = secretmask.EngineOverrideList(val)
+			} else {
+				val = strings.Join(secretmask.EngineOverrides(overrides), "; ")
+			}
+		case isSensitiveFlag(f.Name):
 			val = maskSecret(val)
 		}
 		changed[f.Name] = val
@@ -266,7 +276,9 @@ func captureEnvAppliedFlags(cmd *cobra.Command) map[string]string {
 		if !ok {
 			continue
 		}
-		if isSensitiveFlag(name) {
+		if name == flagEngineOverride {
+			val = secretmask.EngineOverrideList(val)
+		} else if isSensitiveFlag(name) {
 			val = maskSecret(val)
 		}
 		applied[name] = val
