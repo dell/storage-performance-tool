@@ -1332,9 +1332,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				listShardMetricsRecorder.onComplete(shard);
 			}
 		}
+		// bytesListed is the logical size of the objects described by the LIST response, not
+		// payload transferred by this operation. Keep it for discovery diagnostics, but do not
+		// feed it into the generic data-transfer and bandwidth meters.
 		metricsCtx.markSucc(
 						objectsListed,
-						bytesListed,
+						0L,
 						new long[]{reqDuration
 						},
 						new long[]{respLatency
@@ -1447,11 +1450,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final String d = String.valueOf(delims.charAt(i));
 			try {
 				final var r = probe.probeCommonPrefixes(bucketPath, lcp, d, 1000);
-				if (r.commonPrefixes() != null && r.commonPrefixes().size() > (best == null ? 0 : best.size())) {
+				if (!r.truncated()
+								&& r.commonPrefixes() != null
+								&& r.commonPrefixes().size() > (best == null ? 0 : best.size())) {
 					best = r.commonPrefixes();
 					usedDelim = d;
 				}
-			} catch (final Exception e) {
+			} catch (final IOException e) {
 				LogUtil.exception(Level.WARN, e, "Delimiter probe failure for '{}' at LCP '{}'", d, lcp);
 			}
 		}

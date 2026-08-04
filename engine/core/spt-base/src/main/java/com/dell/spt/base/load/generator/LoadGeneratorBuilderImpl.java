@@ -465,11 +465,11 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 	}
 
 	/**
-	 * Select seed shards using delimiter-first discovery when available, falling back to Base62 static
-	 * seeds. Discovery is performed once per delimiter and picks the delimiter with the highest
-	 * CommonPrefixes count. If the best count is still below the concurrency target, fallback is used.
+	 * Select seed shards using delimiter-first discovery when it proves a complete partition.
+	 * Integrity discovery falls back to one exact-prefix shard whenever delimiter evidence is
+	 * incomplete; ordinary LIST workloads retain the legacy Base62 fallback.
 	 */
-	private List<ListShard> seedListShards(
+	List<ListShard> seedListShards(
 					final Config opConfig,
 					final ListShardingConfig shardingConfig,
 					final String seedPrefix,
@@ -482,18 +482,21 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		int bestCount = -1;
 		String bestDelimiter = null;
 		List<String> bestPrefixes = java.util.Collections.emptyList();
+		final boolean integrityDiscovery = opOutput instanceof StorageDriver<?, ?> storageDriver
+						&& storageDriver.metadataIntegrityEnabled();
 		if (opOutput instanceof ListDiscoveryProbe probe) {
 			for (int i = 0; i < delimiters.length(); i++) {
 				final String d = String.valueOf(delimiters.charAt(i));
 				try {
 					final var result = probe.probeCommonPrefixes(bucketPath, seedPrefix == null ? "" : seedPrefix, d, 1000);
 					final int count = result.commonPrefixes().size();
-					if (count > bestCount) {
+					final boolean completePartition = !result.hasContents() && !result.truncated();
+					if ((!integrityDiscovery || completePartition) && count > bestCount) {
 						bestCount = count;
 						bestDelimiter = d;
 						bestPrefixes = result.commonPrefixes();
 					}
-				} catch (final Exception e) {
+				} catch (final IOException e) {
 					LogUtil.exception(Level.WARN, e, "Delimiter probe failure for \"{}\"", d);
 				}
 			}
@@ -510,6 +513,10 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 							bestCount,
 							concurrency);
 			seeds = shardList;
+		} else if (integrityDiscovery) {
+			seeds = List.of(new ListShard(seedPrefix == null ? "" : seedPrefix, null, null, null));
+			Loggers.MSG.info(
+							"LIST seeding via exact-prefix integrity fallback produced one completeness-preserving shard");
 		} else {
 			seeds = effectiveCfg.createStaticShards(seedPrefix);
 			Loggers.MSG.info(

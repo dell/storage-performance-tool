@@ -1,7 +1,9 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -50,6 +52,28 @@ final class S3XmlParserTest {
 						+ "<IsTruncated>false</IsTruncated></ListBucketResult>", handler);
 
 		assertEquals(java.util.List.of("p/"), handler.commonPrefixes());
+	}
+
+	@Test
+	void acceptsStandardRootPrefixAlongsideContentsAndCommonPrefixes() throws Exception {
+		final var handler = new CommonPrefixesXmlHandler();
+		parse("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>bucket</Name><Prefix>campaign/</Prefix>"
+						+ "<KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys><Delimiter>/</Delimiter>"
+						+ "<Contents><Key>campaign/direct</Key><Size>1</Size></Contents>"
+						+ "<CommonPrefixes><Prefix>campaign/nested/</Prefix></CommonPrefixes>"
+						+ "<IsTruncated>false</IsTruncated></ListBucketResult>", handler);
+
+		assertEquals(java.util.List.of("campaign/nested/"), handler.commonPrefixes());
+		assertTrue(handler.hasContents());
+		assertFalse(handler.truncated());
+	}
+
+	@Test
+	void rejectsDuplicateRootPrefix() {
+		final String malformed = "<ListBucketResult><Prefix>one/</Prefix><Prefix>two/</Prefix>"
+						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+
+		assertThrows(SAXException.class, () -> parse(malformed, new CommonPrefixesXmlHandler()));
 	}
 
 	private static void parse(final String xml, final org.xml.sax.helpers.DefaultHandler handler)

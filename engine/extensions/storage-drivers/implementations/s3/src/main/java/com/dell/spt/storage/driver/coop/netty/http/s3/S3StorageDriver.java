@@ -709,13 +709,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			throwUnchecked(e);
 			throw new IOException("S3 LIST delimiter probe interrupted", e);
 		} catch (final SAXException e) {
-			throw listInputFailure("Failed to parse the S3 LIST delimiter probe", e);
+			throw new IOException("Failed to parse the S3 LIST delimiter probe", e);
 		} catch (final ParserConfigurationException e) {
-			throw listInputFailure("Failed to initialize the S3 LIST response parser", e);
+			throw new IOException("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			throw listInputFailure("Failed to connect for S3 LIST delimiter probe", e);
-		} catch (final IOException e) {
-			throw listInputFailure("S3 LIST delimiter probe failed", e);
+			throw new IOException("Failed to connect for S3 LIST delimiter probe", e);
 		}
 	}
 
@@ -1018,19 +1016,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						|| ch >= 'A' && ch <= 'Z'
 						|| ch >= 'a' && ch <= 'z'
 						|| ch == '-' || ch == '_' || ch == '.' || ch == '~';
-	}
-
-	private IOException listInputFailure(final String message, final Throwable cause) {
-		final var failure = cause instanceof IOException
-						? (IOException) cause
-						: new IOException(message, cause);
-		if (integrityMetadataEnabled()) {
-			final var terminal = new IntegrityTerminalException(
-							IntegrityTerminalException.Category.INPUT, message, failure);
-			recordTerminalResponseFailure(terminal);
-			throw terminal;
-		}
-		return failure;
 	}
 
 	private IOException deterministicListInputFailure(

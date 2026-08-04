@@ -16,6 +16,7 @@ final class CommonPrefixesXmlHandler extends DefaultHandler {
 	private final Deque<String> elementStack = new ArrayDeque<>();
 	private boolean documentElementSeen;
 	private boolean rootClosed;
+	private boolean rootPrefixSeen;
 	private boolean insideCommonPrefixes;
 	private boolean prefixSeen;
 	private boolean hasContents;
@@ -29,6 +30,7 @@ final class CommonPrefixesXmlHandler extends DefaultHandler {
 		elementStack.clear();
 		documentElementSeen = false;
 		rootClosed = false;
+		rootPrefixSeen = false;
 		insideCommonPrefixes = false;
 		prefixSeen = false;
 		hasContents = false;
@@ -73,14 +75,19 @@ final class CommonPrefixesXmlHandler extends DefaultHandler {
 			prefixSeen = false;
 			break;
 		case S3Api.QNAME_PREFIX:
-			if (!insideCommonPrefixes) {
-				throw new SAXException("Prefix is invalid outside CommonPrefixes");
+			if (insideCommonPrefixes) {
+				requireDirectChild(qName, parent, S3Api.QNAME_COMMON_PREFIXES);
+				if (prefixSeen) {
+					throw new SAXException("Duplicate Prefix in CommonPrefixes entry");
+				}
+				prefixSeen = true;
+			} else {
+				requireDirectChild(qName, parent, S3Api.QNAME_LIST_BUCKET_RESULT);
+				if (rootPrefixSeen) {
+					throw new SAXException("Duplicate root Prefix in S3 delimiter listing");
+				}
+				rootPrefixSeen = true;
 			}
-			requireDirectChild(qName, parent, S3Api.QNAME_COMMON_PREFIXES);
-			if (prefixSeen) {
-				throw new SAXException("Duplicate Prefix in CommonPrefixes entry");
-			}
-			prefixSeen = true;
 			activeScalar = qName;
 			break;
 		case S3Api.QNAME_ITEM:
@@ -128,11 +135,13 @@ final class CommonPrefixesXmlHandler extends DefaultHandler {
 		}
 		switch (qName) {
 		case S3Api.QNAME_PREFIX:
-			final String prefix = text.toString();
-			if (prefix.isEmpty()) {
-				throw new SAXException("CommonPrefixes entry contains an empty Prefix");
+			if (insideCommonPrefixes) {
+				final String prefix = text.toString();
+				if (prefix.isEmpty()) {
+					throw new SAXException("CommonPrefixes entry contains an empty Prefix");
+				}
+				commonPrefixes.add(prefix);
 			}
-			commonPrefixes.add(prefix);
 			activeScalar = null;
 			break;
 		case S3Api.QNAME_COMMON_PREFIXES:

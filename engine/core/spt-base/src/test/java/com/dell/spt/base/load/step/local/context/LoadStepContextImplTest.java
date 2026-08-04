@@ -1044,7 +1044,7 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
-	public void markListSuccessIncrementsMetricsUsingObjectCount() throws Exception {
+	public void markListSuccessCountsObjectsWithoutTreatingLogicalSizeAsTransferredBytes() throws Exception {
 		testConfig.val("load-op-recycle-mode", false);
 		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("listMetrics");
 		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(metrics);
@@ -1063,7 +1063,7 @@ public class LoadStepContextImplTest {
 
 		assertTrue(stepCtx.put((Operation) listOp));
 		assertEquals(17L, trackingCtx.successCount.get());
-		assertEquals(3400L, trackingCtx.byteCount.get());
+		assertEquals(0L, trackingCtx.byteCount.get());
 	}
 
 	@Test
@@ -1092,7 +1092,7 @@ public class LoadStepContextImplTest {
 
 		assertTrue(stepCtx.put((Operation) listOp));
 		assertEquals(3L, trackingCtx.successCount.get());
-		assertEquals(123L, trackingCtx.byteCount.get());
+		assertEquals(0L, trackingCtx.byteCount.get());
 		assertEquals(123L, trackingCtx.arrayTtfb.get());
 	}
 

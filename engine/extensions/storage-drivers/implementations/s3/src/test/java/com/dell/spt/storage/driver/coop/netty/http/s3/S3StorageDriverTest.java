@@ -652,6 +652,52 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void delimiterProbeAcceptsStandardRootPrefixWithoutTerminalFailure() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		try {
+			final String xml = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>bucket</Name><Prefix>campaign/</Prefix>"
+							+ "<KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys><Delimiter>/</Delimiter>"
+							+ "<Contents><Key>campaign/direct</Key><Size>1</Size></Contents>"
+							+ "<CommonPrefixes><Prefix>campaign/nested/</Prefix></CommonPrefixes>"
+							+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+			driver.enqueueResponse(new DefaultFullHttpResponse(
+							HttpVersion.HTTP_1_1,
+							HttpResponseStatus.OK,
+							Unpooled.copiedBuffer(xml, StandardCharsets.UTF_8)));
+
+			final var result = driver.probeCommonPrefixes("/bucket", "campaign/", "/", 1000);
+
+			assertEquals(List.of("campaign/nested/"), result.commonPrefixes());
+			assertTrue(result.hasContents());
+			assertFalse(result.truncated());
+			assertNull(driver.terminalFailure());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void malformedDelimiterProbeIsRecoverableAndDoesNotPoisonIntegrityDriver() throws Exception {
+		final var driver = new TestS3Driver(metadataConfig(false));
+		try {
+			driver.enqueueResponse(new DefaultFullHttpResponse(
+							HttpVersion.HTTP_1_1,
+							HttpResponseStatus.OK,
+							Unpooled.copiedBuffer(
+											"<ListBucketResult><Prefix>campaign/</Prefix>"
+															+ "<IsTruncated>invalid</IsTruncated></ListBucketResult>",
+											StandardCharsets.UTF_8)));
+
+			assertThrows(
+							IOException.class,
+							() -> driver.probeCommonPrefixes("/bucket", "campaign/", "/", 1000));
+			assertNull(driver.terminalFailure());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
 	void deterministicListRejectsInvalidProducerEvidenceTerminally() throws Exception {
 		final var invalidPages = List.of(
 						"<ListBucketResult><Contents><Key>prefix/not-an-id</Key><Size>1</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
