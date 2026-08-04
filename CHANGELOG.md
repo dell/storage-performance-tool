@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.13.1] - 2026-08-04
+
+### Changed
+
+- **Dependency updates** — Updated the GitHub Actions Java setup action.
+
+### Fixed
+
+- **Local saved-items reuse** — Local Docker runs now stage restrictive `items.csv` inputs as container-readable, read-only copies, allowing root-owned `0600` artifacts produced by `--save-items` to be reused with `--items-file`, `--read-items-file`, or `--delete-items-file` without changing the original file permissions.
+
 ## [5.13.0] - 2026-07-27
 
 ### Added
