@@ -137,3 +137,26 @@ func TestResolveVerificationRunErrorPreservesResourceCleanupFailure(t *testing.T
 		t.Fatalf("cleanup outcome was not preserved: %v", err)
 	}
 }
+
+func TestResolveVerificationRunErrorDeferredWritePolicy(t *testing.T) {
+	params := scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify, DeferVerification: true}
+	outcome := autoResultsOutcome{
+		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+		Finalization: &integrity.FinalizeOutcome{Complete: true, VerificationDeferred: true},
+	}
+	if err := resolveVerificationRunError(nil, outcome, true, params); err != nil {
+		t.Fatalf("nonempty deferred seed should pass: %v", err)
+	}
+	outcome.Finalization.EmptySelection = true
+	err := resolveVerificationRunError(nil, outcome, true, params)
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure {
+		t.Fatalf("empty deferred seed error = %#v, want exit %d", err, constants.ExitCodeWorkloadFailure)
+	}
+	outcome.Finalization.EmptySelection = false
+	outcome.Finalization.VerificationDeferred = false
+	err = resolveVerificationRunError(nil, outcome, true, params)
+	if !errors.As(err, &exitErr) || !strings.Contains(err.Error(), "finalization mode does not match") {
+		t.Fatalf("deferred mode mismatch error = %#v", err)
+	}
+}

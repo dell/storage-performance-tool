@@ -21,31 +21,47 @@ func TestPlanValidRequiresConsistentWorkloadProvenanceAndRoles(t *testing.T) {
 	}{
 		{
 			name: "write",
-			plan: Plan{RunID: 1, Workload: workload.WriteVerify, Producer: create,
+			plan: Plan{RunID: 1, Workload: workload.WriteVerify, Kind: PlanKindWriteRead, Producer: create,
 				Verifier: verify, Input: InputWritten},
 			want: true,
 		},
 		{
+			name: "deferred write",
+			plan: Plan{RunID: 6, Workload: workload.WriteVerify, Kind: PlanKindWriteSeed, Producer: create,
+				Input: InputWritten},
+			want: true,
+		},
+		{
 			name: "discovery read",
-			plan: Plan{RunID: 2, Workload: workload.ReadVerify, Producer: list,
+			plan: Plan{RunID: 2, Workload: workload.ReadVerify, Kind: PlanKindReadDiscovered, Producer: list,
 				Verifier: verify, Input: InputDiscovered},
 			want: true,
 		},
 		{
 			name: "external read",
-			plan: Plan{RunID: 3, Workload: workload.ReadVerify,
+			plan: Plan{RunID: 3, Workload: workload.ReadVerify, Kind: PlanKindReadExternal,
 				Verifier: verify, Input: InputExternal},
 			want: true,
 		},
 		{
 			name: "write with list producer",
-			plan: Plan{RunID: 4, Workload: workload.WriteVerify, Producer: list,
+			plan: Plan{RunID: 4, Workload: workload.WriteVerify, Kind: PlanKindWriteRead, Producer: list,
 				Verifier: verify, Input: InputWritten},
 		},
 		{
 			name: "external read with producer",
-			plan: Plan{RunID: 5, Workload: workload.ReadVerify, Producer: list,
+			plan: Plan{RunID: 5, Workload: workload.ReadVerify, Kind: PlanKindReadExternal, Producer: list,
 				Verifier: verify, Input: InputExternal},
+		},
+		{
+			name: "deferred write with verifier",
+			plan: Plan{RunID: 7, Workload: workload.WriteVerify, Kind: PlanKindWriteSeed, Producer: create,
+				Verifier: verify, Input: InputWritten},
+		},
+		{
+			name: "deferred write with cleanup",
+			plan: Plan{RunID: 8, Workload: workload.WriteVerify, Kind: PlanKindWriteSeed, Producer: create,
+				Cleanup: &PlannedStep{ID: "cleanup", Number: 2, Role: StepRoleCleanup}, Input: InputWritten},
 		},
 	}
 	for _, test := range tests {
@@ -57,6 +73,19 @@ func TestPlanValidRequiresConsistentWorkloadProvenanceAndRoles(t *testing.T) {
 	}
 }
 
+func TestDeferredPlanExposesOnlyProducerStep(t *testing.T) {
+	plan := Plan{
+		RunID: 9, Workload: workload.WriteVerify, Kind: PlanKindWriteSeed,
+		Producer: &PlannedStep{ID: "create", Number: 1, Role: StepRoleCreate}, Input: InputWritten,
+	}
+	if !plan.VerificationDeferred() {
+		t.Fatal("VerificationDeferred() = false, want true")
+	}
+	if ids := plan.StepIDs(); len(ids) != 1 || ids[0] != "create" {
+		t.Fatalf("StepIDs() = %v, want [create]", ids)
+	}
+
+}
 func TestRuntimeStepNumber(t *testing.T) {
 	tests := map[string]int{
 		"mt-001-20260802.190000.000-list":   1,

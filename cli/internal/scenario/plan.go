@@ -100,7 +100,15 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 		}
 		return &integrityplan.PlannedStep{ID: matches[0].ID, Number: matches[0].Number, Role: role}, nil
 	}
-	verifier, err := one(integrityplan.StepRoleVerify, true)
+	if params.DeferVerification && params.WorkloadType != WorkloadTypeWriteVerify {
+		return integrityplan.Plan{}, fmt.Errorf(
+			"deferred verification is valid only for write-verify")
+	}
+	if params.DeferVerification && params.Cleanup {
+		return integrityplan.Plan{}, fmt.Errorf(
+			"deferred write-verify cannot include cleanup")
+	}
+	verifier, err := one(integrityplan.StepRoleVerify, !params.DeferVerification)
 	if err != nil {
 		return integrityplan.Plan{}, err
 	}
@@ -114,8 +122,11 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 	}
 	plan := integrityplan.Plan{
 		RunID: params.RunID, Workload: params.WorkloadType,
-		Verifier: *verifier, Cleanup: cleanup,
-		Multipart: params.PartSize != "", AllowEmpty: params.AllowEmptySelection,
+		Cleanup: cleanup, Multipart: params.PartSize != "",
+		AllowEmpty: params.AllowEmptySelection,
+	}
+	if verifier != nil {
+		plan.Verifier = *verifier
 	}
 	switch params.WorkloadType {
 	case WorkloadTypeWriteVerify:
@@ -128,6 +139,15 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 		}
 		plan.Producer = producer
 		plan.Input = integrityplan.InputWritten
+		if params.DeferVerification {
+			if verifier != nil {
+				return integrityplan.Plan{}, fmt.Errorf(
+					"deferred write-verify plan unexpectedly contains a verification READ step")
+			}
+			plan.Kind = integrityplan.PlanKindWriteSeed
+		} else {
+			plan.Kind = integrityplan.PlanKindWriteRead
+		}
 	case WorkloadTypeReadVerify:
 		if len(byRole[integrityplan.StepRoleCreate]) != 0 {
 			return integrityplan.Plan{}, fmt.Errorf("read-verify plan unexpectedly contains a CREATE step")
@@ -136,12 +156,14 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 			if len(byRole[integrityplan.StepRoleList]) != 0 {
 				return integrityplan.Plan{}, fmt.Errorf("external read-verify plan unexpectedly contains a LIST step")
 			}
+			plan.Kind = integrityplan.PlanKindReadExternal
 			plan.Input = integrityplan.InputExternal
 		} else {
 			producer, producerErr := one(integrityplan.StepRoleList, true)
 			if producerErr != nil {
 				return integrityplan.Plan{}, producerErr
 			}
+			plan.Kind = integrityplan.PlanKindReadDiscovered
 			plan.Producer = producer
 			plan.Input = integrityplan.InputDiscovered
 		}

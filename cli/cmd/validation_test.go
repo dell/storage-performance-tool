@@ -496,6 +496,7 @@ func newIntegrityValidationCommand(t *testing.T) *cobra.Command {
 	cmd.Flags().Int("auth-version", 4, "")
 	cmd.Flags().Int("object-count", 0, "")
 	cmd.Flags().Bool("allow-empty-selection", false, "")
+	cmd.Flags().Bool(flagDeferVerification, false, "")
 	cmd.Flags().Int("integrity-max-console-failures", 20, "")
 	cmd.Flags().Bool("auto-results", true, "")
 	cmd.Flags().String("items-file", "", "")
@@ -532,6 +533,10 @@ func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
 		{name: "write requires auto results", workload: WorkloadTypeWriteVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
 		{name: "read accepts items file", workload: WorkloadTypeReadVerify, flag: "items-file", value: "items.csv"},
 		{name: "write rejects items file", workload: WorkloadTypeWriteVerify, flag: "items-file", value: "items.csv", wantErr: true, errContains: "not supported for write-verify"},
+		{name: "write accepts deferred verification", workload: WorkloadTypeWriteVerify, flag: flagDeferVerification, value: "true"},
+		{name: "read rejects deferred verification", workload: WorkloadTypeReadVerify, flag: flagDeferVerification, value: "true", wantErr: true, errContains: "not supported"},
+		{name: "ordinary write rejects deferred verification", workload: WorkloadTypeWrite, flag: flagDeferVerification, value: "true", wantErr: true, errContains: "not supported"},
+		{name: "ordinary write rejects explicit false deferred verification", workload: WorkloadTypeWrite, flag: flagDeferVerification, value: "false", wantErr: true, errContains: "not supported"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -550,6 +555,20 @@ func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
 	}
 }
 
+func TestValidateDeferredWriteVerifyRejectsCleanup(t *testing.T) {
+	cmd := newIntegrityValidationCommand(t)
+	if err := cmd.Flags().Set(flagDeferVerification, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cleanup", "true"); err != nil {
+		t.Fatal(err)
+	}
+	err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeWriteVerify)
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with --cleanup") {
+		t.Fatalf("deferred cleanup validation error = %v", err)
+	}
+}
+
 func TestIntegrityCommandValidationStopsBeforeExecutionSideEffects(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -561,6 +580,7 @@ func TestIntegrityCommandValidationStopsBeforeExecutionSideEffects(t *testing.T)
 		{name: "excluded copy override", workload: WorkloadTypeReadVerify, args: []string{"--engine-override=load.op.type=copy"}},
 		{name: "unsupported duration", workload: WorkloadTypeReadVerify, args: []string{"--duration=1m"}},
 		{name: "negative object count", workload: WorkloadTypeWriteVerify, args: []string{"--object-count=-1"}},
+		{name: "deferred cleanup", workload: WorkloadTypeWriteVerify, args: []string{"--defer-verification", "--cleanup"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -657,6 +677,7 @@ func TestValidateReadVerifyRejectsEffectiveOSEnvironmentOptions(t *testing.T) {
 		{name: "part size", envKey: constants.EnvPartSize, value: "5MiB", flag: "part-size"},
 		{name: "compressibility", envKey: constants.EnvObjectDataCompressibility, value: "25", flag: "object-data-compressibility"},
 		{name: "dedupable", envKey: constants.EnvObjectDataDedupable, value: "false", flag: "object-data-dedupable"},
+		{name: "deferred verification", envKey: constants.EnvDeferVerification, value: "true", flag: flagDeferVerification},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

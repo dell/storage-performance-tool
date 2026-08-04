@@ -43,7 +43,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`)
-- **Integrity qualification:** `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`, `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER` (`image` or `payload`)
+- **Integrity qualification:** `SPT_DEFER_VERIFICATION` (true/false), `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`, `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER` (`image` or `payload`)
 - **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
@@ -65,7 +65,7 @@ The `run` command executes a benchmark. Its structure is `spt run <type> [option
 | `write` | Implemented | Create objects to measure ingest performance |
 | `list` | Implemented | Enumerate existing objects and report listing throughput |
 | `read` | Implemented | Read pre-existing objects to measure read performance |
-| `write-verify` | Implemented | Write objects with persisted SHA-256 metadata, then verify every successful write once |
+| `write-verify` | Implemented | Write objects with persisted SHA-256 metadata, then verify every successful write now or defer readback |
 | `read-verify` | Implemented | Independently verify v1 metadata objects selected by LIST or `--items-file` |
 | `mock` | Implemented | Exercise the CLI with in-memory drivers (no S3 required) |
 | `tables` | Implemented | Benchmark S3 Tables (Iceberg) operations — see [S3_TABLES.md](S3_TABLES.md) |
@@ -109,6 +109,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
 | `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` (skips seed/discovery) |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
+| `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
 | `--integrity-max-console-failures` | | `20` | Verification only. Maximum corruption samples printed to the console (`0` suppresses samples; env: `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`) |
 | `--shuffle` | | `false` | `read` only. Shuffle items within each fetched read batch before issuing reads |
 | `--shuffle-batch-size` | | `0` | `read` only. Batch size override used with `--shuffle` (`0` = bounded default `512000`, max `1000000`) |
@@ -116,9 +117,12 @@ Required for S3 workloads, optional/ignored for `mock`.
 *Typically specify either `--object-count` or `--duration`, not both.*
 
 `write-verify` accepts a finite object count or duration for its CREATE phase,
-then verifies every successful write once. `read-verify` is always finite:
-`--object-count` caps its deterministic discovery selection and `--items-file`
-bypasses discovery. Both require automatic result collection. See
+then verifies every successful write once by default. With
+`--defer-verification`, it ends after committing the successful-write manifest;
+use that run's `written.csv` as a later `read-verify --items-file`. Deferred mode
+does not permit `--cleanup`. `read-verify` is always finite: `--object-count`
+caps its deterministic discovery selection and `--items-file` bypasses discovery.
+Both require automatic result collection. See
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
 

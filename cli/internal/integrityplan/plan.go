@@ -39,6 +39,20 @@ const (
 	InputExternal InputProvenance = "external"
 )
 
+// PlanKind identifies one complete, immutable integrity scenario shape.
+type PlanKind string
+
+const (
+	// PlanKindWriteRead writes and then verifies the successful CREATE set.
+	PlanKindWriteRead PlanKind = "write_read"
+	// PlanKindWriteSeed writes a durable selection without a verification READ.
+	PlanKindWriteSeed PlanKind = "write_seed"
+	// PlanKindReadDiscovered verifies a selection produced by LIST.
+	PlanKindReadDiscovered PlanKind = "read_discovered"
+	// PlanKindReadExternal verifies a CLI-staged caller manifest.
+	PlanKindReadExternal PlanKind = "read_external"
+)
+
 // PlannedStep binds one exact generated step ID to its semantic role.
 type PlannedStep struct {
 	ID     string
@@ -52,6 +66,7 @@ var runtimeStepID = regexp.MustCompile(`^mt-([0-9]{3})-[0-9]{8}\.[0-9]{6}\.[0-9]
 type Plan struct {
 	RunID      int64
 	Workload   string
+	Kind       PlanKind
 	Producer   *PlannedStep
 	Verifier   PlannedStep
 	Cleanup    *PlannedStep
@@ -60,22 +75,32 @@ type Plan struct {
 	AllowEmpty bool
 }
 
-// Valid reports whether the minimum immutable verification identity exists.
+// Valid reports whether the complete immutable verification shape is internally consistent.
 func (p Plan) Valid() bool {
-	if p.RunID <= 0 || p.Verifier.ID == "" || p.Verifier.Role != StepRoleVerify {
+	if p.RunID <= 0 {
 		return false
 	}
-	if p.Verifier.Number <= 0 ||
-		(p.Cleanup != nil && (p.Cleanup.ID == "" || p.Cleanup.Number <= 0 || p.Cleanup.Role != StepRoleCleanup)) {
+	hasVerifier := p.Verifier != (PlannedStep{})
+	if p.Kind == PlanKindWriteSeed {
+		if hasVerifier {
+			return false
+		}
+	} else if !hasVerifier || p.Verifier.ID == "" ||
+		p.Verifier.Number <= 0 || p.Verifier.Role != StepRoleVerify {
 		return false
 	}
-	seen := map[string]struct{}{p.Verifier.ID: {}}
-	numbers := map[int]struct{}{p.Verifier.Number: {}}
+
+	seen := make(map[string]struct{}, 3)
+	numbers := make(map[int]struct{}, 3)
+	if hasVerifier {
+		seen[p.Verifier.ID] = struct{}{}
+		numbers[p.Verifier.Number] = struct{}{}
+	}
 	for _, step := range []*PlannedStep{p.Producer, p.Cleanup} {
 		if step == nil {
 			continue
 		}
-		if step.Number <= 0 {
+		if step.ID == "" || step.Number <= 0 {
 			return false
 		}
 		if _, duplicate := seen[step.ID]; duplicate {
@@ -87,22 +112,32 @@ func (p Plan) Valid() bool {
 		seen[step.ID] = struct{}{}
 		numbers[step.Number] = struct{}{}
 	}
-	switch p.Workload {
-	case workload.WriteVerify:
-		return p.Input == InputWritten && p.Producer != nil &&
-			p.Producer.ID != "" && p.Producer.Role == StepRoleCreate
-	case workload.ReadVerify:
-		switch p.Input {
-		case InputDiscovered:
-			return p.Producer != nil && p.Producer.ID != "" && p.Producer.Role == StepRoleList
-		case InputExternal:
-			return p.Producer == nil
-		default:
-			return false
-		}
+
+	producerIs := func(role StepRole) bool {
+		return p.Producer != nil && p.Producer.Role == role
+	}
+	switch p.Kind {
+	case PlanKindWriteRead:
+		return p.Workload == workload.WriteVerify && p.Input == InputWritten &&
+			producerIs(StepRoleCreate) && !p.AllowEmpty &&
+			(p.Cleanup == nil || p.Cleanup.Role == StepRoleCleanup)
+	case PlanKindWriteSeed:
+		return p.Workload == workload.WriteVerify && p.Input == InputWritten &&
+			producerIs(StepRoleCreate) && p.Cleanup == nil && !p.AllowEmpty
+	case PlanKindReadDiscovered:
+		return p.Workload == workload.ReadVerify && p.Input == InputDiscovered &&
+			producerIs(StepRoleList) && p.Cleanup == nil
+	case PlanKindReadExternal:
+		return p.Workload == workload.ReadVerify && p.Input == InputExternal &&
+			p.Producer == nil && p.Cleanup == nil
 	default:
 		return false
 	}
+}
+
+// VerificationDeferred reports whether the plan intentionally ends after CREATE evidence.
+func (p Plan) VerificationDeferred() bool {
+	return p.Kind == PlanKindWriteSeed
 }
 
 // Clone returns a detached plan, including optional step pointers.
@@ -136,7 +171,9 @@ func (p Plan) StepIDs() []string {
 	if p.Producer != nil {
 		ids = append(ids, p.Producer.ID)
 	}
-	ids = append(ids, p.Verifier.ID)
+	if p.Verifier.ID != "" {
+		ids = append(ids, p.Verifier.ID)
+	}
 	if p.Cleanup != nil {
 		ids = append(ids, p.Cleanup.ID)
 	}

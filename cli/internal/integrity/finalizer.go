@@ -24,14 +24,16 @@ import (
 
 // WrittenName and the constants in this block are canonical integrity result artifact names.
 const (
-	WrittenName              = constants.ResultsArtifactSuffixWritten
-	WrittenCompletionName    = constants.ResultsArtifactSuffixWrittenCompletion
-	VerifiedName             = constants.ResultsArtifactSuffixVerified
-	VerifiedCompletionName   = constants.ResultsArtifactSuffixVerifiedCompletion
-	VerifyRemainingName      = constants.ResultsArtifactSuffixVerifyRemaining
-	IntegrityFailuresName    = constants.ResultsArtifactSuffixIntegrityFailures
-	IntegrityPerformanceName = constants.ResultsArtifactSuffixIntegrityPerformance
-	MultipartLifecycleName   = constants.ResultsArtifactSuffixMultipartLifecycle
+	WrittenName                           = constants.ResultsArtifactSuffixWritten
+	WrittenCompletionName                 = constants.ResultsArtifactSuffixWrittenCompletion
+	VerifiedName                          = constants.ResultsArtifactSuffixVerified
+	VerifiedCompletionName                = constants.ResultsArtifactSuffixVerifiedCompletion
+	VerifyRemainingName                   = constants.ResultsArtifactSuffixVerifyRemaining
+	IntegrityFailuresName                 = constants.ResultsArtifactSuffixIntegrityFailures
+	IntegrityPerformanceName              = constants.ResultsArtifactSuffixIntegrityPerformance
+	MultipartLifecycleName                = constants.ResultsArtifactSuffixMultipartLifecycle
+	integrityPerformancePhaseWritePrehash = "write_prehash"
+	integrityPerformancePhaseReadVerify   = "read_verify"
 )
 
 var failureHeader = []string{
@@ -73,6 +75,7 @@ type FinalizeOutcome struct {
 	SelectionUniqueCount       int64                               `json:"selection_unique_count"`
 	SelectionCount             int64                               `json:"selection_count"`
 	VerificationAttemptedCount int64                               `json:"verification_attempted_count"`
+	VerificationDeferred       bool                                `json:"verification_deferred"`
 	VerifiedCount              int64                               `json:"verified_count"`
 	CorruptCount               int64                               `json:"corrupt_count"`
 	EmptySelection             bool                                `json:"empty_selection"`
@@ -113,6 +116,8 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 		options.AllowEmptySelection = options.Plan.AllowEmpty
 		options.Multipart = options.Plan.Multipart
 	}
+	verificationDeferred := options.Plan.Valid() && options.Plan.VerificationDeferred()
+	outcome.VerificationDeferred = verificationDeferred
 	if options.Workload != workload.WriteVerify && options.Workload != workload.ReadVerify {
 		return outcome, fmt.Errorf("integrity finalizer does not support workload %q", options.Workload)
 	}
@@ -172,27 +177,29 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	createStep := firstStepRole(runtimeRoles.Create, plannedRoles.Create)
 	listStep := firstStepRole(runtimeRoles.List, plannedRoles.List)
 	readStep := firstStepRole(runtimeRoles.Read, plannedRoles.Read)
-	if readStep == "" {
-		return outcome, fmt.Errorf("verification READ step could not be identified")
-	}
-	readNotStarted := lifecycleForStepRole(options.StepLifecycles, runtimeRoles.Read, plannedRoles.Read) ==
-		string(results.StepLifecycleNotStarted)
+	readNotStarted := false
 	readCounts := operationCounts{}
-	if !readNotStarted {
-		var metricsErr error
-		readCounts, metricsErr = readOperationMetrics(options.ResultsRoot, readStep, "READ")
-		if metricsErr != nil {
-			return outcome, metricsErr
+	if !verificationDeferred {
+		if readStep == "" {
+			return outcome, fmt.Errorf("verification READ step could not be identified")
 		}
-		outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
-		outcome.CorruptCount = readCounts.corrupt
-		if options.BaseURL != "" {
-			if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
-				return outcome, err
+		readNotStarted = lifecycleForStepRole(options.StepLifecycles, runtimeRoles.Read, plannedRoles.Read) ==
+			string(results.StepLifecycleNotStarted)
+		if !readNotStarted {
+			var metricsErr error
+			readCounts, metricsErr = readOperationMetrics(options.ResultsRoot, readStep, "READ")
+			if metricsErr != nil {
+				return outcome, metricsErr
+			}
+			outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
+			outcome.CorruptCount = readCounts.corrupt
+			if options.BaseURL != "" {
+				if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
+					return outcome, err
+				}
 			}
 		}
 	}
-
 	inputName := WrittenName
 	inputCompletionName := WrittenCompletionName
 	inputProducerKind := constants.IntegrityProvenanceEngineStep
@@ -272,6 +279,19 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	}
 	outcome.EmptySelection = outcome.SelectionCount == 0
 	outcome.EmptyAllowed = outcome.EmptySelection && options.Workload == workload.ReadVerify && options.AllowEmptySelection
+	if verificationDeferred {
+		outcome.DigestPerformance, err = combinePerformance(options.ResultsRoot, []performanceArtifact{{step: createStep, phase: integrityPerformancePhaseWritePrehash}})
+		if err != nil {
+			return outcome, err
+		}
+		if options.Multipart {
+			if err = promoteStepFile(options.ResultsRoot, createStep, MultipartLifecycleName); err != nil {
+				return outcome, err
+			}
+		}
+		reconciled = true
+		return outcome, nil
+	}
 	if readNotStarted {
 		// The producer pair is canonical evidence even though the engine
 		// correctly prevented the dependent READ from opening its input. The
@@ -332,11 +352,11 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	if err = ctx.Err(); err != nil {
 		return outcome, err
 	}
-	performanceSteps := []string{readStep}
+	performanceArtifacts := []performanceArtifact{{step: readStep, phase: integrityPerformancePhaseReadVerify}}
 	if options.Workload == workload.WriteVerify {
-		performanceSteps = []string{createStep, readStep}
+		performanceArtifacts = []performanceArtifact{{step: createStep, phase: integrityPerformancePhaseWritePrehash}, {step: readStep, phase: integrityPerformancePhaseReadVerify}}
 	}
-	outcome.DigestPerformance, err = combinePerformance(options.ResultsRoot, performanceSteps)
+	outcome.DigestPerformance, err = combinePerformance(options.ResultsRoot, performanceArtifacts)
 	if err != nil {
 		return outcome, err
 	}
@@ -358,6 +378,7 @@ func integritySummary(outcome FinalizeOutcome, finalErr error) *results.Integrit
 		SelectionUniqueCount:       outcome.SelectionUniqueCount,
 		SelectionCount:             outcome.SelectionCount,
 		VerificationAttemptedCount: outcome.VerificationAttemptedCount,
+		VerificationDeferred:       outcome.VerificationDeferred,
 		VerifiedCount:              outcome.VerifiedCount,
 		CorruptCount:               outcome.CorruptCount,
 		RemainingCount:             outcome.RemainingCount,
@@ -392,7 +413,7 @@ func PlannedStepRoles(plan integrityplan.Plan) StepRoles {
 			roles.List = plan.Producer.ID
 		}
 	}
-	if plan.Verifier.Role == integrityplan.StepRoleVerify {
+	if !plan.VerificationDeferred() && plan.Verifier.Role == integrityplan.StepRoleVerify {
 		roles.Read = plan.Verifier.ID
 	}
 	return roles
@@ -417,7 +438,12 @@ func BindObservedStepRoles(
 	byNumber := make(map[int]string, len(observed))
 	counts := make(map[string]int, len(observed))
 	plannedNumbers := make(map[string]int, 3)
-	for _, step := range []*integrityplan.PlannedStep{plan.Producer, &plan.Verifier, plan.Cleanup} {
+	plannedSteps := []*integrityplan.PlannedStep{plan.Producer}
+	if !plan.VerificationDeferred() {
+		plannedSteps = append(plannedSteps, &plan.Verifier)
+	}
+	plannedSteps = append(plannedSteps, plan.Cleanup)
+	for _, step := range plannedSteps {
 		if step != nil {
 			plannedNumbers[step.ID] = step.Number
 		}
@@ -460,10 +486,12 @@ func BindObservedStepRoles(
 			roles.List = resolve(plan.Producer)
 		}
 	}
-	roles.Read = resolve(&plan.Verifier)
-	missingVerifierAllowed := len(allowMissingVerifier) > 0 && allowMissingVerifier[0]
-	if len(observed) > 0 && roles.Read == "" && !missingVerifierAllowed {
-		return RuntimeRoleBinding{}, fmt.Errorf("runtime evidence is missing the required verification step")
+	if !plan.VerificationDeferred() {
+		roles.Read = resolve(&plan.Verifier)
+		missingVerifierAllowed := len(allowMissingVerifier) > 0 && allowMissingVerifier[0]
+		if len(observed) > 0 && roles.Read == "" && !missingVerifierAllowed {
+			return RuntimeRoleBinding{}, fmt.Errorf("runtime evidence is missing the required verification step")
+		}
 	}
 	return RuntimeRoleBinding{Roles: roles, Evidence: len(observed) > 0}, nil
 }
@@ -988,7 +1016,12 @@ func validateJSONCorruptCount(baseURL, readStep string, expected int64) error {
 	return nil
 }
 
-func combinePerformance(root string, steps []string) (results.IntegrityPerformanceSummary, error) {
+type performanceArtifact struct {
+	step  string
+	phase string
+}
+
+func combinePerformance(root string, artifacts []performanceArtifact) (results.IntegrityPerformanceSummary, error) {
 	var summary results.IntegrityPerformanceSummary
 	destination := filepath.Join(root, IntegrityPerformanceName)
 	tmp, err := os.CreateTemp(root, ".integrity-performance-*")
@@ -1003,12 +1036,13 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 		return summary, err
 	}
 	seen := make(map[string]struct{})
-	phaseOrder := []string{"write_prehash", "read_verify"}
+	phaseOrder := []string{integrityPerformancePhaseWritePrehash, integrityPerformancePhaseReadVerify}
 	phaseTotals := make(map[string]*results.IntegrityPhaseSummary, len(phaseOrder))
 	for _, phase := range phaseOrder {
 		phaseTotals[phase] = &results.IntegrityPhaseSummary{Phase: phase}
 	}
-	for stepIndex, step := range steps {
+	for _, artifact := range artifacts {
+		step := artifact.step
 		path := filepath.Join(root, step+"."+IntegrityPerformanceName)
 		file, openErr := os.Open(path) // #nosec G304 -- internally resolved results path
 		if openErr != nil {
@@ -1033,8 +1067,7 @@ func combinePerformance(root string, steps []string) (results.IntegrityPerforman
 				break
 			}
 			phase := row[3]
-			if (stepIndex == 0 && len(steps) == 2 && phase != "write_prehash") ||
-				((len(steps) == 1 || stepIndex == len(steps)-1) && phase != "read_verify") {
+			if phase != artifact.phase {
 				err = fmt.Errorf("performance artifact step %s has unexpected phase %q", step, phase)
 				break
 			}

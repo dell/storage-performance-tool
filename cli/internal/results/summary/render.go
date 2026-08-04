@@ -219,6 +219,9 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	digest := integrity.DigestPerformance
 	fmt.Fprintf(b, "Integrity Verification\n")
 	r.writeBullet(b, "Finalization", map[bool]string{true: "complete", false: "incomplete"}[integrity.Complete])
+	if integrity.VerificationDeferred {
+		r.writeBullet(b, "Verification", "deferred")
+	}
 	if integrity.SelectionCountsValid && hasListStep(summary) {
 		r.writeBullet(b, "Discovery", fmt.Sprintf("source %d, unique %d, selected %d",
 			integrity.SelectionSourceCount, integrity.SelectionUniqueCount, integrity.SelectionCount))

@@ -65,6 +65,7 @@ type Params struct {
 	// TUI layout
 	MinimalTUI                  bool
 	AllowEmptySelection         bool
+	DeferVerification           bool
 	IntegrityMaxConsoleFailures int // Start TUI with graphs and messages panels collapsed
 
 	// S3 Tables workload

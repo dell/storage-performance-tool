@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Run a short write/read integrity verification workload. Configuration is
-# loaded from cli/.env when present and may be overridden by command options.
+# Run a short integrity write workload with optional immediate readback.
+# Configuration is loaded from cli/.env when present and may be overridden by options.
 
 set -euo pipefail
 
@@ -36,6 +36,7 @@ SKIP_IMAGE_PULL=${SPT_SKIP_IMAGE_PULL:-false}
 FORCE=${FORCE:-true}
 VERBOSE=${VERBOSE:-true}
 CLEANUP=${CLEANUP:-true}
+DEFER_VERIFICATION=${SPT_DEFER_VERIFICATION:-false}
 KEEP_SCENARIO=${KEEP_SCENARIO:-false}
 EXTRA_ARGS=()
 
@@ -82,6 +83,8 @@ while (( $# > 0 )); do
 		--cleanup) CLEANUP=true; shift ;;
 		--no-cleanup) CLEANUP=false; shift ;;
 		--keep-scenario) KEEP_SCENARIO=true; shift ;;
+		--defer-verification) DEFER_VERIFICATION=true; shift ;;
+		--no-defer-verification) DEFER_VERIFICATION=false; shift ;;
 		--no-keep-scenario) KEEP_SCENARIO=false; shift ;;
 		--)
 			shift
@@ -92,8 +95,9 @@ while (( $# > 0 )); do
 			cat <<EOF
 Usage: $(basename "$0") [options] [-- additional-spt-flags]
 
-Run a short headless write-verify workload. Successfully written objects are
-read back and SHA-256 verified; --cleanup deletes only verified objects.
+Run a short headless write-verify workload. By default, successfully written
+objects are read back and SHA-256 verified; --defer-verification preserves the
+seed manifest for later campaigns instead.
 
 Connection:
   --hosts CSV                  Docker hosts (default: $HOSTS)
@@ -113,6 +117,8 @@ Workload:
                                (default: $WRITE_VERIFY_PREFIX)
   --[no-]cleanup               Delete verified objects (default: $CLEANUP)
   --max-console-failures N     Failure samples printed (default: $MAX_CONSOLE_FAILURES)
+  --[no-]defer-verification   Stop after CREATE and preserve written.csv
+                               (requires --no-cleanup; default: $DEFER_VERIFICATION)
 
 Driver and image:
   --s3-driver TYPE             default, netty, aws, or rdma (default: $S3_DRIVER)
@@ -130,7 +136,8 @@ Output and behavior:
   -- additional-spt-flags      Forward remaining flags directly to spt
 
 Inputs may also be supplied through cli/.env or S3_*, HOSTS, SPT_IMAGE,
-SPT_SKIP_IMAGE_PULL, SPT_S3_DRIVER, and WRITE_VERIFY_PREFIX environment values.
+SPT_SKIP_IMAGE_PULL, SPT_DEFER_VERIFICATION, SPT_S3_DRIVER, and
+WRITE_VERIFY_PREFIX environment values.
 
 Examples:
   $(basename "$0")
@@ -162,6 +169,11 @@ for required in ENDPOINTS ACCESS_KEY SECRET_KEY BUCKET WRITE_VERIFY_PREFIX; do
 	fi
 done
 
+if enabled "$DEFER_VERIFICATION" && enabled "$CLEANUP"; then
+	echo "error: deferred verification requires --no-cleanup" >&2
+	exit 2
+fi
+
 echo "=== Write-Verify Test ==="
 echo "SPT binary: $SPT_BIN"
 echo "Hosts: $HOSTS (min-hosts: $MIN_HOSTS)"
@@ -173,7 +185,7 @@ if [[ -n "$DURATION" ]]; then
 else
 	echo "Threads: $THREADS  ObjectSize: $OBJECT_SIZE  ObjectCount: $OBJECT_COUNT"
 fi
-echo "Cleanup: $CLEANUP  Results: $RESULTS_DIR  Label: $LABEL"
+echo "Cleanup: $CLEANUP  Deferred verification: $DEFER_VERIFICATION  Results: $RESULTS_DIR  Label: $LABEL"
 [[ "$S3_DRIVER" != "default" ]] && echo "S3 driver: $S3_DRIVER"
 [[ -n "$PART_SIZE" ]] && echo "Part size: $PART_SIZE"
 [[ -n "$CHECKSUM" ]] && echo "Transport checksum: $CHECKSUM"
@@ -220,6 +232,7 @@ fi
 enabled "$FORCE" && cmd+=(--force)
 enabled "$VERBOSE" && cmd+=(--verbose)
 enabled "$CLEANUP" && cmd+=(--cleanup)
+enabled "$DEFER_VERIFICATION" && cmd+=(--defer-verification)
 enabled "$KEEP_SCENARIO" && cmd+=(--keep-scenario)
 cmd+=("${EXTRA_ARGS[@]}")
 

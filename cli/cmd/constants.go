@@ -13,6 +13,7 @@ import (
 // Docker constants - reference from internal constants to avoid duplication
 const (
 	DefaultSptImage                  = constants.DefaultSptImage
+	flagDeferVerification            = "defer-verification"
 	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
 )
 

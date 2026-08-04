@@ -189,6 +189,11 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		_, appliedFromEnv := cmd.Annotations[envAppliedAnnotationPrefix+name]
 		return !appliedFromEnv
 	}
+	deferVerification, _ := cmd.Flags().GetBool(flagDeferVerification)
+	if workloadType != WorkloadTypeWriteVerify &&
+		(changed(flagDeferVerification) || deferVerification) {
+		return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeferVerification, workloadType)
+	}
 	if !verification {
 		if changed("allow-empty-selection") {
 			return fmt.Errorf(ErrFlagNotSupported, "--allow-empty-selection", workloadType)
@@ -224,6 +229,9 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		}
 		if items, _ := cmd.Flags().GetString("items-file"); items != "" {
 			return errors.New("--items-file is not supported for write-verify")
+		}
+		if cleanup, _ := cmd.Flags().GetBool("cleanup"); deferVerification && cleanup {
+			return errors.New("--defer-verification cannot be used with --cleanup")
 		}
 	}
 	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {

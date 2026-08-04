@@ -155,6 +155,7 @@ func TestIntegrityCostNotices(t *testing.T) {
 	const (
 		multipartNotice = "Integrity notice: each multipart object is fully pre-hashed before multipart initiation."
 		checksumNotice  = "Integrity notice: the selected transport checksum requires an additional payload digest pass; see integrity.performance.csv."
+		deferredNotice  = "Integrity notice: verification readback is deferred; preserve written.csv for later read-verify campaigns."
 	)
 	tests := []struct {
 		name   string
@@ -162,6 +163,7 @@ func TestIntegrityCostNotices(t *testing.T) {
 		want   []string
 	}{
 		{name: "ordinary write", params: scenario.Params{WorkloadType: WorkloadTypeWrite, PartSize: "5MiB", Checksum: "crc32c"}},
+		{name: "deferred", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, DeferVerification: true}, want: []string{deferredNotice}},
 		{name: "reused sha256", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumSHA256}},
 		{name: "separate checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumCRC32C}, want: []string{checksumNotice}},
 		{name: "multipart only", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB"}, want: []string{multipartNotice}},

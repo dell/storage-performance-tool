@@ -7,13 +7,16 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
-// GenerateWriteVerifyScenario composes CREATE, one finite verification READ, and optional verified-only cleanup.
+// GenerateWriteVerifyScenario composes CREATE and, unless deferred, one finite verification READ and optional verified-only cleanup.
 func GenerateWriteVerifyScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
 		return "", fmt.Errorf("write-verify requires a positive run id")
 	}
 	if params.ObjectCount < 0 {
 		return "", fmt.Errorf("write-verify object count must be non-negative")
+	}
+	if params.DeferVerification && params.Cleanup {
+		return "", fmt.Errorf("deferred write-verify does not support cleanup")
 	}
 	ts := resolveTimestamp(params)
 	createID := formatStepID(1, ts, constants.IntegrityStepRoleCreate)
@@ -66,6 +69,7 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 		CreateLimitCount: count,
 		CreateDuration:   duration,
 		Cleanup:          params.Cleanup,
+		Deferred:         params.DeferVerification,
 	})
 }
 

@@ -39,7 +39,7 @@ func TestPrepareRunBundleGeneratesEachInputOnce(t *testing.T) {
 		},
 		BuildVerifyPlan: func(params scenario.Params, plan scenario.StepPlan) (integrityplan.Plan, error) {
 			return integrityplan.Plan{
-				RunID: params.RunID, Workload: params.WorkloadType,
+				RunID: params.RunID, Workload: params.WorkloadType, Kind: integrityplan.PlanKindWriteRead,
 				Producer: &integrityplan.PlannedStep{ID: "create", Number: 1, Role: integrityplan.StepRoleCreate},
 				Verifier: integrityplan.PlannedStep{ID: plan.Steps[0].ID, Number: plan.Steps[0].Number, Role: integrityplan.StepRoleVerify},
 				Input:    integrityplan.InputWritten,

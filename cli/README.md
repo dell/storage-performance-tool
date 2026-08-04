@@ -76,9 +76,10 @@ For read benchmarks, `spt` can seed an item set automatically and optionally wid
   --cleanup
 ```
 
-For end-to-end persisted-data qualification, use `write-verify` to write each
-object with versioned SHA-256 metadata and read it back once, or `read-verify`
-to verify a previously written set later. These are correctness workloads, not
+For persisted-data qualification, use `write-verify` to write each object with
+versioned SHA-256 metadata and either read it back once or preserve its manifest
+for later campaigns, then use `read-verify` for later checks. These are
+correctness workloads, not
 ordinary benchmarks; corruption returns exit code `20` and leaves a resumable
 `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
 
@@ -382,7 +383,7 @@ Executes a benchmark test with the specified workload type.
 
 - `write`: Write-only test, creating new objects
 - `read`: Read-only test on pre-existing objects
-- `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write once
+- `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write now or defer readback
 - `read-verify`: Verify v1 metadata objects selected by LIST or `--items-file`
 - `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
 - `delete`: Test to measure object deletion performance (coming soon)
@@ -412,6 +413,7 @@ Executes a benchmark test with the specified workload type.
 - `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
 - `--items-file`: Path to a saved `items.csv` for `read` workloads (skips the seed phase)
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
+- `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
 - `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.

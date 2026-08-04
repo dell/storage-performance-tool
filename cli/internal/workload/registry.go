@@ -24,7 +24,7 @@ type Spec struct {
 var registry = []Spec{
 	{Write, "Perform a write-only test, creating new objects.", true},
 	{Read, "Perform a read benchmark on pre-existing objects.", true},
-	{WriteVerify, "Write objects, read each successful write once, and verify persisted data.", true},
+	{WriteVerify, "Write objects and verify each successful write now or in a later campaign.", true},
 	{ReadVerify, "Discover or load self-verifying objects and verify each once.", true},
 	{Mixed, "Run a configured mix of S3 operations.", true},
 	{Delete, "Measure object deletion performance.", false},

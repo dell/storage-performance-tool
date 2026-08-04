@@ -57,6 +57,33 @@ spt run write-verify \
 adds a DELETE phase that consumes only `verified.csv`: corrupt, unreadable,
 failed, and unattempted objects are preserved for investigation.
 
+To seed a reusable integrity set without reading it back immediately:
+
+```bash
+spt run write-verify \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket qualification \
+  --object-size 1MiB \
+  --object-count 10000 \
+  --threads 32 \
+  --prefix campaign-42/ \
+  --defer-verification \
+  --headless
+```
+
+`--defer-verification` omits the verification READ and rejects `--cleanup`;
+deleting the seed would defeat the later campaign. Automatic result collection
+still validates durable, nonempty CREATE evidence. Exit code `0` means the seed
+and its manifest completed successfully; it does not claim that any object was
+read or verified during that run.
+
+Use the run's canonical `written.csv` as a later
+`read-verify --items-file`, preserving the exact seeded identities for each
+campaign. The LIST workflow below is also available when verification should
+select the current qualifying objects under a prefix instead.
+
 Verify SPT integrity objects hours or weeks later by discovering the current
 objects under an isolated prefix:
 
@@ -122,11 +149,12 @@ is rejected.
 Code `20` takes precedence if corruption and another failure both occur. The
 results still retain the primary structured failure cause.
 
-Writing zero objects proves nothing, so `write-verify` returns `1` and rejects
-`--allow-empty-selection`. An empty `read-verify` selection also returns `1` by
-default. Use `--allow-empty-selection` only when an empty, successfully
-discovered or staged set is the expected answer. A nonempty selection with zero
-successful verification operations can never pass.
+Writing zero objects proves nothing, so immediate and deferred `write-verify`
+runs return `1` and reject `--allow-empty-selection`. An empty `read-verify`
+selection also returns `1` by default. Use `--allow-empty-selection` only when
+an empty, successfully discovered or staged set is the expected answer. For an
+immediate or later verification run, a nonempty selection with zero successful
+verification operations can never pass.
 
 ## Results and resumability
 
@@ -137,18 +165,21 @@ run-level files:
 |---|---|
 | `written.csv` | Successful completed writes selected by `write-verify` |
 | `verify-input.csv` | Discovery or staged input selected by `read-verify` |
-| `verified.csv` | Objects whose full GET passed metadata, size, and digest checks |
+| `verified.csv` | Objects whose full GET passed metadata, size, and digest checks; absent when verification is deferred |
 | `*.complete.json` | Atomic commit evidence for the matching manifest |
-| `verify-remaining.csv` | Selected objects not in the successful verified set |
-| `integrity.failures.csv` | One diagnostic row for each integrity-failed attempt |
+| `verify-remaining.csv` | Selected objects not in the successful verified set; absent when verification is deferred |
+| `integrity.failures.csv` | One diagnostic row for each integrity-failed attempt; absent when verification is deferred |
 | `integrity.performance.csv` | Digest work and initial-write-delay telemetry |
 | `multipart.lifecycle.csv` | Completion, abort, and possible-orphan state for initiated MPUs |
 | `<step>.multipart.csv` | Existing engine `parts.upload.csv` timing artifact |
 | `index.json` | Machine-readable artifact inventory and integrity summary |
 
-The summary and `index.json` report selected, attempted, verified, corrupt, and
-remaining counts. `verify-remaining.csv` includes corrupt, failed, and
-unattempted objects and is the safest input to a retry:
+The summary and `index.json` report whether verification was deferred, plus
+selected, attempted, verified, corrupt, and remaining counts. A deferred seed
+reports its exact selected count and zero attempted, verified, corrupt, and
+remaining objects. For completed verification runs, `verify-remaining.csv`
+includes corrupt, failed, and unattempted objects and is the safest input to a
+retry:
 
 ```bash
 spt run read-verify \
@@ -278,5 +309,12 @@ QA harnesses that do not use the Go CLI can enable the same engine feature from
 a custom JavaScript scenario. See the runnable
 [`write-verify` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_write_verify.js)
 and [`read-only` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_read_verify.js).
+
+`--defer-verification` is CLI lifecycle policy, not a new engine configuration
+key. Direct-JAR users defer readback by running a metadata-mode CREATE scenario
+that publishes `written.csv` without composing a dependent `ReadLoad`, then run
+a read-only verification scenario later. The engine's metadata and manifest
+contracts are unchanged.
+
 The direct-JAR contract intentionally differs in artifact retrieval and process
 exit policy; those examples document the harness requirements.

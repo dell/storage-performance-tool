@@ -524,6 +524,21 @@ func TestBuildScenarioParams(t *testing.T) {
 	}
 }
 
+func TestBuildScenarioParamsIncludesDeferredVerification(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool(flagDeferVerification, false, "")
+	if err := cmd.Flags().Set(flagDeferVerification, "true"); err != nil {
+		t.Fatal(err)
+	}
+	params, err := buildScenarioParams(WorkloadTypeWriteVerify, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !params.DeferVerification {
+		t.Fatal("buildScenarioParams dropped --defer-verification")
+	}
+}
+
 func TestBuildScenarioParamsEdgeCases(t *testing.T) {
 	tests := []struct {
 		name         string

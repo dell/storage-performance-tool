@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -105,6 +106,56 @@ func TestFinalizeWriteVerifyPromotesValidatesAndDerivesRemaining(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(root, createStep+"."+WrittenName)); err != nil {
 		t.Fatalf("step-prefixed evidence was not preserved: %v", err)
+	}
+}
+
+func TestFinalizeDeferredWritePromotesDurableSeedEvidenceOnly(t *testing.T) {
+	const runID = int64(150)
+	root := t.TempDir()
+	createStep := "mt-001-test-create"
+	writeResultsIndex(t, root, createStep)
+
+	records := [][]string{canonicalHeader, {"b", "a", "1048576", ""}, {"b", "z", "1048576", "v2"}}
+	writeCommittedFixture(t, root, createStep, WrittenName, runID, createStep, records)
+	writeCSVFixture(t, filepath.Join(root, createStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
+		{"CREATE", "2", "0", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, createStep+"."+IntegrityPerformanceName), [][]string{
+		performanceHeader,
+		{"n0", createStep, "s3", "write_prehash", "sha256", "2", "2097152", "0.1", "20", "0.2", "0"},
+	})
+
+	plan := integrityplan.Plan{
+		RunID: runID, Workload: workload.WriteVerify, Kind: integrityplan.PlanKindWriteSeed,
+		Producer: &integrityplan.PlannedStep{ID: createStep, Number: 1, Role: integrityplan.StepRoleCreate},
+		Input:    integrityplan.InputWritten,
+	}
+	outcome, err := FinalizeResults(FinalizeOptions{
+		Plan: plan, ResultsRoot: root,
+		ObservedStepIDs: []string{createStep},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Complete || !outcome.VerificationDeferred || outcome.SelectionCount != 2 ||
+		outcome.VerificationAttemptedCount != 0 || outcome.VerifiedCount != 0 || outcome.RemainingCount != 0 || outcome.CorruptCount != 0 {
+		t.Fatalf("unexpected deferred outcome: %+v", outcome)
+	}
+	if outcome.DigestPerformance.Objects != 2 || len(outcome.DigestPerformance.Phases) != 1 {
+		t.Fatalf("deferred digest performance = %+v", outcome.DigestPerformance)
+	}
+	for _, name := range []string{VerifiedName, VerifiedCompletionName, VerifyRemainingName, IntegrityFailuresName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("deferred finalization unexpectedly created %s: %v", name, statErr)
+		}
+	}
+	manifest, err := readResultsManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Integrity == nil || !manifest.Integrity.Complete || !manifest.Integrity.VerificationDeferred || manifest.Integrity.SelectionCount != 2 {
+		t.Fatalf("deferred index summary = %+v", manifest.Integrity)
 	}
 }
 func TestFinalizeReadVerifyPreservesDiscoveryReconciliationCounts(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 
 func TestPlannedStepRolesUsesTypedRolesWithoutIDSuffixes(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.WriteVerify, Input: integrityplan.InputWritten,
+		RunID: 55, Workload: workload.WriteVerify, Kind: integrityplan.PlanKindWriteRead, Input: integrityplan.InputWritten,
 		Producer: &integrityplan.PlannedStep{
 			ID: "producer-with-custom-name", Number: 1, Role: integrityplan.StepRoleCreate,
 		},
@@ -29,7 +29,7 @@ func TestPlannedStepRolesUsesTypedRolesWithoutIDSuffixes(t *testing.T) {
 
 func TestObservedStepRolesMatchesOnlyExactTypedIDs(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.WriteVerify, Input: integrityplan.InputWritten,
+		RunID: 55, Workload: workload.WriteVerify, Kind: integrityplan.PlanKindWriteRead, Input: integrityplan.InputWritten,
 		Producer: &integrityplan.PlannedStep{
 			ID: "producer-with-custom-name", Number: 1, Role: integrityplan.StepRoleCreate,
 		},
@@ -47,9 +47,30 @@ func TestObservedStepRolesMatchesOnlyExactTypedIDs(t *testing.T) {
 	}
 }
 
+func TestObservedStepRolesBindsDeferredProducerOnly(t *testing.T) {
+	plan := integrityplan.Plan{
+		RunID: 56, Workload: workload.WriteVerify, Kind: integrityplan.PlanKindWriteSeed,
+		Input: integrityplan.InputWritten,
+		Producer: &integrityplan.PlannedStep{
+			ID: "producer-with-custom-name", Number: 1, Role: integrityplan.StepRoleCreate,
+		},
+	}
+	observed := []string{"mt-001-20260802.190000.000-create"}
+	binding, err := BindObservedStepRoles(plan, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !binding.Evidence || binding.Roles != (StepRoles{Create: observed[0]}) {
+		t.Fatalf("observed deferred roles = %+v", binding)
+	}
+	if got := PlannedStepRoles(plan); got != (StepRoles{Create: "producer-with-custom-name"}) {
+		t.Fatalf("planned deferred roles = %+v", got)
+	}
+}
+
 func TestObservedStepRolesRejectsAmbiguousRuntimeOrdinal(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		RunID: 55, Workload: workload.ReadVerify, Kind: integrityplan.PlanKindReadExternal, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
 			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
 		},
@@ -65,7 +86,7 @@ func TestObservedStepRolesRejectsAmbiguousRuntimeOrdinal(t *testing.T) {
 
 func TestObservedStepRolesRejectsExactIdentityWithOrdinalConflict(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		RunID: 55, Workload: workload.ReadVerify, Kind: integrityplan.PlanKindReadExternal, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
 			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
 		},
@@ -78,7 +99,7 @@ func TestObservedStepRolesRejectsExactIdentityWithOrdinalConflict(t *testing.T) 
 
 func TestObservedStepRolesRejectsDuplicateIdentityEvidence(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		RunID: 55, Workload: workload.ReadVerify, Kind: integrityplan.PlanKindReadExternal, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
 			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
 		},
@@ -90,7 +111,7 @@ func TestObservedStepRolesRejectsDuplicateIdentityEvidence(t *testing.T) {
 
 func TestObservedStepRolesDistinguishesMissingCompatibilityEvidence(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		RunID: 55, Workload: workload.ReadVerify, Kind: integrityplan.PlanKindReadExternal, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
 			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
 		},
@@ -106,7 +127,7 @@ func TestObservedStepRolesDistinguishesMissingCompatibilityEvidence(t *testing.T
 
 func TestFinalizeResultsRejectsAmbiguousRuntimeIdentityBeforeArtifacts(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.ReadVerify, Input: integrityplan.InputExternal,
+		RunID: 55, Workload: workload.ReadVerify, Kind: integrityplan.PlanKindReadExternal, Input: integrityplan.InputExternal,
 		Verifier: integrityplan.PlannedStep{
 			ID: "planned-reader", Number: 1, Role: integrityplan.StepRoleVerify,
 		},
@@ -122,7 +143,7 @@ func TestFinalizeResultsRejectsAmbiguousRuntimeIdentityBeforeArtifacts(t *testin
 
 func TestFinalizeResultsRejectsIdentityThatConflictsWithTypedPlan(t *testing.T) {
 	plan := integrityplan.Plan{
-		RunID: 55, Workload: workload.WriteVerify, Input: integrityplan.InputWritten,
+		RunID: 55, Workload: workload.WriteVerify, Kind: integrityplan.PlanKindWriteRead, Input: integrityplan.InputWritten,
 		Producer: &integrityplan.PlannedStep{
 			ID: "create", Number: 1, Role: integrityplan.StepRoleCreate,
 		},

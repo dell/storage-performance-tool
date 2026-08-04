@@ -12,32 +12,42 @@ import (
 
 func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 	tests := []struct {
-		name        string
-		params      Params
-		wantInput   integrityplan.InputProvenance
-		wantRole    integrityplan.StepRole
-		wantCleanup bool
+		name         string
+		params       Params
+		wantKind     integrityplan.PlanKind
+		wantInput    integrityplan.InputProvenance
+		wantRole     integrityplan.StepRole
+		wantVerifier bool
+		wantCleanup  bool
 	}{
 		{
 			name: "write verify multipart cleanup",
 			params: Params{WorkloadType: WorkloadTypeWriteVerify, RunID: 101,
 				Bucket: "b", ObjectSize: "10MiB", ObjectCount: 1, Threads: 1,
 				PartSize: "5MiB", Cleanup: true, BaseTimestamp: "20260802.120000.000"},
-			wantInput: integrityplan.InputWritten, wantRole: integrityplan.StepRoleCreate,
+			wantKind: integrityplan.PlanKindWriteRead, wantInput: integrityplan.InputWritten, wantRole: integrityplan.StepRoleCreate, wantVerifier: true,
 			wantCleanup: true,
 		},
 		{
 			name: "read verify discovery",
 			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 102,
 				Bucket: "b", ObjectCount: 1, Threads: 1, BaseTimestamp: "20260802.120000.000"},
-			wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList,
+			wantKind: integrityplan.PlanKindReadDiscovered, wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList, wantVerifier: true,
 		},
 		{
 			name: "read verify external",
 			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 103,
 				Bucket: "b", Threads: 1, ItemsFile: "/spt-input/items.csv",
 				AllowEmptySelection: true, BaseTimestamp: "20260802.120000.000"},
-			wantInput: integrityplan.InputExternal,
+			wantKind: integrityplan.PlanKindReadExternal, wantInput: integrityplan.InputExternal, wantVerifier: true,
+		},
+		{
+			name: "deferred write verify",
+			params: Params{WorkloadType: WorkloadTypeWriteVerify, RunID: 104,
+				Bucket: "b", ObjectSize: "1MiB", ObjectCount: 1, Threads: 1,
+				DeferVerification: true, BaseTimestamp: "20260802.120000.000"},
+			wantKind: integrityplan.PlanKindWriteSeed, wantInput: integrityplan.InputWritten,
+			wantRole: integrityplan.StepRoleCreate,
 		},
 	}
 	for _, test := range tests {
@@ -54,8 +64,8 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !plan.Valid() || plan.RunID != test.params.RunID || plan.Input != test.wantInput ||
-				plan.Verifier.Role != integrityplan.StepRoleVerify ||
+			if !plan.Valid() || plan.RunID != test.params.RunID || plan.Kind != test.wantKind || plan.Input != test.wantInput ||
+				(plan.Verifier.Role == integrityplan.StepRoleVerify) != test.wantVerifier ||
 				(plan.Cleanup != nil) != test.wantCleanup {
 				t.Fatalf("typed plan = %+v", plan)
 			}

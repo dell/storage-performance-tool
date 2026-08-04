@@ -504,6 +504,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			var plannedRoles integrity.StepRoles
 			if verificationRun {
 				plan := integrityOptions[0].Plan
+				deferredVerification := plan.Valid() && plan.VerificationDeferred()
 				plannedRoles = integrity.PlannedStepRoles(plan)
 				if plan.Valid() {
 					allowMissingVerifier := stepRoleLifecycle(
@@ -511,7 +512,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					binding, bindErr := integrity.BindObservedStepRoles(plan, runtimeStepIDs, allowMissingVerifier)
 					if bindErr != nil {
 						outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, bindErr)
-						outcome.CorruptionMetricsErr = bindErr
+						if !deferredVerification {
+							outcome.CorruptionMetricsErr = bindErr
+						}
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
@@ -520,19 +523,21 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
 					plannedRoles = integrity.ResolveStepRoles(expectedStepIDs, nil)
 				}
-				runtimeRoles := observedRuntimeRoles
-				readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
-				// A dependent READ which never started cannot publish runtime metrics.
-				// Its planned lifecycle remains part of finalization, while runtime
-				// evidence and ActualStepIDs stay exact.
-				if readLifecycle != portcheck.StepLifecycleNotStarted {
-					if runtimeRoles.Read == "" {
-						outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
-					} else {
-						corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
-						outcome.CorruptionMetricsErr = observeErr
-						if observeErr == nil {
-							outcome.ObservedCorruptCount = &corrupt
+				if !deferredVerification {
+					runtimeRoles := observedRuntimeRoles
+					readLifecycle := stepRoleLifecycle(outcome.Tracker, runtimeRoles.Read, plannedRoles.Read)
+					// A dependent READ which never started cannot publish runtime metrics.
+					// Its planned lifecycle remains part of finalization, while runtime
+					// evidence and ActualStepIDs stay exact.
+					if readLifecycle != portcheck.StepLifecycleNotStarted {
+						if runtimeRoles.Read == "" {
+							outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
+						} else {
+							corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
+							outcome.CorruptionMetricsErr = observeErr
+							if observeErr == nil {
+								outcome.ObservedCorruptCount = &corrupt
+							}
 						}
 					}
 				}
@@ -578,8 +583,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
 					writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
 				} else {
-					writeProgress("Integrity: selected=%d attempted=%d verified=%d remaining=%d corrupt=%d\n",
-						finalized.SelectionCount, finalized.VerificationAttemptedCount, finalized.VerifiedCount, finalized.RemainingCount, finalized.CorruptCount)
+					if finalized.VerificationDeferred {
+						writeProgress("Integrity: verification deferred; selected=%d attempted=0 verified=0\n",
+							finalized.SelectionCount)
+					} else {
+						writeProgress("Integrity: selected=%d attempted=%d verified=%d remaining=%d corrupt=%d\n",
+							finalized.SelectionCount, finalized.VerificationAttemptedCount, finalized.VerifiedCount, finalized.RemainingCount, finalized.CorruptCount)
+					}
 					digest := finalized.DigestPerformance
 					writeProgress("Integrity digest work: objects=%d bytes=%d worker_seconds=%.6f mean_worker_mib_per_second=%.3f additional_payload_passes=%d\n",
 						digest.Objects, digest.Bytes, digest.HashWorkerSeconds, digest.MeanWorkerHashMiBPerSecond, digest.AdditionalPayloadPasses)
@@ -811,6 +821,10 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	if outcome.Finalization == nil {
 		reasons = append(reasons, "integrity result finalization did not produce an outcome")
 	} else {
+		if params.DeferVerification != outcome.Finalization.VerificationDeferred {
+			reasons = append(reasons, "integrity finalization mode does not match the requested deferred-verification mode")
+		}
+
 		if !outcome.Finalization.Complete {
 			reasons = append(reasons, "integrity result finalization is incomplete")
 		}
@@ -1194,7 +1208,7 @@ Available workload types:
   write: Perform a write-only test, creating new objects.
   list: Benchmark object listing throughput against a bucket.
   read: Perform a read-only test on pre-existing objects.
-  write-verify: Write, read back, and verify every successfully written object.
+  write-verify: Write and verify every successful object, or defer readback for later campaigns.
   read-verify: Verify self-verifying objects from discovery or --items-file.
   mixed: Perform a test with a specified mix of read and write operations.
   delete: Perform a test to measure object deletion performance.
@@ -1708,6 +1722,7 @@ func init() {
 	// Test Behavior Options
 	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
 	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
+	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
 	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
@@ -1914,6 +1929,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	// Get behavior flags
 	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	params.Cleanup = cleanup
+	params.DeferVerification, _ = cmd.Flags().GetBool(flagDeferVerification)
 
 	seedObjects, _ := cmd.Flags().GetInt("seed-objects")
 	params.SeedCount = seedObjects
@@ -2298,8 +2314,13 @@ func formatScenarioParams(params scenario.Params) string {
 	} else {
 		lines = append(lines, "Cleanup: No")
 	}
-
-	// Always show keep-scenario status
+	if params.WorkloadType == WorkloadTypeWriteVerify {
+		readback := "Immediate"
+		if params.DeferVerification {
+			readback = "Deferred"
+		}
+		lines = append(lines, "Verification Readback: "+readback)
+	}
 	if params.KeepScenario {
 		lines = append(lines, "Keep Scenario: Yes")
 	} else {
@@ -2407,6 +2428,10 @@ func integrityCostNotices(params scenario.Params) []string {
 		return nil
 	}
 	var notices []string
+	if params.DeferVerification {
+		notices = append(notices,
+			"Integrity notice: verification readback is deferred; preserve written.csv for later read-verify campaigns.")
+	}
 	if params.PartSize != "" {
 		notices = append(notices,
 			"Integrity notice: each multipart object is fully pre-hashed before multipart initiation.")

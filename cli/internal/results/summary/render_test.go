@@ -137,6 +137,15 @@ func TestRendererReportsIntegrityDigestCostSeparately(t *testing.T) {
 	}
 }
 
+func TestRendererLabelsDeferredVerification(t *testing.T) {
+	summary := &RunSummary{
+		Integrity: &results.IntegritySummary{Complete: true, VerificationDeferred: true, SelectionCount: 32},
+	}
+	report := NewRenderer(RenderOptions{}).CompactSnippet(summary)
+	mustContain(t, report, "Verification       deferred")
+	mustContain(t, report, "selected 32, attempted 0, verified 0")
+}
+
 func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {
 	t.Parallel()
 

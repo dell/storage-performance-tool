@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
-- **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, independent later reads, corruption-specific exit code `20`, empty-selection policy, and direct-`spt.jar` custom-scenario access.
+- **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, optional deferred write readback for later verification campaigns, corruption-specific exit code `20`, empty-selection policy, and direct-`spt.jar` custom-scenario access.
 - **Integrity evidence and resumability** — Added canonical written/input/verified manifests and completion records, `verify-remaining.csv`, corruption diagnostics, digest-cost telemetry, multipart lifecycle evidence, structured step lifecycle, and distributed immutable-image identity checks.
 
 ### Changed

@@ -249,17 +249,19 @@ func TestFormatScenarioParams(t *testing.T) {
 		{
 			name: "Write verify workload summarizes isolation prefix",
 			params: scenario.ScenarioParams{
-				WorkloadType: WorkloadTypeWriteVerify,
-				Endpoint:     "http://s3.example.com",
-				Endpoints:    []string{"http://s3.example.com"},
-				Bucket:       "qualification",
-				Prefix:       "verify/run-42/",
-				ObjectSize:   "1MiB",
+				WorkloadType:      WorkloadTypeWriteVerify,
+				Endpoint:          "http://s3.example.com",
+				Endpoints:         []string{"http://s3.example.com"},
+				Bucket:            "qualification",
+				Prefix:            "verify/run-42/",
+				ObjectSize:        "1MiB",
+				DeferVerification: true,
 			},
 			expected: []string{
 				"Workload Type: write-verify",
 				"Prefix: verify/run-42/",
 				"Object Size: 1MiB",
+				"Verification Readback: Deferred",
 			},
 		},
 		{

@@ -14,7 +14,7 @@ import (
 func TestPreparedRunKeepsTypedVerificationPlanImmutable(t *testing.T) {
 	plan := integrityplan.Plan{
 		RunID: 42, Workload: scenario.WorkloadTypeWriteVerify,
-		Input: integrityplan.InputWritten,
+		Kind: integrityplan.PlanKindWriteRead, Input: integrityplan.InputWritten,
 		Producer: &integrityplan.PlannedStep{
 			ID: "create-original", Number: 1, Role: integrityplan.StepRoleCreate,
 		},

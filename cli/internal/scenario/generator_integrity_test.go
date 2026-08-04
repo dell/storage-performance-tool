@@ -135,6 +135,47 @@ func TestGenerateWriteVerifyScenarioContract(t *testing.T) {
 	}
 }
 
+func TestGenerateDeferredWriteVerifyScenarioContainsOnlyCreate(t *testing.T) {
+	got, err := GenerateWriteVerifyScenario(Params{
+		WorkloadType: WorkloadTypeWriteVerify,
+		RunID:        46, Bucket: "bucket", ObjectSize: "1MiB", ObjectCount: 3,
+		Threads: 2, DeferVerification: true,
+		BaseTimestamp: "20260730.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "ReadLoad.config") || strings.Contains(got, "DeleteLoad.config") || strings.Contains(got, "verified.csv") {
+		t.Fatalf("deferred scenario contains a verification or cleanup phase:\n%s", got)
+	}
+	plan, err := BuildStepPlanFromScenario(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Steps) != 1 || plan.Steps[0].Op != stepOpCreate {
+		t.Fatalf("deferred scenario steps = %+v, want one CREATE", plan.Steps)
+	}
+	configs := parseGeneratedScenarioConfigs(t, got)
+	if len(configs) != 1 {
+		t.Fatalf("deferred scenario configs = %d, want one CREATE", len(configs))
+	}
+	if output := generatedConfigValue(t, configs[0], "item", "output", "file"); output != "writtenFile" {
+		t.Fatalf("deferred CREATE output = %#v, want writtenFile", output)
+	}
+}
+
+func TestGenerateDeferredWriteVerifyRejectsCleanup(t *testing.T) {
+	_, err := GenerateWriteVerifyScenario(Params{
+		WorkloadType: WorkloadTypeWriteVerify,
+		RunID:        47, Bucket: "bucket", ObjectSize: "1MiB", ObjectCount: 1,
+		Threads: 1, DeferVerification: true, Cleanup: true,
+		BaseTimestamp: "20260730.120000.000",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support cleanup") {
+		t.Fatalf("deferred cleanup error = %v", err)
+	}
+}
+
 func TestGenerateWriteVerifyPrefixIsAppliedOnlyAtCreateAndCleanupUsesVerifiedManifest(t *testing.T) {
 	got, err := GenerateWriteVerifyScenario(Params{
 		WorkloadType: WorkloadTypeWriteVerify, RunID: 43, Bucket: "bucket",
