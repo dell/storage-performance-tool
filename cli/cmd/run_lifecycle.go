@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
 
@@ -27,9 +28,11 @@ func updateRunLifecycleMetadata(meta *runMetadata, outcome *autoResultsOutcome) 
 	}
 	if outcome.Tracker != nil {
 		lifecycle.Workload.State = outcome.Tracker.FinalState
-		lifecycle.Workload.FailureStepID = outcome.Tracker.FailureStepID
-		lifecycle.Workload.FailureCategory = outcome.Tracker.FailureCategory
-		lifecycle.Workload.FailureMessage = outcome.Tracker.FailureMessage
+		if outcome.Tracker.FinalState == constants.StateFailed {
+			lifecycle.Workload.FailureStepID = outcome.Tracker.FailureStepID
+			lifecycle.Workload.FailureCategory = outcome.Tracker.FailureCategory
+			lifecycle.Workload.FailureMessage = outcome.Tracker.FailureMessage
+		}
 	}
 	meta.Lifecycle = lifecycle
 }

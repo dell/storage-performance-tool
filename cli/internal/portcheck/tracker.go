@@ -138,9 +138,18 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		if state != "" {
 			final.FinalState = state
 			final.RunID = status.RunID
-			final.FailureStepID = status.StepID
-			final.FailureCategory = status.Category
-			final.FailureMessage = status.Message
+			if state == constants.StateFailed {
+				final.FailureStepID = status.StepID
+				final.FailureCategory = status.Category
+				final.FailureMessage = status.Message
+			} else {
+				// The engine's status carrier may retain its configured placeholder
+				// step ID after a successful run. Failure attribution belongs only
+				// to FAILED states and must not leak into successful evidence.
+				final.FailureStepID = ""
+				final.FailureCategory = ""
+				final.FailureMessage = ""
+			}
 		}
 		if current, ok := stepState[status.StepID]; ok {
 			current.started = true
@@ -286,16 +295,32 @@ func (t *RunTracker) WaitForCompletion(ctx context.Context, stepIDs []string) (*
 		// substitute for COMPLETED/FAILED/STOPPED or its primary terminal cause.
 		if t.RequireTerminalState {
 			if terminal && isStructuredTerminalState(final.FinalState) {
+				if final.FinalState == constants.StateCompleted {
+					markStepsCompleted(stepState, t.Clock.Now())
+				}
 				break
 			}
 			continue
 		}
 		if terminal || (len(stepState) > 0 && allDone) {
+			if terminal && final.FinalState == constants.StateCompleted {
+				markStepsCompleted(stepState, t.Clock.Now())
+			}
 			break
 		}
 	}
 
 	return populateStepLifecycles(final, stepState, stepIDs), nil
+}
+
+func markStepsCompleted(stepState map[string]*stepProbe, completedAt time.Time) {
+	for _, st := range stepState {
+		st.started = true
+		st.completed = true
+		if st.completedAt.IsZero() {
+			st.completedAt = completedAt
+		}
+	}
 }
 
 func populateStepLifecycles(final *RunResult, stepState map[string]*stepProbe, stepIDs []string) *RunResult {

@@ -1218,10 +1218,14 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 		fetcher.output = outputDir
 		return fetcher
 	}
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error { return nil }
+	generateRunSummaryFunc = func(_ context.Context, _ string, out io.Writer) error {
+		_, err := io.WriteString(out, "Performance by Phase\nphase rows\nIntegrity Verification\nverified 1000\n")
+		return err
+	}
 
 	tmpDir := t.TempDir()
-	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, traceFile, nil)
+	var summaryOut strings.Builder
+	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, []string{stepID}, false, nil, "", false, 0, "", nil, io.Discard, &summaryOut, traceFile, nil)
 
 	select {
 	case <-done:
@@ -1249,8 +1253,21 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 	}
 
 	traceCopyPath := filepath.Join(fetcher.output, filepath.Base(traceFile))
-	if _, err := os.Stat(traceCopyPath); err != nil {
-		t.Fatalf("expected trace file copied to results root: %v", err)
+	traceContent, err := os.ReadFile(traceCopyPath)
+	if err != nil {
+		t.Fatalf("read copied trace: %v", err)
+	}
+	traceText := string(traceContent)
+	performanceAt := strings.Index(traceText, "Performance by Phase")
+	integrityAt := strings.Index(traceText, "Integrity Verification")
+	if !strings.HasPrefix(traceText, "trace-data\n") || performanceAt < 0 || integrityAt <= performanceAt {
+		t.Fatalf("copied trace omitted or reordered final summary: %q", traceText)
+	}
+	if summaryOut.String() != "Performance by Phase\nphase rows\nIntegrity Verification\nverified 1000\n" {
+		t.Fatalf("ordinary summary output changed while persisting trace: %q", summaryOut.String())
+	}
+	if got.RunFiles[0].Size != int64(len(traceContent)) {
+		t.Fatalf("trace manifest size = %d, want final size %d", got.RunFiles[0].Size, len(traceContent))
 	}
 }
 

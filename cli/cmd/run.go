@@ -684,9 +684,38 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 		outcome.Lifecycle.Summary.Started = true
 		summaryCtx, cancelSummary := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Summary)
+		var traceOutput *summaryTraceWriter
+		if traceFile != "" {
+			var traceErr error
+			traceOutput, traceErr = newSummaryTraceWriter(writer, traceFile)
+			if traceErr != nil {
+				outcome.SummaryErr = errors.Join(
+					outcome.SummaryErr, fmt.Errorf("open trace for final summary: %w", traceErr))
+			} else {
+				writer = traceOutput
+			}
+		}
 		if err := generateRunSummaryFunc(summaryCtx, root, writer); err != nil {
-			outcome.SummaryErr = err
-			logging.LogError("auto-results", "generate summary", err)
+			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
+		}
+		if traceOutput != nil {
+			if closeErr := traceOutput.Close(); closeErr != nil {
+				outcome.SummaryErr = errors.Join(
+					outcome.SummaryErr, fmt.Errorf("close trace after final summary: %w", closeErr))
+			}
+			if traceErr := traceOutput.Err(); traceErr != nil {
+				outcome.SummaryErr = errors.Join(
+					outcome.SummaryErr, fmt.Errorf("append final summary to trace: %w", traceErr))
+			}
+		}
+		if traceFile != "" {
+			if traceErr := appendTraceToResultsManifest(root, traceFile); traceErr != nil {
+				outcome.SummaryErr = errors.Join(
+					outcome.SummaryErr, fmt.Errorf("refresh final trace artifact: %w", traceErr))
+			}
+		}
+		if outcome.SummaryErr != nil {
+			logging.LogError("auto-results", "generate or persist summary", outcome.SummaryErr)
 			writeProgress("Auto-results: summary generation encountered issues; see log.\n")
 		}
 		cancelSummary()

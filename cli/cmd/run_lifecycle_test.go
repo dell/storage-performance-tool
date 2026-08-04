@@ -52,6 +52,28 @@ func TestUpdateRunLifecycleMetadataPreservesIndependentOutcomes(t *testing.T) {
 	}
 }
 
+func TestUpdateRunLifecycleMetadataOmitsFailureAttributionForCompletedRun(t *testing.T) {
+	meta := &runMetadata{}
+	outcome := &autoResultsOutcome{
+		Tracker: &portcheck.RunResult{
+			FinalState:      constants.StateCompleted,
+			FailureStepID:   "none-20260804.201852.427",
+			FailureCategory: "stale",
+			FailureMessage:  "must not escape",
+		},
+		Lifecycle: runcontrol.Outcome{Workload: runcontrol.CompletedPhase(nil)},
+	}
+
+	updateRunLifecycleMetadata(meta, outcome)
+	got := meta.Lifecycle.Workload
+	if got.State != constants.StateCompleted {
+		t.Fatalf("state = %q, want %q", got.State, constants.StateCompleted)
+	}
+	if got.FailureStepID != "" || got.FailureCategory != "" || got.FailureMessage != "" {
+		t.Fatalf("completed workload retained failure attribution: %+v", got)
+	}
+}
+
 func TestLifecyclePhaseMetadataIdentifiesJoinedDeadline(t *testing.T) {
 	phase := lifecyclePhaseFromOutcome(runcontrol.CompletedPhase(
 		errors.Join(errors.New("artifact request failed"), context.DeadlineExceeded)))

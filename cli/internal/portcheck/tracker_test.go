@@ -23,13 +23,17 @@ func TestRunTracker_TerminalRun(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"state": "RUNNING"})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"state": "COMPLETED"})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "COMPLETED", "run_id": 42, "step_id": "none-20260804.201852.427",
+			"category": "stale", "message": "must not escape",
+		})
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
 	tr := NewRunTracker(server.URL)
 	tr.PollInterval = 10 * time.Millisecond
+	tr.RequireTerminalState = true
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -39,6 +43,16 @@ func TestRunTracker_TerminalRun(t *testing.T) {
 	}
 	if res.FinalState != "COMPLETED" {
 		t.Fatalf("FinalState = %q, want COMPLETED", res.FinalState)
+	}
+	if res.FailureStepID != "" || res.FailureCategory != "" || res.FailureMessage != "" {
+		t.Fatalf("successful run retained failure attribution: %+v", res)
+	}
+	step := res.Steps["any-step"]
+	if step.Lifecycle != StepLifecycleCompleted || !step.Started || !step.Completed || step.Failed {
+		t.Fatalf("successful terminal step = %+v, want completed", step)
+	}
+	if step.CompletedAt.IsZero() {
+		t.Fatal("successful terminal step omitted its completion time")
 	}
 }
 
