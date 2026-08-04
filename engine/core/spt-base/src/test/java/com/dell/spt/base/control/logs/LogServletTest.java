@@ -1,7 +1,10 @@
 package com.dell.spt.base.control.logs;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
@@ -55,6 +58,28 @@ public class LogServletTest {
 		LogServlet servlet = new LogServlet();
 		assertDoesNotThrow(() -> servlet.doHead(req, resp));
 		// We can't use Mockito's verify static here easily; rely on absence of exception
+	}
+
+	@Test
+	public void testDoGetPreservesHyphenatedArtifactName() throws Exception {
+		final HttpServletRequest req = mock(HttpServletRequest.class);
+		final HttpServletResponse resp = mock(HttpServletResponse.class);
+		when(req.getRequestURI()).thenReturn("/logs/any-step/verify-input.complete.json");
+
+		new LogServlet().doGet(req, resp);
+
+		verify(resp).sendError(eq(404), contains("verify-input.complete.json"));
+	}
+
+	@Test
+	public void testDoHeadPreservesHyphenatedArtifactName() throws Exception {
+		final HttpServletRequest req = mock(HttpServletRequest.class);
+		final HttpServletResponse resp = mock(HttpServletResponse.class);
+		when(req.getRequestURI()).thenReturn("/logs/any-step/verify-input.csv");
+
+		new LogServlet().doHead(req, resp);
+
+		verify(resp).sendError(eq(404), contains("verify-input.csv"));
 	}
 
 	@Test

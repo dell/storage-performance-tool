@@ -44,7 +44,7 @@ public final class LogServlet extends HttpServlet {
 	private static final String KEY_STEP_ID = "stepId";
 	private static final String KEY_LOGGER_NAME = "loggerName";
 	private static final Pattern PATTERN_URI_PATH = Pattern.compile(
-					"/logs/(?<" + KEY_STEP_ID + ">[\\w\\-_.,;:~=+@]+)/(?<" + KEY_LOGGER_NAME + ">[\\w_.]+)");
+					"^/logs/(?<" + KEY_STEP_ID + ">[\\w\\-_.,;:~=+@]+)/(?<" + KEY_LOGGER_NAME + ">[\\w._-]+)$");
 	private static final Pattern PATTERN_INDEX = Pattern.compile(
 					"/logs/(?<" + KEY_STEP_ID + ">[\\w\\-_.,;:~=+@]+)/index\\.json");
 	private static final String PATTERN_STEP_ID_SUBST = "${ctx:" + Constants.KEY_STEP_ID + "}";
@@ -187,7 +187,7 @@ public final class LogServlet extends HttpServlet {
 					throws NoLoggerException, NoLogFileException, InvalidUriPathException {
 		final String reqUri = req.getRequestURI();
 		final Matcher matcher = PATTERN_URI_PATH.matcher(reqUri);
-		if (matcher.find()) {
+		if (matcher.matches()) {
 			final String stepId = matcher.group(KEY_STEP_ID);
 			final String loggerName = matcher.group(KEY_LOGGER_NAME);
 			final String logFileNamePattern = logFileNamePatternByName.get(loggerName);
