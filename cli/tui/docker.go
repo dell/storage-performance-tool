@@ -43,6 +43,9 @@ const (
 	dockerNodeModeArg           = "--run-node=true"
 	dockerNodeLogMount          = "/spt-node-logs"
 	dockerNodeLogResultsDirName = ".node-home"
+	itemFileCreateMode          = 0o600
+	itemFileMountMode           = 0o444
+	itemFileStagingDirPattern   = "spt-items-*"
 	nodeLogDirPattern           = "spt-node-logs-*"
 )
 
@@ -80,6 +83,7 @@ type DockerManager struct {
 	diagnosticsRec      *diagnosticsRecord
 	diagnosticsStopDone bool
 	fileMounts          []scenario.FileMount
+	itemFileStagingDir  string
 }
 
 // HasManagedResources reports container or remote staging ownership after cleanup.
@@ -87,7 +91,7 @@ func (dm *DockerManager) HasManagedResources() bool {
 	if dm.remote != nil {
 		return dm.remote.HasManagedResources()
 	}
-	return dm.containerID != ""
+	return dm.containerID != "" || dm.itemFileStagingDir != ""
 }
 
 func skipImagePull(image string) bool {
@@ -121,10 +125,105 @@ func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 
 // SetFileMountsContext stages external files within the launch lifecycle.
 func (dm *DockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
-	if dm.remote != nil {
-		return dm.remote.SetFileMountsContext(normalizeContext(ctx), mounts)
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	dm.fileMounts = append([]scenario.FileMount(nil), mounts...)
+	if dm.remote != nil {
+		return dm.remote.SetFileMountsContext(ctx, mounts)
+	}
+	if err := dm.cleanupItemFileStagingDir(); err != nil {
+		return err
+	}
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	stagingDir, err := os.MkdirTemp("", itemFileStagingDirPattern)
+	if err != nil {
+		return fmt.Errorf("create local item file staging directory: %w", err)
+	}
+	dm.itemFileStagingDir = stagingDir
+	stagingRoot, err := os.OpenRoot(stagingDir)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("open local item file staging directory: %w", err),
+			dm.cleanupItemFileStagingDir(),
+		)
+	}
+	defer func() { _ = stagingRoot.Close() }()
+	stagedMounts := make([]scenario.FileMount, 0, len(mounts))
+	for _, mount := range mounts {
+		stagedName := filepath.Base(mount.ContainerPath)
+		stagedPath := filepath.Join(stagingDir, stagedName)
+		if err := stageItemFile(ctx, mount.HostPath, stagingRoot, stagedName); err != nil {
+			return errors.Join(
+				fmt.Errorf("stage item file %q: %w", mount.HostPath, err),
+				dm.cleanupItemFileStagingDir(),
+			)
+		}
+		stagedMounts = append(stagedMounts, scenario.FileMount{
+			HostPath:      stagedPath,
+			ContainerPath: mount.ContainerPath,
+		})
+	}
+	dm.fileMounts = stagedMounts
+	return nil
+}
+
+type contextCheckingReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextCheckingReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func stageItemFile(ctx context.Context, sourcePath string, stagingRoot *os.Root, stagedName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err := os.Open(sourcePath) // #nosec G304 -- user-selected item input file
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+
+	staged, err := stagingRoot.OpenFile(stagedName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, itemFileCreateMode)
+	if err != nil {
+		return fmt.Errorf("create staged copy: %w", err)
+	}
+	if _, err = io.Copy(staged, contextCheckingReader{ctx: ctx, reader: source}); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("copy staged file: %w", err)
+	}
+	if err = staged.Close(); err != nil {
+		return fmt.Errorf("close staged file: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err = stagingRoot.Chmod(stagedName, itemFileMountMode); err != nil {
+		return fmt.Errorf("make staged file container-readable: %w", err)
+	}
+	return nil
+}
+
+func (dm *DockerManager) cleanupItemFileStagingDir() error {
+	if dm.itemFileStagingDir == "" {
+		dm.fileMounts = nil
+		return nil
+	}
+	if err := os.RemoveAll(dm.itemFileStagingDir); err != nil {
+		logging.LogWarn("docker", "failed to remove item file staging directory", "path", dm.itemFileStagingDir, "error", err.Error())
+		return fmt.Errorf("remove local item file staging directory %q: %w", dm.itemFileStagingDir, err)
+	}
+	dm.itemFileStagingDir = ""
+	dm.fileMounts = nil
 	return nil
 }
 
@@ -1173,7 +1272,7 @@ func (dm *DockerManager) cleanupContext(ctx context.Context, collectDiagnostics 
 	if dm.containerID == "" {
 		dm.cleanupNodeLogDir()
 		dm.cleanupDiagnosticsDir()
-		return nil
+		return dm.cleanupItemFileStagingDir()
 	}
 
 	logging.LogContainerEvent("stopping", dm.containerID)
@@ -1221,6 +1320,9 @@ func (dm *DockerManager) cleanupContext(ctx context.Context, collectDiagnostics 
 	dm.containerID = ""
 	dm.cleanupNodeLogDir()
 	dm.cleanupDiagnosticsDir()
+	if err := dm.cleanupItemFileStagingDir(); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
 	if err := writeDiagnosticsAggregateManifest(dm.diagnosticsRoot, diagnosticsRecords); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
 	}
@@ -1258,6 +1360,7 @@ func isNoSuchContainer(err error) bool {
 
 // Close cleans up resources
 func (dm *DockerManager) Close() {
+	_ = dm.cleanupItemFileStagingDir()
 	if dm.cancel != nil {
 		dm.cancel()
 	}

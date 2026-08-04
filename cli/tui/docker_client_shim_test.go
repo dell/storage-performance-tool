@@ -149,10 +149,145 @@ func TestEnsureImageAvailable_DevImagePresent(t *testing.T) {
 	}
 }
 
-func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
+func TestSetFileMountsStagesContainerReadableCopy(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	content := []byte("item-1\nitem-2\n")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	mount := scenario.FileMount{HostPath: sourcePath, ContainerPath: "/spt-input/items/read-items.csv"}
+	if err := dm.SetFileMounts([]scenario.FileMount{mount}); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+	if len(dm.fileMounts) != 1 {
+		t.Fatalf("staged mounts = %d, want 1", len(dm.fileMounts))
+	}
+	stagedPath := dm.fileMounts[0].HostPath
+	if stagedPath == sourcePath {
+		t.Fatal("SetFileMounts() retained restrictive source path instead of staging a copy")
+	}
+	if dm.fileMounts[0].ContainerPath != mount.ContainerPath {
+		t.Fatalf("container path = %q, want %q", dm.fileMounts[0].ContainerPath, mount.ContainerPath)
+	}
+	got, err := os.ReadFile(stagedPath)
+	if err != nil {
+		t.Fatalf("read staged items file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("staged content = %q, want %q", got, content)
+	}
+	stagedInfo, err := os.Stat(stagedPath)
+	if err != nil {
+		t.Fatalf("stat staged items file: %v", err)
+	}
+	if gotMode := stagedInfo.Mode().Perm(); gotMode != itemFileMountMode {
+		t.Fatalf("staged mode = %04o, want %04o", gotMode, itemFileMountMode)
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatalf("stat source items file: %v", err)
+	}
+	if gotMode := sourceInfo.Mode().Perm(); gotMode != 0o600 {
+		t.Fatalf("source mode changed to %04o, want 0600", gotMode)
+	}
+
+	stagingDir := dm.itemFileStagingDir
+	if err := dm.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Fatalf("staging directory still exists after cleanup: %v", err)
+	}
+}
+
+func TestSetFileMountsFailureDoesNotRetainPartialState(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	mounts := []scenario.FileMount{
+		{HostPath: sourcePath, ContainerPath: "/spt-input/items/read-items.csv"},
+		{HostPath: filepath.Join(t.TempDir(), "missing.csv"), ContainerPath: "/spt-input/items/mixed-read-items.csv"},
+	}
+	if err := dm.SetFileMounts(mounts); err == nil {
+		t.Fatal("SetFileMounts() error = nil, want staging failure")
+	}
+	if dm.itemFileStagingDir != "" || len(dm.fileMounts) != 0 {
+		t.Fatalf("partial staging state retained: dir=%q mounts=%v", dm.itemFileStagingDir, dm.fileMounts)
+	}
+}
+
+func TestSetFileMountsContextRejectsCanceledContextBeforeStaging(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := dm.SetFileMountsContext(ctx, []scenario.FileMount{{
+		HostPath:      sourcePath,
+		ContainerPath: "/spt-input/items/read-items.csv",
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetFileMountsContext() error = %v, want context.Canceled", err)
+	}
+	if dm.HasManagedResources() || dm.itemFileStagingDir != "" || len(dm.fileMounts) != 0 {
+		t.Fatalf("canceled staging retained resources: dir=%q mounts=%v", dm.itemFileStagingDir, dm.fileMounts)
+	}
+}
+
+func TestLocalItemFileStagingRetainedUntilContainerRemovalSucceeds(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	removeErr := errors.New("injected container removal failure")
+	client := &fakeDockerClient{removeErr: removeErr}
+	dm := &DockerManager{client: client, ctx: context.Background(), containerID: "abc"}
+	if err := dm.SetFileMounts([]scenario.FileMount{{
+		HostPath:      sourcePath,
+		ContainerPath: "/spt-input/items/read-items.csv",
+	}}); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+	stagingDir := dm.itemFileStagingDir
+
+	if err := dm.CleanupResourcesContext(context.Background()); !errors.Is(err, removeErr) {
+		t.Fatalf("first cleanup error = %v, want %v", err, removeErr)
+	}
+	if !dm.HasManagedResources() {
+		t.Fatal("failed cleanup relinquished staged-input ownership")
+	}
+	if _, err := os.Stat(stagingDir); err != nil {
+		t.Fatalf("staging directory was removed before container cleanup succeeded: %v", err)
+	}
+
+	client.removeErr = nil
+	if err := dm.CleanupResourcesContext(context.Background()); err != nil {
+		t.Fatalf("retry cleanup error = %v", err)
+	}
+	if dm.HasManagedResources() {
+		t.Fatal("successful cleanup retained managed resources")
+	}
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Fatalf("staging directory still exists after successful retry: %v", err)
+	}
+}
+
+func TestStartContainerInNodeModeMountsStagedItemFile(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
 	f := &fakeDockerClient{}
 	dm := &DockerManager{client: f, ctx: context.Background()}
-	mounts := []scenario.FileMount{{HostPath: "/host/items.csv", ContainerPath: "/spt-input/items/read-items.csv"}}
+	t.Cleanup(dm.Close)
+	mounts := []scenario.FileMount{{HostPath: sourcePath, ContainerPath: "/spt-input/items/read-items.csv"}}
 	if err := dm.SetFileMounts(mounts); err != nil {
 
 		t.Fatalf("SetFileMounts() error = %v", err)
@@ -163,9 +298,28 @@ func TestStartContainerInNodeModeMountsItemFiles(t *testing.T) {
 	if f.createHostConfig == nil {
 		t.Fatal("ContainerCreate host config was nil")
 	}
-	want := "/host/items.csv:/spt-input/items/read-items.csv:ro"
+	want := dm.fileMounts[0].HostPath + ":/spt-input/items/read-items.csv:ro"
 	if !containsString(f.createHostConfig.Binds, want) {
 		t.Fatalf("host binds = %v, want %q", f.createHostConfig.Binds, want)
+	}
+	if strings.Contains(want, sourcePath+":") {
+		t.Fatalf("container bind used restrictive source directly: %q", want)
+	}
+}
+
+func TestCloseCleansItemFileStagingDir(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	if err := dm.SetFileMounts([]scenario.FileMount{{HostPath: sourcePath, ContainerPath: "/spt-input/items/read-items.csv"}}); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+	stagingDir := dm.itemFileStagingDir
+	dm.Close()
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Fatalf("staging directory still exists after close: %v", err)
 	}
 }
 

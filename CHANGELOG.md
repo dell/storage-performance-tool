@@ -19,6 +19,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Legacy deterministic verification prefixes** — Parse only the generated leaf ID after configured prefixes and shards, and fail explicitly when it cannot be decoded instead of silently using offset zero.
 
+## [5.13.1] - 2026-08-04
+
+### Changed
+
+- **Dependency updates** — Updated the GitHub Actions Java setup action.
+
+### Fixed
+
+- **Local saved-items reuse** — Local Docker runs now stage restrictive `items.csv` inputs as container-readable, read-only copies, allowing root-owned `0600` artifacts produced by `--save-items` to be reused with `--items-file`, `--read-items-file`, or `--delete-items-file` without changing the original file permissions.
+
 ## [5.13.0] - 2026-07-27
 
 ### Added
