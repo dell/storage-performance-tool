@@ -124,10 +124,17 @@ func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	if err != nil {
 		return fmt.Errorf("create local item file staging directory: %w", err)
 	}
+	stagingRoot, err := os.OpenRoot(stagingDir)
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("open local item file staging directory: %w", err)
+	}
+	defer func() { _ = stagingRoot.Close() }()
 	stagedMounts := make([]scenario.FileMount, 0, len(mounts))
 	for _, mount := range mounts {
-		stagedPath := filepath.Join(stagingDir, filepath.Base(mount.ContainerPath))
-		if err := stageItemFile(mount.HostPath, stagedPath); err != nil {
+		stagedName := filepath.Base(mount.ContainerPath)
+		stagedPath := filepath.Join(stagingDir, stagedName)
+		if err := stageItemFile(mount.HostPath, stagingRoot, stagedName); err != nil {
 			_ = os.RemoveAll(stagingDir)
 			return fmt.Errorf("stage item file %q: %w", mount.HostPath, err)
 		}
@@ -141,14 +148,14 @@ func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	return nil
 }
 
-func stageItemFile(sourcePath, stagedPath string) error {
+func stageItemFile(sourcePath string, stagingRoot *os.Root, stagedName string) error {
 	source, err := os.Open(sourcePath) // #nosec G304 -- user-selected item input file
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
 	}
 	defer func() { _ = source.Close() }()
 
-	staged, err := os.OpenFile(stagedPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, itemFileCreateMode)
+	staged, err := stagingRoot.OpenFile(stagedName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, itemFileCreateMode)
 	if err != nil {
 		return fmt.Errorf("create staged copy: %w", err)
 	}
@@ -159,7 +166,7 @@ func stageItemFile(sourcePath, stagedPath string) error {
 	if err = staged.Close(); err != nil {
 		return fmt.Errorf("close staged file: %w", err)
 	}
-	if err = os.Chmod(stagedPath, itemFileMountMode); err != nil {
+	if err = stagingRoot.Chmod(stagedName, itemFileMountMode); err != nil {
 		return fmt.Errorf("make staged file container-readable: %w", err)
 	}
 	return nil
