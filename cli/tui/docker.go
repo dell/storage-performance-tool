@@ -43,6 +43,9 @@ const (
 	dockerNodeModeArg           = "--run-node=true"
 	dockerNodeLogMount          = "/spt-node-logs"
 	dockerNodeLogResultsDirName = ".node-home"
+	itemFileCreateMode          = 0o600
+	itemFileMountMode           = 0o444
+	itemFileStagingDirPattern   = "spt-items-*"
 	nodeLogDirPattern           = "spt-node-logs-*"
 )
 
@@ -80,6 +83,7 @@ type DockerManager struct {
 	diagnosticsRec      *diagnosticsRecord
 	diagnosticsStopDone bool
 	fileMounts          []scenario.FileMount
+	itemFileStagingDir  string
 }
 
 func skipImagePull(image string) bool {
@@ -111,8 +115,65 @@ func (dm *DockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	if dm.remote != nil {
 		return dm.remote.SetFileMounts(mounts)
 	}
-	dm.fileMounts = append([]scenario.FileMount(nil), mounts...)
+	dm.cleanupItemFileStagingDir()
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	stagingDir, err := os.MkdirTemp("", itemFileStagingDirPattern)
+	if err != nil {
+		return fmt.Errorf("create local item file staging directory: %w", err)
+	}
+	stagedMounts := make([]scenario.FileMount, 0, len(mounts))
+	for _, mount := range mounts {
+		stagedPath := filepath.Join(stagingDir, filepath.Base(mount.ContainerPath))
+		if err := stageItemFile(mount.HostPath, stagedPath); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("stage item file %q: %w", mount.HostPath, err)
+		}
+		stagedMounts = append(stagedMounts, scenario.FileMount{
+			HostPath:      stagedPath,
+			ContainerPath: mount.ContainerPath,
+		})
+	}
+	dm.fileMounts = stagedMounts
+	dm.itemFileStagingDir = stagingDir
 	return nil
+}
+
+func stageItemFile(sourcePath, stagedPath string) error {
+	source, err := os.Open(sourcePath) // #nosec G304 -- user-selected item input file
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+
+	staged, err := os.OpenFile(stagedPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, itemFileCreateMode)
+	if err != nil {
+		return fmt.Errorf("create staged copy: %w", err)
+	}
+	if _, err = io.Copy(staged, source); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("copy staged file: %w", err)
+	}
+	if err = staged.Close(); err != nil {
+		return fmt.Errorf("close staged file: %w", err)
+	}
+	if err = os.Chmod(stagedPath, itemFileMountMode); err != nil {
+		return fmt.Errorf("make staged file container-readable: %w", err)
+	}
+	return nil
+}
+
+func (dm *DockerManager) cleanupItemFileStagingDir() {
+	dm.fileMounts = nil
+	if dm.itemFileStagingDir == "" {
+		return
+	}
+	if err := os.RemoveAll(dm.itemFileStagingDir); err != nil {
+		logging.LogWarn("docker", "failed to remove item file staging directory", "path", dm.itemFileStagingDir, "error", err.Error())
+	}
+	dm.itemFileStagingDir = ""
 }
 
 func (dm *DockerManager) itemFileBindSpecs() []string {
@@ -1094,6 +1155,7 @@ func (dm *DockerManager) Cleanup() error {
 	}
 	defer dm.cleanupNodeLogDir()
 	defer dm.cleanupDiagnosticsDir()
+	defer dm.cleanupItemFileStagingDir()
 	if dm.containerID == "" {
 		return nil
 	}
@@ -1178,6 +1240,7 @@ func isNoSuchContainer(err error) bool {
 
 // Close cleans up resources
 func (dm *DockerManager) Close() {
+	dm.cleanupItemFileStagingDir()
 	if dm.cancel != nil {
 		dm.cancel()
 	}
