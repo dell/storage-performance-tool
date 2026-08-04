@@ -138,7 +138,7 @@ lint:
 	LEAST=$$(printf '%s\n' "$$MIN_VER" "$$ACTUAL_VER" | sort -V | head -n1); \
 	if [ "$$LEAST" != "$$MIN_VER" ]; then echo "golangci-lint $$ACTUAL_VER is too old; require $$MIN_VER+"; exit 1; fi
 	@echo "\n▶ Lint: production (full set incl. unused)"; \
-	if [ "${LINT_STRICT:-0}" = "1" ]; then \
+	if [ "$${LINT_STRICT:-0}" = "1" ]; then \
 		EXTRA_OPTS=""; \
 		echo "(strict mode) running full production linters"; \
 	else \

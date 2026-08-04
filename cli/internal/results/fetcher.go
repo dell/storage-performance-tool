@@ -21,7 +21,11 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
-const fileStatusMissing = "missing"
+const (
+	fileStatusError   = "error"
+	fileStatusMissing = "missing"
+	fileStatusOK      = "ok"
+)
 
 var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle)\.node-[0-9]{3}\.csv$`)
 
@@ -269,7 +273,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		if err != nil {
 			status := fileStatusMissing
 			if !errors.Is(err, errNotFound) {
-				status = "error"
+				status = fileStatusError
 			}
 			sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: status, Error: err.Error()})
 			continue
@@ -281,7 +285,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 			size, sanitizeErr = sanitizeConfigArtifact(outPath)
 			if sanitizeErr != nil {
 				_ = os.Remove(outPath)
-				sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: "error", Error: sanitizeErr.Error()})
+				sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: fileStatusError, Error: sanitizeErr.Error()})
 				continue
 			}
 		case constants.ResultsArtifactSuffixExtResults:
@@ -289,7 +293,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		case constants.ResultsArtifactSuffixExtResultsThreshold:
 			size = normalizeResultXML(outPath, "result-with-threshold")
 		}
-		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: "ok", Modified: idxItem.Modified, ContentType: idxItem.ContentType})
+		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: fileStatusOK, Modified: idxItem.Modified, ContentType: idxItem.ContentType})
 	}
 	// Preserve every distributed integrity source as step-prefixed evidence. Canonical artifacts
 	// remain handled by the fixed registry above; these dynamically discovered files are never
@@ -306,10 +310,10 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		name := fmt.Sprintf("%s.%s", stepID, logger)
 		size, err := f.downloadOne(ctx, stepID, logger, filepath.Join(f.OutputDir, name), item.Size)
 		if err != nil {
-			sm.Files = append(sm.Files, FileStatus{Name: name, Status: "error", Error: err.Error()})
+			sm.Files = append(sm.Files, FileStatus{Name: name, Status: fileStatusError, Error: err.Error()})
 			continue
 		}
-		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: "ok", Modified: item.Modified, ContentType: item.ContentType})
+		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: fileStatusOK, Modified: item.Modified, ContentType: item.ContentType})
 	}
 	return sm
 }
