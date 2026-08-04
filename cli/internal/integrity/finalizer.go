@@ -68,6 +68,9 @@ type FinalizeOptions struct {
 
 // FinalizeOutcome is the integrity-specific machine outcome used by console reporting and exit policy.
 type FinalizeOutcome struct {
+	SelectionCountsValid       bool                                `json:"selection_counts_valid"`
+	SelectionSourceCount       int64                               `json:"selection_source_count"`
+	SelectionUniqueCount       int64                               `json:"selection_unique_count"`
 	SelectionCount             int64                               `json:"selection_count"`
 	VerificationAttemptedCount int64                               `json:"verification_attempted_count"`
 	VerifiedCount              int64                               `json:"verified_count"`
@@ -253,6 +256,9 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			inputCompletion.UniqueRecordCount != inputCompletion.SelectedRecordCount) {
 		return outcome, fmt.Errorf("%s completion counts must match for CREATE output", inputName)
 	}
+	outcome.SelectionCountsValid = true
+	outcome.SelectionSourceCount = int64(inputCompletion.SourceRecordCount)
+	outcome.SelectionUniqueCount = int64(inputCompletion.UniqueRecordCount)
 	outcome.SelectionCount = int64(inputCompletion.SelectedRecordCount)
 	if options.Workload == workload.WriteVerify {
 		createCounts, countsErr := readOperationMetrics(options.ResultsRoot, createStep, "CREATE")
@@ -347,6 +353,9 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 func integritySummary(outcome FinalizeOutcome, finalErr error) *results.IntegritySummary {
 	summary := &results.IntegritySummary{
 		Complete:                   outcome.Complete,
+		SelectionCountsValid:       outcome.SelectionCountsValid,
+		SelectionSourceCount:       outcome.SelectionSourceCount,
+		SelectionUniqueCount:       outcome.SelectionUniqueCount,
 		SelectionCount:             outcome.SelectionCount,
 		VerificationAttemptedCount: outcome.VerificationAttemptedCount,
 		VerifiedCount:              outcome.VerifiedCount,

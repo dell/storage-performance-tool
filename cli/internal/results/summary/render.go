@@ -27,6 +27,7 @@ const (
 	defaultMaxWidth       = 100
 	defaultSnippetLineCap = 40
 	headerIOPSAvg         = "IOPS Avg"
+	notApplicableCell     = "—"
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
@@ -218,6 +219,10 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	digest := integrity.DigestPerformance
 	fmt.Fprintf(b, "Integrity Verification\n")
 	r.writeBullet(b, "Finalization", map[bool]string{true: "complete", false: "incomplete"}[integrity.Complete])
+	if integrity.SelectionCountsValid && hasListStep(summary) {
+		r.writeBullet(b, "Discovery", fmt.Sprintf("source %d, unique %d, selected %d",
+			integrity.SelectionSourceCount, integrity.SelectionUniqueCount, integrity.SelectionCount))
+	}
 	if integrity.FinalizationError != "" {
 		r.writeBullet(b, "Finalization error", integrity.FinalizationError)
 	}
@@ -238,9 +243,8 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 
 func (r *Renderer) performanceTable(summary *RunSummary) string {
 	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerTTFBP50, headerBandwidthAvg}
-	isList := strings.EqualFold(summary.Workload.Type, workloadTypeList)
-	if isList {
-		headers[4] = "Ops/s Avg"
+	if hasListStep(summary) {
+		headers[4] = "Rate Avg"
 	}
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
@@ -249,25 +253,44 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		}
 		m := step.Metrics
 		sizeCell := nonEmpty(m.ObjectSizeHuman, summary.Workload.ObjectSizeHuman)
+		dataCell := formatBytesHuman(m.DataBytes)
+		bandwidthCell := formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond)
+		rateCell := formatNumber(m.ThroughputAvgOps, "ops/s")
+		if strings.EqualFold(step.Operation, workloadTypeList) {
+			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
+			rateCell = formatNumber(m.ThroughputAvgOps, "objects/s")
+		}
 		if strings.TrimSpace(sizeCell) == "" {
-			sizeCell = "—"
+			sizeCell = notApplicableCell
 		}
 		row := []string{
 			step.PhaseLabel,
 			sizeCell,
 			formatInt(m.SuccessCount),
-			formatBytesHuman(m.DataBytes),
-			formatNumber(m.ThroughputAvgOps, "ops/s"),
+			dataCell,
+			rateCell,
 			mixedLatencyCell(step, m),
 			mixedTTFBCell(step, m),
-			formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond),
+			bandwidthCell,
 		}
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—", "—"})
+		rows = append(rows, []string{notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func hasListStep(summary *RunSummary) bool {
+	if summary == nil {
+		return false
+	}
+	for _, step := range summary.Steps {
+		if strings.EqualFold(step.Operation, workloadTypeList) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
@@ -505,7 +528,7 @@ func mixedTTFBCell(step StepSummary, metrics *PhaseMetrics) string {
 
 func formatTTFBNumber(value float64) string {
 	if value <= 0 {
-		return "—"
+		return notApplicableCell
 	}
 	return formatNumber(value, "ms")
 }

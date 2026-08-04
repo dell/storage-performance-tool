@@ -97,6 +97,9 @@ type Manifest struct {
 type IntegritySummary struct {
 	Complete                   bool                        `json:"complete"`
 	FinalizationError          string                      `json:"finalization_error,omitempty"`
+	SelectionCountsValid       bool                        `json:"selection_counts_valid"`
+	SelectionSourceCount       int64                       `json:"selection_source_count"`
+	SelectionUniqueCount       int64                       `json:"selection_unique_count"`
 	SelectionCount             int64                       `json:"selection_count"`
 	VerificationAttemptedCount int64                       `json:"verification_attempted_count"`
 	VerifiedCount              int64                       `json:"verified_count"`

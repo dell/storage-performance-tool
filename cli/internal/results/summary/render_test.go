@@ -244,15 +244,20 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 		Steps: []StepSummary{
 			{
 				PhaseLabel: "List",
+				Operation:  "LIST",
 				Metrics: &PhaseMetrics{
 					SuccessCount:      128,
 					ThroughputAvgOps:  256.4,
 					LatencyHeadlineMs: 12.5,
-					BandwidthAvgMiBps: 0,
+					BandwidthAvgMiBps: 512,
 				},
 			},
 		},
 		Totals: RunTotals{DurationHuman: "12.0s"},
+		Integrity: &results.IntegritySummary{
+			Complete: true, SelectionCountsValid: true,
+			SelectionSourceCount: 384, SelectionUniqueCount: 128, SelectionCount: 128,
+		},
 	}
 
 	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
@@ -260,8 +265,11 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 
 	mustContain(t, report, "• Object size        not applicable")
 	mustContain(t, report, "• Prefix             daily/")
-	mustContain(t, report, "Ops/s Avg")
+	mustContain(t, report, "Rate Avg")
+	mustContain(t, report, "256 objects/s")
+	mustContain(t, report, "source 384, unique 128, selected 128")
 
+	mustNotContain(t, report, "512 MiB/s")
 	table := renderer.performanceTable(summary)
 	if !strings.Contains(table, "—") {
 		t.Fatalf("expected object size column to use em dash, got:\n%s", table)

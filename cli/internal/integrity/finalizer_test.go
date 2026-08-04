@@ -107,6 +107,70 @@ func TestFinalizeWriteVerifyPromotesValidatesAndDerivesRemaining(t *testing.T) {
 		t.Fatalf("step-prefixed evidence was not preserved: %v", err)
 	}
 }
+func TestFinalizeReadVerifyPreservesDiscoveryReconciliationCounts(t *testing.T) {
+	root := t.TempDir()
+	listStep := "mt-001-test-list"
+	readStep := "mt-002-test-verify"
+	writeResultsIndex(t, root, listStep, readStep)
+
+	records := [][]string{canonicalHeader}
+	for i := 0; i < 64; i++ {
+		records = append(records, []string{"b", fmt.Sprintf("object-%03d", i), "1048576", ""})
+	}
+	writeCommittedFixture(t, root, listStep, VerifyInputName, 151, listStep, records)
+	completionPath := filepath.Join(root, listStep+"."+VerifyInputCompletionName)
+	completionData, err := os.ReadFile(completionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completion Completion
+	if err = json.Unmarshal(completionData, &completion); err != nil {
+		t.Fatal(err)
+	}
+	completion.SourceRecordCount = 192
+	completion.UniqueRecordCount = 64
+	completion.SelectedRecordCount = 64
+	completionData, err = json.Marshal(completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(completionPath, completionData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCommittedFixture(t, root, readStep, VerifiedName, 151, readStep, records)
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityFailuresName), [][]string{failureHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityPerformanceName), [][]string{
+		performanceHeader,
+		{"n0", readStep, "s3", "read_verify", "sha256", "64", "67108864", "0.1", "640", "", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
+		{"READ", "64", "0", "0"},
+	})
+
+	outcome, err := FinalizeResults(FinalizeOptions{
+		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 151,
+		StepIDs: []string{listStep, readStep},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.SelectionCountsValid || outcome.SelectionSourceCount != 192 ||
+		outcome.SelectionUniqueCount != 64 || outcome.SelectionCount != 64 {
+		t.Fatalf("unexpected discovery reconciliation counts: %+v", outcome)
+	}
+	manifest, err := readResultsManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Integrity == nil || !manifest.Integrity.SelectionCountsValid ||
+		manifest.Integrity.SelectionSourceCount != 192 ||
+		manifest.Integrity.SelectionUniqueCount != 64 ||
+		manifest.Integrity.SelectionCount != 64 {
+		t.Fatalf("index.json lost discovery reconciliation counts: %+v", manifest.Integrity)
+	}
+}
 
 func TestFinalizeNotStartedReadRecordsIncompleteLifecycleWithoutMissingArtifactNoise(t *testing.T) {
 	root := t.TempDir()

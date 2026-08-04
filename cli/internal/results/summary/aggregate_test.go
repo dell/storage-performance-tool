@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
 func TestFormatBytesUsesIecLabels(t *testing.T) {
@@ -318,6 +319,56 @@ func TestAggregateListWorkloadOmitsObjectSize(t *testing.T) {
 	}
 	if listStep.Metrics.ObjectSizeHuman != "" {
 		t.Fatalf("expected empty per-step object size, got %q", listStep.Metrics.ObjectSizeHuman)
+	}
+}
+func TestAggregateReadVerifyUsesCanonicalListCountsWithoutPayloadTransfer(t *testing.T) {
+	t.Parallel()
+
+	listStepID := "mt-001-test-list"
+	verifyStepID := "mt-002-test-verify"
+	runData := &RunData{
+		RunID:     "mt-test",
+		StepOrder: []string{listStepID, verifyStepID},
+		Steps:     make(map[string]*StepData),
+		Manifest: &results.Manifest{Integrity: &results.IntegritySummary{
+			Complete: true, SelectionCountsValid: true,
+			SelectionSourceCount: 192, SelectionUniqueCount: 64, SelectionCount: 64,
+			VerificationAttemptedCount: 64, VerifiedCount: 64,
+		}},
+		Params: &RunParams{WorkloadType: "read-verify"},
+	}
+	runData.Steps[listStepID] = &StepData{
+		StepID: listStepID, Status: StepStatusComplete,
+		Metrics: &MetricsTotals{StepID: listStepID, Rows: []MetricsTotalsRow{{
+			Operation: "LIST", SuccessCount: 192, SizeBytes: 192 * constants.BytesPerMiB,
+			StepDurationSeconds: 0.152, ThroughputAvgOps: 631, BandwidthAvgMiBps: 631,
+		}}},
+	}
+	runData.Steps[verifyStepID] = &StepData{
+		StepID: verifyStepID, Status: StepStatusComplete,
+		Metrics: &MetricsTotals{StepID: verifyStepID, Rows: []MetricsTotalsRow{{
+			Operation: "READ", SuccessCount: 64, SizeBytes: 64 * constants.BytesPerMiB,
+			StepDurationSeconds: 0.184, ThroughputAvgOps: 280, BandwidthAvgMiBps: 280,
+		}}},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listMetrics := summary.Steps[0].Metrics
+	if listMetrics.SuccessCount != 64 {
+		t.Fatalf("LIST success = %d, want canonical selected count 64", listMetrics.SuccessCount)
+	}
+	if listMetrics.DataBytes != 0 || listMetrics.BandwidthAvgMiBps != 0 || listMetrics.HasDataTransfer {
+		t.Fatalf("LIST logical sizes leaked into transfer metrics: %+v", listMetrics)
+	}
+	wantRate := float64(64) / 0.152
+	if listMetrics.ThroughputAvgOps < wantRate-0.001 || listMetrics.ThroughputAvgOps > wantRate+0.001 {
+		t.Fatalf("LIST canonical object rate = %f, want %f", listMetrics.ThroughputAvgOps, wantRate)
+	}
+	if summary.Totals.DataBytes != 64*constants.BytesPerMiB {
+		t.Fatalf("total data moved = %d, want READ payload only", summary.Totals.DataBytes)
 	}
 }
 

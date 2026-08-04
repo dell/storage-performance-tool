@@ -197,7 +197,7 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 	summary.Workload = workload
 	summary.Warnings = append(summary.Warnings, workloadWarnings...)
 
-	steps, totals, stepWarnings := buildStepSummaries(data, workload)
+	steps, totals, stepWarnings := buildStepSummaries(data, workload, summary.Integrity)
 	summary.Steps = steps
 	summary.Totals = totals
 	summary.Warnings = append(summary.Warnings, stepWarnings...)
@@ -273,7 +273,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	return summary, warnings
 }
 
-func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary, RunTotals, []string) {
+func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *results.IntegritySummary) ([]StepSummary, RunTotals, []string) {
 	steps := make([]StepSummary, 0, len(data.StepOrder))
 	totals := RunTotals{}
 	warnings := make([]string, 0)
@@ -306,6 +306,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 			warnings = append(warnings, mixedWarnings...)
 		} else {
 			metrics = deriveMetrics(stepData, workload.ObjectSizeBytes)
+		}
+		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
+			normalizeListMetrics(metrics, integrity)
 		}
 		if metrics != nil {
 			summary.Metrics = metrics
@@ -625,6 +628,27 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
 	}
 	return metrics
+}
+
+// normalizeListMetrics keeps discovery cardinality separate from payload-transfer accounting.
+// Engine LIST totals count distributed object emissions; once canonical selection evidence is
+// available, the run summary reports the deduplicated, post-cap candidate count instead.
+func normalizeListMetrics(metrics *PhaseMetrics, integrity *results.IntegritySummary) {
+	metrics.DataBytes = 0
+	metrics.DataMiB = 0
+	metrics.DataGiB = 0
+	metrics.HasDataTransfer = false
+	metrics.BandwidthAvgMiBps = 0
+	metrics.BandwidthLastMiBps = 0
+	if integrity == nil || !integrity.SelectionCountsValid {
+		return
+	}
+	metrics.SuccessCount = integrity.SelectionCount
+	metrics.ThroughputAvgOps = 0
+	metrics.ThroughputLastOps = 0
+	if metrics.DurationSeconds > 0 {
+		metrics.ThroughputAvgOps = float64(integrity.SelectionCount) / metrics.DurationSeconds
+	}
 }
 
 func preferredLatencyMicros(row MetricsTotalsRow) float64 {
