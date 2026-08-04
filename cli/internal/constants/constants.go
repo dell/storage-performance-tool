@@ -81,6 +81,7 @@ const (
 	JavaOptsEnvVar           = "JAVA_OPTS"
 	JavaToolOptionsEnvVar    = "JAVA_TOOL_OPTIONS"
 	JavaRMIHostnamePrefix    = "-Djava.rmi.server.hostname="
+	ManagedContainerLogRoot  = "/tmp/spt-node-home"
 	SptNodeCommand           = "--run-node"
 
 	DockerLabelManaged = "spt.managed"

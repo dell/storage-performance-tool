@@ -68,6 +68,60 @@ func (e *blockingRemoteExecutor) CopyFromHost(
 	return ctx.Err()
 }
 
+func TestRemoteDockerManagedLaunchesRedirectLogsOutsidePayload(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "")
+	if constants.ManagedContainerLogRoot == constants.IntegrityPayloadRoot ||
+		strings.HasPrefix(constants.ManagedContainerLogRoot, constants.IntegrityPayloadRoot+"/") {
+		t.Fatalf("managed log root %q is inside integrity payload %q",
+			constants.ManagedContainerLogRoot, constants.IntegrityPayloadRoot)
+	}
+
+	tests := []struct {
+		name   string
+		launch func(*RemoteDockerManager) (string, error)
+	}{
+		{
+			name: "node",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartContainerInNodeMode(
+					constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil)
+			},
+		},
+		{
+			name: "worker",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartWorkerNodeContainer(
+					constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil)
+			},
+		},
+		{
+			name: "entry",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartEntryNodeContainer(
+					constants.DefaultSptImage, []string{"w1:1099"}, nil, constants.DefaultNetworkMode)
+			},
+		},
+	}
+
+	want := "-e " + constants.EnvSptLogDir + "=" + constants.ManagedContainerLogRoot
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, mock, _ := newTestRemoteManager(t)
+			if _, err := tc.launch(mgr); err != nil {
+				t.Fatalf("launch error: %v", err)
+			}
+			executed := mock.GetExecutedCommandsMatching("docker run")
+			if len(executed) != 1 {
+				t.Fatalf("docker run count = %d, want 1", len(executed))
+			}
+			cmd := strings.Join(executed[0].Command, " ")
+			if strings.Count(cmd, want) != 1 {
+				t.Fatalf("docker run command = %q, want exactly one %q", cmd, want)
+			}
+		})
+	}
+}
+
 func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	mgr, mock, _ := newTestRemoteManager(t)
 

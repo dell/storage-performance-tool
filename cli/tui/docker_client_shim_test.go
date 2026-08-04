@@ -578,7 +578,7 @@ func TestDockerManager_PrepareNodeLogCaptureUsesConfiguredResultsRoot(t *testing
 	if len(binds) != 1 || binds[0] != wantDir+":"+dockerNodeLogMount {
 		t.Fatalf("binds = %v, want %q", binds, wantDir+":"+dockerNodeLogMount)
 	}
-	if len(env) != 1 || env[0] != "SPT_LOG_DIR="+dockerNodeLogMount {
+	if len(env) != 1 || env[0] != constants.EnvSptLogDir+"="+dockerNodeLogMount {
 		t.Fatalf("env = %v", env)
 	}
 	info, err := os.Stat(wantDir)
@@ -664,7 +664,7 @@ func TestStartContainerInNodeModeUsesConfiguredNodeLogDir(t *testing.T) {
 	if f.createContainerConfig == nil {
 		t.Fatal("ContainerCreate container config was nil")
 	}
-	if !containsString(f.createContainerConfig.Env, "SPT_LOG_DIR="+dockerNodeLogMount) {
+	if !containsString(f.createContainerConfig.Env, constants.EnvSptLogDir+"="+dockerNodeLogMount) {
 		t.Fatalf("env = %v, want SPT_LOG_DIR", f.createContainerConfig.Env)
 	}
 }

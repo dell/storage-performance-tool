@@ -87,6 +87,19 @@ func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
 	}
 }
 
+// remoteNodeEnvironment keeps mutable engine logs outside the immutable /opt/spt
+// application payload. The optional RMI hostname settings are worker-only.
+func remoteNodeEnvironment(rmiHostname string) map[string]string {
+	env := map[string]string{
+		constants.EnvSptLogDir: constants.ManagedContainerLogRoot,
+	}
+	if rmiHostname != "" {
+		env[constants.JavaOptsEnvVar] = constants.JavaRMIHostnamePrefix + rmiHostname
+		env[constants.JavaToolOptionsEnvVar] = constants.JavaRMIHostnamePrefix + rmiHostname
+	}
+	return env
+}
+
 // newRemoteDockerManagerWithExecutor allows tests to inject a custom executor.
 func newRemoteDockerManagerWithExecutor(host *hostparse.HostInfo, exec command.CommandExecutor) (*RemoteDockerManager, error) {
 	if host == nil {
@@ -312,6 +325,7 @@ func (m *RemoteDockerManager) StartContainerInNodeModeContext(
 		NetworkMode: mode,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleNode),
+		Environment: remoteNodeEnvironment(""),
 		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,
@@ -373,13 +387,10 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 		NetworkMode: command.NetworkModeHost,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleWorker),
-		Environment: map[string]string{
-			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
-			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
-		},
-		Command:    cmd,
-		BindMounts: append(diagnosticBinds, m.stagedBindMounts...),
-		EnvFiles:   envFiles,
+		Environment: remoteNodeEnvironment(advIP),
+		Command:     cmd,
+		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
+		EnvFiles:    envFiles,
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
@@ -441,6 +452,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context
 		NetworkMode: selectedNodeNetworkMode(networkMode),
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleEntry),
+		Environment: remoteNodeEnvironment(""),
 		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,

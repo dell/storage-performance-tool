@@ -12,6 +12,7 @@ const (
 	EnvS3AuthVersion   = "S3_AUTH_VERSION"
 	EnvSkipImagePull   = "SPT_SKIP_IMAGE_PULL"
 	EnvSptJavaOpts     = "SPT_JAVA_OPTS"
+	EnvSptLogDir       = "SPT_LOG_DIR"
 	EnvRdmaEnabled     = "SPT_RDMA"
 	EnvS3Driver        = "SPT_S3_DRIVER"
 	EnvServiceThreads  = "SPT_SERVICE_THREADS"

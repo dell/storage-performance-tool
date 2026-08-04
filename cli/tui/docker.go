@@ -367,7 +367,7 @@ func (dm *DockerManager) prepareNodeLogCapture() ([]string, []string) {
 	}
 	dm.nodeLogDir = dir
 	dm.preserveNodeLogDir = preserve
-	return []string{fmt.Sprintf("%s:%s", dir, dockerNodeLogMount)}, []string{"SPT_LOG_DIR=" + dockerNodeLogMount}
+	return []string{fmt.Sprintf("%s:%s", dir, dockerNodeLogMount)}, []string{constants.EnvSptLogDir + "=" + dockerNodeLogMount}
 }
 
 func (dm *DockerManager) prepareDiagnosticsCapture(role string) []string {
