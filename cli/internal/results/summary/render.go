@@ -28,6 +28,7 @@ const (
 	defaultSnippetLineCap = 40
 	headerIOPSAvg         = "IOPS Avg"
 	notApplicableCell     = "—"
+	objectSizeDiscovered  = "discovered at runtime"
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
@@ -167,10 +168,13 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Workload Configuration\n")
 	r.writeBullet(b, "Workload", titleize(work.Type))
 	isList := strings.EqualFold(work.Type, workloadTypeList)
+	isReadVerify := strings.EqualFold(work.Type, workloadTypeReadVerify)
 	if work.ObjectSizeHuman != "" && !isList {
 		r.writeBullet(b, "Object size", formatObjectSizeBullet(work))
 	} else if isList {
 		r.writeBullet(b, "Object size", "not applicable")
+	} else if isReadVerify {
+		r.writeBullet(b, "Object size", objectSizeDiscovered)
 	}
 	if work.Threads > 0 {
 		r.writeBullet(b, "Threads", fmt.Sprintf("%d", work.Threads))

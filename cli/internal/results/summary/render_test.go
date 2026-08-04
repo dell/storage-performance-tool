@@ -285,6 +285,35 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 	}
 }
 
+func TestRendererReadVerifyDisplaysRuntimeDiscoveredAverageObjectSize(t *testing.T) {
+	t.Parallel()
+
+	summary := &RunSummary{
+		Workload: WorkloadSummary{Type: "read-verify", Threads: 1},
+		Steps: []StepSummary{
+			{PhaseLabel: "List", Operation: "LIST", Metrics: &PhaseMetrics{SuccessCount: 1000}},
+			{
+				PhaseLabel: "Verify", Operation: "READ",
+				Metrics: &PhaseMetrics{
+					ObjectSizeHuman: "1.00 MiB avg", SuccessCount: 1000,
+					DataBytes: 1000 * 1024 * 1024, HasDataTransfer: true,
+				},
+			},
+		},
+		Integrity: &results.IntegritySummary{Complete: true, SelectionCount: 1000, VerifiedCount: 1000},
+	}
+	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
+	report := renderer.FullReport(summary)
+	compact := renderer.CompactSnippet(summary)
+
+	mustContain(t, report, "• Object size        discovered at runtime")
+	mustContain(t, report, "1.00 MiB avg")
+	mustContain(t, compact, "1.00 MiB avg")
+	mustNotContain(t, report, "Object size        0 B")
+	mustNotContain(t, report, "│ Verify │ 0 B")
+	mustNotContain(t, compact, "│ Verify │ 0 B")
+}
+
 func TestRendererFullReportIncludesMixedBreakdown(t *testing.T) {
 	t.Parallel()
 

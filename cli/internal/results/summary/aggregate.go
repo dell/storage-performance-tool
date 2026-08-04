@@ -236,7 +236,11 @@ func buildEnvironmentSummary(data *RunData) EnvironmentSummary {
 	return env
 }
 
-const workloadTypeList = workloadreg.List
+const (
+	workloadTypeList        = workloadreg.List
+	workloadTypeReadVerify  = workloadreg.ReadVerify
+	objectSizeAverageSuffix = " avg"
+)
 
 func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	params := data.Params.ScenarioParams
@@ -250,12 +254,16 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		workloadType = strings.ToLower(strings.TrimSpace(params.WorkloadType))
 	}
 	isList := strings.EqualFold(workloadType, workloadreg.List)
+	objectSizeHuman := ""
+	if strings.TrimSpace(params.ObjectSize) != "" {
+		objectSizeHuman = formatBytes(sizeBytes)
+	}
 	summary := WorkloadSummary{
 		Type:              workloadType,
 		ObjectSizeBytes:   sizeBytes,
 		ObjectSizeMiB:     bytesToMiB(sizeBytes),
 		ObjectSizeGiB:     bytesToGiB(sizeBytes),
-		ObjectSizeHuman:   formatBytes(sizeBytes),
+		ObjectSizeHuman:   objectSizeHuman,
 		ObjectCount:       params.ObjectCount,
 		Threads:           params.Threads,
 		Endpoints:         append([]string(nil), params.Endpoints...),
@@ -626,6 +634,12 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
+	} else if strings.EqualFold(row.Operation, reportOperationRead) && row.SuccessCount > 0 && row.SizeBytes > 0 {
+		averageSizeBytes := int64(math.Round(float64(row.SizeBytes) / float64(row.SuccessCount)))
+		metrics.ObjectSizeBytes = averageSizeBytes
+		metrics.ObjectSizeMiB = bytesToMiB(averageSizeBytes)
+		metrics.ObjectSizeGiB = bytesToGiB(averageSizeBytes)
+		metrics.ObjectSizeHuman = formatBytes(averageSizeBytes) + objectSizeAverageSuffix
 	}
 	return metrics
 }

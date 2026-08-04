@@ -363,6 +363,17 @@ func TestAggregateReadVerifyUsesCanonicalListCountsWithoutPayloadTransfer(t *tes
 	if listMetrics.DataBytes != 0 || listMetrics.BandwidthAvgMiBps != 0 || listMetrics.HasDataTransfer {
 		t.Fatalf("LIST logical sizes leaked into transfer metrics: %+v", listMetrics)
 	}
+	if listMetrics.ObjectSizeHuman != "" {
+		t.Fatalf("LIST object size = %q, want not applicable", listMetrics.ObjectSizeHuman)
+	}
+	if summary.Workload.ObjectSizeHuman != "" {
+		t.Fatalf("unconfigured read-verify object size = %q, want runtime-discovered", summary.Workload.ObjectSizeHuman)
+	}
+	verifyMetrics := summary.Steps[1].Metrics
+	if verifyMetrics.ObjectSizeBytes != constants.BytesPerMiB || verifyMetrics.ObjectSizeHuman != "1.00 MiB avg" {
+		t.Fatalf("Verify observed object size = %d / %q, want 1 MiB average",
+			verifyMetrics.ObjectSizeBytes, verifyMetrics.ObjectSizeHuman)
+	}
 	wantRate := float64(64) / 0.152
 	if listMetrics.ThroughputAvgOps < wantRate-0.001 || listMetrics.ThroughputAvgOps > wantRate+0.001 {
 		t.Fatalf("LIST canonical object rate = %f, want %f", listMetrics.ThroughputAvgOps, wantRate)
