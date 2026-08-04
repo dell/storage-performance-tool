@@ -239,6 +239,92 @@ task createVSCodeLaunch {
 	}
 }
 
+def directJarScenarioSpecs = [
+	[
+		name: 'write-verify',
+		source: file("${rootDir}/core/spt-base/doc/usage/input/scenarios/s3_integrity_write_verify.js"),
+		runCallCount: 2,
+	],
+	[
+		name: 'read-verify',
+		source: file("${rootDir}/core/spt-base/doc/usage/input/scenarios/s3_integrity_read_verify.js"),
+		runCallCount: 1,
+	],
+]
+
+tasks.register('verifyDirectJarScenarioConfigs') {
+	group = 'verification'
+	description = 'Validates direct-JAR integrity scenarios through the packaged Nashorn and Confuse path'
+	dependsOn assembleDist
+
+	inputs.files(directJarScenarioSpecs.collect { it.source })
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	def probeRootProvider = layout.buildDirectory.dir('direct-jar-scenario-config')
+	outputs.dir(probeRootProvider)
+
+	doLast {
+		def probeRoot = probeRootProvider.get().asFile
+		delete probeRoot
+		probeRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+
+		directJarScenarioSpecs.each { scenario ->
+			def source = scenario.source.getText('UTF-8')
+			def actualRunCallCount = source.count('.run();')
+			if (actualRunCallCount != scenario.runCallCount) {
+				throw new GradleException(
+					"${scenario.name} scenario has ${actualRunCallCount} run calls; expected ${scenario.runCallCount}")
+			}
+
+			def marker = "DIRECT_JAR_${scenario.name.toUpperCase().replace('-', '_')}_CONFIG_OK"
+			def probeFile = new File(probeRoot, "${scenario.name}-config-only.js")
+			probeFile.setText(source.replace('.run();', ';') + "\nprint(\"${marker}\");\n", 'UTF-8')
+			def scenarioHome = new File(probeRoot, scenario.name)
+			def scenarioLog = new File(scenarioHome, 'log')
+
+			def execution = providers.exec {
+				workingDir distDir
+				commandLine javaExecutable, '-jar', "${distDir}/${sptJar}", "--run-scenario=${probeFile.absolutePath}"
+				environment(
+					'SPT_HOME': scenarioHome.absolutePath,
+					'SPT_LOG_DIR': scenarioLog.absolutePath,
+					'S3_ENDPOINT': '127.0.0.1',
+					'S3_PORT': '1',
+					'S3_SSL_ENABLED': 'false',
+					'S3_ACCESS_KEY': 'direct-jar-test',
+					'S3_SECRET_KEY': 'direct-jar-test',
+					'S3_BUCKET': 'direct-jar-test',
+					'S3_REGION': 'us-east-1',
+					'INTEGRITY_THREADS': '1',
+					'INTEGRITY_COUNT': '1',
+					'INTEGRITY_OBJECT_SIZE': '1KiB',
+					'INTEGRITY_PREFIX': 'direct-jar-test/',
+					'INTEGRITY_ITEMS_FILE': 'direct-jar-test.csv',
+				)
+				ignoreExitValue = true
+			}
+			def result = execution.result.get()
+			def output = execution.standardOutput.asText.get() + execution.standardError.asText.get()
+			if (result.exitValue != 0 || !output.contains(marker)) {
+				throw new GradleException(
+					"Packaged direct-JAR ${scenario.name} config validation failed (exit ${result.exitValue}):\n${output}")
+			}
+		}
+	}
+}
+
+tasks.register('test') {
+	group = 'verification'
+	description = 'Runs bundle-level tests'
+	dependsOn tasks.named('verifyDirectJarScenarioConfigs')
+}
+
+check.dependsOn tasks.named('test')
+
 // Main build task
 build {
 	dependsOn assembleDist, createRunScript, distZip

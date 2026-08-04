@@ -8,17 +8,22 @@
 // S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, INTEGRITY_THREADS,
 // INTEGRITY_COUNT, INTEGRITY_OBJECT_SIZE, and INTEGRITY_PREFIX.
 
-var ENDPOINT = "%{env:S3_ENDPOINT:=s3.example.com}";
-var PORT = %{env:S3_PORT:=443};
-var SSL_ENABLED = %{env:S3_SSL_ENABLED:=true};
-var ACCESS_KEY = "%{env:S3_ACCESS_KEY:=}";
-var SECRET_KEY = "%{env:S3_SECRET_KEY:=}";
-var BUCKET = "%{env:S3_BUCKET:=qualification}";
-var REGION = "%{env:S3_REGION:=us-east-1}";
-var THREADS = %{env:INTEGRITY_THREADS:=8};
-var COUNT = %{env:INTEGRITY_COUNT:=1000};
-var OBJECT_SIZE = "%{env:INTEGRITY_OBJECT_SIZE:=1MiB}";
-var PREFIX = "%{env:INTEGRITY_PREFIX:=spt-integrity/}";
+function envOrDefault(name, defaultValue) {
+	var value = java.lang.System.getenv(name);
+	return value == null || value.length() == 0 ? defaultValue : String(value);
+}
+
+var ENDPOINT = envOrDefault("S3_ENDPOINT", "s3.example.com");
+var PORT = java.lang.Integer.parseInt(envOrDefault("S3_PORT", "443"));
+var SSL_ENABLED = java.lang.Boolean.parseBoolean(envOrDefault("S3_SSL_ENABLED", "true"));
+var ACCESS_KEY = envOrDefault("S3_ACCESS_KEY", "");
+var SECRET_KEY = envOrDefault("S3_SECRET_KEY", "");
+var BUCKET = envOrDefault("S3_BUCKET", "qualification");
+var REGION = envOrDefault("S3_REGION", "us-east-1");
+var THREADS = java.lang.Integer.parseInt(envOrDefault("INTEGRITY_THREADS", "8"));
+var COUNT = java.lang.Long.parseLong(envOrDefault("INTEGRITY_COUNT", "1000"));
+var OBJECT_SIZE = envOrDefault("INTEGRITY_OBJECT_SIZE", "1MiB");
+var PREFIX = envOrDefault("INTEGRITY_PREFIX", "spt-integrity/");
 
 var createStep = "direct-integrity-create";
 var verifyStep = "direct-integrity-verify";
@@ -30,15 +35,15 @@ var commonS3 = {
 	"storage": {
 		"driver": {"type": "s3", "limit": {"concurrency": THREADS}},
 		"net": {
-			"node": {"addrs": [ENDPOINT], "port": PORT},
+			"node": {"addrs": ENDPOINT, "port": PORT},
 			"ssl": {"enabled": SSL_ENABLED}
 		},
 		"auth": {
 			"uid": ACCESS_KEY,
 			"secret": SECRET_KEY,
-			"version": 4,
-			"region": REGION
-		}
+			"version": 4
+		},
+		"region": REGION
 	}
 };
 

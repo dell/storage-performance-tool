@@ -544,6 +544,13 @@ Use `CreateLoad` and `ReadLoad` with the nested
 content verifier. Flattened `--storage-integrity-*` startup arguments are not a
 supported v1 entry point.
 
+The examples read environment variables directly with `System.getenv`; scenario
+source is not processed for shell-style or `%{env:...}` substitutions. Supply
+`S3_ENDPOINT` as one hostname or address. The scenario passes that scalar to the
+list-valued `storage.net.node.addrs` setting, where the configuration layer
+performs its normal string-to-list conversion. `S3_REGION` maps to
+`storage.region`, not `storage.auth.region`.
+
 Metadata CREATE pre-hashes the final object and places SHA-256 and size metadata
 on the original PUT or multipart-initiation request. Metadata READ hashes a
 complete GET body and records corruption separately from transport failures.
