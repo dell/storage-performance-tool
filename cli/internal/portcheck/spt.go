@@ -20,9 +20,10 @@ import (
 
 // SptAPIClient handles interactions with the Spt REST API
 type SptAPIClient struct {
-	BaseURL    string
-	HTTPClient *http.Client
-	Clock      Clock
+	BaseURL       string
+	HTTPClient    *http.Client
+	Clock         Clock
+	expectedRunID int64
 }
 
 type readinessPayload struct {
@@ -59,6 +60,15 @@ func NewSptAPIClientWithClock(baseURL string, timeout time.Duration, clock Clock
 		c.Clock = clock
 	}
 	return c
+}
+
+// SetExpectedRunID binds shutdown-status evidence to the run owned by the
+// caller. A zero value preserves the legacy unbound behavior.
+func (c *SptAPIClient) SetExpectedRunID(runID int64) {
+	if c == nil {
+		return
+	}
+	c.expectedRunID = runID
 }
 
 // sptRunResponse represents the JSON response from /run endpoint
@@ -266,12 +276,6 @@ func (c *SptAPIClient) getStatusDetail(ctx context.Context) (terminalStatus, err
 	return payload, nil
 }
 
-// getStatusSimple retrieves state from /status endpoint if available.
-func (c *SptAPIClient) getStatusSimple(ctx context.Context) (string, error) {
-	status, err := c.getStatusDetail(ctx)
-	return status.State, err
-}
-
 // Shutdown requests a graceful node shutdown via /shutdown.
 func (c *SptAPIClient) Shutdown(ctx context.Context) error {
 	url := c.BaseURL + "/shutdown"
@@ -296,33 +300,50 @@ func (c *SptAPIClient) Shutdown(ctx context.Context) error {
 	}
 }
 
-// WaitForLinger waits until /status continues to return a terminal state for the given duration.
+// WaitForLinger allows the accepted shutdown to transition through its current
+// active state, then requires attributed terminal/idle status for the remainder
+// of the linger window. A nonterminal state after terminal evidence is a state
+// regression and fails immediately.
 func (c *SptAPIClient) WaitForLinger(ctx context.Context, linger time.Duration) error {
 	if linger <= 0 {
 		return nil
 	}
 	start := c.Clock.Now()
-	// First probe must show a terminal state
 	terminalOnce := false
+	lastState := ""
 	for c.Clock.Now().Sub(start) < linger {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-c.Clock.After(200 * time.Millisecond):
+		case <-c.Clock.After(constants.APILingerPollInterval):
 		}
-		st, err := c.getStatusSimple(ctx)
+		status, err := c.getStatusDetail(ctx)
 		if err != nil {
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
-		switch st {
+		lastState = status.State
+		if c.expectedRunID > 0 && status.State != constants.StateIdle && status.RunID != c.expectedRunID {
+			return fmt.Errorf(
+				"status for run %d does not match the owned run %d",
+				status.RunID, c.expectedRunID)
+		}
+		switch status.State {
 		case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
 			terminalOnce = true
+		case constants.StateStarting, constants.StateInitializing, constants.StateRunning:
+			if terminalOnce {
+				return fmt.Errorf(
+					"non-terminal state after terminal status during linger: %s", status.State)
+			}
 		default:
-			return fmt.Errorf("non-terminal state during linger: %s", st)
+			return fmt.Errorf("unexpected state during linger: %s", status.State)
 		}
 	}
 	if !terminalOnce {
-		return fmt.Errorf("no terminal status observed during linger")
+		if lastState == "" {
+			return fmt.Errorf("no terminal status observed during linger")
+		}
+		return fmt.Errorf("no terminal status observed during linger; last state: %s", lastState)
 	}
 	return nil
 }

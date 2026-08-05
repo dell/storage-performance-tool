@@ -2,8 +2,11 @@ package portcheck
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,5 +80,75 @@ func TestSptAPIClient_Linger_NonTerminalFails(t *testing.T) {
 	_ = c.Shutdown(ctx)
 	if err := c.WaitForLinger(ctx, 200*time.Millisecond); err == nil {
 		t.Fatal("expected linger error for non-terminal state, got nil")
+	}
+}
+
+type advancingLingerClock struct {
+	now time.Time
+}
+
+func (clock *advancingLingerClock) Now() time.Time { return clock.now }
+func (clock *advancingLingerClock) Sleep(duration time.Duration) {
+	clock.now = clock.now.Add(duration)
+}
+func (clock *advancingLingerClock) After(duration time.Duration) <-chan time.Time {
+	clock.now = clock.now.Add(duration)
+	fired := make(chan time.Time, 1)
+	fired <- clock.now
+	return fired
+}
+
+func TestSptAPIClientLingerAllowsOwnedRunningToStoppedTransition(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/status" {
+			http.NotFound(writer, request)
+			return
+		}
+		state := "RUNNING"
+		if statusCalls.Add(1) >= 2 {
+			state = "STOPPED"
+		}
+		_, _ = writer.Write([]byte(fmt.Sprintf(`{"state":%q,"run_id":77}`, state)))
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClientWithClock(server.URL, time.Second, &advancingLingerClock{})
+	client.SetExpectedRunID(77)
+	if err := client.WaitForLinger(context.Background(), 600*time.Millisecond); err != nil {
+		t.Fatalf("RUNNING to STOPPED linger failed: %v", err)
+	}
+}
+
+func TestSptAPIClientLingerRejectsWrongRunAndTerminalRegression(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []string
+		runID    int64
+		want     string
+	}{
+		{name: "wrong run", statuses: []string{"STOPPED"}, runID: 78, want: "does not match the owned run"},
+		{name: "terminal regression", statuses: []string{"STOPPED", "RUNNING"}, runID: 77, want: "after terminal status"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var statusCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				index := int(statusCalls.Add(1)) - 1
+				if index >= len(test.statuses) {
+					index = len(test.statuses) - 1
+				}
+				_, _ = writer.Write([]byte(fmt.Sprintf(
+					`{"state":%q,"run_id":%d}`, test.statuses[index], test.runID)))
+			}))
+			defer server.Close()
+
+			client := NewSptAPIClientWithClock(server.URL, time.Second, &advancingLingerClock{})
+			client.SetExpectedRunID(77)
+			err := client.WaitForLinger(context.Background(), 400*time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WaitForLinger() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

@@ -1180,13 +1180,16 @@ func (c *SptAPIClient) WaitForLinger(linger time.Duration) error {
 	return c.WaitForLingerContext(context.Background(), linger)
 }
 
-// WaitForLingerContext observes terminal status within the caller's cancellation budget.
+// WaitForLingerContext allows shutdown to transition through an attributed
+// active state, then requires terminal/idle status for the remainder of the
+// supplied linger budget.
 func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Duration) error {
 	if linger <= 0 {
 		return nil
 	}
 	deadline := time.Now().Add(linger)
 	sawTerminal := false
+	lastState := ""
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1195,6 +1198,7 @@ func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Dur
 		if err != nil {
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
+		lastState = st.State
 		switch st.State {
 		case constants.StateIdle:
 			// IDLE (including /status 404) is node-level evidence that shutdown
@@ -1207,8 +1211,16 @@ func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Dur
 					st.RunID)
 			}
 			sawTerminal = true
+		case constants.StateStarting, constants.StateInitializing, constants.StateRunning:
+			if c.getRunID() != "" && !c.statusMatchesOwnedRun(st) {
+				return fmt.Errorf(
+					"active status for observed run %q does not match the owned run", st.RunID)
+			}
+			if sawTerminal {
+				return fmt.Errorf("non-terminal state after terminal status during linger: %s", st.State)
+			}
 		default:
-			return fmt.Errorf("non-terminal state during linger: %s", st.State)
+			return fmt.Errorf("unexpected state during linger: %s", st.State)
 		}
 		timer := time.NewTimer(constants.APILingerPollInterval)
 		select {
@@ -1224,7 +1236,10 @@ func (c *SptAPIClient) WaitForLingerContext(ctx context.Context, linger time.Dur
 		}
 	}
 	if !sawTerminal {
-		return fmt.Errorf("no terminal status observed during linger")
+		if lastState == "" {
+			return fmt.Errorf("no terminal status observed during linger")
+		}
+		return fmt.Errorf("no terminal status observed during linger; last state: %s", lastState)
 	}
 	return nil
 }

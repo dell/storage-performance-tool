@@ -18,6 +18,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
@@ -176,6 +177,7 @@ func (f *fakeRunTracker) SetRequireTerminalState(required bool) {
 type cancelAwareRunTracker struct {
 	started chan struct{}
 	exited  chan struct{}
+	result  *portcheck.RunResult
 }
 
 func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []string) (*portcheck.RunResult, error) {
@@ -184,6 +186,9 @@ func (t *cancelAwareRunTracker) WaitForCompletion(ctx context.Context, _ []strin
 	}
 	defer close(t.exited)
 	<-ctx.Done()
+	if t.result != nil {
+		return t.result, ctx.Err()
+	}
 	return &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{}}, ctx.Err()
 }
 
@@ -390,7 +395,7 @@ func TestAutoResultsCleanupOnlySkipsEngineEvidenceAndFinalizes(t *testing.T) {
 	}
 
 	var shutdowns, finalizations, summaries atomic.Int32
-	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool) error {
+	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ int64, _ bool) error {
 		if err := ctx.Err(); err != nil {
 			t.Fatalf("shutdown received canceled context: %v", err)
 		}
@@ -783,7 +788,7 @@ func TestAutoResultsLaunchGateRejectsAllPreSubmissionEvidence(t *testing.T) {
 	}
 	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
 	var shutdowns atomic.Int32
-	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool) error {
 		shutdowns.Add(1)
 		return nil
 	}
@@ -1294,7 +1299,7 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
-	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool) error {
 		return nil
 	}
 	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) error {
@@ -1389,7 +1394,7 @@ func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T
 	}
 
 	var shutdownCalled int32
-	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, bool) error {
+	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool) error {
 		atomic.AddInt32(&shutdownCalled, 1)
 		return nil
 	}
@@ -1542,9 +1547,20 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 		requestShutdownAllFunc = origShutdown
 	}()
 
-	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
-	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
 	stepID := "mt-001-verify"
+	tracker := &cancelAwareRunTracker{exited: make(chan struct{})}
+	var trackerCalls atomic.Int32
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		if trackerCalls.Add(1) == 1 {
+			return tracker
+		}
+		return &fakeRunTracker{result: &portcheck.RunResult{
+			FinalState: constants.StateStopped,
+			Steps: map[string]portcheck.StepCompletion{
+				stepID: {StepID: stepID, Lifecycle: portcheck.StepLifecycleNotStarted, Planned: true},
+			},
+		}}
+	}
 	assertCleanupContext := func(stage string, ctx context.Context, budget time.Duration) {
 		t.Helper()
 		if err := ctx.Err(); err != nil {
@@ -1568,15 +1584,18 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 		assertCleanupContext("fleet discovery", ctx, constants.AutoResultsCancelCleanupTimeout)
 		return nil, nil
 	}
+	var shutdownCalled int32
 	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir, onFetch: func(_ string, _ []string) error {
 			return nil
 		}, onContext: func(ctx context.Context) {
 			assertCleanupContext("artifact fetch", ctx, constants.AutoResultsCancelCleanupTimeout)
+			if atomic.LoadInt32(&shutdownCalled) != 1 {
+				t.Error("artifact salvage started before interrupted shutdown completed")
+			}
 		}}
 	}
-	var shutdownCalled int32
-	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool) error {
+	requestShutdownAllFunc = func(ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ int64, _ bool) error {
 		assertCleanupContext("shutdown", ctx, constants.AutoResultsShutdownTimeout)
 		atomic.AddInt32(&shutdownCalled, 1)
 		return nil
@@ -1606,8 +1625,10 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 
 	select {
 	case outcome := <-done:
-		if !errors.Is(outcome.TrackerErr, context.Canceled) {
-			t.Fatalf("tracker error = %v, want context.Canceled", outcome.TrackerErr)
+		if outcome.TrackerErr != nil || outcome.Tracker == nil ||
+			outcome.Tracker.FinalState != constants.StateStopped ||
+			outcome.Tracker.Steps[stepID].Lifecycle != portcheck.StepLifecycleNotStarted {
+			t.Fatalf("reconciled tracker outcome = %+v, error = %v", outcome.Tracker, outcome.TrackerErr)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("auto-results cleanup did not finish within its bounded budget")
@@ -1778,7 +1799,7 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 	}
 	shutdownStarted := make(chan struct{})
 	requestShutdownAllFunc = func(
-		ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ bool,
+		ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, _ int64, _ bool,
 	) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(errors.New("shutdown received exhausted context"), err)
@@ -1868,5 +1889,156 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 	}
 	if !stored.Lifecycle.Summary.Started || !stored.Lifecycle.Summary.Completed {
 		t.Fatalf("stored summary phase = %+v, want completed", stored.Lifecycle.Summary)
+	}
+}
+
+func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *testing.T) {
+	origRunTracker := newRunTrackerFunc
+	origDiscover := discoverStepIDsFunc
+	origFleetDiscover := discoverFleetStepIDsFunc
+	origFetcher := newResultsFetcherFunc
+	origSummary := generateRunSummaryFunc
+	origShutdown := requestShutdownAllFunc
+	t.Cleanup(func() {
+		newRunTrackerFunc = origRunTracker
+		discoverStepIDsFunc = origDiscover
+		discoverFleetStepIDsFunc = origFleetDiscover
+		newResultsFetcherFunc = origFetcher
+		generateRunSummaryFunc = origSummary
+		requestShutdownAllFunc = origShutdown
+	})
+
+	const runID = int64(77)
+	const createStep = "mt-001-create"
+	const readStep = "mt-002-verify"
+	const cleanupStep = "mt-003-delete"
+	initialTracker := &cancelAwareRunTracker{
+		exited: make(chan struct{}),
+		result: &portcheck.RunResult{
+			FinalState: constants.StateRunning,
+			RunID:      runID,
+			Steps: map[string]portcheck.StepCompletion{
+				createStep:  {StepID: createStep, Lifecycle: portcheck.StepLifecycleStarted, Planned: true, Started: true},
+				readStep:    {StepID: readStep, Lifecycle: portcheck.StepLifecyclePlanned, Planned: true},
+				cleanupStep: {StepID: cleanupStep, Lifecycle: portcheck.StepLifecyclePlanned, Planned: true},
+			},
+		},
+	}
+	var trackerCalls atomic.Int32
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		if trackerCalls.Add(1) == 1 {
+			return initialTracker
+		}
+		return &fakeRunTracker{result: &portcheck.RunResult{
+			FinalState: constants.StateStopped,
+			RunID:      runID,
+			Steps: map[string]portcheck.StepCompletion{
+				createStep:  {StepID: createStep, Lifecycle: portcheck.StepLifecycleNotStarted, Planned: true},
+				readStep:    {StepID: readStep, Lifecycle: portcheck.StepLifecycleNotStarted, Planned: true},
+				cleanupStep: {StepID: cleanupStep, Lifecycle: portcheck.StepLifecycleNotStarted, Planned: true},
+			},
+		}}
+	}
+	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return []string{createStep}, nil
+	}
+	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+		return nil, nil
+	}
+
+	var shutdownFinished atomic.Bool
+	requestShutdownAllFunc = func(
+		ctx context.Context, _ []*hostparse.HostInfo, _ string, _ time.Duration, expectedRunID int64, _ bool,
+	) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if expectedRunID != runID {
+			t.Errorf("shutdown expected run ID = %d, want %d", expectedRunID, runID)
+		}
+		shutdownFinished.Store(true)
+		return nil
+	}
+
+	resultsRoot := t.TempDir()
+	var fetchCalls atomic.Int32
+	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
+		return &fakeFetcher{output: outputDir, onFetch: func(output string, stepIDs []string) error {
+			if !shutdownFinished.Load() {
+				t.Error("verification artifact salvage started before shutdown reconciliation")
+			}
+			if strings.Join(stepIDs, ",") != createStep {
+				t.Errorf("fetched step IDs = %v, want only started CREATE", stepIDs)
+			}
+			fetchCalls.Add(1)
+			manifest := results.Manifest{
+				BaseURL: "http://example", OutputDir: output, GeneratedAt: time.Now().UTC(),
+				Steps: []results.StepManifest{{StepID: createStep}},
+			}
+			data, err := json.MarshalIndent(manifest, "", "  ")
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(output, constants.ResultsManifestFileName), data, 0o600)
+		}}
+	}
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+
+	producer := &integrityplan.PlannedStep{ID: createStep, Number: 1, Role: integrityplan.StepRoleCreate}
+	cleanup := &integrityplan.PlannedStep{ID: cleanupStep, Number: 3, Role: integrityplan.StepRoleCleanup}
+	plan := integrityplan.Plan{
+		RunID: runID, Workload: scenario.WorkloadTypeWriteVerify, Kind: integrityplan.PlanKindWriteRead,
+		Producer: producer,
+		Verifier: integrityplan.PlannedStep{ID: readStep, Number: 2, Role: integrityplan.StepRoleVerify},
+		Cleanup:  cleanup, Input: integrityplan.InputWritten,
+	}
+	options := &integrity.FinalizeOptions{
+		RunID: runID, Workload: scenario.WorkloadTypeWriteVerify, Plan: plan,
+	}
+	metadata := &runMetadata{ResultsRoot: resultsRoot}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startAutoResults(
+		ctx, "http://example", "mt", t.TempDir(), []string{createStep, readStep, cleanupStep},
+		false, nil, "9999", true, 1, "", metadata, io.Discard, io.Discard, "", nil, options)
+	cancel()
+
+	select {
+	case outcome := <-done:
+		if outcome.TrackerErr != nil || outcome.Tracker == nil ||
+			outcome.Tracker.FinalState != constants.StateStopped {
+			t.Fatalf("tracker = %+v, error = %v", outcome.Tracker, outcome.TrackerErr)
+		}
+		if outcome.Tracker.Steps[createStep].Lifecycle != portcheck.StepLifecycleStarted {
+			t.Fatalf("pre-shutdown CREATE evidence was downgraded: %+v", outcome.Tracker.Steps[createStep])
+		}
+		if outcome.Tracker.Steps[readStep].Lifecycle != portcheck.StepLifecycleNotStarted {
+			t.Fatalf("READ lifecycle = %q, want not_started", outcome.Tracker.Steps[readStep].Lifecycle)
+		}
+		if outcome.ArtifactErr != nil && strings.Contains(outcome.ArtifactErr.Error(), "required verification step") {
+			t.Fatalf("not-started READ became missing artifact noise: %v", outcome.ArtifactErr)
+		}
+		if outcome.CorruptionMetricsErr != nil {
+			t.Fatalf("not-started READ requested live corrupt metrics: %v", outcome.CorruptionMetricsErr)
+		}
+		if outcome.Finalization == nil || outcome.Finalization.Complete || outcome.FinalizationErr == nil {
+			t.Fatalf("partial finalization = %+v, error = %v", outcome.Finalization, outcome.FinalizationErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("interrupted verification coordinator did not finish")
+	}
+	if fetchCalls.Load() != 1 {
+		t.Fatalf("artifact fetch calls = %d, want 1", fetchCalls.Load())
+	}
+	data, err := os.ReadFile(filepath.Join(resultsRoot, constants.ResultsManifestFileName))
+	if err != nil {
+		t.Fatalf("read persisted index: %v", err)
+	}
+	var manifest results.Manifest
+	if err = json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Integrity == nil || manifest.Integrity.Complete ||
+		!strings.Contains(manifest.Integrity.FinalizationError, integrity.WrittenName) {
+		t.Fatalf("persisted partial integrity outcome = %+v", manifest.Integrity)
 	}
 }

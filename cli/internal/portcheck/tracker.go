@@ -341,8 +341,11 @@ func populateStepLifecycles(final *RunResult, stepState map[string]*stepProbe, s
 			lifecycle = StepLifecycleFailed
 		case st.started || (terminalStepIndex >= 0 && index <= terminalStepIndex):
 			lifecycle = StepLifecycleStarted
-		case terminalStepIndex >= 0 && index > terminalStepIndex &&
-			(final.FinalState == constants.StateFailed || final.FinalState == constants.StateStopped):
+		case final.FinalState == constants.StateStopped:
+			// Stop-only has no failure step ID. Any planned step which the
+			// tracker never observed starting is consequently not started.
+			lifecycle = StepLifecycleNotStarted
+		case terminalStepIndex >= 0 && index > terminalStepIndex && final.FinalState == constants.StateFailed:
 			lifecycle = StepLifecycleNotStarted
 		}
 		final.Steps[id] = StepCompletion{

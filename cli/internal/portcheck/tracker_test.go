@@ -584,3 +584,41 @@ func TestRunTrackerCancellationPreservesPartialLifecycle(t *testing.T) {
 		t.Fatalf("planned-step lifecycle = %q, want %q", got, StepLifecyclePlanned)
 	}
 }
+
+func TestRunTrackerStopOnlyClassifiesUnstartedDownstreamSteps(t *testing.T) {
+	const (
+		createStep = "mt-001-create"
+		readStep   = "mt-002-verify"
+		deleteStep = "mt-003-delete"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/status" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"state": "STOPPED", "run_id": 42, "step_id": createStep,
+			})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+
+	tracker := NewRunTracker(server.URL)
+	tracker.ExpectedRunID = 42
+	tracker.PollInterval = time.Millisecond
+	tracker.RequireTerminalState = true
+	result, err := tracker.WaitForCompletion(context.Background(), []string{createStep, readStep, deleteStep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalState != constants.StateStopped {
+		t.Fatalf("final state = %q, want STOPPED", result.FinalState)
+	}
+	if got := result.Steps[createStep].Lifecycle; got != StepLifecycleStarted {
+		t.Fatalf("create lifecycle = %q, want started", got)
+	}
+	for _, stepID := range []string{readStep, deleteStep} {
+		if got := result.Steps[stepID].Lifecycle; got != StepLifecycleNotStarted {
+			t.Fatalf("%s lifecycle = %q, want not_started", stepID, got)
+		}
+	}
+}

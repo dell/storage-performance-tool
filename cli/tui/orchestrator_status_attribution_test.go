@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -323,5 +324,39 @@ func TestStoppedStatusOwnershipConcurrentPollingReconciliationAndCancellation(t 
 	wait.Wait()
 	if got := orchestrator.apiClient.getRunID(); got != "77" {
 		t.Fatalf("owned run ID = %q, want 77", got)
+	}
+}
+
+func TestWaitForLingerAllowsOwnedRunningToStoppedTransition(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		state := "RUNNING"
+		if statusCalls.Add(1) >= 2 {
+			state = "STOPPED"
+		}
+		_, _ = fmt.Fprintf(writer, `{"state":%q,"run_id":77}`, state)
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.SetRunID("77")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.WaitForLingerContext(ctx, 350*time.Millisecond); err != nil {
+		t.Fatalf("RUNNING to STOPPED linger failed: %v", err)
+	}
+}
+
+func TestWaitForLingerRejectsActiveDifferentRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClient(server.URL)
+	client.SetRunID("77")
+	err := client.WaitForLingerContext(context.Background(), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "does not match the owned run") {
+		t.Fatalf("WaitForLingerContext() error = %v, want active attribution failure", err)
 	}
 }

@@ -176,6 +176,73 @@ func (m *autoResultsMonitor) markWorkloadTerminal() {
 	}
 }
 
+func configureAutoResultsTracker(tracker autoResultsRunTracker, expectedRunID int64, debug, requireTerminal bool) {
+	tracker.SetExpectedRunID(expectedRunID)
+	tracker.SetDebug(debug)
+	tracker.SetRequireTerminalState(requireTerminal)
+}
+
+func recordTrackedStepLifecycles(metadata *runMetadata, result *portcheck.RunResult) {
+	if metadata == nil || result == nil {
+		return
+	}
+	metadata.StepLifecycles = make(map[string]string, len(result.Steps))
+	for stepID, step := range result.Steps {
+		metadata.StepLifecycles[stepID] = string(step.Lifecycle)
+	}
+}
+
+func mergeTrackedRunResults(observed, terminal *portcheck.RunResult) *portcheck.RunResult {
+	if terminal == nil {
+		return observed
+	}
+	if observed == nil {
+		return terminal
+	}
+	if observed.FinalState == constants.StateFailed && terminal.FinalState != constants.StateFailed {
+		terminal.FinalState = observed.FinalState
+		terminal.FailureStepID = observed.FailureStepID
+		terminal.FailureCategory = observed.FailureCategory
+		terminal.FailureMessage = observed.FailureMessage
+	}
+	if terminal.RunID == 0 {
+		terminal.RunID = observed.RunID
+	}
+	if terminal.Steps == nil {
+		terminal.Steps = make(map[string]portcheck.StepCompletion, len(observed.Steps))
+	}
+	for stepID, prior := range observed.Steps {
+		current, ok := terminal.Steps[stepID]
+		if !ok || trackedLifecycleRank(prior.Lifecycle) > trackedLifecycleRank(current.Lifecycle) {
+			terminal.Steps[stepID] = prior
+		}
+	}
+	return terminal
+}
+
+func trackedLifecycleRank(lifecycle portcheck.StepLifecycle) int {
+	const (
+		lifecycleRankUnknown = iota
+		lifecycleRankNotStarted
+		lifecycleRankStarted
+		lifecycleRankCompleted
+		lifecycleRankFailed
+	)
+
+	switch lifecycle {
+	case portcheck.StepLifecycleFailed:
+		return lifecycleRankFailed
+	case portcheck.StepLifecycleCompleted:
+		return lifecycleRankCompleted
+	case portcheck.StepLifecycleStarted:
+		return lifecycleRankStarted
+	case portcheck.StepLifecycleNotStarted:
+		return lifecycleRankNotStarted
+	default:
+		return lifecycleRankUnknown
+	}
+}
+
 func (f *fetcherAdapter) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) (*results.Manifest, error) {
 	return f.Fetcher.FetchArtifactsForSteps(ctx, stepIDs)
 }
@@ -344,6 +411,55 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 		parentCtx = monitorCtx
 		phaseBase := context.WithoutCancel(parentCtx)
+		verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
+		shutdownPerformed := false
+		runShutdown := func(reconcileTerminal bool) {
+			shutdownPerformed = true
+			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
+			defer cancelShutdown()
+			outcome.Lifecycle.Shutdown.Started = true
+			writeProgress("Auto-results: requesting shutdown on all hosts...\n")
+			if lingerSec <= 0 {
+				lingerSec = int(constants.APILingerDefault / time.Second)
+			}
+
+			type reconciliationOutcome struct {
+				result *portcheck.RunResult
+				err    error
+			}
+			var reconciliationDone chan reconciliationOutcome
+			if reconcileTerminal {
+				reconciliationDone = make(chan reconciliationOutcome, 1)
+				go func() {
+					reconciler := newRunTrackerFunc(baseURL)
+					configureAutoResultsTracker(reconciler, expectedRunID, debug, true)
+					result, err := reconciler.WaitForCompletion(shutdownCtx, expectedStepIDs)
+					reconciliationDone <- reconciliationOutcome{result: result, err: err}
+				}()
+			}
+
+			outcome.ShutdownErr = requestShutdownAllFunc(
+				shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, expectedRunID, debug)
+			if reconciliationDone != nil {
+				reconciled := <-reconciliationDone
+				if reconciled.result != nil {
+					outcome.Tracker = mergeTrackedRunResults(outcome.Tracker, reconciled.result)
+				}
+				if reconciled.err != nil {
+					outcome.TrackerErr = fmt.Errorf(
+						"post-shutdown terminal reconciliation: %w", reconciled.err)
+				} else {
+					outcome.TrackerErr = nil
+				}
+			}
+			outcome.Lifecycle.Shutdown = runcontrol.CompletedPhase(outcome.ShutdownErr)
+			if outcome.ShutdownErr != nil {
+				logging.LogError("auto-results", "shutdown encountered issues", outcome.ShutdownErr)
+				writeProgress("Shutdown completed with warnings; see logs for details.\n")
+			} else {
+				writeProgress("Shutdown completed successfully.\n")
+			}
+		}
 		cleanupOnly := monitor.cleanupOnly.Load()
 		if cleanupOnly {
 			outcome.TrackerErr = monitorCtx.Err()
@@ -351,14 +467,11 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		} else {
 			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
 			tracker := newRunTrackerFunc(baseURL)
-			tracker.SetExpectedRunID(expectedRunID)
-			verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
-			tracker.SetRequireTerminalState(verificationRun)
+			configureAutoResultsTracker(tracker, expectedRunID, debug, verificationRun)
 			// Wait for terminal run state; step IDs discovered later via metrics/json
 			if len(expectedStepIDs) > 0 {
 				writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
 			}
-			tracker.SetDebug(debug)
 			// While we wait, continuously discover step IDs so we have exact IDs on completion
 			var discovered []string
 			var fleetDiscovered []string
@@ -425,24 +538,23 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}()
 			outcome.Lifecycle.Workload.Started = true
 			outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(parentCtx, expectedStepIDs)
+			close(stopCh)
+			// Wait for the polling goroutine to actually observe stopCh and return
+			// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below.
+			pollWG.Wait()
+
+			// Cancellation can leave the engine RUNNING. Stop and reconcile the
+			// owned run before deciding which artifacts and roles are applicable.
+			interruptedTracking := parentCtx.Err() != nil && outcome.TrackerErr != nil
+			if interruptedTracking && shutdownOn {
+				runShutdown(true)
+			}
 			outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
 			monitor.markWorkloadTerminal()
-			if metadata != nil && outcome.Tracker != nil {
-				metadata.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
-				for stepID, step := range outcome.Tracker.Steps {
-					metadata.StepLifecycles[stepID] = string(step.Lifecycle)
-				}
-			}
+			recordTrackedStepLifecycles(metadata, outcome.Tracker)
 			if outcome.TrackerErr != nil {
 				logging.LogError("auto-results", "completion tracking failed", outcome.TrackerErr)
 			}
-			close(stopCh)
-			// Wait for the polling goroutine to actually observe stopCh and return
-			// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below —
-			// otherwise a still-in-flight tick could race a caller's test-time
-			// reassignment of those (package-level, test-injectable) function
-			// variables once this function's goroutine finishes.
-			pollWG.Wait()
 			outcome.Lifecycle.Artifacts.Started = true
 			artifactBudget := autoResultsPhaseBudgets.Artifacts
 			if parentCtx.Err() != nil || outcome.TrackerErr != nil {
@@ -613,9 +725,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			outcome.Lifecycle.Artifacts.Err = errors.Join(outcome.ArtifactErr, outcome.CorruptionMetricsErr, outcome.FinalizationErr)
 		}
 
-		// Optional graceful shutdown has a fresh budget that artifact retrieval
-		// cannot consume.
-		if shutdownOn {
+		// Normal terminal runs collect their completed evidence before shutdown.
+		// Interrupted runs already shut down and reconciled before salvage.
+		if shutdownOn && !shutdownPerformed {
 			if !cleanupOnly {
 				settleTimer := time.NewTimer(constants.AutoResultsShutdownSettleDelay)
 				select {
@@ -629,22 +741,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				case <-settleTimer.C:
 				}
 			}
-			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
-			outcome.Lifecycle.Shutdown.Started = true
-			writeProgress("Auto-results: requesting shutdown on all hosts...\n")
-			if lingerSec <= 0 {
-				lingerSec = int(constants.APILingerDefault / time.Second)
-			}
-			outcome.ShutdownErr = requestShutdownAllFunc(
-				shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, debug)
-			cancelShutdown()
-			outcome.Lifecycle.Shutdown = runcontrol.CompletedPhase(outcome.ShutdownErr)
-			if outcome.ShutdownErr != nil {
-				logging.LogError("auto-results", "shutdown encountered issues", outcome.ShutdownErr)
-				writeProgress("Shutdown completed with warnings; see logs for details.\n")
-			} else {
-				writeProgress("Shutdown completed successfully.\n")
-			}
+			runShutdown(false)
 		}
 
 		// Diagnostics and mandatory removal are required even when graceful API
@@ -1091,7 +1188,8 @@ func copyFileAtomic(srcPath string, destPath string) error {
 }
 
 // requestShutdownAll posts /shutdown to all provided hosts and waits for linger.
-func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPort string, linger time.Duration, debug bool) error {
+func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPort string, linger time.Duration,
+	expectedRunID int64, debug bool) error {
 	if len(hosts) == 0 {
 		// default to localhost
 		hosts = []*hostparse.HostInfo{{Host: "localhost", Original: "localhost"}}
@@ -1106,6 +1204,7 @@ func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPor
 		go func() {
 			base := fmt.Sprintf("http://%s:%s", host.Host, apiPort)
 			client := portcheck.NewSptAPIClient(base, constants.APIPollingTimeout)
+			client.SetExpectedRunID(expectedRunID)
 			// 1) POST /shutdown
 			if err := client.Shutdown(ctx); err != nil {
 				ch <- result{host: host.Original, err: fmt.Errorf("shutdown error: %w", err)}
