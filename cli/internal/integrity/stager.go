@@ -66,6 +66,11 @@ func stageInputManifestWithOperations(
 	if err != nil {
 		return "", "", "", fmt.Errorf("create private input staging: %w", err)
 	}
+	stagingRoot, err := os.OpenRoot(stagingDir)
+	if err != nil {
+		return "", "", "", fmt.Errorf("open private input staging: %w", err)
+	}
+	defer func() { _ = stagingRoot.Close() }()
 	createdStagingDir := stagingDir
 	success := false
 	defer func() {
@@ -89,7 +94,7 @@ func stageInputManifestWithOperations(
 	}
 
 	rawPath := filepath.Join(stagingDir, ".verify-input.raw.csv")
-	raw, err := os.OpenFile(rawPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	raw, err := stagingRoot.OpenFile(".verify-input.raw.csv", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", "", "", fmt.Errorf("create staged input: %w", err)
 	}

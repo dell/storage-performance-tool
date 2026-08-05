@@ -381,6 +381,11 @@ func archivePreparedRunInputs(meta *runMetadata, scenarioPath, destDir string) e
 
 func writePreparedInputDurable(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
+	dirRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dirRoot.Close() }()
 	tmp, err := os.CreateTemp(dir, ".prepared-input-*.tmp")
 	if err != nil {
 		return err
@@ -411,7 +416,7 @@ func writePreparedInputDurable(path string, data []byte, perm os.FileMode) error
 		return err
 	}
 	keepTemp = false
-	directory, err := os.Open(dir)
+	directory, err := dirRoot.Open(".")
 	if err != nil {
 		return err
 	}
