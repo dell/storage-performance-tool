@@ -1,6 +1,5 @@
 package com.dell.spt.base.control;
 
-import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.svc.Service;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -9,15 +8,20 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * POST /shutdown — gracefully shuts down the node: closes services; server will stop afterwards
- * in Main.runNode() once services finish (respecting the linger window).
+ * POST /shutdown — gracefully shuts down the node: cancels and joins active work,
+ * then closes services. The server stops in {@code Main.runNode()} after the
+ * configured linger window.
  */
 public final class ShutdownServlet extends HttpServlet {
 
-	private final List<Service> services;
+	private final NodeShutdownCoordinator coordinator;
 
 	public ShutdownServlet(final List<Service> services) {
-		this.services = services;
+		this(new NodeShutdownCoordinator(services));
+	}
+
+	public ShutdownServlet(final NodeShutdownCoordinator coordinator) {
+		this.coordinator = coordinator;
 	}
 
 	@Override
@@ -26,18 +30,6 @@ public final class ShutdownServlet extends HttpServlet {
 		resp.setStatus(HttpServletResponse.SC_ACCEPTED);
 		resp.setContentType("application/json");
 		resp.getWriter().write("{\"accepted\":true}");
-		new Thread(() -> {
-			try {
-				for (final Service svc : services) {
-					try {
-						svc.close();
-					} catch (final Exception e) {
-						Loggers.ERR.warn("Service close failed: {}", e.toString());
-					}
-				}
-			} catch (final Throwable t) {
-				Loggers.ERR.warn("Shutdown task failed: {}", t.toString());
-			}
-		}, "shutdown-servlet-thread").start();
+		new Thread(coordinator::shutdown, "shutdown-servlet-thread").start();
 	}
 }

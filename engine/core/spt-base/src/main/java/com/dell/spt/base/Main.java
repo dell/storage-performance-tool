@@ -16,6 +16,7 @@ import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalArgumentNameException;
 import com.dell.spt.base.control.AddCorsHeadersRule;
 import com.dell.spt.base.control.ApiStatus;
+import com.dell.spt.base.control.NodeShutdownCoordinator;
 import com.dell.spt.base.control.StatusServlet;
 import com.dell.spt.base.control.ConfigServlet;
 import com.dell.spt.base.control.FleetMetricsHandler;
@@ -321,22 +322,24 @@ public final class Main {
 					Loggers.MSG.warn("Unable to align terminal metrics retention with api-linger-sec; continuing with default retention", e);
 				}
 				// Register /run before starting the server to avoid a readiness race
-				final var runServletHolder = new ServletHolder(
-								new RunServlet(
-												extClsLoader,
-												extensions,
-												metricsMgr,
-												fullDefaultConfig,
-												appHomePath,
-												scenarioStepSvc,
-												apiStatus));
+				final var runServlet = new RunServlet(
+								extClsLoader,
+								extensions,
+								metricsMgr,
+								fullDefaultConfig,
+								appHomePath,
+								scenarioStepSvc,
+								apiStatus);
+				final var runServletHolder = new ServletHolder(runServlet);
 				context.addServlet(runServletHolder, "/run");
 				runServletHolder
 								.getRegistration()
 								.setMultipartConfig(new MultipartConfigElement("", 16 * MIB, 16 * MIB, 16 * MIB));
 
-				// Register shutdown endpoint: gracefully closes services; server will stop afterwards
-				context.addServlet(new ServletHolder(new ShutdownServlet(java.util.List.of(fileMgrSvc, scenarioStepSvc))), "/shutdown");
+				// Stop and join active work before service closure begins API linger.
+				final var shutdownCoordinator = new NodeShutdownCoordinator(
+								runServlet, java.util.List.of(fileMgrSvc, scenarioStepSvc));
+				context.addServlet(new ServletHolder(new ShutdownServlet(shutdownCoordinator)), "/shutdown");
 
 				server.start();
 				Loggers.MSG.info("Started to serve the remote API @ port # " + port);

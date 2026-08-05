@@ -34,9 +34,9 @@ public final class ApiStatus {
 	}
 
 	public void setStopped() {
-		snapshotRef.updateAndGet(current -> current.state() == State.FAILED
-						? current
-						: withState(current, State.STOPPED));
+		snapshotRef.updateAndGet(current -> current.state() == State.RUNNING || current.state() == State.STOPPED
+						? withState(current, State.STOPPED)
+						: current);
 	}
 
 	public void setFailed(

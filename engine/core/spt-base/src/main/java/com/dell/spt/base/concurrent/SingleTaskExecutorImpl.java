@@ -49,8 +49,11 @@ public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecuto
 				try {
 					task.run();
 				} catch (final Throwable cause) {
-					throwUncheckedIfInterrupted(cause);
-					LogUtil.trace(Loggers.ERR, Level.ERROR, cause, "Unexpected task execution failure");
+					if (!(cause instanceof InterruptedException)
+									|| Thread.currentThread() == workerRef.get()) {
+						throwUncheckedIfInterrupted(cause);
+						LogUtil.trace(Loggers.ERR, Level.ERROR, cause, "Unexpected task execution failure");
+					}
 				} finally {
 					taskRef.compareAndSet(task, null);
 				}

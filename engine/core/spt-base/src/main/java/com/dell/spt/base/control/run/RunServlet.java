@@ -33,6 +33,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -58,7 +62,7 @@ public class RunServlet extends HttpServlet {
 	private final MetricsManager metricsMgr;
 	private final Config aggregatedConfigWithArgs;
 	private final Path appHomePath;
-	private final SingleTaskExecutor scenarioExecutor = new SingleTaskExecutorImpl();
+	private final SingleTaskExecutor scenarioExecutor;
 	private final LoadStepManagerService scenarioStepSvc;
 	private final ApiStatus apiStatus;
 
@@ -70,6 +74,19 @@ public class RunServlet extends HttpServlet {
 					final Path appHomePath,
 					final LoadStepManagerService scenarioStepSvc,
 					final ApiStatus apiStatus) {
+		this(clsLoader, extensions, metricsMgr, aggregatedConfigWithArgs, appHomePath,
+						scenarioStepSvc, apiStatus, new SingleTaskExecutorImpl());
+	}
+
+	RunServlet(
+					final ClassLoader clsLoader,
+					final List<Extension> extensions,
+					final MetricsManager metricsMgr,
+					final Config aggregatedConfigWithArgs,
+					final Path appHomePath,
+					final LoadStepManagerService scenarioStepSvc,
+					final ApiStatus apiStatus,
+					final SingleTaskExecutor scenarioExecutor) {
 		final ClassLoader effectiveCl = (clsLoader != null) ? clsLoader : Thread.currentThread().getContextClassLoader();
 		this.scriptEngine = ScenarioUtil.scriptEngineByDefault(effectiveCl);
 		this.extensions = extensions;
@@ -78,6 +95,7 @@ public class RunServlet extends HttpServlet {
 		this.appHomePath = appHomePath;
 		this.scenarioStepSvc = scenarioStepSvc;
 		this.apiStatus = apiStatus;
+		this.scenarioExecutor = scenarioExecutor;
 	}
 
 	@Override
@@ -211,16 +229,14 @@ public class RunServlet extends HttpServlet {
 					final long runId,
 					final SingleTaskExecutor scenarioExecutor) {
 		if (run.runId() == runId) {
-			scenarioExecutor.stop(run);
-
-			// FIXED: Remove problematic AssertionError that caused 500 status
-			// The task reference might not be immediately cleared after stop(), 
-			// but that doesn't indicate a failure - just log a warning instead
-			if (null != scenarioExecutor.task()) {
-				Loggers.ERR.warn("Run {} stop requested but task still active - this may be normal during shutdown", runId);
+			if (run instanceof StatusAwareRun statusAwareRun) {
+				statusAwareRun.requestStop(scenarioExecutor);
+			} else {
+				scenarioExecutor.stop(run);
 			}
-
-			// Always return OK status when stop was requested for the correct run ID
+			if (null != scenarioExecutor.task()) {
+				Loggers.ERR.warn("Run {} stop requested but task still active", runId);
+			}
 			resp.setStatus(HttpServletResponse.SC_OK);
 		} else {
 			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
@@ -232,22 +248,41 @@ public class RunServlet extends HttpServlet {
 					final HttpServletResponse resp,
 					final long runId) {
 		stopRunIfMatchesAndSetResponse(run, resp, runId, scenarioExecutor);
-		if (run.runId() == runId) {
-			try {
-				apiStatus.setStopped();
-			} catch (final Exception e) {
-				Loggers.ERR.warn("Failed to update API status after stopping run {}", runId, e);
-			}
-		}
 	}
 
 	/**
-	 * Wrapper around a Run that updates ApiStatus on completion.
+	 * Requests cancellation of the active API run and waits for its cleanup and
+	 * terminal-status publication. A false return means the bounded wait expired.
+	 */
+	public boolean stopActiveRunAndAwait(final long timeout, final TimeUnit timeUnit)
+					throws InterruptedException {
+		final var activeTask = scenarioExecutor.task();
+		if (activeTask == null) {
+			return true;
+		}
+		if (activeTask instanceof StatusAwareRun statusAwareRun) {
+			return statusAwareRun.stopAndAwait(scenarioExecutor, timeout, timeUnit);
+		}
+		scenarioExecutor.stop(activeTask);
+		Loggers.ERR.warn("Stopped an unrecognized API task without completion evidence: {}", activeTask);
+		return false;
+	}
+
+	/**
+	 * Wrapper around a Run that publishes terminal status only after the
+	 * delegate's cleanup has returned.
 	 */
 	static final class StatusAwareRun implements Run {
 
+		private enum ExecutionState {
+			NEW, RUNNING, FINISHED
+		}
+
 		private final Run delegate;
 		private final ApiStatus apiStatus;
+		private final AtomicBoolean stopRequested = new AtomicBoolean();
+		private final AtomicReference<ExecutionState> executionState = new AtomicReference<>(ExecutionState.NEW);
+		private final CountDownLatch completion = new CountDownLatch(1);
 
 		StatusAwareRun(final Run delegate, final ApiStatus apiStatus) {
 			this.delegate = delegate;
@@ -266,13 +301,40 @@ public class RunServlet extends HttpServlet {
 
 		@Override
 		public void run() {
+			if (!executionState.compareAndSet(ExecutionState.NEW, ExecutionState.RUNNING)) {
+				return;
+			}
 			try {
 				delegate.run();
 			} catch (final IntegrityTerminalException e) {
 				apiStatus.setFailed(e.stepId(), e.category(), e.getMessage());
 				throw e;
 			} finally {
-				apiStatus.completeIfNotStopped();
+				if (stopRequested.get()) {
+					apiStatus.setStopped();
+				} else {
+					apiStatus.completeIfNotStopped();
+				}
+				executionState.set(ExecutionState.FINISHED);
+				completion.countDown();
+			}
+		}
+
+		boolean stopAndAwait(
+						final SingleTaskExecutor scenarioExecutor,
+						final long timeout,
+						final TimeUnit timeUnit)
+						throws InterruptedException {
+			requestStop(scenarioExecutor);
+			return completion.await(timeout, timeUnit);
+		}
+
+		private void requestStop(final SingleTaskExecutor scenarioExecutor) {
+			stopRequested.set(true);
+			scenarioExecutor.stop(this);
+			if (executionState.compareAndSet(ExecutionState.NEW, ExecutionState.FINISHED)) {
+				apiStatus.setStopped();
+				completion.countDown();
 			}
 		}
 	}

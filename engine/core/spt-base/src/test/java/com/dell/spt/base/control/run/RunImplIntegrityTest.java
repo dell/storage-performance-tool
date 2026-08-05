@@ -3,6 +3,7 @@ package com.dell.spt.base.control.run;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.concurrent.SingleTaskExecutorImpl;
 import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.client.CsvArtifactAggregator;
@@ -10,6 +11,8 @@ import com.dell.spt.base.load.step.file.FileManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.script.ScriptEngine;
 import javax.script.ScriptException;
@@ -97,5 +100,54 @@ class RunImplIntegrityTest {
 		assertEquals("failed-step", status.stepId());
 		assertEquals(IntegrityTerminalException.Category.PUBLICATION, status.failureCategory());
 		assertEquals("rename failed", status.failureMessage());
+	}
+
+	@Test
+	void stopPublishesStoppedOnlyAfterDelegateCleanupCompletes() throws Exception {
+		final var status = new ApiStatus();
+		status.setRunning("create", 16L);
+		final var delegate = mock(Run.class);
+		final var started = new CountDownLatch(1);
+		final var cleanupStarted = new CountDownLatch(1);
+		final var releaseCleanup = new CountDownLatch(1);
+		when(delegate.runId()).thenReturn(16L);
+		doAnswer(invocation -> {
+			started.countDown();
+			try {
+				new CountDownLatch(1).await();
+			} catch (final InterruptedException expected) {
+				cleanupStarted.countDown();
+				releaseCleanup.await();
+			}
+			return null;
+		}).when(delegate).run();
+
+		final var executor = new SingleTaskExecutorImpl();
+		try {
+			final var wrapped = new RunServlet.StatusAwareRun(delegate, status);
+			executor.execute(wrapped);
+			assertTrue(started.await(2, TimeUnit.SECONDS));
+
+			final var stopCompleted = new AtomicBoolean();
+			final var stopThread = new Thread(() -> {
+				try {
+					stopCompleted.set(wrapped.stopAndAwait(executor, 2, TimeUnit.SECONDS));
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			});
+			stopThread.start();
+
+			assertTrue(cleanupStarted.await(2, TimeUnit.SECONDS));
+			assertEquals(ApiStatus.State.RUNNING, status.state());
+			releaseCleanup.countDown();
+			stopThread.join(TimeUnit.SECONDS.toMillis(2));
+
+			assertFalse(stopThread.isAlive());
+			assertTrue(stopCompleted.get());
+			assertEquals(ApiStatus.State.STOPPED, status.state());
+		} finally {
+			executor.close();
+		}
 	}
 }

@@ -21,6 +21,8 @@ class ApiStatusTest {
 
 		status.completeIfNotStopped();
 		assertEquals(ApiStatus.State.COMPLETED, status.state());
+		status.setStopped();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
 
 		status.setRunning("step-2", 77L);
 		status.setStopped();
@@ -32,6 +34,8 @@ class ApiStatusTest {
 		status.setIdle();
 		assertEquals(ApiStatus.State.IDLE, status.state());
 		assertEquals(0L, status.runId());
+		status.setStopped();
+		assertEquals(ApiStatus.State.IDLE, status.state());
 		assertNull(status.stepId());
 	}
 

@@ -172,6 +172,10 @@ task integrationTest(type: Test) {
 
 	// Build all shadow JARs beforehand like in the unit test task
 	dependsOn rootProject.subprojects.collect { it.tasks.findByName('shadowJar') }.findAll { it != null }
+	// Aggregate builds must refresh the packaged JAR and extension directory used by the E2E canary.
+	if (rootProject.findProject(':bundle') != null) {
+		dependsOn ':bundle:assembleDist'
+	}
 	shouldRunAfter test
 }
 
