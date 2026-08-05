@@ -6,11 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.14.0] - 2026-08-05
+
 ### Added
 
 - **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, full-object verification through current-version LIST discovery or exact-version manifests, corruption-specific exit code `20`, explicit empty-selection policy, and `--defer-verification` for CREATE-only seeding followed by later verification campaigns.
 - **Integrity evidence and resumability** — Added canonical written/input/verified manifests and completion records, `verify-remaining.csv`, corruption diagnostics, digest-cost telemetry, multipart lifecycle evidence, structured step lifecycle, and distributed immutable-image or payload identity checks.
 - **Direct-JAR integrity scenarios** — Added runnable `spt.jar` examples for write-and-read verification, CREATE-only seeding, and later verification from a QA-maintained item file.
+- **Verification and maintenance helpers** — Added a repeatable `write-verify` test script and an engine line-count utility for local development and qualification work.
 
 ### Changed
 
