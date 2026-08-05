@@ -13,7 +13,7 @@
 ## 1. Overview
 
 All the configuration values have the default values which may be seen
-in the file [```<SPT_DIR>/config/defaults.yaml```](/src/main/resources/config/defaults.yaml). The file contains
+in the file [```<SPT_DIR>/config/defaults.yaml```](../../../../src/main/resources/config/defaults.yaml). The file contains
 the comments so it's quite self-descriptive and may be used as quick
 reference.
 
@@ -197,7 +197,8 @@ configured value is `0`.
 For direct `spt.jar` use, supply these settings through a custom scenario's
 `.config()` map. Flattened `--storage-integrity-*` startup arguments are not a
 supported v1 entry point. See the
-[write/read example](../scenarios/s3_integrity_write_verify.js) and
+[write/read example](../scenarios/s3_integrity_write_verify.js),
+[CREATE-only seed example](../scenarios/s3_integrity_seed.js), and
 [read-only example](../scenarios/s3_integrity_read_verify.js).
 
 This facility is separate from `item.data.verify`, `ReadVerifyLoad`, and

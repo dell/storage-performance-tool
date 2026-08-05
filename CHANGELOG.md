@@ -8,16 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
-- **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, optional deferred write readback for later verification campaigns, corruption-specific exit code `20`, empty-selection policy, and direct-`spt.jar` custom-scenario access.
-- **Integrity evidence and resumability** — Added canonical written/input/verified manifests and completion records, `verify-remaining.csv`, corruption diagnostics, digest-cost telemetry, multipart lifecycle evidence, structured step lifecycle, and distributed immutable-image identity checks.
+- **S3 persisted-data integrity verification** — Added `write-verify` and `read-verify` correctness workloads with v1 SHA-256 user metadata, full-object verification through current-version LIST discovery or exact-version manifests, corruption-specific exit code `20`, explicit empty-selection policy, and `--defer-verification` for CREATE-only seeding followed by later verification campaigns.
+- **Integrity evidence and resumability** — Added canonical written/input/verified manifests and completion records, `verify-remaining.csv`, corruption diagnostics, digest-cost telemetry, multipart lifecycle evidence, structured step lifecycle, and distributed immutable-image or payload identity checks.
+- **Direct-JAR integrity scenarios** — Added runnable `spt.jar` examples for write-and-read verification, CREATE-only seeding, and later verification from a QA-maintained item file.
 
 ### Changed
 
 - **Versioned integrity identity** — Metadata-mode reads carry S3 version IDs separately from object keys, while ordinary mode retains the legacy Netty `key~version` result naming for compatibility.
+- **Verification run lifecycle** — Verification launch, artifact collection, finalization, shutdown, and summary generation now have explicit ownership and separately bounded cleanup so interrupted distributed runs retain attributable lifecycle evidence.
 
 ### Fixed
 
 - **Legacy deterministic verification prefixes** — Parse only the generated leaf ID after configured prefixes and shards, and fail explicitly when it cannot be decoded instead of silently using offset zero.
+- **S3 LIST integrity discovery** — Stream and validate LIST responses without buffering an unbounded page, distinguish root-level `Prefix` from `CommonPrefixes`, reject malformed or incomplete entries, and canonicalize discovered identities before verification.
+- **Short-run rate metrics** — Preserve sub-second elapsed time when calculating IOPS and bandwidth so short phases no longer report zero rates.
+- **Verification credential exposure** — Redact credential-bearing engine overrides from generated metadata, errors, dry-run output, trace output, and environment diagnostics while preserving exact values only for in-memory launch configuration.
+- **Distributed interruption cleanup** — Stop the owned entry-node run before worker services, preserve STOPPED and downstream `not_started` outcomes, salvage partial evidence, and remove managed containers after interrupted verification runs.
 
 ## [5.13.1] - 2026-08-04
 

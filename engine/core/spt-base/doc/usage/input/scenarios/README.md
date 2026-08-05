@@ -339,7 +339,7 @@ var resumedLoadStep = pausedLoadStep.start();
 ## 3. Examples
 
 The complete set of the example scenarios is available in the
-[`<SPT_DIR>/example/scenario`](/src/main/resources/example/scenario) directory. The scenarios are sorted by
+[`<SPT_DIR>/example/scenario`](../../../../src/main/resources/example/scenario) directory. The scenarios are sorted by
 the language.
 
 ### 3.1. Javascript
@@ -535,8 +535,18 @@ java -jar <SPT_DIR>/spt.jar \
 
 - [`s3_integrity_write_verify.js`](s3_integrity_write_verify.js) writes a finite
   generated set and then verifies every successful write.
+- [`s3_integrity_seed.js`](s3_integrity_seed.js) writes a finite generated set
+  with metadata and retains its manifest without issuing a verification READ.
 - [`s3_integrity_read_verify.js`](s3_integrity_read_verify.js) verifies a finite
   QA-maintained item file without a preceding write.
+
+Omitting `ReadLoad` is the complete direct-JAR defer mechanism; there is no
+engine defer setting or workload alias. A CREATE-only seed harness must require
+nonzero successful CREATE operations, the declared nonempty output item file,
+and every role-applicable CREATE artifact. It must not report verification
+success because the scenario intentionally performs no verification READ. A
+later independent read-only scenario can consume the retained file with
+`storage.integrity.input.provenance: external`.
 
 Use `CreateLoad` and `ReadLoad` with the nested
 `storage.integrity.mode: metadata` configuration. Do not use `ReadVerifyLoad` or

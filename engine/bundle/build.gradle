@@ -241,6 +241,11 @@ task createVSCodeLaunch {
 
 def directJarScenarioSpecs = [
 	[
+		name: 'seed',
+		source: file("${rootDir}/core/spt-base/doc/usage/input/scenarios/s3_integrity_seed.js"),
+		runCallCount: 1,
+	],
+	[
 		name: 'write-verify',
 		source: file("${rootDir}/core/spt-base/doc/usage/input/scenarios/s3_integrity_write_verify.js"),
 		runCallCount: 2,

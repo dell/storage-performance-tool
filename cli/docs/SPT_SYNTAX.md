@@ -86,7 +86,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test |
-| `--prefix` | | `""` | Optional object key prefix for list and verification workloads |
+| `--prefix` | | `""` | Generated-key namespace for `write-verify`; listing constraint for `list` and LIST-based `read-verify` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
 
@@ -96,7 +96,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Ignored for `list` |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write` workloads and `read` seed phases |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
@@ -120,9 +120,10 @@ Required for S3 workloads, optional/ignored for `mock`.
 then verifies every successful write once by default. With
 `--defer-verification`, it ends after committing the successful-write manifest;
 use that run's `written.csv` as a later `read-verify --items-file`. Deferred mode
-does not permit `--cleanup`. `read-verify` is always finite: `--object-count`
-caps its deterministic discovery selection and `--items-file` bypasses discovery.
-Both require automatic result collection. See
+does not permit `--cleanup`. `read-verify` is always finite and never deletes
+objects: `--object-count` caps its deterministic discovery selection and
+`--items-file` bypasses discovery. Verification workloads do not support
+`--attach-existing`; both require automatic result collection. See
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
 
@@ -176,7 +177,7 @@ spt run write \
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--cleanup` | | `false` | Delete created objects after the test completes |
+| `--cleanup` | | `false` | Delete created objects after the test completes. `write-verify` deletes only successfully verified objects; unsupported for `read-verify` and deferred verification |
 | `--generate-only` | | `false` | Generate the scenario file without running it |
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
@@ -203,7 +204,7 @@ spt run write \
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
-| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node |
+| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
 | `--integrity-runtime-identity-tier` | `image` | Verification only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |

@@ -103,7 +103,8 @@ spt run read-verify \
 omit it to verify the full discovered set. `read-verify` requires valid v1 SPT
 metadata. Missing or malformed metadata is an integrity failure; SPT does not
 fall back to generated content or accept arbitrary objects written by older SPT
-versions and other tools.
+versions and other tools. It never deletes selected objects and rejects
+`--cleanup`.
 
 For QA-controlled selection, supply a canonical manifest instead of LIST:
 
@@ -218,8 +219,8 @@ filesystems used by the SPT container when those primitives are provided by the
 host. SPT fails the integrity run rather than weakening publication when a
 primitive is unavailable. Network, clustered, FUSE, and other userspace
 filesystems are crash-durable only when their provider explicitly guarantees
-equivalent server-side persistence semantics. Phase 1 verification requires the
-Linux CLI. Other platforms, including Windows, reject `write-verify` and
+equivalent server-side persistence semantics. Persisted-data verification
+requires the Linux CLI. Other platforms, including Windows, reject `write-verify` and
 `read-verify` before item staging, scenario generation, or results evidence is
 created because they cannot establish the required persistence contract.
 Ordinary workloads remain supported on those platforms.
@@ -295,19 +296,26 @@ or its collection error in `spt_run_params.json`.
   evidence creation because its required directory-durability primitive is unavailable.
 - SHA-256 metadata and complete-object GET only; range verification is out of scope.
 - Generated object content for writes; file-backed write payloads are out of scope.
-- Isolated, unversioned prefixes are the normal discovery contract. Exact
-  historical versions require a manifest with `version_id` values.
-- Current version is used by LIST discovery. Concurrent overwrite or replication
-  change can otherwise be mistaken for corruption.
+- Isolated, unversioned prefixes are the normal discovery contract. Automatic
+  LIST discovery selects current versions only; it does not enumerate historical
+  versions. Exact historical versions require a manifest with `version_id`
+  values, and automatic all-version discovery is deferred to a later release.
+- Concurrent overwrite or replication change during current-version discovery
+  can otherwise be mistaken for corruption.
 - Copy and update operations do not maintain the v1 metadata contract.
-- Netty and AWS S3 drivers are implemented in Phase 1. RDMA qualification
-  requires its separate hardware canary before release parity is claimed.
+- Release qualification did not include a PowerStore target or a real versioned
+  bucket. Those compatibility paths remain unvalidated; exact-version manifest
+  support is implemented but was not target-qualified in this release.
+- Netty and AWS S3 paths have execution qualification. The RDMA metadata path is
+  implemented and software-path tested, but its hardware path was not qualified;
+  do not infer RDMA hardware parity from this release.
 
 ## Direct `spt.jar` use
 
 QA harnesses that do not use the Go CLI can enable the same engine feature from
 a custom JavaScript scenario. See the runnable
-[`write-verify` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_write_verify.js)
+[`write-verify` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_write_verify.js),
+[`CREATE-only seed` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_seed.js),
 and [`read-only` scenario](../../engine/core/spt-base/doc/usage/input/scenarios/s3_integrity_read_verify.js).
 
 `--defer-verification` is CLI lifecycle policy, not a new engine configuration

@@ -144,7 +144,8 @@ mismatched marker prevents dependent I/O. Completion v1 is a closed schema:
 unknown JSON members and trailing JSON values are rejected.
 
 LIST discovery streams complete object entries into per-node sources, merges
-RFC 4180 records in stable node order, de-duplicates shard overlap, applies the
-configured selection maximum, publishes `verify-input.csv`, and only then
-starts READ. QA-owned `external` input is parsed and validated but intentionally
-does not require an engine completion marker.
+RFC 4180 records, canonical external-sorts them by `(bucket,key,version_id)`,
+de-duplicates shard overlap, applies the configured selection maximum,
+publishes `verify-input.csv`, and only then starts READ. QA-owned `external`
+input is parsed and validated but intentionally does not require an engine
+completion marker.
