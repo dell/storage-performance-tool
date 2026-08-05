@@ -9,6 +9,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.svc.ServiceBase;
 import com.github.akurilov.confuse.Config;
+import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.List;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -18,7 +19,8 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 
 	private final List<Extension> extensions;
 	private final MetricsManager metricsMgr;
-	private LoadStepService stepSvc = null;
+	private volatile LoadStepService stepSvc = null;
+	private boolean acceptingSteps = true;
 
 	public LoadStepManagerServiceImpl(
 					final int port, final List<Extension> extensions, final MetricsManager metricsMgr) {
@@ -40,7 +42,13 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 	}
 
 	@Override
-	protected final void doClose() {
+	protected final synchronized void doClose() throws IOException {
+		acceptingSteps = false;
+		final var activeStepSvc = stepSvc;
+		if (activeStepSvc != null) {
+			activeStepSvc.close();
+			stepSvc = null;
+		}
 		Loggers.MSG.info("Service \"{}\" closed", SVC_NAME);
 	}
 
@@ -50,9 +58,12 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 	}
 
 	@Override
-	public final String newStepService(
+	public final synchronized String newStepService(
 					final String stepType, final Config config, final List<Config> ctxConfigs)
 					throws RemoteException {
+		if (!acceptingSteps) {
+			throw new RemoteException("Load step manager is closing");
+		}
 		stepSvc = new LoadStepServiceImpl(port, extensions, stepType, config, ctxConfigs, metricsMgr);
 		Loggers.MSG.info("New step service started @ port #{}: {}", port, stepSvc.name());
 		return stepSvc.name();

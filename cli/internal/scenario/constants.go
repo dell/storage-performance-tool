@@ -1,12 +1,19 @@
 package scenario
 
+import (
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
+)
+
 const (
-	workloadTypeWrite  = "write"
-	workloadTypeRead   = "read"
-	workloadTypeMixed  = "mixed"
-	workloadTypeMock   = "mock"
-	workloadTypeList   = "list"
-	workloadTypeTables = "tables"
+	workloadTypeWrite       = workload.Write
+	workloadTypeRead        = workload.Read
+	workloadTypeWriteVerify = workload.WriteVerify
+	workloadTypeReadVerify  = workload.ReadVerify
+	workloadTypeMixed       = workload.Mixed
+	workloadTypeMock        = workload.Mock
+	workloadTypeList        = workload.List
+	workloadTypeTables      = workload.Tables
 
 	storageDriverTypeS3       = "s3"
 	storageDriverTypeS3Aws    = "s3-aws"
@@ -29,17 +36,19 @@ const (
 	// ChecksumSHA1 selects SHA-1 checksum validation.
 	ChecksumSHA1 = "sha1"
 	// ChecksumSHA256 selects SHA-256 checksum validation.
-	ChecksumSHA256 = "sha256"
+	ChecksumSHA256 = constants.IntegrityAlgorithmSHA256
 	// ChecksumCRC64NVME selects CRC64-NVME checksum validation.
 	ChecksumCRC64NVME = "crc64-nvme"
 
-	itemTypeData         = "data"
-	itemTypePath         = "path"
-	itemNamingTypeRandom = "random"
-	loadOpTypeNoop       = "noop"
-	loadOpTypeList       = "list"
+	itemTypeData          = "data"
+	itemTypePath          = "path"
+	itemNamingTypeRandom  = "random"
+	integrityModeMetadata = constants.IntegrityModeMetadata
+	loadOpTypeNoop        = "noop"
+	loadOpTypeList        = "list"
 
 	metricsAveragePeriodFiveSeconds = "5s"
+	defaultIntegrityObjectCount     = 1000
 
 	listStepSuffix             = "list"
 	listNamingRadix            = 36
@@ -115,9 +124,6 @@ const (
 
 // Template keys for tables scenarios
 const (
-	templateKeyTablesEndpoint         = "TablesEndpoint"
-	templateKeyTablesAccessKey        = "TablesAccessKey"
-	templateKeyTablesSecretKey        = "TablesSecretKey"
 	templateKeyTablesBucket           = "TablesBucket"
 	templateKeyTablesNamespace        = "TablesNamespace"
 	templateKeyTablesTableName        = "TablesTableName"
@@ -143,10 +149,12 @@ const (
 // Exported workload identifiers for packages that need to branch on scenario type
 // without duplicating literal strings.
 const (
-	WorkloadTypeList   = workloadTypeList
-	WorkloadTypeRead   = workloadTypeRead
-	WorkloadTypeTables = workloadTypeTables
-	WorkloadTypeMixed  = workloadTypeMixed
+	WorkloadTypeList        = workloadTypeList
+	WorkloadTypeRead        = workloadTypeRead
+	WorkloadTypeWriteVerify = workloadTypeWriteVerify
+	WorkloadTypeReadVerify  = workloadTypeReadVerify
+	WorkloadTypeTables      = workloadTypeTables
+	WorkloadTypeMixed       = workloadTypeMixed
 )
 
 // Mixed workload template keys

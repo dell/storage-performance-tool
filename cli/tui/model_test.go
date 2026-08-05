@@ -5,7 +5,12 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +18,187 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
+
+type launchTestModel struct{}
+
+func (launchTestModel) Init() tea.Cmd                         { return nil }
+func (m launchTestModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
+func (launchTestModel) View() string                          { return "" }
+
+func TestStartTUILaunchReturnsPreSubmissionFailure(t *testing.T) {
+	wantErr := errors.New("readiness failed")
+	hooks := NewLaunchHooks(nil)
+	p := tea.NewProgram(
+		launchTestModel{}, tea.WithInput(nil), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(),
+	)
+	resultCh, cancel := startTUILaunch(
+		context.Background(), p, hooks,
+		func(context.Context) error { return wantErr }, nil,
+	)
+	_, programErr := p.Run()
+	cancel()
+	if err := finishTUILaunch(context.Background(), programErr, resultCh, hooks); !errors.Is(err, wantErr) {
+		t.Fatalf("finishTUILaunch() error = %v, want %v", err, wantErr)
+	}
+	if hooks.Submitted() {
+		t.Fatal("failed pre-submission launch was marked submitted")
+	}
+}
+
+func TestStartTUILaunchPreservesPostSubmissionFailure(t *testing.T) {
+	wantErr := errors.New("TUI failed after submission")
+	hooks := NewLaunchHooks(nil)
+	p := tea.NewProgram(
+		launchTestModel{}, tea.WithInput(nil), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(),
+	)
+	resultCh, cancel := startTUILaunch(
+		context.Background(), p, hooks,
+		func(context.Context) error {
+			hooks.NotifySubmitted()
+			return wantErr
+		}, nil,
+	)
+	_, programErr := p.Run()
+	cancel()
+	if err := finishTUILaunch(context.Background(), programErr, resultCh, hooks); !errors.Is(err, wantErr) {
+		t.Fatalf("finishTUILaunch() error = %v, want %v", err, wantErr)
+	}
+	if !hooks.Submitted() {
+		t.Fatal("post-submission launch error lost submission state")
+	}
+}
+
+func installNonInteractiveTUIProgram(t *testing.T) {
+	t.Helper()
+	original := newTUIProgramWithTrace
+	newTUIProgramWithTrace = func(model Model, _ string, _ bool) (*tea.Program, *os.File, error) {
+		return tea.NewProgram(
+			model, tea.WithInput(nil), tea.WithOutput(io.Discard),
+			tea.WithoutRenderer(), tea.WithoutSignalHandler(),
+		), nil, nil
+	}
+	t.Cleanup(func() { newTUIProgramWithTrace = original })
+}
+
+func TestLocalTUIPropagatesRealPostFailureAndCleansContainer(t *testing.T) {
+	installNonInteractiveTUIProgram(t)
+	mockDocker := NewMockDockerManager()
+	originalDockerFactory := newTUIDockerManager
+	newTUIDockerManager = func() (DockerInterface, error) { return mockDocker, nil }
+	t.Cleanup(func() { newTUIDockerManager = originalDockerFactory })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"n0"}`))
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/run":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/shutdown", "/status":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	_, apiPort := splitServerHostPort(t, server.URL)
+	hooks := NewLaunchHooks(nil)
+
+	started := time.Now()
+	err := startTUIWithScenarioAndParamsWithNetworkModeTrace(
+		context.Background(),
+		"image", "", scenario.Params{WorkloadType: scenario.WorkloadTypeRead}, apiPort,
+		"bridge", t.TempDir(), nil, "", false, []byte("scenario"), []byte("defaults"),
+		hooks,
+	)
+	if err == nil || !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("local TUI startup error = %v, want POST status 500", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("local TUI startup failure took %s", time.Since(started))
+	}
+	if hooks.Submitted() {
+		t.Fatal("failed local POST marked launch submitted")
+	}
+	if mockDocker.HasManagedResources() {
+		t.Fatal("local TUI POST failure retained container resources")
+	}
+}
+
+func TestRemoteTUIPropagatesReadinessFailureAndCleansContainer(t *testing.T) {
+	installNonInteractiveTUIProgram(t)
+	wantErr := errors.New("remote readiness failed")
+	originalFactory := newMultiHostTUITestOrchestrator
+	newMultiHostTUITestOrchestrator = func(orchestrator *MultiHostOrchestrator) *MultiHostTestOrchestrator {
+		wrapper := NewMultiHostTestOrchestrator(orchestrator)
+		wrapper.waitForAPIs = func(context.Context, time.Duration) error { return wantErr }
+		return wrapper
+	}
+	t.Cleanup(func() { newMultiHostTUITestOrchestrator = originalFactory })
+
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "remote", Original: "remote"}}, 1)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	hooks := NewLaunchHooks(nil)
+
+	err := startTUIWithMultiHostOrchestratorWithTrace(
+		context.Background(),
+		orchestrator, "image", "", scenario.Params{WorkloadType: scenario.WorkloadTypeRead},
+		nil, "", false, []byte("scenario"), []byte("defaults"), hooks,
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("remote TUI startup error = %v, want %v", err, wantErr)
+	}
+	if hooks.Submitted() {
+		t.Fatal("failed remote readiness marked launch submitted")
+	}
+	if mockDocker.HasManagedResources() || orchestrator.hosts[0].IsManaged() {
+		t.Fatal("remote TUI readiness failure retained container resources")
+	}
+}
+
+func TestRemoteTUIPropagatesIdentityFailureBeforeContainerStart(t *testing.T) {
+	installNonInteractiveTUIProgram(t)
+	wantErr := errors.New("remote image identity unavailable")
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "remote", Original: "remote"}}, 1)
+	mockDocker := NewMockDockerManager()
+	mockDocker.SetContainerID("")
+	orchestrator.hosts[0].DockerManager = mockDocker
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{errors: map[string]error{"remote": wantErr}}
+	hooks := NewLaunchHooks(nil)
+
+	err := startTUIWithMultiHostOrchestratorWithTrace(
+		context.Background(), orchestrator, "repo/spt:test", "",
+		scenario.Params{WorkloadType: scenario.WorkloadTypeReadVerify},
+		nil, "", false, []byte("scenario"), []byte("defaults"), hooks,
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("remote TUI identity error = %v, want %v", err, wantErr)
+	}
+	if hooks.Submitted() {
+		t.Fatal("failed remote identity gate marked launch submitted")
+	}
+	if mockDocker.HasManagedResources() || orchestrator.hosts[0].IsManaged() {
+		t.Fatal("remote TUI identity failure started or retained container resources")
+	}
+}
 
 func TestNewProgramWithTrace_CreatesHeaderAndSupportsAppend(t *testing.T) {
 	tmpDir := t.TempDir()

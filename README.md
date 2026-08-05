@@ -131,17 +131,18 @@ The default distribution is GET 45% / STAT 30% / PUT 15% / DELETE 10%. Use `--ge
 
 Headless mode activates automatically when no TTY is available; use `--headless` to force it manually.
 
-For the full CLI reference (all flags, workload types, distributed options, RDMA, S3 Tables), see [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md).
+For the full CLI reference (all flags, workload types, distributed options, RDMA, S3 Tables), see [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md). For persisted-object correctness testing, see [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md).
 
 ---
 
 ## Features
 
 - **Unified Experience** -- SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** -- write, read, list, mixed, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
+- **Multi-Workload Support** -- write, read, write-verify, read-verify, list, mixed, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
 - **Pluggable S3 Storage Drivers** -- choose the backend that fits your target: `default` (Netty), `aws` (AWS SDK v2), or `rdma` (hardware-accelerated). Select with `--s3-driver`.
 - **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
 - **S3 Checksum Validation** -- compute and send checksums on write requests with `--checksum` (`crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`). When combined with multipart upload, checksums are applied per part. Supported by the Netty, AWS SDK, and RDMA drivers.
+- **Persisted-Data Verification** -- `write-verify` and `read-verify` attach versioned SHA-256 object metadata and later validate complete GET responses, with resumable manifests and corruption-specific exit status (see [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md)).
 - **Data Compressibility & Deduplication Controls** -- shape generated object data for storage-efficiency benchmarks with `--object-data-compressibility` (0-100% target compressibility) and `--object-data-dedupable=false` (per-4KB anti-dedupe stamping).
 - **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
 - **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
@@ -230,6 +231,7 @@ make build-cli        # produces ./cli/spt
 For detailed engineering notes and planning documents, browse the `docs/` directories inside `cli/` and `engine/`.
 
 - [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) — Full CLI syntax reference (all commands, flags, and examples)
+- [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md) — Persisted-object write/read verification, artifacts, and automation contract
 - [`cli/docs/REPLAY.md`](cli/docs/REPLAY.md) — Replay archived SPT or legacy Mongoose workloads against a current S3 target
 - [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) — S3-RDMA acceleration setup, tuning, and architecture
 - [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md) — S3 Tables (Iceberg) test vectors and usage guide

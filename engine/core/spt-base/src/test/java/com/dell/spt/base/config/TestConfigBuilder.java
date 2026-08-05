@@ -254,6 +254,18 @@ public class TestConfigBuilder {
 		driver.put("limit", driverLimit);
 		storage.put("driver", driver);
 
+		Map<String, Object> integrity = new HashMap<>();
+		integrity.put("mode", "none");
+		integrity.put("algorithm", "sha256");
+		Map<String, Object> integrityInput = new HashMap<>();
+		integrityInput.put("provenance", "none");
+		integrityInput.put("expectedProducerId", "");
+		integrity.put("input", integrityInput);
+		Map<String, Object> integritySelection = new HashMap<>();
+		integritySelection.put("maxCount", 0L);
+		integrity.put("selection", integritySelection);
+		storage.put("integrity", integrity);
+
 		storage.put("namespace", "");
 		Map<String, Object> storageNet = new HashMap<>();
 		Map<String, Object> storageNetNode = new HashMap<>();

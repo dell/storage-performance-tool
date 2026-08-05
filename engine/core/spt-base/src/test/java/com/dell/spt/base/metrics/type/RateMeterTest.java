@@ -1,38 +1,93 @@
 package com.dell.spt.base.metrics.type;
 
-import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
-
 import java.time.Clock;
-import java.util.concurrent.TimeUnit;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import org.junit.jupiter.api.Test;
 
-/** @author veronika K. on 16.10.18 */
-public class RateMeterTest {
+class RateMeterTest {
 
-	private static final int SLEEP_MILLISEC = 1000;
-	private static final int COUNT_BYTES_1 = 1234;
-	private static final int COUNT_BYTES_2 = 567;
-	private static final double ACCURACY = 0.1;
+	private static final long BYTES_PER_MIB = 1024L * 1024L;
 
 	@Test
-	public void test() throws InterruptedException {
-		final RateMeter<RateMetricSnapshot> meter = new RateMeterImpl(Clock.systemUTC(), "SOME_RATE");
-		final var t0 = System.currentTimeMillis();
-		meter.update(COUNT_BYTES_1);
-		TimeUnit.MILLISECONDS.sleep(SLEEP_MILLISEC);
-		final var t1 = System.currentTimeMillis();
-		final var snapshot1 = meter.snapshot();
-		final var expected1 = 1000.0 * COUNT_BYTES_1 / (t1 - t0);
-		assertEquals(expected1, snapshot1.mean(), expected1 * ACCURACY);
-		assertEquals(expected1, snapshot1.last(), expected1 * ACCURACY);
-		meter.update(COUNT_BYTES_2);
-		TimeUnit.MILLISECONDS.sleep(SLEEP_MILLISEC);
-		final var t2 = System.currentTimeMillis();
-		final var snapshot2 = meter.snapshot();
-		final var expectedRate = 1000.0 * (COUNT_BYTES_1 + COUNT_BYTES_2) / (t2 - t0);
-		assertEquals(expectedRate, snapshot2.mean(), expectedRate * ACCURACY);
-		assertEquals(expectedRate, snapshot2.last(), expectedRate * ACCURACY);
+	void meanRateUsesFractionalSecondsForShortRuns() {
+		final var clock = new MutableClock();
+		final RateMeter<RateMetricSnapshot> operationMeter = new RateMeterImpl(clock, "OPERATIONS");
+		final RateMeter<RateMetricSnapshot> byteMeter = new RateMeterImpl(clock, "BYTES");
+
+		operationMeter.update(32);
+		byteMeter.update(32 * BYTES_PER_MIB);
+		clock.advanceMillis(179);
+
+		assertEquals(32.0 / 0.179, operationMeter.snapshot().mean(), 1.0e-9);
+		assertEquals(32.0 * BYTES_PER_MIB / 0.179, byteMeter.snapshot().mean(), 1.0e-6);
+	}
+
+	@Test
+	void meanRateRetainsFractionalPrecisionForLongerRuns() {
+		final var clock = new MutableClock();
+		final RateMeter<RateMetricSnapshot> meter = new RateMeterImpl(clock, "SOME_RATE");
+
+		meter.update(1801);
+		clock.advanceMillis(1500);
+
+		assertEquals(1801.0 / 1.5, meter.snapshot().mean(), 1.0e-9);
+	}
+
+	@Test
+	void lastRateUsesTheCompletedSamplingWindow() {
+		final var clock = new MutableClock();
+		final RateMeter<RateMetricSnapshot> meter = new RateMeterImpl(clock, "SOME_RATE");
+
+		meter.update(1234);
+		clock.advanceMillis(1000);
+
+		assertEquals(1234.0, meter.snapshot().last(), 1.0e-9);
+	}
+
+	@Test
+	void meanRateIsZeroUntilTimeAdvances() {
+		final var clock = new MutableClock();
+		final RateMeter<RateMetricSnapshot> meter = new RateMeterImpl(clock, "SOME_RATE");
+
+		meter.update(32);
+
+		assertEquals(0.0, meter.snapshot().mean());
+	}
+
+	private static final class MutableClock extends Clock {
+
+		private long epochMillis;
+
+		void advanceMillis(final long millis) {
+			epochMillis += millis;
+		}
+
+		@Override
+		public ZoneId getZone() {
+			return ZoneOffset.UTC;
+		}
+
+		@Override
+		public Clock withZone(final ZoneId zone) {
+			if (!ZoneOffset.UTC.equals(zone)) {
+				throw new UnsupportedOperationException("test clock only supports UTC");
+			}
+			return this;
+		}
+
+		@Override
+		public Instant instant() {
+			return Instant.ofEpochMilli(epochMillis);
+		}
+
+		@Override
+		public long millis() {
+			return epochMillis;
+		}
 	}
 }

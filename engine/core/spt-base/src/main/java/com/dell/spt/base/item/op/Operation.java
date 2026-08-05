@@ -3,6 +3,9 @@ package com.dell.spt.base.item.op;
 import static java.lang.System.currentTimeMillis;
 import static java.lang.System.nanoTime;
 
+import com.dell.spt.base.integrity.IntegrityMetadata;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.storage.Credential;
 
@@ -84,6 +87,9 @@ public interface Operation<I extends Item> {
 	long latency();
 
 	default void buildItemPath(final I item, final String itemPath) {
+		if (item instanceof IntegrityManifestDataItem) {
+			return;
+		}
 		String itemName = item.name();
 		if (itemPath == null || itemPath.isEmpty()) {
 			if (!itemName.startsWith("/")) {
@@ -134,6 +140,46 @@ public interface Operation<I extends Item> {
 	 * instead of accumulating retry counts across unrelated cycles.
 	 */
 	default void resetOpRetryCount() {}
+
+	/** Exact version requested from storage; null/empty means current-version semantics. */
+	default String requestedVersionId() {
+		return null;
+	}
+
+	/** Compatibility-safe setter for the exact requested version. */
+	default void requestedVersionId(final String versionId) {}
+
+	/** Version returned by storage, kept separate from requested manifest identity. */
+	default String returnedVersionId() {
+		return null;
+	}
+
+	/** Compatibility-safe setter for the returned storage version. */
+	default void returnedVersionId(final String versionId) {}
+
+	/** Request identifier returned by storage for terminal diagnostics. */
+	default String responseRequestId() {
+		return null;
+	}
+
+	/** Compatibility-safe setter for the returned request identifier. */
+	default void responseRequestId(final String requestId) {}
+
+	/** Precomputed whole-object metadata attached to CREATE requests in metadata mode. */
+	default IntegrityMetadata integrityMetadata() {
+		return null;
+	}
+
+	/** Compatibility-safe setter for precomputed whole-object integrity metadata. */
+	default void integrityMetadata(final IntegrityMetadata metadata) {}
+
+	/** Protocol-complete metadata verification result for a READ response. */
+	default IntegrityVerificationResult integrityVerificationResult() {
+		return null;
+	}
+
+	/** Compatibility-safe setter for a protocol-complete READ verification result. */
+	default void integrityVerificationResult(final IntegrityVerificationResult result) {}
 
 	/**
 	 * Returns {@code true} if this implementation actually tracks {@link #opRetryCount()} /

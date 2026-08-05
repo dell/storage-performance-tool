@@ -5,34 +5,33 @@ Copyright © 2025 Dell Technologies
 // Package cmd implements the command-line interface for spt.
 package cmd
 
-import "github.com/dell/storage-performance-tool/cli/internal/constants"
+import (
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
+)
 
 // Docker constants - reference from internal constants to avoid duplication
 const (
-	DefaultSptImage = constants.DefaultSptImage
+	DefaultSptImage                  = constants.DefaultSptImage
+	flagDeferVerification            = "defer-verification"
+	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
 )
 
 // Workload type constants
 const (
-	WorkloadTypeWrite  = "write"
-	WorkloadTypeRead   = "read"
-	WorkloadTypeMixed  = "mixed"
-	WorkloadTypeDelete = "delete"
-	WorkloadTypeList   = "list"
-	WorkloadTypeMock   = "mock"
-	WorkloadTypeTables = "tables"
+	WorkloadTypeWrite       = workload.Write
+	WorkloadTypeRead        = workload.Read
+	WorkloadTypeWriteVerify = workload.WriteVerify
+	WorkloadTypeReadVerify  = workload.ReadVerify
+	WorkloadTypeMixed       = workload.Mixed
+	WorkloadTypeDelete      = workload.Delete
+	WorkloadTypeList        = workload.List
+	WorkloadTypeMock        = workload.Mock
+	WorkloadTypeTables      = workload.Tables
 )
 
-// ValidWorkloadTypes contains all valid workload types
-var ValidWorkloadTypes = []string{
-	WorkloadTypeWrite,
-	WorkloadTypeRead,
-	WorkloadTypeMixed,
-	WorkloadTypeDelete,
-	WorkloadTypeList,
-	WorkloadTypeMock,
-	WorkloadTypeTables,
-}
+// ValidWorkloadTypes contains all accepted workload types in registry order.
+var ValidWorkloadTypes = workload.Names()
 
 // Error message constants
 const (
@@ -41,8 +40,8 @@ const (
 	ErrMissingSecretKey               = "--secret-key flag is required for %s workload" // #nosec G101: constant phrase contains "secret" but is not a credential
 	ErrMissingBucket                  = "--bucket flag is required for %s workload"
 	ErrDurationOrCount                = "cannot specify both --object-count and --duration"
-	ErrInvalidWorkloadType            = "invalid workload type: %s. Must be one of: write, read, mixed, delete, list, mock"
-	ErrWorkloadNotImplemented         = "workload type '%s' is not yet implemented. Currently only 'write', 'read', 'list', and 'mock' are supported"
+	ErrInvalidWorkloadType            = "invalid workload type: %s"
+	ErrWorkloadNotImplemented         = "workload type '%s' is not yet implemented; run 'spt run --help' to list implemented workloads"
 	ErrInvalidEndpointURL             = "invalid endpoint URL: %w"
 	ErrMissingHostname                = "endpoint URL must include a hostname"
 	ErrFlagNotSupported               = "%s flag is not supported for %s workload"

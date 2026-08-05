@@ -69,7 +69,8 @@ class MetricsTotalCsvLogMessageTest {
 						TimingMetricSnapshotImpl.fromSamples(MetricsConstants.METRIC_NAME_LAT, List.of(10L, 20L)),
 						TimingMetricSnapshotImpl.fromSamples(MetricsConstants.METRIC_NAME_TTFB, List.of(7L, 11L, 13L)),
 						new ConcurrencyMetricSnapshotImpl(MetricsConstants.METRIC_NAME_CONC, 2, 2.0),
-						new RateMetricSnapshotImpl(0.0, 0.0, MetricsConstants.METRIC_NAME_FAIL, 0, 1000),
+						new RateMetricSnapshotImpl(0.0, 0.0, MetricsConstants.METRIC_NAME_FAIL, 2, 1000),
+						new RateMetricSnapshotImpl(0.0, 0.0, MetricsConstants.METRIC_NAME_CORRUPT, 1, 1000),
 						new RateMetricSnapshotImpl(1.0, 1.0, MetricsConstants.METRIC_NAME_SUCC, 3, 1000),
 						new RateMetricSnapshotImpl(128.0, 128.0, MetricsConstants.METRIC_NAME_BYTE, 256, 1000),
 						2,
@@ -92,6 +93,8 @@ class MetricsTotalCsvLogMessageTest {
 		final String header = formatted.substring(0, lineSeparatorIndex);
 		final String values = formatted.substring(lineSeparatorIndex + lineSeparator.length());
 		assertEquals(columnCount(header), columnCount(values), formatted);
+		assertTrue(header.contains("CountFail,CountCorrupt,Size"), formatted);
+		assertTrue(values.contains(",2,1,256,"), formatted);
 		assertTrue(values.endsWith(",10.333333333333334,7,20,30,40,50,13"), formatted);
 	}
 

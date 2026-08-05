@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,12 +74,51 @@ func (f *fakeDockerClient) ContainerRemove(ctx context.Context, containerID stri
 func (f *fakeDockerClient) ServerVersion(ctx context.Context) (types.Version, error) {
 	return f.ver, nil
 }
+
+type blockingDockerClient struct {
+	*fakeDockerClient
+	blockCreate bool
+	blockStart  bool
+	started     chan struct{}
+}
+
+func (f *blockingDockerClient) signalStarted() {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+}
+
+func (f *blockingDockerClient) ContainerCreate(
+	ctx context.Context,
+	config *container.Config,
+	hostConfig *container.HostConfig,
+	networkingConfig *network.NetworkingConfig,
+	platform *ocispec.Platform,
+	containerName string,
+) (container.CreateResponse, error) {
+	if f.blockCreate {
+		f.signalStarted()
+		<-ctx.Done()
+		return container.CreateResponse{}, ctx.Err()
+	}
+	return f.fakeDockerClient.ContainerCreate(ctx, config, hostConfig, networkingConfig, platform, containerName)
+}
+
+func (f *blockingDockerClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
+	if f.blockStart {
+		f.signalStarted()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return f.fakeDockerClient.ContainerStart(ctx, containerID, options)
+}
 func (f *fakeDockerClient) Close() error { return nil }
 
 func TestEnsureImageAvailable_PullsWhenMissing(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	dm := &DockerManager{client: &fakeDockerClient{inspectErr: io.EOF}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable("myimg:latest"); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), "myimg:latest"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !dm.client.(*fakeDockerClient).pulled {
@@ -89,7 +129,7 @@ func TestEnsureImageAvailable_PullsWhenMissing(t *testing.T) {
 func TestEnsureImageAvailable_SkipPullWhenPresent(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
 	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable("present"); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), "present"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if dm.client.(*fakeDockerClient).pulled {
@@ -101,7 +141,7 @@ func TestEnsureImageAvailable_DevImagePresent(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
 	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
-	if err := dm.ensureImageAvailable(devImage); err != nil {
+	if err := dm.ensureImageAvailableContext(context.Background(), devImage); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if dm.client.(*fakeDockerClient).pulled {
@@ -180,6 +220,65 @@ func TestSetFileMountsFailureDoesNotRetainPartialState(t *testing.T) {
 	}
 }
 
+func TestSetFileMountsContextRejectsCanceledContextBeforeStaging(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	dm := &DockerManager{client: &fakeDockerClient{}, ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := dm.SetFileMountsContext(ctx, []scenario.FileMount{{
+		HostPath:      sourcePath,
+		ContainerPath: "/spt-input/items/read-items.csv",
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetFileMountsContext() error = %v, want context.Canceled", err)
+	}
+	if dm.HasManagedResources() || dm.itemFileStagingDir != "" || len(dm.fileMounts) != 0 {
+		t.Fatalf("canceled staging retained resources: dir=%q mounts=%v", dm.itemFileStagingDir, dm.fileMounts)
+	}
+}
+
+func TestLocalItemFileStagingRetainedUntilContainerRemovalSucceeds(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
+		t.Fatalf("write source items file: %v", err)
+	}
+	removeErr := errors.New("injected container removal failure")
+	client := &fakeDockerClient{removeErr: removeErr}
+	dm := &DockerManager{client: client, ctx: context.Background(), containerID: "abc"}
+	if err := dm.SetFileMounts([]scenario.FileMount{{
+		HostPath:      sourcePath,
+		ContainerPath: "/spt-input/items/read-items.csv",
+	}}); err != nil {
+		t.Fatalf("SetFileMounts() error = %v", err)
+	}
+	stagingDir := dm.itemFileStagingDir
+
+	if err := dm.CleanupResourcesContext(context.Background()); !errors.Is(err, removeErr) {
+		t.Fatalf("first cleanup error = %v, want %v", err, removeErr)
+	}
+	if !dm.HasManagedResources() {
+		t.Fatal("failed cleanup relinquished staged-input ownership")
+	}
+	if _, err := os.Stat(stagingDir); err != nil {
+		t.Fatalf("staging directory was removed before container cleanup succeeded: %v", err)
+	}
+
+	client.removeErr = nil
+	if err := dm.CleanupResourcesContext(context.Background()); err != nil {
+		t.Fatalf("retry cleanup error = %v", err)
+	}
+	if dm.HasManagedResources() {
+		t.Fatal("successful cleanup retained managed resources")
+	}
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Fatalf("staging directory still exists after successful retry: %v", err)
+	}
+}
+
 func TestStartContainerInNodeModeMountsStagedItemFile(t *testing.T) {
 	sourcePath := filepath.Join(t.TempDir(), "items.csv")
 	if err := os.WriteFile(sourcePath, []byte("item-1\n"), 0o600); err != nil {
@@ -190,6 +289,7 @@ func TestStartContainerInNodeModeMountsStagedItemFile(t *testing.T) {
 	t.Cleanup(dm.Close)
 	mounts := []scenario.FileMount{{HostPath: sourcePath, ContainerPath: "/spt-input/items/read-items.csv"}}
 	if err := dm.SetFileMounts(mounts); err != nil {
+
 		t.Fatalf("SetFileMounts() error = %v", err)
 	}
 	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.BridgeNetworkMode, nil); err != nil {
@@ -223,11 +323,86 @@ func TestCloseCleansItemFileStagingDir(t *testing.T) {
 	}
 }
 
+func TestStartContainerInNodeModeContextCancelsDockerCreateAndStart(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "true")
+	tests := []struct {
+		name        string
+		blockCreate bool
+		blockStart  bool
+	}{
+		{name: "create", blockCreate: true},
+		{name: "start", blockStart: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &blockingDockerClient{
+				fakeDockerClient: &fakeDockerClient{},
+				blockCreate:      test.blockCreate,
+				blockStart:       test.blockStart,
+				started:          make(chan struct{}, 1),
+			}
+			dm := &DockerManager{client: fake, ctx: context.Background()}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				_, err := dm.StartContainerInNodeModeContext(
+					ctx, "test-image", "10080", constants.BridgeNetworkMode, nil)
+				done <- err
+			}()
+
+			select {
+			case <-fake.started:
+			case <-time.After(time.Second):
+				t.Fatal("Docker operation did not start")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("start error = %v, want context cancellation", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Docker operation did not return after cancellation")
+			}
+		})
+	}
+}
+
+func TestStartContainerInNodeModeRetainsOwnershipWhenCanceledCleanupFails(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "true")
+	fake := &blockingDockerClient{
+		fakeDockerClient: &fakeDockerClient{removeErr: context.Canceled},
+		blockStart:       true,
+		started:          make(chan struct{}, 1),
+	}
+	dm := &DockerManager{client: fake, ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := dm.StartContainerInNodeModeContext(
+			ctx, "test-image", "10080", constants.BridgeNetworkMode, nil)
+		done <- err
+	}()
+
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("Docker start did not begin")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context cancellation", err)
+	}
+	if !dm.HasManagedResources() {
+		t.Fatal("container ownership was discarded after canceled removal")
+	}
+}
+
 func TestEnsureImageAvailable_DevImageMissing(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "false")
 	devImage := constants.DefaultSptImage + ":" + constants.DevImageTag
 	dm := &DockerManager{client: &fakeDockerClient{inspectErr: io.EOF}, ctx: context.Background()}
-	err := dm.ensureImageAvailable(devImage)
+	err := dm.ensureImageAvailableContext(context.Background(), devImage)
 	if err == nil {
 		t.Fatal("expected error when dev image is missing locally")
 	}
@@ -258,6 +433,55 @@ func TestCleanupIgnoresAlreadyGoneContainer(t *testing.T) {
 	}
 	if f.stopped != 1 || f.removed != 1 {
 		t.Fatalf("expected stop+remove once, got %d/%d", f.stopped, f.removed)
+	}
+}
+
+func TestCleanupContextStopFailureRetainsContainerForRetry(t *testing.T) {
+	f := &fakeDockerClient{stopErr: errors.New("stop failed")}
+	dm := &DockerManager{client: f, containerID: "retry-stop", ctx: context.Background()}
+	if err := dm.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want stop failure")
+	}
+	if dm.ContainerID() != "retry-stop" || f.removed != 0 {
+		t.Fatalf("failed stop lost cleanup ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+	f.stopErr = nil
+	if err := dm.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if dm.ContainerID() != "" || f.removed != 1 {
+		t.Fatalf("successful retry did not clear ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+}
+
+func TestCleanupContextRemoveFailureRetainsContainerForRetry(t *testing.T) {
+	f := &fakeDockerClient{removeErr: errors.New("remove failed")}
+	dm := &DockerManager{client: f, containerID: "retry-remove", ctx: context.Background()}
+	if err := dm.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want remove failure")
+	}
+	if dm.ContainerID() != "retry-remove" {
+		t.Fatalf("failed remove cleared container ID: %q", dm.ContainerID())
+	}
+	f.removeErr = nil
+	if err := dm.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if dm.ContainerID() != "" || f.removed != 2 {
+		t.Fatalf("successful retry did not clear ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
+	}
+}
+
+func TestCleanupContextCanceledBeforeStopRetainsContainer(t *testing.T) {
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, containerID: "retry-cancel", ctx: context.Background()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := dm.CleanupContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CleanupContext() error = %v, want context.Canceled", err)
+	}
+	if dm.ContainerID() != "retry-cancel" || f.removed != 0 {
+		t.Fatalf("canceled cleanup lost ownership: id=%q removed=%d", dm.ContainerID(), f.removed)
 	}
 }
 
@@ -354,7 +578,7 @@ func TestDockerManager_PrepareNodeLogCaptureUsesConfiguredResultsRoot(t *testing
 	if len(binds) != 1 || binds[0] != wantDir+":"+dockerNodeLogMount {
 		t.Fatalf("binds = %v, want %q", binds, wantDir+":"+dockerNodeLogMount)
 	}
-	if len(env) != 1 || env[0] != "SPT_LOG_DIR="+dockerNodeLogMount {
+	if len(env) != 1 || env[0] != constants.EnvSptLogDir+"="+dockerNodeLogMount {
 		t.Fatalf("env = %v", env)
 	}
 	info, err := os.Stat(wantDir)
@@ -440,7 +664,7 @@ func TestStartContainerInNodeModeUsesConfiguredNodeLogDir(t *testing.T) {
 	if f.createContainerConfig == nil {
 		t.Fatal("ContainerCreate container config was nil")
 	}
-	if !containsString(f.createContainerConfig.Env, "SPT_LOG_DIR="+dockerNodeLogMount) {
+	if !containsString(f.createContainerConfig.Env, constants.EnvSptLogDir+"="+dockerNodeLogMount) {
 		t.Fatalf("env = %v, want SPT_LOG_DIR", f.createContainerConfig.Env)
 	}
 }

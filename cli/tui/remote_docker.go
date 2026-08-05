@@ -26,6 +26,8 @@ import (
 const (
 	remoteRemoveRecursiveFlag = "-rf"
 	remoteChmodCommand        = "chmod"
+	remoteCleanupTimeout      = 10 * time.Second
+	remoteDiagnosticsSlack    = 30 * time.Second
 )
 
 // RemoteDockerManager implements DockerInterface by executing docker CLI via SSH
@@ -85,6 +87,19 @@ func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
 	}
 }
 
+// remoteNodeEnvironment keeps mutable engine logs outside the immutable /opt/spt
+// application payload. The optional RMI hostname settings are worker-only.
+func remoteNodeEnvironment(rmiHostname string) map[string]string {
+	env := map[string]string{
+		constants.EnvSptLogDir: constants.ManagedContainerLogRoot,
+	}
+	if rmiHostname != "" {
+		env[constants.JavaOptsEnvVar] = constants.JavaRMIHostnamePrefix + rmiHostname
+		env[constants.JavaToolOptionsEnvVar] = constants.JavaRMIHostnamePrefix + rmiHostname
+	}
+	return env
+}
+
 // newRemoteDockerManagerWithExecutor allows tests to inject a custom executor.
 func newRemoteDockerManagerWithExecutor(host *hostparse.HostInfo, exec command.CommandExecutor) (*RemoteDockerManager, error) {
 	if host == nil {
@@ -117,13 +132,23 @@ func NewRemoteDockerManager(host *hostparse.HostInfo) (*RemoteDockerManager, err
 // ContainerID returns the last started container ID (if any)
 func (m *RemoteDockerManager) ContainerID() string { return m.containerID }
 
-func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) {
+// HasManagedResources reports whether cleanup must retain ownership for retry.
+func (m *RemoteDockerManager) HasManagedResources() bool {
+	return m.containerID != "" || m.stagingDir != "" || m.diagnosticsDir != ""
+}
+
+func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
 	if m.stagingDir == "" {
-		return
+		return nil
 	}
-	_, _, _ = m.exec.ExecuteCommand(ctx, m.host, []string{"rm", remoteRemoveRecursiveFlag, m.stagingDir})
+	_, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"rm", remoteRemoveRecursiveFlag, m.stagingDir})
+	if err != nil {
+		return fmt.Errorf("remove remote staging directory %s on %s: %w (stderr: %s)",
+			m.stagingDir, m.host.Original, err, stderr)
+	}
 	m.stagingDir = ""
 	m.stagedBindMounts = nil
+	return nil
 }
 
 func (m *RemoteDockerManager) ensureStagingDir(ctx context.Context) error {
@@ -144,23 +169,32 @@ func (m *RemoteDockerManager) setDiagnosticsResultsRoot(resultsRoot string) {
 
 // SetFileMounts stages local item files onto the remote Docker host for bind mounting.
 func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
-	m.stagedBindMounts = nil
-	m.stagingDir = ""
+	return m.SetFileMountsContext(context.Background(), mounts)
+}
+
+// SetFileMountsContext stages remote bind-mount inputs within the caller's context.
+func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	defer cancel()
+	if err := m.cleanupStaging(ctx); err != nil {
+		return err
+	}
 	if len(mounts) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
-	defer cancel()
 	if err := m.ensureStagingDir(ctx); err != nil {
 		return err
 	}
 	for _, mount := range mounts {
 		remotePath := path.Join(m.stagingDir, path.Base(mount.ContainerPath))
 		if err := m.exec.CopyFile(ctx, m.host, mount.HostPath, remotePath); err != nil {
-			return err
+			return errors.Join(err, m.cleanupStaging(ctx))
 		}
 		if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{remoteChmodCommand, "0444", remotePath}); err != nil {
-			return fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+			return errors.Join(
+				fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr),
+				m.cleanupStaging(ctx),
+			)
 		}
 		m.stagedBindMounts = append(m.stagedBindMounts, fmt.Sprintf("%s:%s:ro", remotePath, mount.ContainerPath))
 	}
@@ -218,20 +252,34 @@ func (m *RemoteDockerManager) prepareDiagnostics(ctx context.Context, role strin
 	return []string{fmt.Sprintf("%s:%s", remoteDir, dockerDiagnosticsMount)}, []string{remoteEnvFile}, nil
 }
 
-func (m *RemoteDockerManager) cleanupRemoteDiagnostics(ctx context.Context) {
+func (m *RemoteDockerManager) cleanupRemoteDiagnostics(ctx context.Context) error {
 	if m.diagnosticsDir == "" {
-		return
+		return nil
 	}
-	_, _, _ = m.exec.ExecuteCommand(ctx, m.host, []string{"rm", remoteRemoveRecursiveFlag, m.diagnosticsDir})
+	_, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"rm", remoteRemoveRecursiveFlag, m.diagnosticsDir})
+	if err != nil {
+		return fmt.Errorf("remove remote diagnostics directory %s on %s: %w (stderr: %s)",
+			m.diagnosticsDir, m.host.Original, err, stderr)
+	}
 	m.diagnosticsDir = ""
 	m.diagnosticsRole = ""
 	m.diagnosticsDone = false
 	m.diagnosticsRec = nil
 	m.diagnosticsStopDone = false
+	return nil
+}
+
+func (m *RemoteDockerManager) cleanupFailedStart(ctx context.Context, cause error) error {
+	return errors.Join(cause, m.cleanupStaging(ctx), m.cleanupRemoteDiagnostics(ctx))
 }
 
 // StartContainer is not used for remote multi-host mode; return a clear error
 func (m *RemoteDockerManager) StartContainer(_ string, _ []string) (string, error) {
+	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
+}
+
+// StartContainerContext reports that generic remote starts are unsupported.
+func (m *RemoteDockerManager) StartContainerContext(_ context.Context, _ string, _ []string) (string, error) {
 	return "", fmt.Errorf("StartContainer not supported for remote manager; use node/worker/entry helpers")
 }
 
@@ -240,20 +288,30 @@ func (m *RemoteDockerManager) StartContainerWithScenario(_ string, _ string, _ [
 	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
 }
 
+// StartContainerWithScenarioContext reports that remote scenario starts are unsupported.
+func (m *RemoteDockerManager) StartContainerWithScenarioContext(_ context.Context, _ string, _ string, _ []string) (string, error) {
+	return "", fmt.Errorf("StartContainerWithScenario not supported for remote manager")
+}
+
 // StartContainerInNodeMode starts a single Spt node exposing the provided API port.
 func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort string, networkMode string, additionalArgs []string) (string, error) {
+	return m.StartContainerInNodeModeContext(context.Background(), image, apiPort, networkMode, additionalArgs)
+}
+
+// StartContainerInNodeModeContext starts a remote API node within the caller's context.
+func (m *RemoteDockerManager) StartContainerInNodeModeContext(
+	ctx context.Context, image string, apiPort string, networkMode string, additionalArgs []string,
+) (string, error) {
 	port := command.ParsePortFromString(apiPort)
 	if port <= 0 {
 		return "", fmt.Errorf("invalid api port: %q", apiPort)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
 	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleNode)
 	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
+		return "", m.cleanupFailedStart(ctx, err)
 	}
 
 	name := generateRemoteContainerName("node", m.host.Host)
@@ -267,6 +325,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 		NetworkMode: mode,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleNode),
+		Environment: remoteNodeEnvironment(""),
 		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,
@@ -277,9 +336,7 @@ func (m *RemoteDockerManager) StartContainerInNodeMode(image string, apiPort str
 
 	id, _, err := m.ops.StartContainer(ctx, cfg)
 	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
+		return "", m.cleanupFailedStart(ctx, err)
 	}
 	m.containerID = strings.TrimSpace(id)
 	return m.containerID, nil
@@ -293,11 +350,18 @@ func selectedNodeNetworkMode(networkMode string) command.NetworkMode {
 }
 
 // StartWorkerNodeContainer starts a worker in RMI mode on the remote host.
-func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return m.StartWorkerNodeContainerContext(
+		context.Background(), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+// StartWorkerNodeContainerContext starts a remote RMI worker within the caller's context.
+func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+	ctx = normalizeContext(ctx)
 	// Detect advertised IP on the remote host if not explicitly provided
 	advIP := strings.TrimSpace(rmiHostname)
 	if advIP == "" {
-		ip, err := remoteip.DetectAdvertisedIP(context.Background(), m.exec, m.host)
+		ip, err := remoteip.DetectAdvertisedIP(ctx, m.exec, m.host)
 		if err != nil {
 			return "", err
 		}
@@ -305,13 +369,11 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 	}
 	logging.LogInfo("remote-docker", "using advertised IP", "host", m.host.Original, "ip", advIP)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
 	defer cancel()
-	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleWorker)
+	diagnosticBinds, envFiles, err := m.prepareDiagnostics(startCtx, constants.DockerRoleWorker)
 	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 
 	// Host networking with explicit JVM RMI hostname and explicit ports
@@ -325,71 +387,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 		NetworkMode: command.NetworkModeHost,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleWorker),
-		Environment: map[string]string{
-			constants.JavaOptsEnvVar:        fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
-			constants.JavaToolOptionsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, advIP),
-		},
-		Command:    cmd,
-		BindMounts: append(diagnosticBinds, m.stagedBindMounts...),
-		EnvFiles:   envFiles,
-	}
-
-	// RDMA device passthrough when SPT_RDMA is enabled
-	if constants.IsRdmaEnabled() {
-		cfg.Devices = []string{constants.RdmaDevicePath}
-		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
-		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
-	}
-
-	// Echo exact JAVA_OPTS for triage
-	logging.LogInfo("remote-docker", "JAVA_OPTS configured", "host", m.host.Original, "JAVA_OPTS", cfg.Environment[constants.JavaOptsEnvVar])
-
-	id, _, err := m.ops.StartContainer(ctx, cfg)
-	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
-	}
-	m.containerID = strings.TrimSpace(id)
-
-	// Readiness probe against remote host over network
-	if m.proberRun != nil {
-		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
-		rctx, rcancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
-		defer rcancel()
-		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
-			return m.containerID, fmt.Errorf("worker API readiness: %w", err)
-		}
-	}
-	return m.containerID, nil
-}
-
-// StartEntryNodeContainer starts the entry node with worker addresses and extra args (e.g., S3 params).
-func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
-	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
-	cmd := []string{}
-	if len(workerAddresses) > 0 {
-		cmd = append(cmd, "--load-step-node-addrs="+strings.Join(workerAddresses, ","))
-	}
-	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
-	cmd = append(cmd, additionalArgs...)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
-	defer cancel()
-	diagnosticBinds, envFiles, err := m.prepareDiagnostics(ctx, constants.DockerRoleEntry)
-	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
-	}
-
-	name := generateRemoteContainerName("entry", m.host.Host)
-	cfg := command.ContainerConfig{
-		Image:       image,
-		Name:        name,
-		NetworkMode: selectedNodeNetworkMode(networkMode),
-		Detached:    true,
-		Labels:      m.baseLabels(constants.DockerRoleEntry),
+		Environment: remoteNodeEnvironment(advIP),
 		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,
@@ -402,16 +400,79 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
 	}
 
-	id, _, err := m.ops.StartContainer(ctx, cfg)
+	// Echo exact JAVA_OPTS for triage
+	logging.LogInfo("remote-docker", "JAVA_OPTS configured", "host", m.host.Original, "JAVA_OPTS", cfg.Environment[constants.JavaOptsEnvVar])
+
+	id, _, err := m.ops.StartContainer(startCtx, cfg)
 	if err != nil {
-		m.cleanupStaging(ctx)
-		m.cleanupRemoteDiagnostics(ctx)
-		return "", err
+		return "", m.cleanupFailedStart(startCtx, err)
+	}
+	m.containerID = strings.TrimSpace(id)
+
+	// Readiness probe against remote host over network
+	if m.proberRun != nil {
+		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
+		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
+		defer rcancel()
+		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
+			return m.containerID, fmt.Errorf("worker API readiness: %w", err)
+		}
+	}
+	return m.containerID, nil
+}
+
+// StartEntryNodeContainer starts the entry node with worker addresses and extra args (e.g., S3 params).
+func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return m.StartEntryNodeContainerContext(
+		context.Background(), image, workerAddresses, additionalArgs, networkMode)
+}
+
+// StartEntryNodeContainerContext starts a remote RMI entry node within the caller's context.
+func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	ctx = normalizeContext(ctx)
+	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
+	cmd := []string{}
+	if len(workerAddresses) > 0 {
+		cmd = append(cmd, "--load-step-node-addrs="+strings.Join(workerAddresses, ","))
+	}
+	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
+	cmd = append(cmd, additionalArgs...)
+
+	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
+	defer cancel()
+	diagnosticBinds, envFiles, err := m.prepareDiagnostics(startCtx, constants.DockerRoleEntry)
+	if err != nil {
+		return "", m.cleanupFailedStart(startCtx, err)
+	}
+
+	name := generateRemoteContainerName("entry", m.host.Host)
+	cfg := command.ContainerConfig{
+		Image:       image,
+		Name:        name,
+		NetworkMode: selectedNodeNetworkMode(networkMode),
+		Detached:    true,
+		Labels:      m.baseLabels(constants.DockerRoleEntry),
+		Environment: remoteNodeEnvironment(""),
+		Command:     cmd,
+		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
+		EnvFiles:    envFiles,
+	}
+
+	// RDMA device passthrough when SPT_RDMA is enabled
+	if constants.IsRdmaEnabled() {
+		cfg.Devices = []string{constants.RdmaDevicePath}
+		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
+		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
+	}
+
+	id, _, err := m.ops.StartContainer(startCtx, cfg)
+	if err != nil {
+		return "", m.cleanupFailedStart(startCtx, err)
 	}
 	m.containerID = strings.TrimSpace(id)
 	if m.proberRun != nil {
 		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
-		rctx, rcancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
+		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
 			return m.containerID, fmt.Errorf("entry API readiness: %w", err)
@@ -469,6 +530,8 @@ func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnost
 			return &record, errors.New(record.Error)
 		}
 		record.RemoteDirRemoved = true
+		m.diagnosticsDir = ""
+		m.diagnosticsRole = ""
 		m.diagnosticsDone = true
 		m.diagnosticsRec = &record
 		return &record, nil
@@ -533,6 +596,8 @@ func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnost
 		return &record, errors.New(record.Error)
 	}
 	record.RemoteDirRemoved = true
+	m.diagnosticsDir = ""
+	m.diagnosticsRole = ""
 	if err := writeDiagnosticsRecordManifest(localDir, record); err != nil {
 		m.diagnosticsRec = &record
 		return &record, fmt.Errorf("write diagnostics manifest: %w", err)
@@ -570,36 +635,70 @@ func (m *RemoteDockerManager) gracefulStopForDiagnostics(ctx context.Context) er
 
 // Cleanup force-removes the last started container (if any)
 func (m *RemoteDockerManager) Cleanup() error {
-	timeout := 10 * time.Second
+	timeout := remoteCleanupTimeout
 	if m.diagnosticsDir != "" {
-		timeout = time.Duration(dockerDiagnosticsStopTimeoutSeconds+30) * time.Second
+		timeout = time.Duration(dockerDiagnosticsStopTimeoutSeconds)*time.Second + remoteDiagnosticsSlack
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return m.CleanupContext(ctx)
+}
+
+// CleanupContext force-removes the last container and staging within the caller's budget.
+func (m *RemoteDockerManager) CleanupContext(ctx context.Context) error {
+	return m.cleanupContext(ctx, true)
+}
+
+// CleanupResourcesContext removes the container and staging without retrying
+// diagnostics. A preserved diagnostics directory remains managed for a later
+// collection/removal attempt.
+func (m *RemoteDockerManager) CleanupResourcesContext(ctx context.Context) error {
+	return m.cleanupContext(ctx, false)
+}
+
+func (m *RemoteDockerManager) cleanupContext(ctx context.Context, collectDiagnostics bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
-	if m.containerID != "" {
-		if m.diagnosticsDir != "" && !m.diagnosticsDone {
+	if collectDiagnostics && m.diagnosticsDir != "" && !m.diagnosticsDone {
+		if m.containerID == "" {
+			// A prior attempt already removed the container. The remote
+			// directory is now stable and remains CLI-owned until collection
+			// and removal succeed.
+			m.diagnosticsStopDone = true
+		} else {
 			if err := m.gracefulStopForDiagnostics(ctx); err != nil {
 				logging.LogWarn("remote-docker", "diagnostics graceful stop failed", "host", m.host.Original, "error", err.Error())
 				cleanupErrs = append(cleanupErrs, err)
 			}
-			record, err := m.collectDiagnostics(ctx)
-			if record != nil {
-				diagnosticsRecords = append(diagnosticsRecords, *record)
-			}
-			if err != nil {
-				logging.LogWarn("remote-docker", "diagnostics collection failed", "host", m.host.Original, "remote_dir", m.diagnosticsDir, "error", err.Error())
-				cleanupErrs = append(cleanupErrs, err)
-			}
 		}
+		record, err := m.collectDiagnostics(ctx)
+		if record != nil {
+			diagnosticsRecords = append(diagnosticsRecords, *record)
+		}
+		if err != nil {
+			logging.LogWarn("remote-docker", "diagnostics collection failed", "host", m.host.Original, "remote_dir", m.diagnosticsDir, "error", err.Error())
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	if m.containerID != "" {
 		if err := m.ops.StopContainer(ctx, m.containerID); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 			return errors.Join(cleanupErrs...)
 		}
 		m.containerID = ""
+		if m.diagnosticsDir != "" {
+			m.diagnosticsStopDone = true
+		}
 	}
-	m.cleanupStaging(ctx)
+	if err := m.cleanupStaging(ctx); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
 	if err := writeDiagnosticsAggregateManifest(m.diagnosticsRoot, diagnosticsRecords); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
 	}

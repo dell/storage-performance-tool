@@ -27,6 +27,8 @@ const (
 	defaultMaxWidth       = 100
 	defaultSnippetLineCap = 40
 	headerIOPSAvg         = "IOPS Avg"
+	notApplicableCell     = "—"
+	objectSizeDiscovered  = "discovered at runtime"
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
@@ -58,6 +60,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderEnvironment(b, summary)
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderIntegrity(b, summary)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
@@ -104,6 +107,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
+	r.renderIntegrity(sb, summary)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -164,10 +168,13 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Workload Configuration\n")
 	r.writeBullet(b, "Workload", titleize(work.Type))
 	isList := strings.EqualFold(work.Type, workloadTypeList)
+	isReadVerify := strings.EqualFold(work.Type, workloadTypeReadVerify)
 	if work.ObjectSizeHuman != "" && !isList {
 		r.writeBullet(b, "Object size", formatObjectSizeBullet(work))
 	} else if isList {
 		r.writeBullet(b, "Object size", "not applicable")
+	} else if isReadVerify {
+		r.writeBullet(b, "Object size", objectSizeDiscovered)
 	}
 	if work.Threads > 0 {
 		r.writeBullet(b, "Threads", fmt.Sprintf("%d", work.Threads))
@@ -208,11 +215,43 @@ func (r *Renderer) renderPerformance(b *strings.Builder, summary *RunSummary) {
 	b.WriteString("\n\n")
 }
 
+func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
+	if summary.Integrity == nil {
+		return
+	}
+	integrity := summary.Integrity
+	digest := integrity.DigestPerformance
+	fmt.Fprintf(b, "Integrity Verification\n")
+	r.writeBullet(b, "Finalization", map[bool]string{true: "complete", false: "incomplete"}[integrity.Complete])
+	if integrity.VerificationDeferred {
+		r.writeBullet(b, "Verification", "deferred")
+	}
+	if integrity.SelectionCountsValid && hasListStep(summary) {
+		r.writeBullet(b, "Discovery", fmt.Sprintf("source %d, unique %d, selected %d",
+			integrity.SelectionSourceCount, integrity.SelectionUniqueCount, integrity.SelectionCount))
+	}
+	if integrity.FinalizationError != "" {
+		r.writeBullet(b, "Finalization error", integrity.FinalizationError)
+	}
+	r.writeBullet(b, "Selection", fmt.Sprintf("selected %d, attempted %d, verified %d, remaining %d, corrupt %d",
+		integrity.SelectionCount, integrity.VerificationAttemptedCount, integrity.VerifiedCount,
+		integrity.RemainingCount, integrity.CorruptCount))
+	r.writeBullet(b, "Empty selection", fmt.Sprintf("%t (allowed: %t)",
+		integrity.EmptySelection, integrity.EmptyAllowed))
+	r.writeBullet(b, "Digest work", fmt.Sprintf("%d objects, %s", digest.Objects, formatBytesHuman(digest.Bytes)))
+	r.writeBullet(b, "Digest worker time", fmt.Sprintf("%.6f s cumulative worker time", digest.HashWorkerSeconds))
+	r.writeBullet(b, "Mean worker rate", fmt.Sprintf("%.3f MiB/s", digest.MeanWorkerHashMiBPerSecond))
+	if digest.InitialWriteDelaySecondsMaxNode != nil {
+		r.writeBullet(b, "Initial write delay", fmt.Sprintf("%.6f s (maximum node interval)", *digest.InitialWriteDelaySecondsMaxNode))
+	}
+	r.writeBullet(b, "Additional passes", fmt.Sprintf("%d full payload passes", digest.AdditionalPayloadPasses))
+	b.WriteString("\n")
+}
+
 func (r *Renderer) performanceTable(summary *RunSummary) string {
 	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerTTFBP50, headerBandwidthAvg}
-	isList := strings.EqualFold(summary.Workload.Type, workloadTypeList)
-	if isList {
-		headers[4] = "Ops/s Avg"
+	if hasListStep(summary) {
+		headers[4] = "Rate Avg"
 	}
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
@@ -221,25 +260,44 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		}
 		m := step.Metrics
 		sizeCell := nonEmpty(m.ObjectSizeHuman, summary.Workload.ObjectSizeHuman)
+		dataCell := formatBytesHuman(m.DataBytes)
+		bandwidthCell := formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond)
+		rateCell := formatNumber(m.ThroughputAvgOps, "ops/s")
+		if strings.EqualFold(step.Operation, workloadTypeList) {
+			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
+			rateCell = formatNumber(m.ThroughputAvgOps, "objects/s")
+		}
 		if strings.TrimSpace(sizeCell) == "" {
-			sizeCell = "—"
+			sizeCell = notApplicableCell
 		}
 		row := []string{
 			step.PhaseLabel,
 			sizeCell,
 			formatInt(m.SuccessCount),
-			formatBytesHuman(m.DataBytes),
-			formatNumber(m.ThroughputAvgOps, "ops/s"),
+			dataCell,
+			rateCell,
 			mixedLatencyCell(step, m),
 			mixedTTFBCell(step, m),
-			formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond),
+			bandwidthCell,
 		}
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{"—", "—", "—", "—", "—", "—", "—", "—"})
+		rows = append(rows, []string{notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func hasListStep(summary *RunSummary) bool {
+	if summary == nil {
+		return false
+	}
+	for _, step := range summary.Steps {
+		if strings.EqualFold(step.Operation, workloadTypeList) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Renderer) renderCompactMixedBreakdowns(b *strings.Builder, summary *RunSummary) {
@@ -477,7 +535,7 @@ func mixedTTFBCell(step StepSummary, metrics *PhaseMetrics) string {
 
 func formatTTFBNumber(value float64) string {
 	if value <= 0 {
-		return "—"
+		return notApplicableCell
 	}
 	return formatNumber(value, "ms")
 }

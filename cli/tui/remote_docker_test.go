@@ -6,10 +6,12 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
@@ -24,10 +26,100 @@ func newTestRemoteManager(t *testing.T) (*RemoteDockerManager, *command.MockComm
 	// Make any docker command succeed and return a fake container ID
 	mock.DefaultResponse = command.MockResponse{Stdout: "abc123def456", Stderr: "", Error: nil}
 	mgr, err := newRemoteDockerManagerWithExecutor(host, mock)
+
 	if err != nil {
 		t.Fatalf("failed to create remote docker manager: %v", err)
 	}
 	return mgr, mock, host
+}
+
+type blockingRemoteExecutor struct {
+	started chan struct{}
+}
+
+func (e *blockingRemoteExecutor) signalStarted() {
+	select {
+	case e.started <- struct{}{}:
+	default:
+	}
+}
+
+func (e *blockingRemoteExecutor) ExecuteCommand(
+	ctx context.Context, _ *hostparse.HostInfo, _ []string,
+) (string, string, error) {
+	e.signalStarted()
+	<-ctx.Done()
+	return "", "", ctx.Err()
+}
+
+func (e *blockingRemoteExecutor) CopyFile(
+	ctx context.Context, _ *hostparse.HostInfo, _, _ string,
+) error {
+	e.signalStarted()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (e *blockingRemoteExecutor) CopyFromHost(
+	ctx context.Context, _ *hostparse.HostInfo, _, _ string,
+) error {
+	e.signalStarted()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRemoteDockerManagedLaunchesRedirectLogsOutsidePayload(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "")
+	if constants.ManagedContainerLogRoot == constants.IntegrityPayloadRoot ||
+		strings.HasPrefix(constants.ManagedContainerLogRoot, constants.IntegrityPayloadRoot+"/") {
+		t.Fatalf("managed log root %q is inside integrity payload %q",
+			constants.ManagedContainerLogRoot, constants.IntegrityPayloadRoot)
+	}
+
+	tests := []struct {
+		name   string
+		launch func(*RemoteDockerManager) (string, error)
+	}{
+		{
+			name: "node",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartContainerInNodeMode(
+					constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil)
+			},
+		},
+		{
+			name: "worker",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartWorkerNodeContainer(
+					constants.DefaultSptImage, "10.0.0.10", 40000, 3, nil)
+			},
+		},
+		{
+			name: "entry",
+			launch: func(mgr *RemoteDockerManager) (string, error) {
+				return mgr.StartEntryNodeContainer(
+					constants.DefaultSptImage, []string{"w1:1099"}, nil, constants.DefaultNetworkMode)
+			},
+		},
+	}
+
+	want := "-e " + constants.EnvSptLogDir + "=" + constants.ManagedContainerLogRoot
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, mock, _ := newTestRemoteManager(t)
+			if _, err := tc.launch(mgr); err != nil {
+				t.Fatalf("launch error: %v", err)
+			}
+			executed := mock.GetExecutedCommandsMatching("docker run")
+			if len(executed) != 1 {
+				t.Fatalf("docker run count = %d, want 1", len(executed))
+			}
+			cmd := strings.Join(executed[0].Command, " ")
+			if strings.Count(cmd, want) != 1 {
+				t.Fatalf("docker run command = %q, want exactly one %q", cmd, want)
+			}
+		})
+	}
 }
 
 func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
@@ -66,6 +158,147 @@ func TestRemoteDocker_StartContainerInNodeMode_RespectsPort(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "--name spt-node-") {
 		t.Errorf("expected docker run command to include node name prefix, got: %s", cmd)
+	}
+}
+
+func TestRemoteDockerCleanupStopFailureRetainsContainerAndStagingForRetry(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "retry-container"
+	mgr.stagingDir = "/tmp/retry-staging"
+	mock.SetCommandFailure("docker rm -f retry-container", "busy", errors.New("remove failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want container removal failure")
+	}
+	if mgr.containerID != "retry-container" || mgr.stagingDir != "/tmp/retry-staging" {
+		t.Fatalf("failed cleanup lost ownership: container=%q staging=%q", mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("docker rm -f retry-container", "removed")
+	mock.SetCommandSuccess("rm -rf /tmp/retry-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" {
+		t.Fatalf("successful retry retained ownership: container=%q staging=%q", mgr.containerID, mgr.stagingDir)
+	}
+}
+
+func TestRemoteDockerCleanupStagingFailureRemainsRetryable(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "removed-container"
+	mgr.stagingDir = "/tmp/retry-staging"
+	mock.SetCommandSuccess("docker rm -f removed-container", "removed")
+	mock.SetCommandFailure("rm -rf /tmp/retry-staging", "permission denied", errors.New("rm failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil {
+		t.Fatal("CleanupContext() error = nil, want staging removal failure")
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "/tmp/retry-staging" {
+		t.Fatalf("staging failure state = container %q staging %q", mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("rm -rf /tmp/retry-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("staging cleanup retry error = %v", err)
+	}
+	if mgr.stagingDir != "" {
+		t.Fatalf("successful staging retry retained path %q", mgr.stagingDir)
+	}
+}
+
+func TestRemoteDockerPreservedDiagnosticsRemainManagedAndRetryCopy(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "diagnostics-container"
+	mgr.stagingDir = "/tmp/diagnostics-staging"
+	mgr.diagnosticsDir = "/tmp/spt-diagnostics/run/worker"
+	mgr.diagnosticsRole = constants.DockerRoleWorker
+	mgr.diagnosticsRoot = t.TempDir()
+	mgr.diagnosticsStopDone = true
+	mock.SetCommandSuccess(
+		"find "+mgr.diagnosticsDir+" -maxdepth 1 -type f -print",
+		mgr.diagnosticsDir+"/spt.jfr\n",
+	)
+	mock.FailureMode = "copy_from_failure"
+
+	if err := mgr.CleanupContext(context.Background()); err == nil || !strings.Contains(err.Error(), "copy from host failed") {
+		t.Fatalf("CleanupContext() error = %v, want diagnostics copy failure", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" || mgr.diagnosticsDir == "" || !mgr.HasManagedResources() {
+		t.Fatalf("copy failure ownership: container=%q staging=%q diagnostics=%q managed=%t",
+			mgr.containerID, mgr.stagingDir, mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+
+	mock.FailureMode = ""
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("diagnostics copy retry error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful copy retry retained diagnostics ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+	if record := mgr.diagnosticsRecord(); record == nil || !record.RemoteDirRemoved || record.PreservedRemoteDir {
+		t.Fatalf("successful copy retry record = %+v", record)
+	}
+}
+
+func TestRemoteDockerPreservedDiagnosticsRetryRemoteRemoval(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "diagnostics-container"
+	mgr.diagnosticsDir = "/tmp/spt-diagnostics/run/worker"
+	mgr.diagnosticsRole = constants.DockerRoleWorker
+	mgr.diagnosticsRoot = t.TempDir()
+	mgr.diagnosticsStopDone = true
+	mock.SetCommandSuccess(
+		"find "+mgr.diagnosticsDir+" -maxdepth 1 -type f -print", "",
+	)
+	mock.SetCommandFailure("rm -rf "+mgr.diagnosticsDir, "permission denied", errors.New("rm failed"))
+
+	if err := mgr.CleanupContext(context.Background()); err == nil || !strings.Contains(err.Error(), "remove remote diagnostics") {
+		t.Fatalf("CleanupContext() error = %v, want remote diagnostics removal failure", err)
+	}
+	if mgr.containerID != "" || mgr.diagnosticsDir == "" || !mgr.HasManagedResources() {
+		t.Fatalf("remove failure ownership: container=%q diagnostics=%q managed=%t",
+			mgr.containerID, mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+
+	mock.SetCommandSuccess("rm -rf "+mgr.diagnosticsDir, "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("remote diagnostics removal retry error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful removal retry retained ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
+	}
+}
+
+func TestRemoteDockerCleanupCancellationDuringStopRetainsOwnershipForRetry(t *testing.T) {
+	mgr, mock, _ := newTestRemoteManager(t)
+	mgr.containerID = "cancel-container"
+	mgr.stagingDir = "/tmp/cancel-staging"
+	mock.SetCommandResponse("docker rm -f cancel-container", command.MockResponse{
+		Stdout: "removed",
+		Delay:  100 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if err := mgr.CleanupContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CleanupContext() error = %v, want context deadline", err)
+	}
+	if mgr.containerID != "cancel-container" || mgr.stagingDir != "/tmp/cancel-staging" {
+		t.Fatalf("mid-cleanup cancellation lost ownership: container=%q staging=%q",
+			mgr.containerID, mgr.stagingDir)
+	}
+
+	mock.SetCommandSuccess("docker rm -f cancel-container", "removed")
+	mock.SetCommandSuccess("rm -rf /tmp/cancel-staging", "")
+	if err := mgr.CleanupContext(context.Background()); err != nil {
+		t.Fatalf("CleanupContext() retry error = %v", err)
+	}
+	if mgr.containerID != "" || mgr.stagingDir != "" {
+		t.Fatalf("successful retry retained ownership: container=%q staging=%q",
+			mgr.containerID, mgr.stagingDir)
 	}
 }
 
@@ -244,6 +477,10 @@ func TestRemoteDocker_CleanupCollectsDiagnosticsBeforeStagingCleanup(t *testing.
 
 	if err := mgr.Cleanup(); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if mgr.diagnosticsDir != "" || mgr.HasManagedResources() {
+		t.Fatalf("successful diagnostics cleanup retained ownership: dir=%q managed=%t",
+			mgr.diagnosticsDir, mgr.HasManagedResources())
 	}
 	if len(mock.CopiedFromFiles) != 2 {
 		t.Fatalf("copied diagnostics = %d, want 2", len(mock.CopiedFromFiles))
@@ -483,5 +720,103 @@ func TestRemoteDocker_CleanupCollectsNodeModeDiagnostics(t *testing.T) {
 	}
 	if !record.Collected || !record.RemoteDirRemoved {
 		t.Fatalf("expected node-mode diagnostics to be collected and remote dir removed, record = %+v", record)
+	}
+}
+
+func TestRemoteDockerSetFileMountsContextCancelsStaging(t *testing.T) {
+	host := &hostparse.HostInfo{
+		User: "root", Host: "worker.example.com", Original: "root@worker.example.com", IsLocal: false,
+	}
+	exec := &blockingRemoteExecutor{started: make(chan struct{}, 1)}
+	mgr, err := newRemoteDockerManagerWithExecutor(host, exec)
+	if err != nil {
+		t.Fatalf("new remote manager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.SetFileMountsContext(ctx, []scenario.FileMount{{
+			HostPath: "/host/items.csv", ContainerPath: "/spt-input/items.csv",
+		}})
+	}()
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("remote staging command did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("staging error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote staging did not return after cancellation")
+	}
+}
+
+func TestRemoteDockerStartContextCancelsRemoteCommand(t *testing.T) {
+	host := &hostparse.HostInfo{
+		User: "root", Host: "worker.example.com", Original: "root@worker.example.com", IsLocal: false,
+	}
+	exec := &blockingRemoteExecutor{started: make(chan struct{}, 1)}
+	mgr, err := newRemoteDockerManagerWithExecutor(host, exec)
+	if err != nil {
+		t.Fatalf("new remote manager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.StartContainerInNodeModeContext(
+			ctx, constants.DefaultSptImage, "10080", constants.BridgeNetworkMode, nil)
+		done <- err
+	}()
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("remote Docker command did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("remote start error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote Docker start did not return after cancellation")
+	}
+}
+
+func TestRemoteDockerWorkerReadinessUsesLaunchContext(t *testing.T) {
+	mgr, _, _ := newTestRemoteManager(t)
+	readinessStarted := make(chan struct{})
+	mgr.proberRun = func(ctx context.Context, _ string, _ time.Duration) error {
+		close(readinessStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.StartWorkerNodeContainerContext(
+			ctx, constants.DefaultSptImage, "192.0.2.10", 1099, 1, nil)
+		done <- err
+	}()
+	select {
+	case <-readinessStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker readiness did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("readiness error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker readiness did not return after cancellation")
+	}
+	if mgr.containerID == "" {
+		t.Fatal("canceled readiness lost ownership of the started container")
 	}
 }

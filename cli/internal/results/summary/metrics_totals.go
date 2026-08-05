@@ -25,6 +25,8 @@ type MetricsTotalsRow struct {
 	NodeCount           int64
 	SuccessCount        int64
 	FailureCount        int64
+	CorruptCount        int64
+	HasCorruptCount     bool
 	SizeBytes           int64
 	StepDurationSeconds float64
 	DurationSumSeconds  float64
@@ -58,6 +60,7 @@ const (
 	columnNodeCount       = "NodeCount"
 	columnCountSucc       = "CountSucc"
 	columnCountFail       = "CountFail"
+	columnCountCorrupt    = "CountCorrupt"
 	columnSize            = "Size"
 	columnStepDuration    = "StepDuration[s]"
 	columnDurationSum     = "DurationSum[s]"
@@ -176,6 +179,12 @@ func parseMetricsTotalsRow(record []string, index map[string]int) (MetricsTotals
 	}
 	if row.FailureCount, err = parseInt(record, index, columnCountFail); err != nil {
 		return row, err
+	}
+	if _, ok := index[columnCountCorrupt]; ok {
+		if row.CorruptCount, err = parseInt(record, index, columnCountCorrupt); err != nil {
+			return row, err
+		}
+		row.HasCorruptCount = true
 	}
 	if row.SizeBytes, err = parseInt(record, index, columnSize); err != nil {
 		return row, err

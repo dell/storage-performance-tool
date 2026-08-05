@@ -63,7 +63,7 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 
 	private void appendHeader(final StringBuilder strb) {
 		strb.append("DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,")
-						.append("CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],")
+						.append("CountFail,CountCorrupt,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],")
 						.append(COLUMN_BW_AVG_MIB_PER_SECOND)
 						.append(',')
 						.append(COLUMN_BW_LAST_MIB_PER_SECOND)
@@ -94,6 +94,7 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 		final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
 		final TimingMetricSnapshot durationSnapshot = snapshot.durationSnapshot();
 		final RateMetricSnapshot successCountSnapshot = snapshot.successSnapshot();
+		final RateMetricSnapshot corruptCountSnapshot = snapshot.corruptSnapshot();
 		final RateMetricSnapshot byteCountSnapshot = snapshot.byteSnapshot();
 		final TimingMetricSnapshot latencySnapshot = snapshot.latencySnapshot();
 		final TimingMetricSnapshot ttfbSnapshot = snapshot.ttfbSnapshot();
@@ -116,6 +117,8 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 						.append(successCountSnapshot.count())
 						.append(',')
 						.append(snapshot.failsSnapshot().count())
+						.append(',')
+						.append(corruptCountSnapshot == null ? 0L : corruptCountSnapshot.count())
 						.append(',')
 						.append(byteCountSnapshot.count())
 						.append(',')

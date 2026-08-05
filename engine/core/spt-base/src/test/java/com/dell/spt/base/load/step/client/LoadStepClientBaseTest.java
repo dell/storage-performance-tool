@@ -2,6 +2,8 @@ package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.github.akurilov.confuse.Config;
@@ -19,6 +21,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.config.Configurator;
 
@@ -42,6 +45,28 @@ class LoadStepClientBaseTest {
 		extensions = Collections.emptyList();
 		ctxConfigs = Collections.emptyList();
 		mockMetricsManager = mock(MetricsManager.class);
+	}
+
+	@Test
+	void metadataSliceRunIdMustMatchBeforeStart() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.runId()).thenReturn(77L);
+		assertDoesNotThrow(() -> LoadStepClientBase.requireMatchingRunId(slice, 77L));
+
+		when(slice.runId()).thenReturn(78L);
+		final var mismatch = assertThrows(
+						IntegrityTerminalException.class,
+						() -> LoadStepClientBase.requireMatchingRunId(slice, 77L));
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, mismatch.category());
+		assertTrue(mismatch.getMessage().contains("expected 77, actual 78"));
+	}
+
+	@Test
+	void metadataSliceRunIdMustBePositive() {
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> LoadStepClientBase.requireMatchingRunId(mock(LoadStep.class), 0L));
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
 	}
 
 	@Nested

@@ -110,6 +110,7 @@ final class MetricsJsonResponder {
 
 		long successCount = snapshot.successSnapshot().count();
 		long failCount = snapshot.failsSnapshot().count();
+		long corruptCount = corruptCount(snapshot);
 		long bytesTotal = snapshot.byteSnapshot().count();
 		double latencyMean = snapshot.latencySnapshot().mean();
 		double durationMean = snapshot.durationSnapshot().mean();
@@ -119,6 +120,7 @@ final class MetricsJsonResponder {
 		if (progressEntry != null) {
 			successCount = Math.max(successCount, progressEntry.successCount);
 			failCount = Math.max(failCount, progressEntry.failedCount);
+			corruptCount = Math.max(corruptCount, progressEntry.corruptCount);
 			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
 			if (progressEntry.latencyMeanUs > 0.0) {
 				latencyMean = progressEntry.latencyMeanUs;
@@ -150,7 +152,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addMetrics(jsonObj, snapshot, successCount, failCount, bytesTotal, latencyMean, durationMean);
+		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -178,6 +180,7 @@ final class MetricsJsonResponder {
 
 		long successCount = snapshot.successSnapshot().count();
 		long failCount = snapshot.failsSnapshot().count();
+		long corruptCount = corruptCount(snapshot);
 		long bytesTotal = snapshot.byteSnapshot().count();
 		double latencyMean = snapshot.latencySnapshot().mean();
 		double durationMean = snapshot.durationSnapshot().mean();
@@ -187,6 +190,7 @@ final class MetricsJsonResponder {
 		if (progressEntry != null) {
 			successCount = Math.max(successCount, progressEntry.successCount);
 			failCount = Math.max(failCount, progressEntry.failedCount);
+			corruptCount = Math.max(corruptCount, progressEntry.corruptCount);
 			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
 			if (progressEntry.latencyMeanUs > 0.0) {
 				latencyMean = progressEntry.latencyMeanUs;
@@ -218,7 +222,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addMetrics(jsonObj, snapshot, successCount, failCount, bytesTotal, latencyMean, durationMean);
+		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -273,12 +277,14 @@ final class MetricsJsonResponder {
 					final AllMetricsSnapshot snapshot,
 					final long successCount,
 					final long failCount,
+					final long corruptCount,
 					final long bytesTotal,
 					final double latencyMean,
 					final double durationMean) {
 		final ObjectNode operations = objectMapper.createObjectNode();
 		operations.put("success_count", successCount);
 		operations.put("failed_count", failCount);
+		operations.put("corrupt_count", corruptCount);
 		operations.put("success_rate_last", snapshot.successSnapshot().last());
 		operations.put("failed_rate_last", snapshot.failsSnapshot().last());
 		jsonObj.set("operations", operations);
@@ -305,6 +311,11 @@ final class MetricsJsonResponder {
 		concurrency.put("current", snapshot.concurrencySnapshot().last());
 		concurrency.put("mean", snapshot.concurrencySnapshot().mean());
 		jsonObj.set("concurrency", concurrency);
+	}
+
+	private static long corruptCount(final AllMetricsSnapshot snapshot) {
+		final var corruptSnapshot = snapshot.corruptSnapshot();
+		return corruptSnapshot == null ? 0L : corruptSnapshot.count();
 	}
 
 	private ObjectNode timingObject(final TimingMetricSnapshot snapshot, final double mean) {
@@ -415,6 +426,7 @@ final class MetricsJsonResponder {
 		final ObjectNode operations = objectMapper.createObjectNode();
 		operations.put("success_count", 0L);
 		operations.put("failed_count", 0L);
+		operations.put("corrupt_count", 0L);
 		operations.put("success_rate_last", 0.0);
 		operations.put("failed_rate_last", 0.0);
 		jsonObj.set("operations", operations);
@@ -495,6 +507,7 @@ final class MetricsJsonResponder {
 			final ObjectNode operations = objectMapper.createObjectNode();
 			operations.put("success_count", entry.successCount);
 			operations.put("failed_count", entry.failedCount);
+			operations.put("corrupt_count", entry.corruptCount);
 			operations.put("success_rate_last", 0.0);
 			operations.put("failed_rate_last", 0.0);
 			jsonObj.set("operations", operations);
@@ -579,6 +592,7 @@ final class MetricsJsonResponder {
 			final ObjectNode operations = objectMapper.createObjectNode();
 			operations.put("success_count", entry.successCount);
 			operations.put("failed_count", entry.failedCount);
+			operations.put("corrupt_count", entry.corruptCount);
 			operations.put("success_rate_last", 0.0);
 			operations.put("failed_rate_last", 0.0);
 			jsonObj.set("operations", operations);

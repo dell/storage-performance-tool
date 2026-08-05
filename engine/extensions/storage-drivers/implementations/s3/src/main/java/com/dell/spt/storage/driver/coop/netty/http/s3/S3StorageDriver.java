@@ -15,16 +15,20 @@ import static io.netty.handler.codec.http.HttpMethod.GET;
 import static io.netty.handler.codec.http.HttpMethod.PUT;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static com.dell.spt.base.item.op.Operation.SLASH;
-
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
@@ -68,8 +72,12 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Set;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -87,7 +95,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
-import javax.xml.parsers.SAXParserFactory;
 import org.apache.logging.log4j.Level;
 import org.xml.sax.SAXException;
 
@@ -304,6 +311,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final String checksumAlgorithm;
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
+	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
 
 	public S3StorageDriver(
 					final String stepId,
@@ -655,6 +663,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final String prefix,
 					final String delimiter,
 					final int maxKeys) throws IOException {
+		final String canonicalPrefix = sanitizePrefix(prefix);
 		final var nodeAddr = storageNodeAddrs[0];
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -665,34 +674,32 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.setLength(0);
 		uriBuilder.append(bucketPath);
 		appendInitialQuery(uriBuilder, "list-type=2");
-		appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+		appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 		appendQueryParam(uriBuilder, "delimiter", delimiter);
-		appendQueryParam(uriBuilder, "max-keys", Integer.toString(Math.min(Math.max(maxKeys, 1), S3Api.MAX_KEYS_LIMIT)));
+		appendQueryParam(uriBuilder, "max-keys",
+						Integer.toString(Math.min(Math.max(maxKeys, 1), S3Api.MAX_KEYS_LIMIT)));
 		final var uri = uriBuilder.toString();
 		applyAuthHeaders(reqHeaders, HttpMethod.GET, uri, credential);
 		final FullHttpRequest req = new DefaultFullHttpRequest(
-						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER, reqHeaders, EmptyHttpHeaders.INSTANCE);
+						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER,
+						reqHeaders, EmptyHttpHeaders.INSTANCE);
 		try {
 			final var resp = executeHttpRequest(req);
 			try {
 				if (resp == null) {
-					Loggers.MSG.warn("Delimiter probe returned no response (null) for prefix='{}' delimiter='{}'", prefix, delimiter);
-					return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(java.util.Collections.emptyList(), false, false);
+					throw new IOException("S3 LIST delimiter probe returned no response");
+				}
+				if (!HttpStatusClass.SUCCESS.equals(resp.status().codeClass())) {
+					throw new IOException("S3 LIST delimiter probe failed: " + resp.status());
 				}
 				final var content = resp.content();
-				var parser = THREAD_LOCAL_XML_PARSER.get();
-				if (parser == null) {
-					parser = SAXParserFactory.newInstance().newSAXParser();
-					THREAD_LOCAL_XML_PARSER.set(parser);
-				} else {
-					parser.reset();
-				}
 				final var handler = new CommonPrefixesXmlHandler();
 				try (final InputStream is = new ByteBufInputStream(content)) {
-					parser.parse(is, handler);
+					S3XmlParser.parse(is, handler);
 				}
 				return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(
-								java.util.List.copyOf(handler.commonPrefixes()), handler.hasContents(), handler.truncated());
+								java.util.List.copyOf(handler.commonPrefixes()),
+								handler.hasContents(), handler.truncated());
 			} finally {
 				if (resp != null) {
 					resp.release();
@@ -700,12 +707,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
-		} catch (final SAXException | ParserConfigurationException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
+			throw new IOException("S3 LIST delimiter probe interrupted", e);
+		} catch (final SAXException e) {
+			throw new IOException("Failed to parse the S3 LIST delimiter probe", e);
+		} catch (final ParserConfigurationException e) {
+			throw new IOException("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
+			throw new IOException("Failed to connect for S3 LIST delimiter probe", e);
 		}
-		return new com.dell.spt.base.storage.driver.ListDiscoveryProbe.DiscoverResult(java.util.Collections.emptyList(), false, false);
 	}
 
 	@Override
@@ -718,8 +727,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final int count,
 					final ListOptions options)
 					throws IOException {
+		final String canonicalPrefix = sanitizePrefix(prefix);
 		final var requestedMax = options.maxKeys() > 0 ? options.maxKeys() : S3Api.MAX_KEYS_LIMIT;
-		final var countLimit = Math.min(Math.max(count, 1), Math.min(requestedMax, S3Api.MAX_KEYS_LIMIT));
+		final var countLimit = Math.min(
+						Math.max(count, 1), Math.min(requestedMax, S3Api.MAX_KEYS_LIMIT));
 		final var nodeAddr = storageNodeAddrs[0];
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -731,65 +742,68 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(path);
 		if (options.includeVersions()) {
 			appendInitialQuery(uriBuilder, "versions");
-			appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+			appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 			appendQueryParam(uriBuilder, "delimiter", options.delimiter());
-			appendQueryParam(uriBuilder, "key-marker", options.keyMarker());
+			appendQueryParam(uriBuilder, "key-marker", sanitizePrefix(options.keyMarker()));
 			appendQueryParam(uriBuilder, "version-id-marker", options.versionIdMarker());
 		} else {
 			appendInitialQuery(uriBuilder, "list-type=2");
-			appendQueryParam(uriBuilder, "prefix", sanitizePrefix(prefix));
+			appendQueryParam(uriBuilder, "prefix", canonicalPrefix);
 			appendQueryParam(uriBuilder, "delimiter", options.delimiter());
 			if (options.continuationToken() != null && !options.continuationToken().isEmpty()) {
 				appendQueryParam(uriBuilder, "continuation-token", options.continuationToken());
 			} else if (options.startAfter() != null && !options.startAfter().isEmpty()) {
-				appendQueryParam(uriBuilder, "start-after", options.startAfter());
+				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(options.startAfter()));
 			} else if (lastPrevItem != null) {
 				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(lastPrevItem.name()));
 			}
 		}
 		appendQueryParam(uriBuilder, "max-keys", Integer.toString(countLimit));
 		final var uri = uriBuilder.toString();
-		applyAuthHeaders(reqHeaders, HttpMethod.GET, path, credential);
+		applyAuthHeaders(reqHeaders, HttpMethod.GET, uri, credential);
 		final FullHttpRequest checkBucketReq = new DefaultFullHttpRequest(
-						HttpVersion.HTTP_1_1,
-						HttpMethod.GET,
-						uri,
-						Unpooled.EMPTY_BUFFER,
-						reqHeaders,
-						EmptyHttpHeaders.INSTANCE);
+						HttpVersion.HTTP_1_1, HttpMethod.GET, uri, Unpooled.EMPTY_BUFFER,
+						reqHeaders, EmptyHttpHeaders.INSTANCE);
 		final List<I> buff = new ArrayList<>(countLimit);
 		try {
 			final var listResp = executeHttpRequest(checkBucketReq);
 			try {
+				if (listResp == null) {
+					throw new IOException("S3 LIST returned no response");
+				}
+				if (!HttpStatusClass.SUCCESS.equals(listResp.status().codeClass())) {
+					throw new IOException("S3 LIST failed: " + listResp.status());
+				}
 				final var listRespContent = listResp.content();
-				var listRespParser = THREAD_LOCAL_XML_PARSER.get();
-				if (listRespParser == null) {
-					listRespParser = SAXParserFactory.newInstance().newSAXParser();
-					THREAD_LOCAL_XML_PARSER.set(listRespParser);
-				} else {
-					listRespParser.reset();
-				}
-				final var listingHandler = new BucketXmlListingHandler<>(buff, path, itemFactory, idRadix);
+				final var listingHandler = new BucketXmlListingHandler<>(
+								buff, path, canonicalPrefix, itemFactory, idRadix);
 				try (final InputStream contentStream = new ByteBufInputStream(listRespContent)) {
-					listRespParser.parse(contentStream, listingHandler);
+					S3XmlParser.parse(contentStream, listingHandler);
 				}
-				if (buff.size() == 0) {
+				if (buff.isEmpty()) {
 					throw new EOFException();
 				}
 				if (!listingHandler.isTruncated()) {
 					buff.add(null); // poison
 				}
 			} finally {
-				listResp.release();
+				if (listResp != null) {
+					listResp.release();
+				}
 			}
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
-		} catch (final SAXException | ParserConfigurationException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to init the XML response parser");
+			throw new IOException("S3 LIST interrupted", e);
+		} catch (final SAXException e) {
+			throw deterministicListInputFailure("Failed to parse the S3 object listing", e);
+		} catch (final ParserConfigurationException e) {
+			throw deterministicListInputFailure("Failed to initialize the S3 LIST response parser", e);
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
-		} catch (final NullPointerException e) {
-			LogUtil.exception(Level.WARN, e, "Timeout response");
+			throw deterministicListInputFailure("Failed to connect for S3 LIST", e);
+		} catch (final EOFException e) {
+			throw e;
+		} catch (final IOException e) {
+			throw deterministicListInputFailure("S3 LIST input failed", e);
 		}
 		return buff;
 	}
@@ -828,7 +842,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			httpRequest = listRequest((ListOperation<?>) op, nodeAddr);
 		} else if (taggingEnabled) {
 			httpRequest = objectTaggingRequest(op, nodeAddr);
-		} else if (versioning) {
+		} else if (versioning
+						|| (integrityMetadataEnabled() && op.requestedVersionId() != null)) {
 			httpRequest = objectVersioningRequest(op, nodeAddr);
 		} else {
 			httpRequest = super.httpRequest(op, nodeAddr);
@@ -1003,6 +1018,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						|| ch == '-' || ch == '_' || ch == '.' || ch == '~';
 	}
 
+	private IOException deterministicListInputFailure(
+					final String message, final Throwable cause) {
+		if (verifyFlag) {
+			return new TerminalItemInputException(message, cause);
+		}
+		return cause instanceof IOException
+						? (IOException) cause
+						: new IOException(message, cause);
+	}
+
 	private static String normalizeBucketPath(final String path) {
 		if (path == null || path.isEmpty()) {
 			return SLASH;
@@ -1064,7 +1089,15 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (checksumStrategy == null || !(op.item() instanceof DataItem)) {
 			return;
 		}
-
+		if (OpType.CREATE.equals(op.type())
+						&& op.integrityMetadata() != null
+						&& IntegrityMetadataCodec.ALGORITHM_SHA256.equals(checksumStrategy.configToken)
+						&& !(op instanceof PartialDataOperation)) {
+			final byte[] digestBytes = HexFormat.of().parseHex(op.integrityMetadata().digest());
+			httpHeaders.set(
+							checksumStrategy.requestHeaderName, BASE64_ENCODER.encodeToString(digestBytes));
+			return;
+		}
 		var dataItem = (DataItem) op.item();
 		final MessageDigest digest = checksumStrategy.digestSupplier.get();
 
@@ -1108,7 +1141,63 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
+		return checksumStrategy != null
+						&& (op instanceof CompositeDataOperation
+										|| !IntegrityMetadataCodec.ALGORITHM_SHA256.equals(checksumStrategy.configToken));
+	}
+
+	@Override
 	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {}
+
+	@Override
+	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders, final O op) {
+		super.applyMetaDataHeaders(httpHeaders, op);
+		if (!integrityMetadataEnabled()
+						|| !OpType.CREATE.equals(op.type())
+						|| op.integrityMetadata() == null
+						|| op instanceof PartialDataOperation) {
+			return;
+		}
+		IntegrityMetadataCodec.httpHeaders(op.integrityMetadata()).forEach(httpHeaders::set);
+	}
+
+	final boolean integrityMetadataEnabledForResponse() {
+		return integrityMetadataEnabled();
+	}
+
+	final void recordIntegrityReadResultFromResponse(final IntegrityVerificationResult result) {
+		recordIntegrityReadResult(result);
+	}
+
+	final void recordTerminalResponseFailure(final IntegrityTerminalException failure) {
+		recordTerminalFailure(failure);
+	}
+
+	/** Extension hook for transports which deliver a successful GET body outside HTTP. */
+	protected boolean observesReadBodyOutOfBand(final O op) {
+		return false;
+	}
+
+	final boolean observesIntegrityReadBodyOutOfBand(final O op) {
+		return observesReadBodyOutOfBand(op);
+	}
+
+	protected final void finishOutOfBandIntegrityRead(
+					final Channel channel, final O op, final java.nio.ByteBuffer body) {
+		final IntegrityVerificationResult result = S3ResponseHandler.finishOutOfBandIntegrityRead(channel, body);
+		if (result != null) {
+			op.integrityVerificationResult(result);
+			recordIntegrityReadResult(result);
+			if (!result.verified()) {
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+			}
+		}
+	}
+
+	protected final void discardOutOfBandIntegrityRead(final Channel channel) {
+		S3ResponseHandler.discardOutOfBandIntegrityRead(channel);
+	}
 
 	HttpRequest initMultipartUploadRequest(final O op, final String nodeAddr) {
 		final var item = op.item();
@@ -1127,7 +1216,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var httpMethod = HttpMethod.POST;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
-		applyMetaDataHeaders(httpHeaders);
+		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, uri, op.credential());
@@ -1276,22 +1365,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var item = (I) op.item();
 		final var opType = op.type();
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
-		// /<bucket>/<itemName>~<versionId>,
-		// /bucket/30auvg3756cw~16788129946F0FF5,57ec29fc427c270,10,0/0
-		var indexOfVersionStart = item.name().lastIndexOf('~');
-		// versioning relies on the fact that ~ is used for versions only
-		// so far ecs doesn't use ~ symbol in versionId. If that changes, then algorithm will break
-		// another chance for it to break is when ~ is used in bucket name, versioning enabled, but
-		// no actual version is provided. That can happen on the first run for creates
-		String versionId = null;
-		if (indexOfVersionStart != -1) {
-			versionId = item.name().substring(indexOfVersionStart + 1);
-			item.name(item.name().substring(0, indexOfVersionStart));
+		final boolean explicitVersionCarrier = integrityMetadataEnabled();
+		String versionId = op.requestedVersionId();
+		if (!explicitVersionCarrier) {
+			// Retain the legacy key~version convention only for ordinary mode.
+			final int indexOfVersionStart = item.name().lastIndexOf('~');
+			if (indexOfVersionStart != -1) {
+				versionId = item.name().substring(indexOfVersionStart + 1);
+				item.name(item.name().substring(0, indexOfVersionStart));
+			}
 		}
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
-		final var uri = dataUriPath(item, srcPath, op.dstPath(), op.type());
-		final var httpRequest = (HttpRequest) new DefaultHttpRequest(HTTP_1_1, httpMethod, uri, httpHeaders);
+		final String objectUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		final String uri = explicitVersionCarrier && versionId != null
+						? objectUri + "?versionId=" + percentEncode(versionId)
+						: objectUri;
+		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
+						HTTP_1_1, httpMethod, uri, httpHeaders);
 		switch (opType) {
 		case CREATE:
 			if (srcPath == null || srcPath.isEmpty()) {
@@ -1308,24 +1399,30 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 			break;
 		case READ:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			if (op instanceof DataOperation) {
 				applyRangesHeaders(httpHeaders, (DataOperation) op);
 			}
 			break;
 		case UPDATE:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			final var dataOp = (DataOperation) op;
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, dataOp.markedRangesSize());
 			applyRangesHeaders(httpHeaders, dataOp);
 			break;
 		case DELETE:
-			httpHeaders.set("x-amz-version-id", versionId);
+			if (!explicitVersionCarrier && versionId != null) {
+				httpHeaders.set("x-amz-version-id", versionId);
+			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			break;
 		}
-		applyMetaDataHeaders(httpHeaders);
+		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpRequest.method(), uri, op.credential());
@@ -1459,9 +1556,39 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	public void complete(final Channel channel, final O op) {
+		if (channel != null && op instanceof ListOperation) {
+			try {
+				S3ResponseHandler.discardListResponse(channel);
+			} catch (final IOException e) {
+				final var failure = new IntegrityTerminalException(
+								IntegrityTerminalException.Category.CLEANUP,
+								"failed to clean up aborted LIST response spool",
+								e);
+				recordTerminalFailure(failure);
+				throw failure;
+			}
+		}
 		if (channel != null && op instanceof CompositeDataOperation
 						&& OpType.CREATE.equals(op.type())) {
 			final var compositeOp = (CompositeDataOperation) op;
+			final boolean abortRequested = compositeOp.get(S3Api.KEY_MPU_ABORT) != null;
+			final boolean completing = !abortRequested && compositeOp.allSubOperationsDone();
+			if (abortRequested) {
+				final boolean abortSucceeded = Operation.Status.SUCC.equals(op.status());
+				emitMultipartLifecycle(
+								compositeOp,
+								abortSucceeded ? "failed_aborted" : "failed_orphaned",
+								true,
+								abortSucceeded,
+								abortSucceeded ? mpuFailure(compositeOp) : "abort failed: " + op.status());
+				op.status(Operation.Status.FAIL_UNKNOWN);
+			} else if (completing) {
+				if (Operation.Status.SUCC.equals(op.status())) {
+					emitMultipartLifecycle(compositeOp, "completed", false, null, null);
+				} else if (compositeOp.get(S3Api.KEY_UPLOAD_ID) != null) {
+					scheduleFailedCompletionAbort(compositeOp, op.status());
+				}
+			}
 			// Pre-super: extract upload ID from channel (channel may be released by super)
 			// and set failure status so super.complete() can close the channel if needed
 			if (compositeOp.get(S3Api.KEY_MPU_ABORT) == null
@@ -1532,6 +1659,112 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	private void scheduleFailedCompletionAbort(
+					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		final CompletableFuture<Void> cleanupTask = new CompletableFuture<>();
+		multipartCleanupTasks.add(cleanupTask);
+		ServiceTaskExecutor.VT_EXECUTOR.submit(() -> {
+			try {
+				abortAfterFailedCompletion(op, completionStatus);
+				cleanupTask.complete(null);
+			} catch (final Throwable failure) {
+				cleanupTask.completeExceptionally(failure);
+			} finally {
+				multipartCleanupTasks.remove(cleanupTask);
+			}
+		});
+	}
+
+	private void abortAfterFailedCompletion(
+					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		FullHttpResponse response = null;
+		try {
+			final HttpRequest abortRequest = abortMultipartUploadRequest(op, storageNodeAddrs[0]);
+			final FullHttpRequest fullAbortRequest = new DefaultFullHttpRequest(
+							abortRequest.protocolVersion(),
+							abortRequest.method(),
+							abortRequest.uri(),
+							Unpooled.EMPTY_BUFFER,
+							abortRequest.headers(),
+							EmptyHttpHeaders.INSTANCE);
+			response = executeHttpRequest(fullAbortRequest);
+			final boolean succeeded = response != null
+							&& HttpStatusClass.SUCCESS.equals(response.status().codeClass());
+			emitMultipartLifecycle(
+							op,
+							succeeded ? "failed_aborted" : "failed_orphaned",
+							true,
+							succeeded,
+							"completion failed: " + completionStatus + (succeeded ? "" : "; abort failed"));
+		} catch (final Exception e) {
+			emitMultipartLifecycle(
+							op,
+							"failed_orphaned",
+							true,
+							false,
+							"completion failed: " + completionStatus
+											+ "; abort failed: " + e.getClass().getSimpleName());
+		} finally {
+			if (response != null) {
+				response.release();
+			}
+		}
+	}
+
+	private void emitMultipartLifecycle(
+					final CompositeDataOperation op,
+					final String state,
+					final boolean abortAttempted,
+					final Boolean abortSucceeded,
+					final String error) {
+		if (!integrityMetadataEnabled()) {
+			return;
+		}
+		final String bucket = multipartBucket(op);
+		final String key = multipartKey(op, bucket);
+		IntegrityCsvArtifacts.logMultipartLifecycleOnce(
+						op,
+						IntegrityCsvArtifacts.nodeIdentity(),
+						stepId,
+						driverType(),
+						bucket,
+						key,
+						op.get(S3Api.KEY_UPLOAD_ID),
+						state,
+						abortAttempted,
+						abortSucceeded,
+						error);
+	}
+
+	private String multipartBucket(final CompositeDataOperation op) {
+		String path = op.dstPath();
+		if (path == null || path.isBlank()) {
+			path = namespace;
+		}
+		if (path == null) {
+			return "";
+		}
+		final String relative = path.startsWith(SLASH) ? path.substring(1) : path;
+		final int slash = relative.indexOf(SLASH);
+		return slash < 0 ? relative : relative.substring(0, slash);
+	}
+
+	private static String multipartKey(final CompositeDataOperation op, final String bucket) {
+		String key = op.item().name();
+		if (key.startsWith(SLASH)) {
+			key = key.substring(1);
+		}
+		if (!bucket.isEmpty() && key.startsWith(bucket + SLASH)) {
+			key = key.substring(bucket.length() + 1);
+		}
+		return key;
+	}
+
+	private static String mpuFailure(final CompositeDataOperation op) {
+		final String failure = op.get("mpuFailure");
+		return failure == null ? "multipart part failed" : "multipart part failed: " + failure;
+	}
+
 	@Override
 	protected void appendHandlers(final Channel channel) {
 		super.appendHandlers(channel);
@@ -1540,6 +1773,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						verifyFlag,
 						versioning,
 						checksumStrategy == null ? null : checksumStrategy.responseChecksumHeaderName));
+	}
+
+	@Override
+	protected void doClose() throws IOException {
+		final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
+		if (pending.length > 0) {
+			CompletableFuture.allOf(pending).join();
+		}
+		multipartCleanupTasks.clear();
+		super.doClose();
 	}
 
 	@Override

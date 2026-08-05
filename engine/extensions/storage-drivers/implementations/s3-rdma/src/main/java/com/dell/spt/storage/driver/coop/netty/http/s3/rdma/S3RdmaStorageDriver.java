@@ -16,6 +16,7 @@ import com.github.akurilov.confuse.Config;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.util.AttributeKey;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -61,6 +62,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/** HTTP header name for RDMA token. */
 	public static final String RDMA_TOKEN_HEADER = "x-amz-rdma-token";
 
+	private static final AttributeKey<RdmaContext> RDMA_CONTEXT_ATTR_KEY = AttributeKey.newInstance("spt-rdma-attempt");
+
 	/**
 	 * Per-operation RDMA state tracked across the request/response lifecycle.
 	 * Created in submitRdma(), read in httpRequest(), cleaned up in complete().
@@ -71,7 +74,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final long mrHandle;
 		final OpType opType;
 		final int size;
-		final long startTimeNanos;
+		volatile Channel channel;
+		volatile long startTimeNanos;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -80,7 +84,6 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			this.mrHandle = mrHandle;
 			this.opType = opType;
 			this.size = size;
-			this.startTimeNanos = System.nanoTime();
 		}
 	}
 
@@ -334,7 +337,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Remove and clean up RDMA context for an operation. Returns true if found. */
 	private boolean cleanupRdmaContext(final O op) {
-		final RdmaContext ctx = rdmaOps.remove(op);
+		final RdmaContext ctx;
+		synchronized (op) {
+			ctx = rdmaOps.remove(op);
+		}
 		if (ctx != null) {
 			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 			return true;
@@ -410,6 +416,29 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		return sb.toString();
 	}
 
+	@Override
+	protected void bindRequestChannel(final Channel channel, final O op) {
+		synchronized (op) {
+			final RdmaContext ctx = rdmaOps.get(op);
+			channel.attr(RDMA_CONTEXT_ATTR_KEY).set(ctx);
+			if (ctx != null) {
+				ctx.channel = channel;
+			}
+		}
+	}
+
+	@Override
+	protected void onRequestDispatched(final Channel channel, final O op) {
+		final RdmaContext ctx = channel.attr(RDMA_CONTEXT_ATTR_KEY).get();
+		if (ctx != null) {
+			synchronized (op) {
+				if (rdmaOps.get(op) == ctx && ctx.startTimeNanos == 0) {
+					ctx.startTimeNanos = System.nanoTime();
+				}
+			}
+		}
+	}
+
 	/**
 	 * Override to inject the RDMA token header and suppress the HTTP body for PUT.
 	 *
@@ -469,6 +498,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	@Override
+	protected boolean observesReadBodyOutOfBand(final O op) {
+		return rdmaOps.containsKey(op) && OpType.READ.equals(op.type());
+	}
+
 	/**
 	 * Clean up RDMA resources after the server responds.
 	 *
@@ -477,17 +511,37 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	@Override
 	public void complete(final Channel channel, final O op) {
-		final RdmaContext ctx = rdmaOps.remove(op);
-		if (ctx != null) {
-			try {
-				if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
-					((DataOperation) op).countBytesDone(ctx.size);
-				}
-			} finally {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
-			}
+		final RdmaContext responseContext = channel == null
+						? null
+						: channel.attr(RDMA_CONTEXT_ATTR_KEY).getAndSet(null);
+		if (responseContext == null) {
+			super.complete(channel, op);
+			return;
 		}
+		final boolean claimed;
+		synchronized (op) {
+			claimed = rdmaOps.remove(op, responseContext);
+		}
+		if (!claimed) {
+			discardOutOfBandIntegrityRead(channel);
+			return;
+		}
+		completeRdmaContext(channel, op, responseContext);
 		super.complete(channel, op);
+	}
+
+	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
+		try {
+			if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
+				final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
+				body.position(0);
+				body.limit(ctx.size);
+				finishOutOfBandIntegrityRead(channel, op, body);
+				((DataOperation) op).countBytesDone(ctx.size);
+			}
+		} finally {
+			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+		}
 	}
 
 	/**
@@ -502,16 +556,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			int reaped = 0;
 			for (final var entry : rdmaOps.entrySet()) {
 				final var ctx = entry.getValue();
-				if (now - ctx.startTimeNanos > timeoutNanos) {
+				if (ctx.startTimeNanos != 0 && now - ctx.startTimeNanos > timeoutNanos) {
 					final Operation<?> op = entry.getKey();
-					if (rdmaOps.remove(op, ctx)) {
+					final boolean claimed;
+					synchronized (op) {
+						claimed = ctx.startTimeNanos != 0 && rdmaOps.remove(op, ctx);
+					}
+					if (claimed) {
 						final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(now - ctx.startTimeNanos);
 						Loggers.MSG.warn("{}: RDMA operation timed out: type={} size={} elapsed={}ms status={} item={}",
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
 						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 						op.status(Operation.Status.FAIL_IO);
-						handleCompleted((O) op);
+						discardOutOfBandIntegrityRead(ctx.channel);
+						super.complete(ctx.channel, (O) op);
 						reaped++;
 					}
 				}

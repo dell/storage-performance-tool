@@ -82,6 +82,19 @@ public class DistributedLatencyMeanTest {
 	}
 
 	@Test
+	void corruptionCountsAggregateAsFailureSubset() {
+		workerCtx.markCorrupt();
+		workerCtx.markCorrupt();
+		workerCtx.markFail();
+		workerCtx.refreshLastSnapshot();
+		entryCtx.refreshLastSnapshot();
+
+		final DistributedAllMetricsSnapshot snapshot = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
+		assertEquals(3, snapshot.failsSnapshot().count());
+		assertEquals(2, snapshot.corruptSnapshot().count());
+	}
+
+	@Test
 	void latencyMeanCorrectWithSmallOpCount() {
 		for (int i = 0; i < 100; i++) {
 			workerCtx.markSucc(ITEM_BYTES, KNOWN_DURATION_US, KNOWN_LATENCY_US);

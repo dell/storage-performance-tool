@@ -279,6 +279,10 @@ class NettyStorageDriverPqcConfigTest {
 			config.val("storage-driver-threads", 1);
 			config.val("storage-driver-limit-concurrency", 0);
 			config.val("storage-driver-limit-queue-input", 16);
+			config.val("storage-integrity-mode", "none");
+			config.val("storage-integrity-algorithm", "sha256");
+			config.val("storage-integrity-input-provenance", "none");
+			config.val("storage-integrity-input-expectedProducerId", "");
 
 			config.val("storage-net-bindBacklogSize", 0);
 			config.val("storage-net-interestOpQueued", false);

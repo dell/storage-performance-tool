@@ -1,38 +1,86 @@
 package com.dell.spt.base.control;
 
-import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
+
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import org.junit.jupiter.api.Test;
 
 class ApiStatusTest {
 
 	@Test
 	void defaultsToIdleAndTransitions() {
-		ApiStatus s = new ApiStatus();
-		assertEquals(ApiStatus.State.IDLE, s.state());
-		assertEquals(0L, s.runId());
-		assertNull(s.stepId());
+		final var status = new ApiStatus();
+		assertEquals(ApiStatus.State.IDLE, status.state());
+		assertEquals(0L, status.runId());
+		assertNull(status.stepId());
 
-		s.setRunning("step-1", 42L);
-		assertEquals(ApiStatus.State.RUNNING, s.state());
-		assertEquals(42L, s.runId());
-		assertEquals("step-1", s.stepId());
+		status.setRunning("step-1", 42L);
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+		assertEquals(42L, status.runId());
+		assertEquals("step-1", status.stepId());
 
-		// Completion should set COMPLETED
-		s.completeIfNotStopped();
-		assertEquals(ApiStatus.State.COMPLETED, s.state());
+		status.completeIfNotStopped();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
+		status.setStopped();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
 
-		// STOPPED should not be overridden by completion
-		s.setRunning("step-2", 77L);
-		s.setStopped();
-		s.completeIfNotStopped();
-		assertEquals(ApiStatus.State.STOPPED, s.state());
-		assertEquals(77L, s.runId());
-		assertEquals("step-2", s.stepId());
+		status.setRunning("step-2", 77L);
+		status.setStopped();
+		status.completeIfNotStopped();
+		assertEquals(ApiStatus.State.STOPPED, status.state());
+		assertEquals(77L, status.runId());
+		assertEquals("step-2", status.stepId());
 
-		// setIdle resets identifiers
-		s.setIdle();
-		assertEquals(ApiStatus.State.IDLE, s.state());
-		assertEquals(0L, s.runId());
-		assertNull(s.stepId());
+		status.setIdle();
+		assertEquals(ApiStatus.State.IDLE, status.state());
+		assertEquals(0L, status.runId());
+		status.setStopped();
+		assertEquals(ApiStatus.State.IDLE, status.state());
+		assertNull(status.stepId());
+	}
+
+	@Test
+	void failureDominatesStopInEitherOrderingAndCompletion() {
+		final var failureThenStop = new ApiStatus();
+		failureThenStop.setRunning("read", 101L);
+		failureThenStop.setFailed(
+						"read", IntegrityTerminalException.Category.PUBLICATION, "publish failed");
+		failureThenStop.setStopped();
+		failureThenStop.completeIfNotStopped();
+		assertFailed(failureThenStop, "read", "publish failed");
+
+		final var stopThenFailure = new ApiStatus();
+		stopThenFailure.setRunning("read", 102L);
+		stopThenFailure.setStopped();
+		stopThenFailure.setFailed(
+						"read", IntegrityTerminalException.Category.PUBLICATION, "publish failed");
+		stopThenFailure.completeIfNotStopped();
+		assertFailed(stopThenFailure, "read", "publish failed");
+	}
+
+	@Test
+	void firstFailureIsStickyAndMessageIsSanitizedAndBounded() {
+		final var status = new ApiStatus();
+		status.setRunning("read", 103L);
+		status.setFailed(
+						"read",
+						IntegrityTerminalException.Category.INPUT,
+						"bad\nrow\t" + "x".repeat(ApiStatus.MAX_FAILURE_MESSAGE_LENGTH));
+		status.setFailed(
+						"later", IntegrityTerminalException.Category.CLEANUP, "must not replace first");
+
+		assertEquals(IntegrityTerminalException.Category.INPUT, status.failureCategory());
+		assertEquals("read", status.stepId());
+		assertFalse(status.failureMessage().contains("\n"));
+		assertFalse(status.failureMessage().contains("\t"));
+		assertEquals(ApiStatus.MAX_FAILURE_MESSAGE_LENGTH, status.failureMessage().length());
+	}
+
+	private static void assertFailed(
+					final ApiStatus status, final String stepId, final String message) {
+		assertEquals(ApiStatus.State.FAILED, status.state());
+		assertEquals(stepId, status.stepId());
+		assertEquals(IntegrityTerminalException.Category.PUBLICATION, status.failureCategory());
+		assertEquals(message, status.failureMessage());
 	}
 }

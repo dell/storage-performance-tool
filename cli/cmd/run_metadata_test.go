@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,6 +212,185 @@ func TestCopyScenarioForResults(t *testing.T) {
 	}
 	if string(data) != "content" {
 		t.Fatalf("copied content = %q, want %q", string(data), "content")
+	}
+}
+
+func TestArchivePreparedRunInputsArchivesScenarioAndDefaultsIdentity(t *testing.T) {
+	dir := t.TempDir()
+	scenarioPath := filepath.Join(dir, "prepared.js")
+	if err := os.WriteFile(scenarioPath, []byte("later file content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultsDir := filepath.Join(dir, "results")
+	if err := os.MkdirAll(resultsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	meta := &runMetadata{
+		preparedInputs:       true,
+		preparedScenarioJS:   []byte("exact submitted scenario"),
+		preparedDefaultsYAML: []byte("exact submitted defaults"),
+	}
+	if err := archivePreparedRunInputs(meta, scenarioPath, resultsDir); err != nil {
+		t.Fatalf("archivePreparedRunInputs() error = %v", err)
+	}
+	archivedScenario, err := os.ReadFile(filepath.Join(resultsDir, "prepared.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archivedScenario) != "exact submitted scenario" {
+		t.Fatalf("archived scenario = %q", archivedScenario)
+	}
+	if _, err := os.Stat(filepath.Join(resultsDir, constants.ResultsPreparedDefaultsFileName)); !os.IsNotExist(err) {
+		t.Fatalf("prepared defaults unexpectedly archived: %v", err)
+	}
+	if meta.ScenarioStoredPath != "prepared.js" {
+		t.Fatalf("stored scenario path = %q", meta.ScenarioStoredPath)
+	}
+	if meta.PreparedDefaultsSHA256 != "e227f21e867f64ab7788c8e8b6736014fe66c4c66ff123124aec1e4570cc97ef" ||
+		meta.PreparedDefaultsBytes != len("exact submitted defaults") {
+		t.Fatalf("defaults identity = %q/%d", meta.PreparedDefaultsSHA256, meta.PreparedDefaultsBytes)
+	}
+}
+
+func TestPreparedResultTreeExcludesCredentialsFromRealGeneratedDefaults(t *testing.T) {
+	const accessKey = "ROUND11_ACCESS_KEY_NEVER_ARCHIVE_7f3a"
+	const secretKey = "ROUND11_SECRET_KEY_NEVER_ARCHIVE_91bc"
+	const overrideSecret = "ROUND12_OVERRIDE_SECRET_NEVER_ARCHIVE_c421"
+	params := scenario.Params{
+		WorkloadType: scenario.WorkloadTypeWriteVerify,
+		Endpoint:     "http://s3.example:9000",
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		Bucket:       "qualification",
+		Threads:      1,
+		EngineOverrides: []string{
+			"storage.auth.secret=" + overrideSecret,
+			"storage.driver.threads=8",
+		},
+	}
+	defaults, err := scenario.GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(defaults), accessKey) || !strings.Contains(string(defaults), overrideSecret) {
+		t.Fatal("real generated defaults did not contain the distinctive credentials")
+	}
+
+	root := t.TempDir()
+	scenarioPath := filepath.Join(root, "prepared.js")
+	if err = os.WriteFile(scenarioPath, []byte("Load.run({});\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultsRoot := filepath.Join(root, "results")
+	if err = os.MkdirAll(resultsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: scenario.WorkloadTypeWriteVerify,
+		Params:       params,
+		ScenarioPath: scenarioPath,
+	})
+	meta.preparedInputs = true
+	meta.preparedScenarioJS = []byte("Load.run({});\n")
+	meta.preparedDefaultsYAML = defaults
+	if err = archivePreparedRunInputs(meta, scenarioPath, resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeRunMetadata(meta, resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		constants.ResultsSummaryFilePrefix + "42" + constants.ResultsSummaryFileSuffix: "verification summary\n",
+		"spt.trace.log": "trace without credentials\n",
+	} {
+		if err = os.WriteFile(filepath.Join(resultsRoot, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = filepath.WalkDir(resultsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, credential := range []string{accessKey, secretKey, overrideSecret} {
+			if strings.Contains(string(content), credential) {
+				return errors.New("credential leaked into result artifact " + filepath.Base(path))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedTablesResultTreeExcludesCredentials(t *testing.T) {
+	const accessKey = "ROUND12_TABLES_ACCESS_NEVER_ARCHIVE_7f3a"
+	const secretKey = "ROUND12_TABLES_SECRET_NEVER_ARCHIVE_91bc"
+	params := scenario.Params{
+		WorkloadType: scenario.WorkloadTypeTables,
+		Endpoint:     "http://s3.example:9000",
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		Threads:      1,
+		Tables: scenario.TablesParams{
+			TestVector:        "tps",
+			TableBucket:       "qualification",
+			Namespace:         "ns",
+			TableName:         "table",
+			ConcurrentWriters: 1,
+		},
+	}
+	scenarioJS, err := scenario.GenerateTablesScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults, err := scenario.GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(scenarioJS, accessKey) || strings.Contains(scenarioJS, secretKey) {
+		t.Fatal("real generated Tables scenario contains credentials")
+	}
+	if !strings.Contains(string(defaults), accessKey) || !strings.Contains(string(defaults), secretKey) {
+		t.Fatal("real generated Tables defaults did not contain launch credentials")
+	}
+
+	resultsRoot := t.TempDir()
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: scenario.WorkloadTypeTables,
+		Params:       params,
+		ScenarioPath: "prepared-tables.js",
+	})
+	meta.preparedInputs = true
+	meta.preparedScenarioJS = []byte(scenarioJS)
+	meta.preparedDefaultsYAML = defaults
+	if err = archivePreparedRunInputs(meta, "prepared-tables.js", resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeRunMetadata(meta, resultsRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	err = filepath.WalkDir(resultsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(content), accessKey) || strings.Contains(string(content), secretKey) {
+			return errors.New("Tables credential leaked into result artifact " + filepath.Base(path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -30,15 +30,23 @@ const (
 
 // TestOrchestrator manages the complete lifecycle of an API-based Spt test
 type TestOrchestrator struct {
-	dockerManager DockerInterface
-	apiClient     *SptAPIClient
-	containerID   string
-	scenarioPath  string
-	keepScenario  bool
-	apiPort       string // Configurable API port
-	networkMode   string
-	mu            sync.Mutex
-	compatOnce    sync.Once
+	dockerManager      DockerInterface
+	apiClient          *SptAPIClient
+	containerID        string
+	scenarioPath       string
+	keepScenario       bool
+	apiPort            string // Configurable API port
+	networkMode        string
+	resultsRoot        string
+	mu                 sync.Mutex
+	compatOnce         sync.Once
+	stopOnce           sync.Once
+	stoppedOnce        sync.Once
+	finalizeMu         sync.Mutex
+	finalizeAttempt    *cleanupAttempt
+	diagnosticsTimeout time.Duration
+	cleanupTimeout     time.Duration
+	statusInterval     time.Duration
 
 	// Callbacks for status updates
 	onStatusUpdate func(status *TestStatus)
@@ -73,15 +81,27 @@ type nodeLogResultsRootConfigurer interface {
 	setNodeLogResultsRoot(string)
 }
 
-func configureDockerFileMounts(dm DockerInterface, mounts []scenario.FileMount) error {
+func configureDockerFileMounts(ctx context.Context, dm DockerInterface, mounts []scenario.FileMount) error {
 	if len(mounts) == 0 {
 		return nil
 	}
-	configurer, ok := dm.(fileMountConfigurer)
-	if !ok {
-		return fmt.Errorf("docker manager does not support external item file mounts")
+	return setFileMountsContext(ctx, dm, mounts)
+}
+
+func cleanupSingleHostStartFailure(ctx context.Context, dm DockerInterface) error {
+	if dm == nil {
+		return nil
 	}
-	return configurer.SetFileMounts(mounts)
+	cleanupCtx, cancel := boundedDetachedContext(ctx, constants.StartupRollbackTimeout)
+	defer cancel()
+	return dm.CleanupContext(cleanupCtx)
+}
+
+func cleanupSingleHostAmbiguousSubmission(ctx context.Context, dm DockerInterface, hooks LaunchHooks) error {
+	if hooks.SessionManaged() {
+		return nil
+	}
+	return cleanupSingleHostStartFailure(ctx, dm)
 }
 
 // NewTestOrchestrator creates a new test orchestrator
@@ -95,6 +115,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot 
 	return &TestOrchestrator{
 		dockerManager:         dm,
 		apiPort:               apiPort,
+		resultsRoot:           nodeLogResultsRoot,
 		networkMode:           constants.DefaultNetworkMode,
 		stopCh:                make(chan struct{}),
 		stoppedCh:             make(chan struct{}),
@@ -102,6 +123,7 @@ func NewTestOrchestrator(dm DockerInterface, apiPort string, nodeLogResultsRoot 
 		lastSuccessfulMetrics: time.Now(),
 		metricsState:          newNodePollState(),
 		metricsBackoffCfg:     singleNodeBackoff,
+		statusInterval:        defaultStatusInterval,
 		randSource:            rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- non-crypto jitter source
 		logJSONBodies:         os.Getenv("SPT_LOG_METRICS_BODY") == "1",
 	}
@@ -147,6 +169,14 @@ func (o *TestOrchestrator) containerStartupDiagnostics() string {
 
 // StartTest starts a Spt test using the API approach
 func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params scenario.Params) error {
+	return o.StartTestWithLaunchHooks(ctx, image, params, LaunchHooks{})
+}
+
+// StartTestWithLaunchHooks starts a Spt test and reports its API submission
+// through explicit orchestration hooks.
+func (o *TestOrchestrator) StartTestWithLaunchHooks(
+	ctx context.Context, image string, params scenario.Params, hooks LaunchHooks,
+) error {
 	var err error
 	params, err = scenario.PrepareExternalItemFiles(params)
 	if err != nil {
@@ -165,13 +195,38 @@ func (o *TestOrchestrator) StartTest(ctx context.Context, image string, params s
 		return fmt.Errorf("failed to generate defaults: %w", err)
 	}
 
-	return o.StartTestWithContent(ctx, image, params, []byte(scenarioContent), defaultsContent)
+	return o.StartTestWithContentAndLaunchHooks(
+		ctx, image, params, []byte(scenarioContent), defaultsContent, hooks)
 }
 
 // StartTestWithContent starts a Spt test with caller-provided scenario and defaults content.
 func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
+	return o.StartTestWithContentAndLaunchHooks(
+		ctx, image, params, scenarioContent, defaultsContent, LaunchHooks{})
+}
+
+// StartTestWithContentAndLaunchHooks starts caller-provided content and reports
+// the accepted API submission through explicit orchestration hooks.
+func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
+	ctx context.Context,
+	image string,
+	params scenario.Params,
+	scenarioContent, defaultsContent []byte,
+	hooks LaunchHooks,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			o.mu.Unlock()
+		}
+	}()
 
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
@@ -192,17 +247,27 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 		}
 	}
 
-	if err := configureDockerFileMounts(o.dockerManager, params.ItemFileMounts); err != nil {
+	if err := configureDockerFileMounts(ctx, o.dockerManager, params.ItemFileMounts); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
 	}
 
 	// Start container in node mode
 	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
-	containerID, err := o.dockerManager.StartContainerInNodeMode(image, o.apiPort, o.networkMode, startupArgs)
+	containerID, err := startContainerInNodeModeContext(
+		ctx, o.dockerManager, image, o.apiPort, o.networkMode, startupArgs)
 	if err != nil {
-		return fmt.Errorf("failed to start container in node mode: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to start container in node mode: %w", err),
+			cleanupSingleHostStartFailure(ctx, o.dockerManager),
+		)
 	}
 	o.containerID = containerID
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	// Create API client
 	if o.apiClient == nil {
@@ -215,7 +280,7 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 		o.onOutput("Waiting for Spt API to become ready...")
 	}
 
-	if err := o.apiClient.WaitForAPIReady(apiReadyTimeout); err != nil {
+	if err := o.apiClient.WaitForAPIReadyContext(ctx, apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
 		diagnostics := o.containerStartupDiagnostics()
@@ -224,16 +289,38 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 			o.onError("Container startup diagnostics:\n" + diagnostics)
 			reportedDiagnostics = true
 		}
-		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
+		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API failure", cleanupErr)
 		}
+		var startupErr error
 		if diagnostics != "" {
 			if reportedDiagnostics {
-				return fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+				startupErr = fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+			} else {
+				startupErr = fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 			}
-			return fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
+		} else {
+			startupErr = fmt.Errorf("spt API failed to become ready: %w", err)
 		}
-		return fmt.Errorf("spt API failed to become ready: %w", err)
+		return errors.Join(startupErr, cleanupErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
+
+	if scenario.IsIntegrityWorkload(params) {
+		if err := o.apiClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
+			cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
+			if cleanupErr != nil {
+				logging.LogError("orchestrator", "failed to cleanup container after capability failure", cleanupErr)
+			}
+			return errors.Join(err, cleanupErr)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
 	}
 
 	if o.apiClient != nil {
@@ -249,33 +336,63 @@ func (o *TestOrchestrator) StartTestWithContent(ctx context.Context, image strin
 	if o.onOutput != nil {
 		o.onOutput("Starting test via API...")
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
-	runID, err := o.apiClient.StartTest(scenarioContent, defaultsContent)
-	if err != nil {
-		// Clean up the started container since API test start failed
-		logging.LogError("orchestrator", "API test start failed, cleaning up container", err)
-		if cleanupErr := o.dockerManager.Cleanup(); cleanupErr != nil {
+	submission, submitErr := o.apiClient.StartTestContext(ctx, scenarioContent, defaultsContent, params.RunID)
+	if submission.Submission == SubmissionUnknown {
+		hooks.NotifySubmissionUnknown()
+		logging.LogError("orchestrator", "API test submission remains ambiguous; preserving conservative cleanup ownership", submitErr)
+		cleanupErr := cleanupSingleHostAmbiguousSubmission(
+			ctx, o.dockerManager, hooks)
+		return errors.Join(fmt.Errorf("failed to establish whether the engine accepted POST /run: %w", submitErr), cleanupErr)
+	}
+	if submission.Submission == SubmissionNotSubmitted {
+		logging.LogError("orchestrator", "API test start failed, cleaning up container", submitErr)
+		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
+		if cleanupErr != nil {
 			logging.LogError("orchestrator", "failed to cleanup container after API start failure", cleanupErr)
 		}
-		return fmt.Errorf("failed to start test via API: %w", err)
+		return errors.Join(fmt.Errorf("failed to start test via API: %w", submitErr), cleanupErr)
 	}
-
-	logging.LogInfo("orchestrator", "test started successfully", "runID", runID)
+	logging.LogInfo("orchestrator", "test submission confirmed", "runID", submission.RunID)
 	if o.onOutput != nil {
-		o.onOutput(fmt.Sprintf("Test started with run ID: %s", runID))
+		o.onOutput(fmt.Sprintf("Test started with run ID: %s", submission.RunID))
 	}
 
-	// Start monitoring goroutines
-	go o.monitorStatus(ctx)
-	go o.monitorMetrics(ctx)
-	go o.streamContainerOutput(ctx)
+	if submitErr == nil {
+		// Start monitoring goroutines only while the launch context remains active.
+		go o.monitorStatus(ctx)
+		go o.monitorMetrics(ctx)
+		go o.streamContainerOutput(ctx)
+	}
+
+	// Submission state is fully committed before caller-controlled notification.
+	// Keep acknowledgment synchronous, but never hold the lifecycle mutex while
+	// the hook prepares result artifacts or waits for its launch gate.
+	o.mu.Unlock()
+	locked = false
+	notifyAcceptedSubmission(hooks, submitErr)
+	if submitErr != nil {
+		return fmt.Errorf("engine submission was confirmed after POST /run returned an error: %w", submitErr)
+	}
 
 	return nil
 }
 
+func isPresentationTerminalState(state string) bool {
+	switch state {
+	case constants.StateCompleted, constants.StateFailed, constants.StateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
 // monitorStatus polls the test status periodically
 func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
-	ticker := time.NewTicker(defaultStatusInterval)
+	ticker := time.NewTicker(o.statusInterval)
 	defer ticker.Stop()
 
 	for {
@@ -296,7 +413,14 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 			}
 
 			// Check if test has completed
-			if status != nil && (status.State == constants.StateCompleted || status.State == constants.StateFailed) {
+			if status != nil && isPresentationTerminalState(status.State) {
+				if !o.apiClient.statusMatchesOwnedRun(status) {
+					logging.LogDebug(
+						"orchestrator", "ignoring terminal status not attributed to owned run",
+						"state", status.State, "observed_run_id", status.RunID,
+						"owned_run_id", o.apiClient.getRunID())
+					continue
+				}
 				logging.LogInfo("orchestrator", "test finished", "state", status.State)
 				if o.onOutput != nil {
 					o.onOutput(fmt.Sprintf("Test %s", status.State))
@@ -510,7 +634,7 @@ func (o *TestOrchestrator) StopTest() error {
 	defer o.mu.Unlock()
 
 	// Signal monitoring goroutines to stop
-	close(o.stopCh)
+	o.stopOnce.Do(func() { close(o.stopCh) })
 
 	// Stop the node via API
 	if o.apiClient != nil {
@@ -554,7 +678,7 @@ func (o *TestOrchestrator) StopTest() error {
 		_ = os.Remove(o.scenarioPath)
 	}
 
-	close(o.stoppedCh)
+	o.stoppedOnce.Do(func() { close(o.stoppedCh) })
 	return nil
 }
 

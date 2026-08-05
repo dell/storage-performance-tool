@@ -7,6 +7,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.LoadStepBase;
@@ -55,6 +56,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				stepCtx.start();
 				anyStarted = true;
 			} catch (final IllegalStateException e) {
+				final var terminal = IntegrityTerminalException.find(e);
+				if (terminal != null) {
+					throw terminal;
+				}
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
 				iterator.remove();

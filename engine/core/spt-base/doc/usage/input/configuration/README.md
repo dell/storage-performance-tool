@@ -7,12 +7,13 @@
 1.2.2. [Size](#122-size)<br/>
 1.2.3. [Dictionary](#123-dictionary)<br/>
 1.2.4. [Expression](#124-expression)<br/>
+1.3. [Persisted-data integrity](#13-persisted-data-integrity)<br/>
 2. [Aliasing](#2-aliasing)<br/>
 
 ## 1. Overview
 
 All the configuration values have the default values which may be seen
-in the file [```<SPT_DIR>/config/defaults.yaml```](/src/main/resources/config/defaults.yaml). The file contains
+in the file [```<SPT_DIR>/config/defaults.yaml```](../../../../src/main/resources/config/defaults.yaml). The file contains
 the comments so it's quite self-descriptive and may be used as quick
 reference.
 
@@ -155,6 +156,54 @@ setting.
 
 The [expression language](../../../../src/main/java/com/dell/spt/base/config/el/README.md) allows to assign the dynamic values 
 to some configuration parameters.
+
+### 1.3. Persisted-data integrity
+
+The metadata integrity feature is configured as a nested scenario object. It is
+disabled by default:
+
+```javascript
+"storage": {
+    "integrity": {
+        "mode": "metadata",
+        "algorithm": "sha256",
+        "input": {
+            "provenance": "engine_step",
+            "expectedProducerId": "direct-integrity-create"
+        },
+        "selection": {
+            "maxCount": 0
+        }
+    }
+}
+```
+
+| Nested setting | Default | Contract |
+|---|---|---|
+| `storage.integrity.mode` | `none` | `none` preserves ordinary behavior; `metadata` enables v1 persisted-data integrity |
+| `storage.integrity.algorithm` | `sha256` | Version 1 supports only `sha256` |
+| `storage.integrity.input.provenance` | `none` | `none`, `engine_step`, `cli_stager`, or `external`; metadata READ/DELETE must choose a non-`none` source |
+| `storage.integrity.input.expectedProducerId` | empty | Exact producing step ID, or the CLI stager ID, when that provenance requires completion evidence |
+| `storage.integrity.selection.maxCount` | `0` | Deterministic maximum after LIST discovery; `0` selects all discovered records |
+
+`engine_step` requires the matching manifest completion JSON from the named
+CREATE or LIST step. `cli_stager` requires producer ID
+`spt-cli-items-stager-v1`. `external` accepts a QA-owned finite item file without
+an engine completion sidecar; the scenario author is responsible for its
+completeness. `run.id` is the common positive correlation ID in completion
+records and worker slices. Direct-JAR startup initializes it once when the
+configured value is `0`.
+
+For direct `spt.jar` use, supply these settings through a custom scenario's
+`.config()` map. Flattened `--storage-integrity-*` startup arguments are not a
+supported v1 entry point. See the
+[write/read example](../scenarios/s3_integrity_write_verify.js),
+[CREATE-only seed example](../scenarios/s3_integrity_seed.js), and
+[read-only example](../scenarios/s3_integrity_read_verify.js).
+
+This facility is separate from `item.data.verify`, `ReadVerifyLoad`, and
+`ReadVerifyRandomRangeLoad`, which select legacy deterministic-content
+verification. Metadata integrity uses `CreateLoad` and `ReadLoad`.
 
 ## 2. Aliasing
 

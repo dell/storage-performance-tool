@@ -59,7 +59,7 @@ public interface LogUtil {
 		}
 	}
 
-	static void flushAll() {
+	public static void flushAll() {
 		final var logCtx = ((LoggerContext) LogManager.getContext());
 		for (final var logger : logCtx.getLoggers()) {
 			for (final var appender : logger.getAppenders().values()) {

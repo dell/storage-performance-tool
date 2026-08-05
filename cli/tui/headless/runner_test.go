@@ -5,7 +5,12 @@ Copyright © 2025 Dell Technologies
 package headless
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 )
@@ -139,6 +145,99 @@ func TestHeadlessRunner_DryRun(t *testing.T) {
 	calls := mockDocker.GetScenarioCalls()
 	if len(calls) != 0 {
 		t.Errorf("Expected no container starts in dry run mode, got %d calls", len(calls))
+	}
+}
+
+func TestHeadlessRunnerDryRunReportsIdentityWithoutGeneratedContent(t *testing.T) {
+	const (
+		accessKey      = "DRY_RUN_GENERATED_ACCESS_7f3a"
+		secretKey      = "DRY_RUN_GENERATED_SECRET_91bc"
+		overrideSecret = "DRY_RUN_GENERATED_OVERRIDE_c421"
+	)
+	params := scenario.ScenarioParams{
+		WorkloadType:  "write",
+		Endpoint:      "http://s3.example:9000",
+		AccessKey:     accessKey,
+		SecretKey:     secretKey,
+		Bucket:        "qualification",
+		Threads:       1,
+		ObjectSize:    "1KB",
+		ObjectCount:   1,
+		BaseTimestamp: "20260803.120000.000",
+		EngineOverrides: []string{
+			"storage.auth.secret=" + overrideSecret,
+		},
+	}
+	scenarioContent, err := scenario.GenerateScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultsContent, err := scenario.GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(t.TempDir(), "generated.trace")
+	runner, err := NewHeadlessRunner(nil, HeadlessOptions{
+		TraceFile: tracePath,
+		DryRun:    true,
+		APIPort:   "9999",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout := captureHeadlessStdout(t, func() {
+		runErr = runner.runDryModeWithParams("identity-image", "scenario.js", params)
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if err = runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	trace := readHeadlessTrace(t, tracePath)
+	assertDryRunContentHidden(t, stdout, trace, accessKey, secretKey, overrideSecret)
+	assertDryRunContentIdentity(t, stdout, trace, "Generated scenario content", []byte(scenarioContent))
+	assertDryRunContentIdentity(t, stdout, trace, "Generated defaults configuration", defaultsContent)
+	for _, output := range []string{stdout, trace} {
+		if !strings.Contains(output, "Image: identity-image") ||
+			!strings.Contains(output, "API Port: 9999") {
+			t.Fatalf("dry-run output lost non-sensitive launch details: %s", output)
+		}
+	}
+}
+
+func TestHeadlessRunnerDryRunReportsIdentityWithoutProvidedContent(t *testing.T) {
+	const (
+		scenarioSecret = "DRY_RUN_PROVIDED_SCENARIO_7f3a"
+		defaultsSecret = "DRY_RUN_PROVIDED_DEFAULTS_91bc"
+	)
+	scenarioContent := []byte("Load.run({credential: \"" + scenarioSecret + "\"});\n")
+	defaultsContent := []byte("storage:\n  auth:\n    secret: " + defaultsSecret + "\n")
+	originalScenario := append([]byte(nil), scenarioContent...)
+	originalDefaults := append([]byte(nil), defaultsContent...)
+	tracePath := filepath.Join(t.TempDir(), "provided.trace")
+	runner, err := NewHeadlessRunner(nil, HeadlessOptions{
+		TraceFile: tracePath,
+		DryRun:    true,
+		APIPort:   "9999",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := captureHeadlessStdout(t, func() {
+		runner.runDryModeWithContent(
+			"identity-image", "scenario.js", scenarioContent, defaultsContent)
+	})
+	if err = runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	trace := readHeadlessTrace(t, tracePath)
+	assertDryRunContentHidden(t, stdout, trace, scenarioSecret, defaultsSecret)
+	assertDryRunContentIdentity(t, stdout, trace, "Provided scenario content", scenarioContent)
+	assertDryRunContentIdentity(t, stdout, trace, "Provided defaults configuration", defaultsContent)
+	if !bytes.Equal(scenarioContent, originalScenario) || !bytes.Equal(defaultsContent, originalDefaults) {
+		t.Fatal("dry-run identity reporting changed the exact submission bytes")
 	}
 }
 
@@ -587,10 +686,9 @@ func TestStartHeadlessMode_Integration(t *testing.T) {
 // TestHeadlessHybridIntegration tests the integration of BuildEndpointArgs with headless mode
 func TestHeadlessHybridIntegration(t *testing.T) {
 	tests := []struct {
-		name         string
-		params       scenario.ScenarioParams
-		expectError  bool
-		expectNoArgs bool
+		name        string
+		params      scenario.ScenarioParams
+		expectError bool
 	}{
 		{
 			name: "S3 write with valid endpoint",
@@ -604,8 +702,7 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 				ObjectSize:   "1MB",
 				ObjectCount:  100,
 			},
-			expectError:  false,
-			expectNoArgs: false,
+			expectError: false,
 		},
 		{
 			name: "HTTPS S3 endpoint",
@@ -617,8 +714,7 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 				Bucket:       "bucket",
 				Threads:      2,
 			},
-			expectError:  false,
-			expectNoArgs: false,
+			expectError: false,
 		},
 		{
 			name: "Mock workload (no endpoint args needed)",
@@ -628,8 +724,7 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 				ObjectSize:   "512KB",
 				Duration:     "30s",
 			},
-			expectError:  false,
-			expectNoArgs: true,
+			expectError: false,
 		},
 		{
 			name: "Invalid endpoint URL",
@@ -640,13 +735,13 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 				SecretKey:    "secret",
 				Bucket:       "bucket",
 			},
-			expectError:  true,
-			expectNoArgs: false,
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.params.BaseTimestamp = "20260803.120000.000"
 			tmpDir := t.TempDir()
 			tracePath := filepath.Join(tmpDir, "trace.log")
 			scenarioPath := filepath.Join(tmpDir, "scenario.js")
@@ -702,33 +797,81 @@ func TestHeadlessHybridIntegration(t *testing.T) {
 
 			traceStr := string(traceContent)
 
-			// In the new API-based flow, configuration is done via defaults.yaml
-			// not CLI arguments, so we check for defaults content instead
-			if tt.expectNoArgs {
-				// For mock workloads, we should see dummy-mock configuration
-				if !strings.Contains(traceStr, "dummy-mock") && !strings.Contains(traceStr, "mock") {
-					t.Error("Mock workload should have dummy-mock driver in trace or scenario")
-				}
-			} else {
-				// For S3 workloads, we should see S3 configuration in generated content
-				// Check that scenario was generated with S3 driver
-				if !strings.Contains(traceStr, `"type": "s3"`) && !strings.Contains(traceStr, "s3") {
-					t.Error("S3 workload should have S3 driver configuration in generated scenario")
-				}
-				// The actual endpoint/auth configuration is now in defaults.yaml
-				// which is generated but not shown in dry-run output
+			defaultsContent, err := scenario.GenerateDefaults(tt.params)
+			if err != nil {
+				t.Fatalf("Failed to generate defaults: %v", err)
 			}
-
-			// Verify scenario generation worked
-			if !strings.Contains(traceStr, "Load") {
-				t.Error("Trace should contain generated scenario with 'Load'")
-			}
+			assertDryRunContentIdentity(
+				t, traceStr, traceStr, "Generated scenario content", []byte(scenarioContent))
+			assertDryRunContentIdentity(
+				t, traceStr, traceStr, "Generated defaults configuration", defaultsContent)
 
 			// Verify dry run output
 			if !strings.Contains(traceStr, "DRY-RUN") {
 				t.Error("Trace should contain dry run indicators")
 			}
 		})
+	}
+}
+
+func captureHeadlessStdout(t *testing.T, run func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdout
+	os.Stdout = writer
+	output := make(chan struct {
+		data []byte
+		err  error
+	}, 1)
+	go func() {
+		data, readErr := io.ReadAll(reader)
+		output <- struct {
+			data []byte
+			err  error
+		}{data: data, err: readErr}
+	}()
+	run()
+	os.Stdout = previous
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-output
+	if err = reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	return string(result.data)
+}
+
+func readHeadlessTrace(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+func assertDryRunContentHidden(t *testing.T, stdout, trace string, secrets ...string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if strings.Contains(stdout, secret) || strings.Contains(trace, secret) {
+			t.Fatalf("dry-run output disclosed sensitive content %q", secret)
+		}
+	}
+}
+
+func assertDryRunContentIdentity(t *testing.T, stdout, trace, label string, content []byte) {
+	t.Helper()
+	digest := sha256.Sum256(content)
+	want := fmt.Sprintf("%s: bytes=%d sha256=%x", label, len(content), digest)
+	if !strings.Contains(stdout, want) || !strings.Contains(trace, want) {
+		t.Fatalf("dry-run output missing content identity %q", want)
 	}
 }
 
@@ -832,6 +975,74 @@ func TestHeadlessRunner_ReturnsPromptlyOnEngineCompletion(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunWithParams did not return after engine reported COMPLETED " +
 			"(blocks at <-ctx.Done() waiting for auto-terminate instead of exiting on completion)")
+	}
+}
+
+func TestLocalHeadlessSessionDefersCleanupUntilSessionFinalization(t *testing.T) {
+	manager := tui.NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	session := runcontrol.NewSession()
+	hooks := tui.NewSessionLaunchHooks(session, nil)
+	runner, err := NewHeadlessRunner(manager, HeadlessOptions{LaunchHooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runner.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err = runner.runBenchmark(ctx, "", func(*tui.TestOrchestrator) error {
+		hooks.NotifySubmitted()
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runBenchmark() error = %v, want cancellation", err)
+	}
+	if got := manager.GetCleanupCallCount(); got != 0 {
+		t.Fatalf("presentation cleanup calls = %d, want 0 before evidence/finalization", got)
+	}
+	if !manager.HasManagedResources() {
+		t.Fatal("presentation adapter released resources before session finalization")
+	}
+
+	outcome := session.FinalizeResources(context.Background())
+	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved {
+		t.Fatalf("session finalization = %+v", outcome)
+	}
+	if got := manager.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("session cleanup calls = %d, want exactly 1", got)
+	}
+}
+
+func TestLocalHeadlessSessionReturnsOnAuthoritativeWorkloadTerminal(t *testing.T) {
+	manager := tui.NewMockDockerManager()
+	session := runcontrol.NewSession()
+	hooks := tui.NewSessionLaunchHooks(session, nil)
+	runner, err := NewHeadlessRunner(manager, HeadlessOptions{LaunchHooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runner.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.runBenchmark(context.Background(), "", func(*tui.TestOrchestrator) error {
+			hooks.NotifySubmitted()
+			return nil
+		})
+	}()
+	session.MarkWorkloadTerminal()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runBenchmark() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session-managed headless presentation did not return on authoritative terminal signal")
+	}
+	if got := manager.GetCleanupCallCount(); got != 0 {
+		t.Fatalf("presentation cleanup calls = %d, want session-owned cleanup", got)
 	}
 }
 

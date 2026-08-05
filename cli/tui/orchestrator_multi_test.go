@@ -6,12 +6,16 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +23,149 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	dockerconf "github.com/dell/storage-performance-tool/cli/internal/docker"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
+type identityPreflight struct {
+	identities      map[string]preflight.ImageIdentity
+	errors          map[string]error
+	payloads        map[string]string
+	payloadErrors   map[string]error
+	payloadCalls    *atomic.Int64
+	runningPayloads map[string]string
+	runningErrors   map[string]error
+	runningCalls    *atomic.Int64
+}
+
+func (f identityPreflight) InspectPayloadIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (string, error) {
+	if f.payloadCalls != nil {
+		f.payloadCalls.Add(1)
+	}
+	if err := f.payloadErrors[host.Original]; err != nil {
+		return "", err
+	}
+	return f.payloads[host.Original], nil
+}
+
+func (f identityPreflight) InspectRunningPayloadIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (string, error) {
+	if f.runningCalls != nil {
+		f.runningCalls.Add(1)
+	}
+	if err := f.runningErrors[host.Original]; err != nil {
+		return "", err
+	}
+	return f.runningPayloads[host.Original], nil
+}
+
+func (f identityPreflight) CheckDocker(context.Context, *hostparse.HostInfo) (string, error) {
+	return "test", nil
+}
+
+func (f identityPreflight) EnsureImage(context.Context, *hostparse.HostInfo, string) error {
+	return nil
+}
+
+func (f identityPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int) (*dockerconf.ConflictInfo, error) {
+	return &dockerconf.ConflictInfo{}, nil
+}
+
+func (f identityPreflight) InspectImageIdentity(
+	_ context.Context,
+	host *hostparse.HostInfo,
+	_ string,
+) (preflight.ImageIdentity, error) {
+	if err := f.errors[host.Original]; err != nil {
+		return preflight.ImageIdentity{}, err
+	}
+	return f.identities[host.Original], nil
+}
+
+func TestMultiHostOrchestrator_ConnectHostsRequiresDesignatedEntry(t *testing.T) {
+	tests := []struct {
+		name           string
+		failHost       string
+		minHosts       int
+		wantEntryError bool
+	}{
+		{name: "entry failure is fatal despite quorum", failHost: "entry", minHosts: 1, wantEntryError: true},
+		{name: "worker failure is tolerated at quorum", failHost: "worker-2", minHosts: 2},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{
+				{Host: "entry", Original: "entry"},
+				{Host: "worker-1", Original: "worker-1"},
+				{Host: "worker-2", Original: "worker-2"},
+			}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, test.minHosts)
+			orchestrator.preflight = identityPreflight{}
+			orchestrator.SetNotifier(func(string) {})
+
+			failErr := errors.New("connection unavailable")
+			var managerCalls atomic.Int64
+			orchestrator.newDockerManagerForHost = func(
+				ctx context.Context,
+				host *hostparse.HostInfo,
+			) (*DockerManager, error) {
+				managerCalls.Add(1)
+				if host.Original == test.failHost {
+					return nil, failErr
+				}
+				managerCtx, cancel := context.WithCancel(ctx)
+				return &DockerManager{ctx: managerCtx, cancel: cancel, hostInfo: host}, nil
+			}
+
+			err := orchestrator.ConnectHosts(context.Background())
+			if test.wantEntryError {
+				if err == nil {
+					t.Fatal("ConnectHosts() error = nil, want designated-entry failure")
+				}
+				if !errors.Is(err, failErr) {
+					t.Fatalf("ConnectHosts() error = %v, want wrapped connection failure", err)
+				}
+				if !strings.Contains(err.Error(), "designated entry host entry is unavailable") {
+					t.Fatalf("ConnectHosts() error = %v, want designated-entry diagnostic", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ConnectHosts() error = %v, want worker failure tolerated", err)
+			}
+
+			if calls := managerCalls.Load(); calls != int64(len(hostInfos)) {
+				t.Fatalf("Docker manager calls = %d, want %d", calls, len(hostInfos))
+			}
+			if got := len(orchestrator.GetReadyHosts()); got != 2 {
+				t.Fatalf("ready hosts = %d, want 2", got)
+			}
+			if test.wantEntryError {
+				if orchestrator.hosts[0].DockerManager != nil {
+					t.Fatal("failed entry unexpectedly retained a Docker manager")
+				}
+			} else if orchestrator.hosts[0].DockerManager == nil {
+				t.Fatal("successful entry has no Docker manager")
+			}
+
+			for _, host := range orchestrator.hosts {
+				if host.DockerManager != nil {
+					host.DockerManager.Close()
+				}
+			}
+
+		})
+	}
+}
 func TestMultiHostOrchestrator_NewMultiHostTestOrchestrator(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
@@ -120,6 +263,51 @@ func TestMultiHostOrchestrator_WaitForAPIs_NoRunningContainers_Simple(t *testing
 	}
 }
 
+func TestMultiHostOrchestratorWaitForAPIsHonorsCallerCancellation(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "127.0.0.1", Original: "host1"}}, 1)
+	orchestrator.apiPort = "1"
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err := orchestrator.WaitForAPIs(ctx, 5*time.Second)
+	if !errors.Is(err, context.Canceled) || time.Since(started) > 100*time.Millisecond {
+		t.Fatalf("WaitForAPIs() = %v after %s, want prompt context cancellation", err, time.Since(started))
+	}
+}
+
+func TestMultiHostOrchestratorWaitForAPIsPreservesPartialReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "127.0.0.1", Original: "ready"},
+		{Host: "127.0.0.2", Original: "unavailable"},
+	}, 1)
+	orchestrator.apiPort = port
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusRunning)
+	}
+	if err = orchestrator.WaitForAPIs(context.Background(), 100*time.Millisecond); err != nil {
+		t.Fatalf("partial readiness should preserve the ready participant: %v", err)
+	}
+	if orchestrator.hosts[0].APIClient == nil || orchestrator.hosts[1].APIClient != nil {
+		t.Fatalf("partial readiness clients = ready:%p unavailable:%p",
+			orchestrator.hosts[0].APIClient, orchestrator.hosts[1].APIClient)
+	}
+}
+
 func TestMultiHostOrchestrator_StopAllContainers_NoRunning(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
@@ -136,6 +324,123 @@ func TestMultiHostOrchestrator_StopAllContainers_NoRunning(t *testing.T) {
 	// Should succeed with no running containers
 	if err != nil {
 		t.Errorf("StopAllContainers should succeed when no containers are running, got: %v", err)
+	}
+}
+
+func TestMultiHostOrchestratorStopFailureRetainsOwnershipAndRetryClearsIt(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.StopAllContainers(context.Background()); err == nil {
+		t.Fatal("StopAllContainers() error = nil, want cleanup failure")
+	}
+	if !host.IsManaged() || host.GetStatus() != HostStatusRunning ||
+		host.ContainerID != "container-1" || manager.ContainerID() != "container-1" {
+		t.Fatalf("failed cleanup disowned live resource: managed=%t status=%s hostID=%q managerID=%q",
+			host.IsManaged(), host.GetStatus(), host.ContainerID, manager.ContainerID())
+	}
+
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("StopAllContainers() retry error = %v", err)
+	}
+	if host.IsManaged() || host.GetStatus() != HostStatusStopped || host.ContainerID != "" {
+		t.Fatalf("successful retry retained ownership: managed=%t status=%s id=%q",
+			host.IsManaged(), host.GetStatus(), host.ContainerID)
+	}
+}
+
+func TestCleanupManagedContainersAfterStartFailureRetainsFailedHostForRetry(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(context.Background()); err == nil {
+		t.Fatal("pre-submission cleanup error = nil, want failure")
+	}
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed pre-submission cleanup lost retry ownership: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(context.Background()); err != nil {
+		t.Fatalf("pre-submission cleanup retry error = %v", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" || host.GetStatus() != HostStatusStopped {
+		t.Fatalf("successful pre-submission retry retained host: managed=%t id=%q status=%s",
+			host.IsManaged(), host.ContainerID, host.GetStatus())
+	}
+}
+
+type mountFailureDockerManager struct {
+	*MockDockerManager
+	mountErr     error
+	stagingOwned bool
+}
+
+func (m *mountFailureDockerManager) SetFileMounts([]scenario.FileMount) error {
+	return m.mountErr
+}
+
+func (m *mountFailureDockerManager) CleanupContext(ctx context.Context) error {
+	if m.failOnCleanup {
+		return errors.New("mock error: failed to cleanup remote staging")
+	}
+	m.stagingOwned = false
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *mountFailureDockerManager) HasManagedResources() bool {
+	return m.stagingOwned || m.MockDockerManager.HasManagedResources()
+}
+
+func TestItemStagingFailureRetainsManagedOwnershipWithoutContainerID(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &mountFailureDockerManager{
+		MockDockerManager: NewMockDockerManager(),
+		mountErr:          errors.New("remote staging and cleanup failed"),
+		stagingOwned:      true,
+	}
+	manager.SetContainerID("")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.SetStatus(HostStatusReady)
+	orchestrator.itemFileMounts = []scenario.FileMount{{
+		HostPath: "/local/items.csv", ContainerPath: "/spt-input/items.csv",
+	}}
+
+	err := orchestrator.StartContainers(context.Background(), "test-image", nil)
+	if err == nil || !strings.Contains(err.Error(), "remote staging and cleanup failed") {
+		t.Fatalf("StartContainers() error = %v, want staging failure", err)
+	}
+	if !host.IsManaged() || host.ContainerID != "" || manager.ContainerID() != "" {
+		t.Fatalf("staging-only cleanup failure lost ownership: managed=%t hostID=%q managerID=%q",
+			host.IsManaged(), host.ContainerID, manager.ContainerID())
+	}
+
+	manager.SetFailOnCleanup(false)
+	if err = orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("StopAllContainers() staging retry error = %v", err)
+	}
+	if host.IsManaged() || host.GetStatus() != HostStatusStopped {
+		t.Fatalf("successful staging retry retained ownership: managed=%t status=%s",
+			host.IsManaged(), host.GetStatus())
 	}
 }
 
@@ -233,6 +538,10 @@ func newOrderedDiagnosticsDockerManager() *orderedDiagnosticsDockerManager {
 }
 
 func (m *orderedDiagnosticsDockerManager) Cleanup() error {
+	return m.CleanupContext(context.Background())
+}
+
+func (m *orderedDiagnosticsDockerManager) CleanupContext(ctx context.Context) error {
 	m.appendEvent("cleanup")
 	m.record = &diagnosticsRecord{
 		Host:        "host1",
@@ -240,7 +549,7 @@ func (m *orderedDiagnosticsDockerManager) Cleanup() error {
 		Collected:   true,
 		ContainerID: "container-1",
 	}
-	return m.MockDockerManager.Cleanup()
+	return m.MockDockerManager.CleanupContext(ctx)
 }
 
 func (m *orderedDiagnosticsDockerManager) gracefulStopForDiagnostics(context.Context) error {
@@ -286,6 +595,39 @@ func TestMultiHostOrchestrator_StopAllContainers_DiagnosticsAfterCleanup(t *test
 	got := strings.Join(h.DockerManager.(*orderedDiagnosticsDockerManager).eventList(), ",")
 	if got != "cleanup,record" {
 		t.Fatalf("diagnostics order = %q, want cleanup,record", got)
+	}
+}
+
+type diagnosticsOnlyCleanupErrorManager struct {
+	*MockDockerManager
+}
+
+func (m *diagnosticsOnlyCleanupErrorManager) CleanupContext(ctx context.Context) error {
+	if err := m.MockDockerManager.CleanupContext(ctx); err != nil {
+		return err
+	}
+	return errors.New("copy diagnostics: permission denied")
+}
+
+func TestStopAllContainersClearsOwnershipAfterDiagnosticsOnlyError(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &diagnosticsOnlyCleanupErrorManager{MockDockerManager: NewMockDockerManager()}
+	manager.SetContainerID("container-1")
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	err := orchestrator.StopAllContainers(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "copy diagnostics") {
+		t.Fatalf("StopAllContainers() error = %v, want diagnostics evidence error", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" || host.GetStatus() != HostStatusStopped ||
+		manager.HasManagedResources() {
+		t.Fatalf("diagnostics-only error retained false ownership: managed=%t hostID=%q status=%s resources=%t",
+			host.IsManaged(), host.ContainerID, host.GetStatus(), manager.HasManagedResources())
 	}
 }
 
@@ -368,6 +710,72 @@ func TestMultiHostOrchestrator_CollectDiagnosticsRunsHostsConcurrently(t *testin
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("CollectDiagnostics did not complete after host collectors were released")
+	}
+}
+
+type cancellationDrainDiagnosticsManager struct {
+	*MockDockerManager
+	host      string
+	wait      bool
+	started   chan<- struct{}
+	startOnce sync.Once
+}
+
+func (*cancellationDrainDiagnosticsManager) gracefulStopForDiagnostics(context.Context) error {
+	return nil
+}
+
+func (m *cancellationDrainDiagnosticsManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	if m.wait {
+		m.startOnce.Do(func() { m.started <- struct{}{} })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &diagnosticsRecord{Host: m.host, Role: constants.DockerRoleWorker, Collected: true}, nil
+}
+
+func (*cancellationDrainDiagnosticsManager) diagnosticsRecord() *diagnosticsRecord { return nil }
+
+func TestCollectDiagnosticsCancellationDrainsAvailableRecords(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "ready", Original: "ready"},
+		{Host: "canceled", Original: "canceled"},
+	}, 2)
+	root := t.TempDir()
+	orchestrator.SetResultsRoot(root)
+	started := make(chan struct{}, 1)
+	for index, host := range orchestrator.hosts {
+		host.SetManaged(true)
+		host.DockerManager = &cancellationDrainDiagnosticsManager{
+			MockDockerManager: NewMockDockerManager(),
+			host:              host.Info.Original,
+			wait:              index == 1,
+			started:           started,
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- orchestrator.CollectDiagnostics(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cancelable diagnostics worker did not start")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("CollectDiagnostics() error = %v, want context.Canceled", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, dockerDiagnosticsResultsDirName, dockerDiagnosticsManifestFileName))
+	if err != nil {
+		t.Fatalf("partial diagnostics manifest was not written: %v", err)
+	}
+	var manifest diagnosticsManifest
+	if err = json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Records) != 1 || manifest.Records[0].Host != "ready" {
+		t.Fatalf("partial diagnostics records = %+v, want completed host", manifest.Records)
 	}
 }
 
@@ -473,8 +881,12 @@ func (m *finalizeOrderDockerManager) diagnosticsRecord() *diagnosticsRecord {
 }
 
 func (m *finalizeOrderDockerManager) Cleanup() error {
+	return m.CleanupContext(context.Background())
+}
+
+func (m *finalizeOrderDockerManager) CleanupContext(ctx context.Context) error {
 	m.record("cleanup")
-	return m.MockDockerManager.Cleanup()
+	return m.MockDockerManager.CleanupContext(ctx)
 }
 
 func (m *finalizeOrderDockerManager) record(event string) {
@@ -559,6 +971,215 @@ func TestMultiHostOrchestrator_FinalizeDiagnosticsAndCleanup_RunsOnceConcurrentl
 	}
 }
 
+func TestMultiHostOrchestratorFinalizeDiagnosticsRetriesFailedCleanup(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	manager.SetFailOnCleanup(true)
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err == nil {
+		t.Fatal("first finalization error = nil, want cleanup failure")
+	}
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed finalization lost cleanup ownership: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+	manager.SetFailOnCleanup(false)
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("finalization retry error = %v", err)
+	}
+	if manager.GetCleanupCallCount() != 2 || host.IsManaged() || host.ContainerID != "" {
+		t.Fatalf("retry state: calls=%d managed=%t id=%q",
+			manager.GetCleanupCallCount(), host.IsManaged(), host.ContainerID)
+	}
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("successful finalization should remain sticky: %v", err)
+	}
+	if manager.GetCleanupCallCount() != 2 {
+		t.Fatalf("successful finalization reran cleanup: %d calls", manager.GetCleanupCallCount())
+	}
+}
+
+type slowFailedCleanupManager struct {
+	*MockDockerManager
+	started chan struct{}
+	release chan struct{}
+
+	mu        sync.Mutex
+	calls     int
+	active    int
+	maxActive int
+}
+
+type phaseBudgetDockerManager struct {
+	*MockDockerManager
+	diagnosticsReturned chan struct{}
+	cleanupStarted      chan struct{}
+	normalCleanupCalls  atomic.Int32
+	resourceOnlyCalls   atomic.Int32
+	record              *diagnosticsRecord
+}
+
+func (m *phaseBudgetDockerManager) gracefulStopForDiagnostics(context.Context) error {
+	return nil
+}
+
+func (m *phaseBudgetDockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
+	<-ctx.Done()
+	m.record = &diagnosticsRecord{
+		Host: "host1", Role: constants.DockerRoleWorker,
+		ContainerID: "container-1", Error: ctx.Err().Error(),
+	}
+	close(m.diagnosticsReturned)
+	return m.record, ctx.Err()
+}
+
+func (m *phaseBudgetDockerManager) diagnosticsRecord() *diagnosticsRecord {
+	return m.record
+}
+
+func (m *phaseBudgetDockerManager) CleanupContext(ctx context.Context) error {
+	m.normalCleanupCalls.Add(1)
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *phaseBudgetDockerManager) CleanupResourcesContext(ctx context.Context) error {
+	m.resourceOnlyCalls.Add(1)
+	close(m.cleanupStarted)
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func TestFinalizeDiagnosticsTimeoutStillRunsMandatoryRemovalWithFreshBudget(t *testing.T) {
+	resultsRoot := t.TempDir()
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	orchestrator.SetResultsRoot(resultsRoot)
+	orchestrator.diagnosticsTimeout = 10 * time.Millisecond
+	orchestrator.cleanupTimeout = time.Second
+	manager := &phaseBudgetDockerManager{
+		MockDockerManager:   NewMockDockerManager(),
+		diagnosticsReturned: make(chan struct{}),
+		cleanupStarted:      make(chan struct{}),
+	}
+	manager.SetContainerID("container-1")
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FinalizeDiagnosticsAndCleanup() error = %v, want diagnostics deadline", err)
+	}
+	select {
+	case <-manager.diagnosticsReturned:
+	default:
+		t.Fatal("timed-out diagnostics collector was not joined")
+	}
+	select {
+	case <-manager.cleanupStarted:
+	default:
+		t.Fatal("mandatory removal did not start after diagnostics timeout")
+	}
+	if manager.normalCleanupCalls.Load() != 0 || manager.resourceOnlyCalls.Load() != 1 {
+		t.Fatalf("cleanup calls normal=%d resource_only=%d, want 0/1",
+			manager.normalCleanupCalls.Load(), manager.resourceOnlyCalls.Load())
+	}
+	if host.IsManaged() || manager.HasManagedResources() {
+		t.Fatal("mandatory removal retained container ownership")
+	}
+	manifestPath := filepath.Join(resultsRoot, dockerDiagnosticsResultsDirName, dockerDiagnosticsManifestFileName)
+	if _, statErr := os.Stat(manifestPath); statErr != nil {
+		t.Fatalf("partial diagnostics evidence was not retained: %v", statErr)
+	}
+	if retryErr := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); retryErr != nil {
+		t.Fatalf("post-timeout retry error = %v", retryErr)
+	}
+	if manager.resourceOnlyCalls.Load() != 1 {
+		t.Fatalf("cleanup retry overlapped or repeated removal: %d calls", manager.resourceOnlyCalls.Load())
+	}
+}
+
+func (m *slowFailedCleanupManager) CleanupContext(ctx context.Context) error {
+	m.mu.Lock()
+	m.calls++
+	call := m.calls
+	m.active++
+	if m.active > m.maxActive {
+		m.maxActive = m.active
+	}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.active--
+		m.mu.Unlock()
+	}()
+	if call == 1 {
+		close(m.started)
+		<-m.release
+		return errors.New("first cleanup failed after slow unwind")
+	}
+	return m.MockDockerManager.CleanupContext(ctx)
+}
+
+func (m *slowFailedCleanupManager) counts() (calls, maxActive int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls, m.maxActive
+}
+
+func TestFinalizeDiagnosticsCanceledWaiterDoesNotExposeOverlappingRetry(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	host := orchestrator.hosts[0]
+	manager := &slowFailedCleanupManager{
+		MockDockerManager: NewMockDockerManager(),
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	manager.SetContainerID("container-1")
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- orchestrator.FinalizeDiagnosticsAndCleanup(firstCtx) }()
+	select {
+	case <-manager.started:
+	case <-time.After(time.Second):
+		t.Fatal("first cleanup did not start")
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first waiter error = %v, want context.Canceled", err)
+	}
+
+	joinedDone := make(chan error, 1)
+	go func() { joinedDone <- orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()) }()
+	time.Sleep(25 * time.Millisecond)
+	if calls, maxActive := manager.counts(); calls != 1 || maxActive != 1 {
+		t.Fatalf("retry started before prior workers quiesced: calls=%d max_active=%d", calls, maxActive)
+	}
+	close(manager.release)
+	if err := <-joinedDone; err == nil || !strings.Contains(err.Error(), "slow unwind") {
+		t.Fatalf("joined attempt error = %v, want first cleanup failure", err)
+	}
+	if err := orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()); err != nil {
+		t.Fatalf("retry after quiescence failed: %v", err)
+	}
+	if calls, maxActive := manager.counts(); calls != 2 || maxActive != 1 {
+		t.Fatalf("cleanup retry state: calls=%d max_active=%d, want 2/1", calls, maxActive)
+	}
+}
+
 func TestMultiHostOrchestrator_GetHostsInfo_CompleteInfo(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "host1", IsLocal: false, Original: "host1"},
@@ -627,13 +1248,13 @@ func TestMultiHostOrchestrator_CheckPort(t *testing.T) {
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 
 	// Test with a port that should be closed (high port number)
-	result := orchestrator.checkPort("127.0.0.1", 65432, 1*time.Second)
+	result := orchestrator.checkPortContext(context.Background(), "127.0.0.1", 65432, 1*time.Second)
 	if result {
 		t.Error("Expected checkPort to return false for closed port, got true")
 	}
 
 	// Test with invalid host
-	result = orchestrator.checkPort("invalid-host-that-does-not-exist", 80, 1*time.Second)
+	result = orchestrator.checkPortContext(context.Background(), "invalid-host-that-does-not-exist", 80, 1*time.Second)
 	if result {
 		t.Error("Expected checkPort to return false for invalid host, got true")
 	}
@@ -649,7 +1270,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	// If the standard RMI port is already open on localhost (e.g., a dev
 	// environment is running a node), this test's assumption is invalid.
 	// Skip to avoid flakiness on shared environments/CI agents.
-	if orchestrator.checkPort("127.0.0.1", constants.RMIRegistryPortInt, 100*time.Millisecond) {
+	if orchestrator.checkPortContext(context.Background(), "127.0.0.1", constants.RMIRegistryPortInt, 100*time.Millisecond) {
 		t.Skip("skipping: RMI port 1099 is open on localhost")
 	}
 
@@ -660,7 +1281,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	}
 
 	// Test with very short timeout to ensure it times out quickly
-	err := orchestrator.waitForRMIReady(host, 2*time.Second)
+	err := orchestrator.waitForRMIReadyContext(context.Background(), host, 2*time.Second)
 	if err == nil {
 		t.Error("Expected waitForRMIReady to timeout, but it succeeded")
 	}
@@ -682,7 +1303,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_InvalidHost(t *testing.T) {
 	}
 
 	// Test with invalid host - should fail quickly
-	err := orchestrator.waitForRMIReady(host, 3*time.Second)
+	err := orchestrator.waitForRMIReadyContext(context.Background(), host, 3*time.Second)
 	if err == nil {
 		t.Error("Expected waitForRMIReady to fail with invalid host, but it succeeded")
 	}
@@ -696,7 +1317,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_NoWorkers(t *testing.T) {
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 
 	// Test with empty worker list
-	err := orchestrator.waitForAllWorkersReady([]*HostConnection{}, 5*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), []*HostConnection{}, 5*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with no workers, got: %v", err)
 	}
@@ -724,7 +1345,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_InsufficientWorkers(t *tes
 
 	// Both workers will fail to be ready (invalid hosts), so we'll have 0 ready workers
 	// but need 2 (minHosts 3 - 1 entry node = 2 workers required)
-	err := orchestrator.waitForAllWorkersReady(workers, 2*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err == nil {
 		t.Error("Expected waitForAllWorkersReady to fail with insufficient ready workers")
 	}
@@ -755,7 +1376,7 @@ func TestStartEntryNode_UsesAdvertisedIPForWorkerAddresses(t *testing.T) {
 
 	// Call startEntryNode directly to avoid network waits
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB", ObjectCount: 1}
-	if err := o.startEntryNode(primary, []*HostConnection{worker}, params, nil); err != nil {
+	if err := o.startEntryNodeContext(context.Background(), primary, []*HostConnection{worker}, params, nil); err != nil {
 		t.Fatalf("startEntryNode error: %v", err)
 	}
 
@@ -795,7 +1416,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 	}
 
 	// One worker will fail (invalid host), but since we only require 0 workers (minHosts=1 - 1 entry = 0), it should succeed
-	err := orchestrator.waitForAllWorkersReady(workers, 2*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with partial failure when minHosts allows it, got: %v", err)
 	}
@@ -822,7 +1443,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_ErrorPropagation(t *testin
 	}
 
 	// Both workers will fail, and we need 2, so should get detailed error
-	err := orchestrator.waitForAllWorkersReady(workers, 1*time.Second)
+	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 1*time.Second)
 	if err == nil {
 		t.Error("Expected waitForAllWorkersReady to fail when all workers fail")
 	}
@@ -895,8 +1516,10 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: "mock", Threads: 1, ObjectSize: "1MB"}
+	var launchSubmitted atomic.Bool
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
 
-	err := wrapper.StartTest(ctx, "test-image", params)
+	err := wrapper.StartTestWithLaunchHooks(ctx, "test-image", params, hooks)
 	if err != nil {
 		t.Errorf("Expected StartTest to succeed for single host, got: %v", err)
 	}
@@ -931,6 +1554,9 @@ func TestMultiHostTestOrchestrator_StartTest_SingleHost(t *testing.T) {
 	}
 	if postedScenario == "" {
 		t.Fatal("expected generated scenario to be posted to /run")
+	}
+	if !launchSubmitted.Load() {
+		t.Fatal("expected successful single-host POST to notify launch submission")
 	}
 	if !strings.Contains(postedDefaults, "dummy-mock") {
 		t.Fatalf("expected generated defaults to include mock driver, got:\n%s", postedDefaults)
@@ -993,6 +1619,343 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_SingleHostPostsProvidedA
 	}
 }
 
+func TestDistributedIntegrityImageIdentityRecordsMatchingFleet(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":  {ID: id, RepoDigests: []string{"repo/spt@sha256:one"}},
+		"worker": {ID: id},
+	}, payloadCalls: payloadCalls}
+	var recorded *DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = &evidence
+	})
+
+	evidence, err := orchestrator.verifyDistributedIntegrityImageIdentity(context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ImageID != id || evidence.Tier != distributedRuntimeIdentityTierImmutableImage || len(evidence.Participants) != 2 {
+		t.Fatalf("unexpected evidence: %+v", evidence)
+	}
+	if recorded == nil || recorded.ImageID != id {
+		t.Fatalf("runtime identity recorder received %+v", recorded)
+	}
+	if payloadCalls.Load() != 0 {
+		t.Fatalf("image tier made %d payload probes, want 0", payloadCalls.Load())
+	}
+}
+
+func TestDistributedIntegrityImageIdentityRecordsSingleRemoteParticipant(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry": {ID: id, RepoDigests: []string{"repo/spt@sha256:one"}},
+	}}
+	var recorded *DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = &evidence
+	})
+
+	evidence, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Tier != distributedRuntimeIdentityTierImmutableImage || evidence.ImageID != id ||
+		len(evidence.Participants) != 1 {
+		t.Fatalf("unexpected evidence: %+v", evidence)
+	}
+	if recorded == nil || recorded.ImageID != id {
+		t.Fatalf("runtime identity recorder received %+v", recorded)
+	}
+}
+
+func TestDistributedIntegrityImageIdentityFailureStopsSingleRemoteParticipant(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "entry", Original: "entry"}}, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{errors: map[string]error{
+		"entry": errors.New("image identity unavailable"),
+	}}
+
+	_, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test")
+	if err == nil || !strings.Contains(err.Error(), "entry") ||
+		!strings.Contains(err.Error(), "image identity unavailable") {
+		t.Fatalf("single-remote identity error = %v", err)
+	}
+}
+
+func TestDistributedIntegrityPayloadIdentityRecordsMatchingFleet(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities:   map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:     map[string]string{"entry": payload, "worker": payload},
+		payloadCalls: payloadCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	evidence, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Tier != distributedRuntimeIdentityTierImageAndPayload || evidence.PayloadSHA256 != payload {
+		t.Fatalf("unexpected payload evidence: %+v", evidence)
+	}
+	for _, participant := range evidence.Participants {
+		if participant.PayloadSHA256 != payload {
+			t.Fatalf("participant payload evidence = %+v", participant)
+		}
+	}
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	if payloadCalls.Load() != 2 {
+		t.Fatalf("payload probes = %d after cached second prepare, want 2", payloadCalls.Load())
+	}
+}
+
+func TestDistributedIntegrityPayloadMismatchStopsBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].DockerManager = workerDM
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:   map[string]string{"entry": strings.Repeat("b", 64), "worker": strings.Repeat("c", 64)},
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(), "repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify}, []byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "payload identity mismatch") ||
+		!strings.Contains(err.Error(), "entry") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+	if len(entryDM.GetEntryNodeCalls()) != 0 || len(workerDM.GetWorkerNodeCalls()) != 0 {
+		t.Fatal("mixed payload fleet started containers before the identity gate")
+	}
+}
+
+func TestDistributedIntegrityPayloadUnavailableNamesHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{
+		identities:    map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:      map[string]string{"entry": strings.Repeat("b", 64)},
+		payloadErrors: map[string]error{"worker": errors.New("sha256sum unavailable")},
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+
+	_, err := orchestrator.verifyDistributedIntegrityImageIdentity(context.Background(), "repo/spt:test")
+	if err == nil || !strings.Contains(err.Error(), "payload identity unavailable") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("payload identity error = %v", err)
+	}
+}
+
+func TestRunningIntegrityPayloadIdentityUsesStartedContainers(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for i, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+		host.ContainerID = fmt.Sprintf("container-%d", i)
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	runningCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities:      map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+		payloads:        map[string]string{"entry": payload, "worker": payload},
+		runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		runningCalls:    runningCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusRunning)
+	}
+	if err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runningCalls.Load() != 2 {
+		t.Fatalf("running payload probes = %d, want 2", runningCalls.Load())
+	}
+}
+
+func TestRunningIntegrityPayloadIdentityRejectsDriftAndUnavailableEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		running       map[string]string
+		runningErrors map[string]error
+		want          string
+	}{
+		{name: "mutated running payload", running: map[string]string{"entry": strings.Repeat("b", 64), "worker": strings.Repeat("c", 64)}, want: "running payload identity mismatch on worker"},
+		{name: "unavailable running payload", running: map[string]string{"entry": strings.Repeat("b", 64)}, runningErrors: map[string]error{"worker": errors.New("container exited")}, want: "worker: container exited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+			for i, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+				host.ContainerID = fmt.Sprintf("container-%d", i)
+			}
+			id := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities:      map[string]preflight.ImageIdentity{"entry": {ID: id}, "worker": {ID: id}},
+				payloads:        map[string]string{"entry": payload, "worker": payload},
+				runningPayloads: tc.running,
+				runningErrors:   tc.runningErrors,
+			}
+			orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusRunning)
+			}
+			err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("VerifyRunningIntegrityPayloadIdentity() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDistributedIntegrityImageMismatchStopsBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].DockerManager = workerDM
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":  {ID: "sha256:" + strings.Repeat("a", 64)},
+		"worker": {ID: "sha256:" + strings.Repeat("b", 64)},
+	}}
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "image identity mismatch") ||
+		!strings.Contains(err.Error(), "entry") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+	if len(entryDM.GetEntryNodeCalls()) != 0 || len(workerDM.GetWorkerNodeCalls()) != 0 {
+		t.Fatal("mixed image fleet started containers before the identity gate")
+	}
+}
+
+func TestDistributedIntegrityRejectsAttachedWorkersBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetAttachExistingWorkers(true)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"repo/spt:test",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "runtime image identity is not provable") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+}
+
+func TestMultiHostIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *testing.T) {
+	var runPosts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string"}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"qa-client-01": {ID: "sha256:" + strings.Repeat("a", 64)},
+	}}
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err := wrapper.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDocker.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+	if orchestrator.hosts[0].IsManaged() {
+		t.Fatal("failed capability gate left the host marked managed")
+	}
+}
+
 func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistributedAndPostsProvidedArtifacts(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:"+constants.RMIRegistryPort)
 	if err != nil {
@@ -1045,10 +2008,17 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 			"load.service.threads=4",
 		},
 	}
-	if err := wrapper.StartTestWithContent(ctx, "test-image", params, replayScenario, replayDefaults); err != nil {
+	var launchSubmitted atomic.Bool
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
+	if err := wrapper.StartTestWithContentAndLaunchHooks(
+		ctx, "test-image", params, replayScenario, replayDefaults, hooks,
+	); err != nil {
 		t.Fatalf("StartTestWithContent() error = %v", err)
 	}
 	defer func() { _ = wrapper.StopTest() }()
+	if !launchSubmitted.Load() {
+		t.Fatal("successful distributed /run POST did not signal launch submission")
+	}
 
 	if postedScenario != string(replayScenario) {
 		t.Fatalf("posted scenario mismatch:\n%s", postedScenario)
@@ -1104,6 +2074,11 @@ func newSingleHostReplayAPIServer(t *testing.T, postedScenario, postedDefaults *
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"n0"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
+				`"input":{"provenance":"string","expectedProducerId":"string"},` +
+				`"selection":{"maxCount":"long"}}}}`))
 		case "/run":
 			if r.Method == http.MethodHead {
 				w.WriteHeader(http.StatusNoContent)
@@ -1511,7 +2486,9 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeList, Threads: 2, Bucket: "demo", Endpoint: "http://minio:9000"}
-	if err := wrapper.StartTest(ctx, "test-image", params); err != nil {
+	var launchSubmitted atomic.Bool
+	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
+	if err := wrapper.StartTestWithLaunchHooks(ctx, "test-image", params, hooks); err != nil {
 		t.Fatalf("StartTest(list) returned error: %v", err)
 	}
 
@@ -1541,6 +2518,9 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	if !runStarted.Load() {
 		t.Fatalf("expected run to be started via /run API on primary")
 	}
+	if !launchSubmitted.Load() {
+		t.Fatal("expected successful LIST POST to notify launch submission")
+	}
 
 	// Baseline should show both nodes present with worker inactive
 	if baseline != nil {
@@ -1554,5 +2534,813 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 		if ws.IsActive {
 			t.Fatalf("worker should be inactive in baseline for LIST runs")
 		}
+	}
+}
+
+func TestMultiHostListPreSubmissionFailuresCleanEveryManagedContainer(t *testing.T) {
+	tests := []struct {
+		name      string
+		want      string
+		failRun   bool
+		configure func(*MultiHostTestOrchestrator, *MockDockerManager)
+	}{
+		{
+			name: "scenario generation", want: "scenario failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.generateScenario = func(scenario.Params) (string, error) {
+					return "", errors.New("scenario failure")
+				}
+			},
+		},
+		{
+			name: "endpoint arguments", want: "endpoint failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.buildEndpointArgs = func(scenario.Params) ([]string, error) {
+					return nil, errors.New("endpoint failure")
+				}
+			},
+		},
+		{
+			name: "missing primary manager", want: "no Docker manager",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.multiHost.hosts[0].DockerManager = nil
+			},
+		},
+		{
+			name: "primary start", want: "mock start entry node container failed",
+			configure: func(_ *MultiHostTestOrchestrator, primary *MockDockerManager) {
+				primary.SetFailOnStart(true)
+			},
+		},
+		{
+			name: "post-start readiness", want: "readiness failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				calls := 0
+				baseWait := wrapper.waitForAPIs
+				wrapper.waitForAPIs = func(ctx context.Context, timeout time.Duration) error {
+					calls++
+					if calls == 2 {
+						return errors.New("readiness failure")
+					}
+					return baseWait(ctx, timeout)
+				}
+			},
+		},
+		{
+			name: "defaults generation", want: "defaults failure",
+			configure: func(wrapper *MultiHostTestOrchestrator, _ *MockDockerManager) {
+				wrapper.generateDefaults = func(scenario.Params) ([]byte, error) {
+					return nil, errors.New("defaults failure")
+				}
+			},
+		},
+		{name: "entry submission", want: "status 500", failRun: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/ready":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+				case "/run":
+					if test.failRun {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("ETag", "run-1")
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer server.Close()
+			u, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, port, err := net.SplitHostPort(u.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+				{Host: "127.0.0.1", Original: "primary"},
+				{Host: "127.0.0.1", Original: "worker"},
+			}, 2)
+			orchestrator.apiPort = port
+			primary, worker := NewMockDockerManager(), NewMockDockerManager()
+			orchestrator.hosts[0].DockerManager = primary
+			orchestrator.hosts[1].DockerManager = worker
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			wrapper := NewMultiHostTestOrchestrator(orchestrator)
+			if test.configure != nil {
+				test.configure(wrapper, primary)
+			}
+			var submitted atomic.Bool
+			err = wrapper.StartTestWithLaunchHooks(context.Background(), "image", scenario.Params{
+				WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket",
+				Endpoint: server.URL,
+			}, LaunchHooks{OnSubmitted: func() { submitted.Store(true) }})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("LIST failure = %v, want %q", err, test.want)
+			}
+			if submitted.Load() {
+				t.Fatal("failed LIST launch notified submission")
+			}
+			for _, host := range orchestrator.hosts {
+				if host.DockerManager == nil {
+					continue
+				}
+				if host.IsManaged() || host.ContainerID != "" || host.GetStatus() == HostStatusRunning {
+					t.Fatalf("%s retained cleanup ownership: managed=%t id=%q status=%s",
+						host.Info.Original, host.IsManaged(), host.ContainerID, host.GetStatus())
+				}
+			}
+		})
+	}
+}
+
+func TestMultiHostListCleanupFailureRetainsWorkerForRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "127.0.0.1", Original: "primary"},
+		{Host: "127.0.0.1", Original: "worker"},
+	}, 2)
+	orchestrator.apiPort = port
+	primary, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = primary
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	worker.SetFailOnCleanup(true)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.generateScenario = func(scenario.Params) (string, error) {
+		return "", errors.New("scenario failure")
+	}
+	err = wrapper.StartTest(context.Background(), "image", scenario.Params{
+		WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket", Endpoint: server.URL,
+	})
+	if err == nil || !strings.Contains(err.Error(), "scenario failure") ||
+		!strings.Contains(err.Error(), "failed to cleanup") {
+		t.Fatalf("LIST cleanup failure = %v, want primary cause plus cleanup failure", err)
+	}
+	host := orchestrator.hosts[1]
+	if !host.IsManaged() || host.ContainerID == "" {
+		t.Fatalf("failed LIST cleanup lost worker retry ownership: managed=%t id=%q",
+			host.IsManaged(), host.ContainerID)
+	}
+	worker.SetFailOnCleanup(false)
+	if err = orchestrator.StopAllContainers(context.Background()); err != nil {
+		t.Fatalf("LIST cleanup retry failed: %v", err)
+	}
+	if host.IsManaged() || host.ContainerID != "" {
+		t.Fatalf("LIST cleanup retry retained worker: managed=%t id=%q", host.IsManaged(), host.ContainerID)
+	}
+}
+
+func TestStartupRollbackUsesFreshBudgetAfterCallerCancellation(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	manager := NewMockDockerManager()
+	manager.SetContainerID("container-1")
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.ContainerID = "container-1"
+	host.SetStatus(HostStatusRunning)
+	host.SetManaged(true)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := orchestrator.cleanupManagedContainersAfterStartFailure(canceled); err != nil {
+		t.Fatalf("cleanupManagedContainersAfterStartFailure() error = %v", err)
+	}
+	if host.IsManaged() || manager.HasManagedResources() || manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("canceled rollback state: managed=%t resources=%t cleanup_calls=%d",
+			host.IsManaged(), manager.HasManagedResources(), manager.GetCleanupCallCount())
+	}
+}
+
+func TestMultiHostListCancellationDuringWorkerReadinessStopsAndRollsBack(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "primary", Original: "primary"}, {Host: "worker", Original: "worker"},
+	}, 2)
+	primary, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = primary
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapper.waitForAPIs = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	err := wrapper.StartTestWithLaunchHooks(ctx, "image", scenario.Params{
+		WorkloadType: scenario.WorkloadTypeList, Threads: 1, Bucket: "bucket",
+	}, NewLaunchHooks(nil))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("LIST cancellation error = %v, want context.Canceled", err)
+	}
+	if worker.GetStartCallCount() != 1 || worker.GetCleanupCallCount() != 1 {
+		t.Fatalf("worker calls start=%d cleanup=%d, want 1/1",
+			worker.GetStartCallCount(), worker.GetCleanupCallCount())
+	}
+	if primary.GetStartCallCount() != 0 {
+		t.Fatalf("primary started %d time(s) after cancellation", primary.GetStartCallCount())
+	}
+	for _, host := range orchestrator.hosts {
+		if host.IsManaged() || host.ContainerID != "" {
+			t.Fatalf("host %s retained resources after cancellation", host.Info.Original)
+		}
+	}
+}
+
+func TestSingleRemoteCancellationDuringReadinessRollsBackWithoutPost(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "remote", Original: "remote"}}, 1)
+	manager := NewMockDockerManager()
+	host := orchestrator.hosts[0]
+	host.DockerManager = manager
+	host.SetStatus(HostStatusReady)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapper.waitForAPIs = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	err := wrapper.StartTestWithContentAndLaunchHooks(
+		ctx, "image", scenario.Params{WorkloadType: scenario.WorkloadTypeRead},
+		[]byte("scenario"), []byte("defaults"), NewLaunchHooks(nil))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("single-remote cancellation error = %v, want context.Canceled", err)
+	}
+	if manager.GetStartCallCount() != 1 || manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("single-remote calls start=%d cleanup=%d, want 1/1",
+			manager.GetStartCallCount(), manager.GetCleanupCallCount())
+	}
+	if host.IsManaged() || manager.HasManagedResources() {
+		t.Fatal("single-remote cancellation retained managed resources")
+	}
+}
+
+func TestDistributedAdvertisedIPCancellationPreventsWorkerAndEntryStarts(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+	}, 2)
+	entry, worker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entry
+	orchestrator.hosts[1].DockerManager = worker
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	detectionStarted := make(chan struct{})
+	orchestrator.detectAdvIP = func(ctx context.Context, _ *hostparse.HostInfo) (string, error) {
+		close(detectionStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- orchestrator.StartDistributedTestWithContent(
+			ctx, "image", scenario.Params{WorkloadType: scenario.WorkloadTypeRead}, []byte("scenario"))
+	}()
+	select {
+	case <-detectionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("advertised-IP detection did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("distributed cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("distributed startup ignored advertised-IP cancellation")
+	}
+	if worker.GetStartCallCount() != 0 || entry.GetStartCallCount() != 0 {
+		t.Fatalf("container starts after canceled detection: worker=%d entry=%d",
+			worker.GetStartCallCount(), entry.GetStartCallCount())
+	}
+}
+
+func TestSingleRemoteIntegrityStartsVerifiedImmutableImageID(t *testing.T) {
+	var postedScenario, postedDefaults string
+	server := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer server.Close()
+	host, port := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	verifiedID := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"qa-client-01": {ID: verifiedID},
+	}}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const mutableTag = "repo/spt:mutable"
+	if err := wrapper.StartTestWithContent(
+		ctx,
+		mutableTag,
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := mockDocker.GetContainerCalls()
+	if len(calls) != 1 {
+		t.Fatalf("container starts = %d, want 1", len(calls))
+	}
+	if calls[0].Image != verifiedID {
+		t.Fatalf("container image = %q, want verified immutable ID %q (tag was %q)",
+			calls[0].Image, verifiedID, mutableTag)
+	}
+	if postedScenario == "" {
+		t.Fatal("verified single-remote scenario was not posted")
+	}
+}
+
+func TestSingleRemoteIntegrityIdentityFailureStopsBeforeContainerAndScenario(t *testing.T) {
+	var postedScenario, postedDefaults string
+	server := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer server.Close()
+	host, port := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	orchestrator.preflight = identityPreflight{errors: map[string]error{
+		"qa-client-01": errors.New("mutable tag no longer resolves to prepared image"),
+	}}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err := wrapper.StartTestWithContent(
+		context.Background(),
+		"repo/spt:mutable",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeReadVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "qa-client-01") {
+		t.Fatalf("identity error = %v, want host-specific failure", err)
+	}
+	if len(mockDocker.GetContainerCalls()) != 0 {
+		t.Fatal("identity failure started a container")
+	}
+	if postedScenario != "" {
+		t.Fatal("identity failure posted the scenario")
+	}
+}
+
+func TestRunningPayloadEvidenceRecordsExactStartedParticipantSetByHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "dropped", Original: "dropped"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	payload := strings.Repeat("b", 64)
+	runningCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "dropped": {ID: imageID}, "worker": {ID: imageID},
+		},
+		payloads: map[string]string{
+			"entry": payload, "dropped": payload, "worker": payload,
+		},
+		runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		runningCalls:    runningCalls,
+	}
+	orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+	var recorded DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = evidence
+	})
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].ContainerID = "entry-container"
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusRunning)
+	orchestrator.hosts[2].ContainerID = "worker-container"
+
+	if err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runningCalls.Load() != 2 {
+		t.Fatalf("running payload probes = %d, want 2", runningCalls.Load())
+	}
+	if len(recorded.Participants) != 2 || recorded.Participants[0].Host != "entry" ||
+		recorded.Participants[1].Host != "worker" {
+		t.Fatalf("running participant evidence = %+v, want exact entry/worker set", recorded.Participants)
+	}
+	for _, participant := range recorded.Participants {
+		if participant.PayloadSHA256 != payload || participant.ImageID != imageID {
+			t.Fatalf("incomplete running participant evidence: %+v", participant)
+		}
+	}
+}
+
+func TestRunningImageEvidenceRecordsExactStartedParticipantSetByHost(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "dropped", Original: "dropped"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	payloadCalls := &atomic.Int64{}
+	orchestrator.preflight = identityPreflight{
+		identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "dropped": {ID: imageID}, "worker": {ID: imageID},
+		},
+		payloadCalls: payloadCalls,
+	}
+	var recorded DistributedRuntimeIdentityEvidence
+	orchestrator.SetRuntimeIdentityRecorder(func(evidence DistributedRuntimeIdentityEvidence) {
+		recorded = evidence
+	})
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].ContainerID = "entry-container"
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusRunning)
+	orchestrator.hosts[2].ContainerID = "worker-container"
+
+	if err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if payloadCalls.Load() != 0 {
+		t.Fatalf("image-tier reconciliation made %d payload probes, want 0", payloadCalls.Load())
+	}
+	if len(recorded.Participants) != 2 || recorded.Participants[0].Host != "entry" ||
+		recorded.Participants[1].Host != "worker" {
+		t.Fatalf("running image participant evidence = %+v, want exact entry/worker set", recorded.Participants)
+	}
+	for _, participant := range recorded.Participants {
+		if participant.ImageID != imageID || participant.PayloadSHA256 != "" {
+			t.Fatalf("invalid running image participant evidence: %+v", participant)
+		}
+	}
+}
+
+func TestRunningImageEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T) {
+	newPrepared := func(t *testing.T) *MultiHostOrchestrator {
+		t.Helper()
+		hostInfos := []*hostparse.HostInfo{
+			{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+		}
+		orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+		for index, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusReady)
+			host.ContainerID = fmt.Sprintf("container-%d", index)
+		}
+		imageID := "sha256:" + strings.Repeat("a", 64)
+		orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+			"entry": {ID: imageID}, "worker": {ID: imageID},
+		}}
+		if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+			context.Background(), "repo/spt:test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusRunning)
+		}
+		return orchestrator
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*MultiHostOrchestrator)
+		want   string
+	}{
+		{name: "no running participants", mutate: func(orchestrator *MultiHostOrchestrator) {
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusFailed)
+			}
+		}, want: "no running participants"},
+		{name: "empty prepared host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants[0].Host = ""
+		}, want: "empty participant host"},
+		{name: "duplicate prepared host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants[1].Host =
+				orchestrator.runtimeIdentityEvidence.Participants[0].Host
+		}, want: "duplicate host"},
+		{name: "missing prepared running host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.runtimeIdentityEvidence.Participants =
+				orchestrator.runtimeIdentityEvidence.Participants[:1]
+		}, want: "worker was not present in prepared"},
+		{name: "unexpected running host", mutate: func(orchestrator *MultiHostOrchestrator) {
+			orchestrator.hosts[1].Info.Host = "replacement"
+		}, want: "not present in prepared"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orchestrator := newPrepared(t)
+			orchestrator.mu.Lock()
+			test.mutate(orchestrator)
+			orchestrator.mu.Unlock()
+			err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("coverage error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunningPayloadEvidenceRejectsAmbiguousOrUnexpectedCoverage(t *testing.T) {
+	newPrepared := func(t *testing.T) (*MultiHostOrchestrator, string) {
+		t.Helper()
+		hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
+		orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+		for index, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusReady)
+			host.ContainerID = fmt.Sprintf("container-%d", index)
+		}
+		imageID := "sha256:" + strings.Repeat("a", 64)
+		payload := strings.Repeat("b", 64)
+		orchestrator.preflight = identityPreflight{
+			identities:      map[string]preflight.ImageIdentity{"entry": {ID: imageID}, "worker": {ID: imageID}},
+			payloads:        map[string]string{"entry": payload, "worker": payload},
+			runningPayloads: map[string]string{"entry": payload, "worker": payload},
+		}
+		orchestrator.SetIntegrityRuntimeIdentityTier(constants.IntegrityRuntimeIdentityTierPayload)
+		if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+			context.Background(), "repo/spt:test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusRunning)
+		}
+		return orchestrator, payload
+	}
+
+	t.Run("no running participants", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		for _, host := range orchestrator.hosts {
+			host.SetStatus(HostStatusFailed)
+		}
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "no running participants") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
+
+	t.Run("unexpected running host", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		orchestrator.hosts[1].Info.Host = "replacement"
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "not present in prepared") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
+
+	t.Run("duplicate prepared host", func(t *testing.T) {
+		orchestrator, _ := newPrepared(t)
+		orchestrator.mu.Lock()
+		orchestrator.runtimeIdentityEvidence.Participants[1].Host =
+			orchestrator.runtimeIdentityEvidence.Participants[0].Host
+		orchestrator.mu.Unlock()
+		err := orchestrator.VerifyRunningIntegrityPayloadIdentity(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "duplicate host") {
+			t.Fatalf("coverage error = %v", err)
+		}
+	})
+}
+
+func TestFinalizeDiagnosticsCanceledWaiterDoesNotBlockBehindFirstCaller(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	orchestrator.SetResultsRoot(t.TempDir())
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	host := orchestrator.hosts[0]
+	host.SetStatus(HostStatusRunning)
+	host.ContainerID = "container-1"
+	host.SetManaged(true)
+	host.DockerManager = &blockingDiagnosticsDockerManager{
+		MockDockerManager: NewMockDockerManager(),
+		host:              "host1",
+		started:           started,
+		release:           release,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- orchestrator.FinalizeDiagnosticsAndCleanup(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first finalizer did not enter diagnostics")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	err := orchestrator.FinalizeDiagnosticsAndCleanup(canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("canceled waiter blocked for %s behind first caller", elapsed)
+	}
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first finalizer did not return after release")
+	}
+}
+
+func TestRunningIntegrityIdentityRejectsParticipantCountBelowMinimum(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker-1", Original: "worker-1"},
+		{Host: "worker-2", Original: "worker-2"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry": {ID: imageID}, "worker-1": {ID: imageID}, "worker-2": {ID: imageID},
+	}}
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+		context.Background(), "repo/spt:test"); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[1].SetStatus(HostStatusFailed)
+	orchestrator.hosts[2].SetStatus(HostStatusFailed)
+
+	err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "below min-hosts 2") {
+		t.Fatalf("quorum error = %v, want min-hosts rejection", err)
+	}
+	if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 3 {
+		t.Fatalf("failed gate rewrote evidence to %d participants", got)
+	}
+}
+
+func TestRunningIntegrityIdentityRejectsUnavailableLockedParticipantForEveryTier(t *testing.T) {
+	for _, tier := range []string{
+		constants.IntegrityRuntimeIdentityTierImage,
+		constants.IntegrityRuntimeIdentityTierPayload,
+	} {
+		t.Run(tier, func(t *testing.T) {
+			hostInfos := []*hostparse.HostInfo{
+				{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"},
+			}
+			orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities: map[string]preflight.ImageIdentity{
+					"entry": {ID: imageID}, "worker": {ID: imageID},
+				},
+				payloads: map[string]string{"entry": payload, "worker": payload},
+			}
+			orchestrator.SetIntegrityRuntimeIdentityTier(tier)
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+				context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+			orchestrator.executionParticipantKeys = []string{"entry", "worker"}
+			orchestrator.hosts[0].SetStatus(HostStatusRunning)
+			orchestrator.hosts[0].APIClient = &SptAPIClient{}
+			orchestrator.hosts[1].SetStatus(HostStatusFailed)
+
+			err := orchestrator.VerifyRunningIntegrityRuntimeIdentity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "worker is not running") {
+				t.Fatalf("locked participant error = %v", err)
+			}
+			if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 2 {
+				t.Fatalf("failed gate rewrote evidence to %d participants", got)
+			}
+		})
+	}
+}
+
+func TestEntryAPIRunRejectsAPIFailedLockedWorkerBeforeScenarioPostForEveryTier(t *testing.T) {
+	for _, tier := range []string{
+		constants.IntegrityRuntimeIdentityTierImage,
+		constants.IntegrityRuntimeIdentityTierPayload,
+	} {
+		t.Run(tier, func(t *testing.T) {
+			var runPosts atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/ready":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+				case "/run":
+					if r.Method == http.MethodPost {
+						runPosts.Add(1)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			entryHost, apiPort := splitServerHostPort(t, server.URL)
+
+			orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+				{Host: entryHost, Original: "entry"},
+				{Host: "worker.invalid", Original: "worker"},
+			}, 2)
+			orchestrator.SetAPIPort(apiPort)
+			orchestrator.SetIntegrityRuntimeIdentityTier(tier)
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			payload := strings.Repeat("b", 64)
+			orchestrator.preflight = identityPreflight{
+				identities: map[string]preflight.ImageIdentity{
+					"entry": {ID: imageID}, "worker": {ID: imageID},
+				},
+				payloads:        map[string]string{"entry": payload, "worker": payload},
+				runningPayloads: map[string]string{"entry": payload, "worker": payload},
+			}
+			for _, host := range orchestrator.hosts {
+				host.SetStatus(HostStatusReady)
+			}
+			if _, err := orchestrator.PrepareDistributedIntegrityRuntimeIdentity(
+				context.Background(), "repo/spt:test"); err != nil {
+				t.Fatal(err)
+			}
+
+			// This is the exact set already supplied to the entry node's RMI topology.
+			// Losing the worker's API proof cannot silently shrink that execution set.
+			orchestrator.executionParticipantKeys = []string{entryHost, "worker.invalid"}
+			orchestrator.hosts[0].ContainerID = "entry-container"
+			orchestrator.hosts[0].SetStatus(HostStatusRunning)
+			orchestrator.hosts[1].ContainerID = "worker-container"
+			orchestrator.hosts[1].SetStatus(HostStatusFailed)
+
+			wrapper := NewMultiHostTestOrchestrator(orchestrator)
+			err := wrapper.startEntryAPIRun(
+				context.Background(), "repo/spt:test",
+				scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+				[]byte(`CreateLoad.config({}).run(); ReadLoad.config({}).run();`), nil,
+				"Distributed verification", LaunchHooks{},
+			)
+			if err == nil || !strings.Contains(err.Error(), "worker is not running") {
+				t.Fatalf("entry API gate error = %v", err)
+			}
+			if got := runPosts.Load(); got != 0 {
+				t.Fatalf("/run POST count = %d, want 0", got)
+			}
+			if got := len(orchestrator.runtimeIdentityEvidence.Participants); got != 2 {
+				t.Fatalf("failed gate rewrote evidence to %d participants", got)
+			}
+		})
 	}
 }

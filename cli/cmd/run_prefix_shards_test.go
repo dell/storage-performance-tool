@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,15 +42,17 @@ func TestResolvePrefixShardsUsesConfiguredHostsWhenMinHostsIsLower(t *testing.T)
 }
 
 func TestResolvePrefixShardsDefaultsToAggregateConcurrency(t *testing.T) {
-	params := scenario.Params{WorkloadType: WorkloadTypeWrite, Threads: 16}
-	cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
+	for _, workloadType := range []string{WorkloadTypeWrite, WorkloadTypeWriteVerify} {
+		params := scenario.Params{WorkloadType: workloadType, Threads: 16}
+		cmd := prefixShardTestCommand(t, "-1", false, "root@wrk1,root@wrk2,root@wrk3")
 
-	got, err := resolvePrefixShardCount(cmd, params)
-	if err != nil {
-		t.Fatalf("resolvePrefixShardCount() error = %v", err)
-	}
-	if got != 48 {
-		t.Fatalf("resolvePrefixShardCount() = %d, want 48", got)
+		got, err := resolvePrefixShardCount(cmd, params)
+		if err != nil {
+			t.Fatalf("resolvePrefixShardCount(%s) error = %v", workloadType, err)
+		}
+		if got != 48 {
+			t.Fatalf("resolvePrefixShardCount(%s) = %d, want 48", workloadType, got)
+		}
 	}
 }
 
@@ -140,11 +143,38 @@ func TestApplyPrefixShardsRejectsInapplicableAndConflictingInputs(t *testing.T) 
 }
 
 func TestApplyPrefixShardsAllowsSeededReadAndMixedCreate(t *testing.T) {
-	for _, workload := range []string{WorkloadTypeRead, WorkloadTypeMixed} {
+	for _, workload := range []string{WorkloadTypeRead, WorkloadTypeWriteVerify, WorkloadTypeMixed} {
 		params := scenario.Params{WorkloadType: workload}
 		if err := applyPrefixShards(&params, 16); err != nil {
 			t.Fatalf("applyPrefixShards(%s) error = %v", workload, err)
 		}
+	}
+}
+
+func TestIntegrityCostNotices(t *testing.T) {
+	const (
+		multipartNotice = "Integrity notice: each multipart object is fully pre-hashed before multipart initiation."
+		checksumNotice  = "Integrity notice: the selected transport checksum requires an additional payload digest pass; see integrity.performance.csv."
+		deferredNotice  = "Integrity notice: verification readback is deferred; preserve written.csv for later read-verify campaigns."
+	)
+	tests := []struct {
+		name   string
+		params scenario.Params
+		want   []string
+	}{
+		{name: "ordinary write", params: scenario.Params{WorkloadType: WorkloadTypeWrite, PartSize: "5MiB", Checksum: "crc32c"}},
+		{name: "deferred", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, DeferVerification: true}, want: []string{deferredNotice}},
+		{name: "reused sha256", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumSHA256}},
+		{name: "separate checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, Checksum: scenario.ChecksumCRC32C}, want: []string{checksumNotice}},
+		{name: "multipart only", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB"}, want: []string{multipartNotice}},
+		{name: "multipart checksum", params: scenario.Params{WorkloadType: WorkloadTypeWriteVerify, PartSize: "5MiB", Checksum: scenario.ChecksumSHA256}, want: []string{multipartNotice, checksumNotice}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := integrityCostNotices(tt.params); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("integrityCostNotices() = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 

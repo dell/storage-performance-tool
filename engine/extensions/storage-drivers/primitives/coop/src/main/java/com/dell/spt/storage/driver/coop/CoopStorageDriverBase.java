@@ -414,6 +414,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						childFailureContext = "part retry";
 					} else {
 						// retries exhausted — abort the MPU
+						parentOp.put("mpuFailure", op.status().name());
 						parentOp.put("mpuAbort", "true");
 					}
 				} else if (parentOp.get("mpuAbort") == null) {

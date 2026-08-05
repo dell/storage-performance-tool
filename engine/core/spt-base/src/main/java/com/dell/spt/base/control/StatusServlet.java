@@ -26,18 +26,22 @@ public final class StatusServlet extends HttpServlet {
 
 	@Override
 	protected void doGet(final HttpServletRequest req, final HttpServletResponse resp) throws IOException {
+		final var status = apiStatus.snapshot();
 		final ObjectNode root = om.createObjectNode();
-		root.put("state", apiStatus.state().name());
-		final long sinceMillis = apiStatus.sinceMillis();
-		root.put("since", ISO8601.format(Instant.ofEpochMilli(sinceMillis)));
+		root.put("state", status.state().name());
+		root.put("since", ISO8601.format(Instant.ofEpochMilli(status.sinceMillis())));
 
-		final long runId = apiStatus.runId();
+		final long runId = status.runId();
 		if (runId != 0L) {
 			root.put("run_id", runId);
 		}
-		final String stepId = apiStatus.stepId();
+		final String stepId = status.stepId();
 		if (stepId != null && !stepId.isEmpty()) {
 			root.put("step_id", stepId);
+		}
+		if (status.failureCategory() != null) {
+			root.put("category", status.failureCategory().wireName());
+			root.put("message", status.failureMessage());
 		}
 
 		resp.setContentType("application/json");

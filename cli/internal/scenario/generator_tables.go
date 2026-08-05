@@ -19,8 +19,6 @@ func GenerateTablesScenario(params Params) (string, error) {
 	ts := resolveTimestamp(params)
 
 	data := map[string]interface{}{
-		templateKeyTablesAccessKey:        params.AccessKey,
-		templateKeyTablesSecretKey:        params.SecretKey,
 		templateKeyTablesBucket:           tp.TableBucket,
 		templateKeyTablesNamespace:        tp.Namespace,
 		templateKeyTablesTableName:        tp.TableName,

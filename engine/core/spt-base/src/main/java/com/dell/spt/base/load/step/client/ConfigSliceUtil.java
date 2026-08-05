@@ -25,6 +25,10 @@ public interface ConfigSliceUtil {
 
 	static Config initSlice(final Config config) {
 		final Config configSlice = new BasicConfig(config);
+		final long runId = config.longVal("run-id");
+		if (runId > 0L) {
+			configSlice.val("run-id", runId);
+		}
 		// disable the distributed mode on the slave nodes
 		configSlice.val("load-step-node-addrs", Collections.EMPTY_LIST);
 		return configSlice;

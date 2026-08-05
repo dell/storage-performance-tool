@@ -35,7 +35,8 @@ type Params struct {
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
 	// External item files bind-mounted into the engine container.
-	ItemFileMounts []FileMount
+	ItemFileMounts  []FileMount
+	ItemStagingDirs []string
 
 	// Write workload
 	SaveItems bool // Save items.csv to the step log directory for later retrieval
@@ -59,9 +60,13 @@ type Params struct {
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
 	BaseTimestamp string
+	RunID         int64 // Positive run identity shared by every verification step and staged input marker
 
 	// TUI layout
-	MinimalTUI bool // Start TUI with graphs and messages panels collapsed
+	MinimalTUI                  bool
+	AllowEmptySelection         bool
+	DeferVerification           bool
+	IntegrityMaxConsoleFailures int // Start TUI with graphs and messages panels collapsed
 
 	// S3 Tables workload
 	Tables TablesParams
@@ -101,6 +106,11 @@ type TablesParams struct {
 //
 //nolint:revive // compatibility alias retained during migration away from stuttered name
 type ScenarioParams = Params
+
+// IsIntegrityWorkload reports whether params require the persisted-data integrity engine contract.
+func IsIntegrityWorkload(params Params) bool {
+	return params.WorkloadType == WorkloadTypeWriteVerify || params.WorkloadType == WorkloadTypeReadVerify
+}
 
 // resolveStorageDriverType maps the user-facing S3Driver value to the engine
 // storage-driver-type string. An empty value (or "default"/"netty") resolves

@@ -43,6 +43,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`)
+- **Integrity qualification:** `SPT_DEFER_VERIFICATION` (true/false), `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`, `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER` (`image` or `payload`)
 - **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
 - **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
@@ -64,6 +65,8 @@ The `run` command executes a benchmark. Its structure is `spt run <type> [option
 | `write` | Implemented | Create objects to measure ingest performance |
 | `list` | Implemented | Enumerate existing objects and report listing throughput |
 | `read` | Implemented | Read pre-existing objects to measure read performance |
+| `write-verify` | Implemented | Write objects with persisted SHA-256 metadata, then verify every successful write now or defer readback |
+| `read-verify` | Implemented | Independently verify v1 metadata objects selected by LIST or `--items-file` |
 | `mock` | Implemented | Exercise the CLI with in-memory drivers (no S3 required) |
 | `tables` | Implemented | Benchmark S3 Tables (Iceberg) operations — see [S3_TABLES.md](S3_TABLES.md) |
 | `mixed` | Implemented | Run a weighted mix of GET, PUT, DELETE, and STAT operations concurrently |
@@ -83,7 +86,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test |
-| `--prefix` | | `""` | Optional object key prefix (list workload only) |
+| `--prefix` | | `""` | Generated-key namespace for `write-verify`; listing constraint for `list` and LIST-based `read-verify` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
 
@@ -93,7 +96,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Ignored for `list` |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write` workloads and `read` seed phases |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process |
@@ -104,11 +107,25 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
-| `--items-file` | | `""` | Path to a saved `items.csv` for `read` (skips seed phase) |
+| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` (skips seed/discovery) |
+| `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
+| `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
+| `--integrity-max-console-failures` | | `20` | Verification only. Maximum corruption samples printed to the console (`0` suppresses samples; env: `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`) |
 | `--shuffle` | | `false` | `read` only. Shuffle items within each fetched read batch before issuing reads |
 | `--shuffle-batch-size` | | `0` | `read` only. Batch size override used with `--shuffle` (`0` = bounded default `512000`, max `1000000`) |
 
 *Typically specify either `--object-count` or `--duration`, not both.*
+
+`write-verify` accepts a finite object count or duration for its CREATE phase,
+then verifies every successful write once by default. With
+`--defer-verification`, it ends after committing the successful-write manifest;
+use that run's `written.csv` as a later `read-verify --items-file`. Deferred mode
+does not permit `--cleanup`. `read-verify` is always finite and never deletes
+objects: `--object-count` caps its deterministic discovery selection and
+`--items-file` bypasses discovery. Verification workloads do not support
+`--attach-existing`; both require automatic result collection. See
+[S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
+selection behavior, and exit codes `0`, `1`, and `20`.
 
 **`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
 
@@ -160,7 +177,7 @@ spt run write \
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--cleanup` | | `false` | Delete created objects after the test completes |
+| `--cleanup` | | `false` | Delete created objects after the test completes. `write-verify` deletes only successfully verified objects; unsupported for `read-verify` and deferred verification |
 | `--generate-only` | | `false` | Generate the scenario file without running it |
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
@@ -187,7 +204,8 @@ spt run write \
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
-| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node |
+| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
+| `--integrity-runtime-identity-tier` | `image` | Verification only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |

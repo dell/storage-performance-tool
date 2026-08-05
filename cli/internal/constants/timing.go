@@ -9,14 +9,37 @@ import "time"
 // Timeout constants for various operations
 const (
 	// API and connection timeouts
-	APIPollingTimeout   = 500 * time.Millisecond // Timeout for API polling requests
-	APIReadinessTimeout = 30 * time.Second       // Timeout for waiting for APIs to be ready
-	PortCheckTimeout    = 2 * time.Second        // Timeout for checking if a port is open
+	APIPollingTimeout               = 500 * time.Millisecond // Timeout for API polling requests
+	APIReadinessPollInterval        = 500 * time.Millisecond // Interval between API readiness probes
+	APIReadinessTimeout             = 30 * time.Second       // Timeout for waiting for APIs to be ready
+	SubmissionReconciliationTimeout = 10 * time.Second       // Bounded /status reconciliation after an ambiguous POST /run
+	PortCheckTimeout                = 2 * time.Second        // Timeout for checking if a port is open
+	AutoResultsTrackerPollInterval  = 500 * time.Millisecond // Completion-tracker polling interval
+	AutoResultsTrackerIdleGrace     = 20 * time.Second       // Stable idle duration required for fallback completion
+	AutoResultsStartupTimeout       = 2 * time.Minute        // Maximum time to observe the first real run activity
+	AutoResultsUnavailableTimeout   = 2 * time.Minute        // Maximum continuous loss of all completion-tracker API signals
+	AutoResultsArtifactTimeout      = 5 * time.Minute        // Bounded artifact and integrity finalization budget
+	AutoResultsCancelCleanupTimeout = 15 * time.Second       // Best-effort artifact salvage budget after cancellation
+	AutoResultsDiscoveryInterval    = 500 * time.Millisecond // Step discovery polling interval
+	AutoResultsShutdownTimeout      = 30 * time.Second       // Graceful API shutdown request budget
+	AutoResultsEntryTerminalTimeout = 12 * time.Second       // Entry-node terminal barrier before distributed worker shutdown
+	AutoResultsShutdownSettleDelay  = 1 * time.Second        // Artifact settle delay before shutdown
+	AutoResultsSummaryTimeout       = 30 * time.Second       // Final summary publication budget after resource finalization
+	ResultsDiscoveryHTTPTimeout     = 5 * time.Second        // Step-identity discovery request timeout
+	IntegrityMetricsHTTPTimeout     = 10 * time.Second       // Required corruption-metrics request timeout
 
 	// Container lifecycle timeouts
-	ContainerShutdownGrace       = 2 * time.Second // Grace period for container graceful shutdown
-	APILingerDefault             = 5 * time.Second // Default /status linger window after /shutdown
-	DiagnosticsCollectionTimeout = 5 * time.Minute // Per-host timeout for copying JVM diagnostics artifacts
+	ContainerShutdownGrace         = 2 * time.Second  // Grace period for container graceful shutdown
+	ContainerCleanupTimeout        = 30 * time.Second // Bounded mandatory container/staging removal budget
+	ContainerStopTimeoutSeconds    = 10               // Normal Docker stop timeout in seconds
+	StartupRollbackTimeout         = 30 * time.Second // Bounded pre-submission rollback budget
+	AdvertisedIPDetectionTimeout   = 10 * time.Second // Per-host advertised-IP detection budget
+	DiagnosticsCollectionTimeout   = 5 * time.Minute  // Per-host timeout for copying JVM diagnostics artifacts
+	DiagnosticsFinalizationTimeout = DiagnosticsCollectionTimeout + ContainerCleanupTimeout
+	APILingerDefault               = 5 * time.Second        // Default /status linger window after /shutdown
+	APILingerPollInterval          = 200 * time.Millisecond // Interval between post-shutdown status probes
+	TUIStartupDelay                = 100 * time.Millisecond // Delay allowing the TUI event loop to initialize before startup
+	TUILaunchJoinTimeout           = StartupRollbackTimeout // Bound for joining canceled TUI startup and rollback work
 
 	// Metrics collection intervals
 	DefaultMetricsInterval = 500 * time.Millisecond // Default interval for metrics collection
@@ -35,3 +58,7 @@ const (
 	// Health monitoring
 	MetricsHealthTimeout = 30 * time.Second // Timeout for metrics health monitoring
 )
+
+// AutoResultsTrackerStableConfirmations is the number of unchanged successful
+// probes required before a step artifact is considered complete.
+const AutoResultsTrackerStableConfirmations = 2

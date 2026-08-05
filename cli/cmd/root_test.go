@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRootCommand(t *testing.T) {
@@ -238,5 +242,31 @@ func TestInitializeLogger(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExecuteCommandCodeHonorsParentCancellation(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	command := &cobra.Command{
+		Use: "wait",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			<-cmd.Context().Done()
+			return cmd.Context().Err()
+		},
+	}
+	command.SetContext(parent)
+	done := make(chan int, 1)
+	go func() {
+		done <- executeCommandCode(command)
+	}()
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("executeCommandCode = %d, want 1 after cancellation", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executeCommandCode did not return after context cancellation")
 	}
 }

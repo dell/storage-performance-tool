@@ -77,6 +77,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private static final String BC_JSSE_PROVIDER_CLASS = "org.bouncycastle.jsse.provider.BouncyCastleJsseProvider";
 	private static final String BC_JCE_PROVIDER_CLASS = "org.bouncycastle.jce.provider.BouncyCastleProvider";
 
+	static final long IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5;
 	static {
 		final java.util.logging.Logger julConnPoolLogger = java.util.logging.Logger.getLogger(MultiNodeConnPoolImpl.class.getName());
 		julConnPoolLogger.setLevel(java.util.logging.Level.WARNING);
@@ -878,20 +879,23 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	@Override
 	protected final void doStop() throws IllegalStateException {
 		try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, CLS_NAME)) {
-			try {
-				Loggers.MSG.debug("{}: shutdown the I/O executor", toString());
-				if (ioExecutor
-								.shutdownGracefully(0, 0, TimeUnit.NANOSECONDS)
-								.await(1, TimeUnit.MICROSECONDS)) {
-					Loggers.MSG.debug("{}: I/O workers stopped in time", toString());
-				} else {
-					Loggers.ERR.debug("{}: I/O workers stopping timeout", toString());
-				}
-			} catch (final InterruptedException e) {
-				LogUtil.exception(Level.WARN, e, "Graceful I/O workers shutdown was interrupted");
-				throwUnchecked(e);
+			Loggers.MSG.debug("{}: shutdown the I/O executor", toString());
+			if (shutdownIoExecutor(ioExecutor)) {
+				Loggers.MSG.debug("{}: I/O workers stopped in time", toString());
+			} else {
+				Loggers.ERR.warn(
+								"{}: I/O workers did not stop within {} s",
+								toString(),
+								IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
 			}
 		}
+
+	}
+
+	static boolean shutdownIoExecutor(final EventLoopGroup ioExecutor) {
+		return ioExecutor
+						.shutdownGracefully(0, 0, TimeUnit.NANOSECONDS)
+						.awaitUninterruptibly(IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 	}
 
 	@Override

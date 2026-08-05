@@ -1,7 +1,14 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityInputProvenance;
+import com.dell.spt.base.integrity.IntegrityMetadata;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityMode;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.PathItem;
@@ -15,6 +22,7 @@ import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 
@@ -48,8 +56,12 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -84,6 +96,17 @@ public class S3AwsStorageDriverTest {
 						Mockito.withSettings().lenient().defaultAnswer(Mockito.CALLS_REAL_METHODS));
 	}
 
+	private static void disableIntegrity(final Config storageConfig) {
+		final Config integrityConfig = mock(Config.class);
+		final Config inputConfig = mock(Config.class);
+		when(storageConfig.configVal("integrity")).thenReturn(integrityConfig);
+		when(integrityConfig.stringVal("mode")).thenReturn("none");
+		when(integrityConfig.stringVal("algorithm")).thenReturn(IntegrityMetadataCodec.ALGORITHM_SHA256);
+		when(integrityConfig.configVal("input")).thenReturn(inputConfig);
+		when(inputConfig.stringVal("provenance")).thenReturn("none");
+		when(inputConfig.stringVal("expectedProducerId")).thenReturn("");
+	}
+
 	private void setBucketName(S3AwsStorageDriver<Item, Operation<Item>> driver, String bucketName) throws Exception {
 		Field bucketField = S3AwsStorageDriver.class.getDeclaredField("bucketName");
 		bucketField.setAccessible(true);
@@ -108,12 +131,155 @@ public class S3AwsStorageDriverTest {
 		algoField.set(driver, algorithm);
 	}
 
+	private void enableIntegrityMetadata(
+					final S3AwsStorageDriver<Item, Operation<Item>> driver) throws Exception {
+		final Field field = StorageDriverBase.class.getDeclaredField("integrityConfig");
+		field.setAccessible(true);
+		field.set(driver, new IntegrityConfig(
+						IntegrityMode.METADATA,
+						IntegrityMetadataCodec.ALGORITHM_SHA256,
+						IntegrityInputProvenance.EXTERNAL,
+						null));
+	}
+
+	private static IntegrityMetadata metadataFor(final byte[] content) throws Exception {
+		return new IntegrityMetadata(
+						IntegrityMetadataCodec.VERSION_1,
+						IntegrityMetadataCodec.ALGORITHM_SHA256,
+						HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content)),
+						content.length);
+	}
+
 	@BeforeEach
 	void setUp() throws Exception {
 		drv = newDriverMock();
 		mockS3Client = mock(S3AsyncClient.class);
 		setS3Client(drv, mockS3Client);
 		setBucketName(drv, "test-bucket");
+	}
+
+	@Nested
+	class IntegrityMetadataTest {
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void putCarriesMetadataAndReusesSha256ForTransportChecksum() throws Exception {
+			enableIntegrityMetadata(drv);
+			setChecksumFields(drv, true, ChecksumAlgorithm.SHA256);
+			when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											PutObjectResponse.builder().versionId("returned-version").build()));
+
+			final byte[] content = "body".getBytes(StandardCharsets.UTF_8);
+			final IntegrityMetadata metadata = metadataFor(content);
+			final DataItem item = new DataItemImpl("key", 0, content.length);
+			item.dataInput(DataInput.instance(
+							null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+			final DataOperationImpl<DataItem> op = new DataOperationImpl<>(
+							0, OpType.CREATE, item, null, "/bucket", TEST_CRED, null, 0);
+			op.integrityMetadata(metadata);
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			final ArgumentCaptor<PutObjectRequest> request = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(request.capture(), any(AsyncRequestBody.class));
+			assertEquals(IntegrityMetadataCodec.logicalMetadata(metadata), request.getValue().metadata());
+			assertEquals(
+							Base64.getEncoder().encodeToString(HexFormat.of().parseHex(metadata.digest())),
+							request.getValue().checksumSHA256());
+			assertNull(request.getValue().checksumAlgorithm());
+			assertEquals("returned-version", op.returnedVersionId());
+		}
+
+		@Test
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		void multipartInitiationCarriesWholeObjectMetadata() throws Exception {
+			enableIntegrityMetadata(drv);
+			final IntegrityMetadata metadata = metadataFor(
+							"body".getBytes(StandardCharsets.UTF_8));
+			final CompositeDataOperation op = mock(CompositeDataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(op.type()).thenReturn(OpType.CREATE);
+			when(op.item()).thenReturn(item);
+			when(op.dstPath()).thenReturn("/bucket");
+			when(item.name()).thenReturn("key");
+			when(op.allSubOperationsDone()).thenReturn(false);
+			when(op.integrityMetadata()).thenReturn(metadata);
+			when(mockS3Client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											CreateMultipartUploadResponse.builder().uploadId("upload-id").build()));
+
+			drv.execute((Operation) op).join();
+
+			final ArgumentCaptor<CreateMultipartUploadRequest> request = ArgumentCaptor.forClass(CreateMultipartUploadRequest.class);
+			verify(mockS3Client).createMultipartUpload(request.capture());
+			assertEquals(IntegrityMetadataCodec.logicalMetadata(metadata), request.getValue().metadata());
+			verify(op).put(KEY_UPLOAD_ID, "upload-id");
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void readUsesExactManifestVersionAndVerifiesTheCompleteBody() throws Exception {
+			enableIntegrityMetadata(drv);
+			final byte[] content = "body".getBytes(StandardCharsets.UTF_8);
+			final IntegrityMetadata metadata = metadataFor(content);
+			final GetObjectResponse getResponse = GetObjectResponse.builder()
+							.metadata(IntegrityMetadataCodec.logicalMetadata(metadata))
+							.contentLength((long) content.length)
+							.versionId("returned-version")
+							.build();
+			when(mockS3Client.getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											new ResponseInputStream<>(getResponse, new ByteArrayInputStream(content))));
+
+			final IntegrityManifestDataItem item = new IntegrityManifestDataItem(
+							"bucket", "folder/key~literal", content.length, "requested-version");
+			final DataOperationImpl<IntegrityManifestDataItem> op = new DataOperationImpl<>(
+							0, OpType.READ, item, null, "/bucket", TEST_CRED, null, 0);
+			op.startRequest();
+			op.finishRequest();
+
+			drv.invokeNio((Operation<Item>) (Operation<?>) op);
+
+			final ArgumentCaptor<GetObjectRequest> request = ArgumentCaptor.forClass(GetObjectRequest.class);
+			verify(mockS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			assertEquals("folder/key~literal", request.getValue().key());
+			assertEquals("requested-version", request.getValue().versionId());
+			assertEquals("returned-version", op.returnedVersionId());
+			assertNotNull(op.integrityVerificationResult());
+			assertTrue(op.integrityVerificationResult().verified());
+			assertEquals(Operation.Status.SUCC, op.status());
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void digestMismatchRemainsTerminalCorruptionAfterReadCompletion() throws Exception {
+			enableIntegrityMetadata(drv);
+			final byte[] expected = "body".getBytes(StandardCharsets.UTF_8);
+			final byte[] actual = "Body".getBytes(StandardCharsets.UTF_8);
+			final GetObjectResponse getResponse = GetObjectResponse.builder()
+							.metadata(IntegrityMetadataCodec.logicalMetadata(metadataFor(expected)))
+							.contentLength((long) actual.length)
+							.build();
+			when(mockS3Client.getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											new ResponseInputStream<>(getResponse, new ByteArrayInputStream(actual))));
+
+			final IntegrityManifestDataItem item = new IntegrityManifestDataItem(
+							"bucket", "key", actual.length, null);
+			final DataOperationImpl<IntegrityManifestDataItem> op = new DataOperationImpl<>(
+							0, OpType.READ, item, null, "/bucket", TEST_CRED, null, 0);
+			op.startRequest();
+			op.finishRequest();
+
+			drv.invokeNio((Operation<Item>) (Operation<?>) op);
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+			assertFalse(op.integrityVerificationResult().verified());
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -895,6 +1061,11 @@ public class S3AwsStorageDriverTest {
 			assertEquals("mybucket", cap.getValue().bucket());
 
 			verify(op).objectsListed(2);
+			@SuppressWarnings("rawtypes")
+			ArgumentCaptor<List> objects = ArgumentCaptor.forClass(List.class);
+			verify(op).listedObjects(objects.capture());
+			assertEquals("obj1", ((com.dell.spt.base.item.op.list.ListedObject) objects.getValue().get(0)).key());
+			assertEquals(100L, ((com.dell.spt.base.item.op.list.ListedObject) objects.getValue().get(0)).size());
 			verify(op).truncated(false);
 			verify(op).pageFirstKey("obj1");
 			verify(op).startAfter("obj2");
@@ -1587,6 +1758,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromItemOutputPath() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			// storage-net-node-addrs always throws (confuse path mismatch in practice)
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
@@ -1599,6 +1771,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromItemInputPath_whenOutputPathNull() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -1611,6 +1784,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromNodeAddrs_withSlash() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("addr/extra");
 
 			assertEquals("addr", S3AwsStorageDriver.resolveBucketName(config));
@@ -1619,6 +1793,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void fromNodeAddrs_noSlash() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("justaddr");
 
 			assertEquals("justaddr", S3AwsStorageDriver.resolveBucketName(config));
@@ -1627,6 +1802,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void allSourcesMissing_fallsBackToUsername() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
 
@@ -1638,6 +1814,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void nodeAddrsEmpty_fallsThrough() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenReturn("");
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -1649,6 +1826,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void outputPathTooShort_fallsToInputPath() {
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			Config itemConfig = mock(Config.class);
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no path"));
 			when(config.configVal("item")).thenReturn(itemConfig);
@@ -2367,6 +2545,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
@@ -2494,6 +2673,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
@@ -2634,6 +2814,7 @@ public class S3AwsStorageDriverTest {
 			when(authConfig.stringVal("token")).thenReturn(null);
 
 			Config config = mock(Config.class);
+			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);

@@ -5,6 +5,7 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -242,6 +243,17 @@ func (m *MockDockerManager) StreamOutput(containerID string, stdoutCallback func
 
 // Cleanup simulates container cleanup
 func (m *MockDockerManager) Cleanup() error {
+	return m.CleanupContext(context.Background())
+}
+
+// CleanupContext simulates bounded container cleanup.
+func (m *MockDockerManager) CleanupContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -253,6 +265,11 @@ func (m *MockDockerManager) Cleanup() error {
 
 	m.containerID = ""
 	return nil
+}
+
+// HasManagedResources reports whether the mock still owns a container.
+func (m *MockDockerManager) HasManagedResources() bool {
+	return m.ContainerID() != ""
 }
 
 // Close simulates closing the Docker manager

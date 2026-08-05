@@ -4,18 +4,26 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.io.StorageItemInput;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -325,6 +333,106 @@ class LoadGeneratorImplRecycleTest {
 		assertSame(op, output.received.get(0));
 	}
 
+	@Test
+	void terminalSingleOutputIsStickyAndNeverResubmitted() throws Exception {
+		final var failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "terminal output");
+		final var terminalOutput = new TerminalOutput<DataOperation<DataItem>>(failure);
+		final var terminalGenerator = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(), terminalOutput, BATCH_SIZE, 0, 1000, true, false);
+		try {
+			terminalGenerator.doWork();
+			terminalGenerator.recycle(newOp("terminal-single"));
+			assertSame(failure, assertThrows(
+							IntegrityTerminalException.class, terminalGenerator::doWork));
+			assertSame(failure, terminalGenerator.terminalFailure());
+			assertSame(failure, assertThrows(
+							IntegrityTerminalException.class, terminalGenerator::doWork));
+			assertEquals(1, terminalOutput.singleCalls.get());
+		} finally {
+			terminalGenerator.close();
+		}
+	}
+
+	@Test
+	void terminalBatchOutputIsStickyAndNeverResubmitted() throws Exception {
+		final var failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "terminal batch output");
+		final var terminalOutput = new TerminalOutput<DataOperation<DataItem>>(failure);
+		final var terminalGenerator = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(), terminalOutput, BATCH_SIZE, 0, 1000, true, false);
+		try {
+			terminalGenerator.doWork();
+			terminalGenerator.recycle(newOp("terminal-batch-1"));
+			terminalGenerator.recycle(newOp("terminal-batch-2"));
+			assertSame(failure, assertThrows(
+							IntegrityTerminalException.class, terminalGenerator::doWork));
+			assertSame(failure, assertThrows(
+							IntegrityTerminalException.class, terminalGenerator::doWork));
+			assertEquals(1, terminalOutput.batchCalls.get());
+		} finally {
+			terminalGenerator.close();
+		}
+	}
+
+	@Test
+	void typedInputFailurePropagatesWhileOrdinaryInputFailureRetainsLegacyEofBehavior() throws Exception {
+		final Input<DataItem> typedInput = mock(Input.class);
+		when(typedInput.toString()).thenReturn("TypedInput");
+		final var failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.INPUT, "bad LIST input");
+		doThrow(failure).when(typedInput).get(anyList(), anyInt());
+		final var typedGenerator = new LoadGeneratorImpl<>(
+						typedInput, opsBuilder, List.of(), output, BATCH_SIZE, 0, 1000, false, false);
+		try {
+			assertSame(failure, assertThrows(
+							IntegrityTerminalException.class, typedGenerator::doWork));
+			assertSame(failure, typedGenerator.terminalFailure());
+		} finally {
+			typedGenerator.close();
+		}
+
+		final StorageDriver<DataItem, DataOperation<DataItem>> listingDriver = mock(StorageDriver.class);
+		final var listingFailure = new TerminalItemInputException(
+						"failed deterministic S3 listing", new IOException("truncated XML"));
+		doThrow(listingFailure).when(listingDriver).list(
+						any(), anyString(), anyString(), anyInt(), nullable(DataItem.class),
+						anyInt(), any(ListOptions.class));
+		final Input<DataItem> storageListingInput = new StorageItemInput<>(
+						listingDriver,
+						BATCH_SIZE,
+						new DataItemFactoryImpl<>(),
+						"/bucket",
+						"prefix/",
+						36);
+		final var listingGenerator = new LoadGeneratorImpl<>(
+						storageListingInput, opsBuilder, List.of(), output,
+						BATCH_SIZE, 0, 1000, false, false);
+		try {
+			final var terminal = assertThrows(
+							IntegrityTerminalException.class, listingGenerator::doWork);
+			assertEquals(IntegrityTerminalException.Category.INPUT, terminal.category());
+			assertSame(listingFailure, terminal.getCause());
+			assertSame(terminal, listingGenerator.terminalFailure());
+		} finally {
+			listingGenerator.close();
+		}
+
+		final Input<DataItem> ordinaryInput = mock(Input.class);
+		when(ordinaryInput.toString()).thenReturn("OrdinaryInput");
+		doThrow(new IllegalArgumentException("legacy input failure"))
+						.when(ordinaryInput).get(anyList(), anyInt());
+		final var ordinaryGenerator = new LoadGeneratorImpl<>(
+						ordinaryInput, opsBuilder, List.of(), output, BATCH_SIZE, 0, 1000, false, false);
+		try {
+			ordinaryGenerator.doWork();
+			assertNull(ordinaryGenerator.terminalFailure());
+			assertTrue(ordinaryGenerator.isItemInputFinished());
+		} finally {
+			ordinaryGenerator.close();
+		}
+	}
+
 	// --- helpers ---
 
 	private DataOperation<DataItem> newOp(final String name) {
@@ -343,6 +451,41 @@ class LoadGeneratorImplRecycleTest {
 			}
 			Thread.sleep(10);
 		}
+	}
+
+	private static final class TerminalOutput<O> implements Output<O> {
+		private final IntegrityTerminalException failure;
+		private final AtomicInteger singleCalls = new AtomicInteger();
+		private final AtomicInteger batchCalls = new AtomicInteger();
+
+		private TerminalOutput(final IntegrityTerminalException failure) {
+			this.failure = failure;
+		}
+
+		@Override
+		public boolean put(final O item) {
+			singleCalls.incrementAndGet();
+			throw failure;
+		}
+
+		@Override
+		public int put(final List<O> buffer, final int from, final int to) {
+			batchCalls.incrementAndGet();
+			throw failure;
+		}
+
+		@Override
+		public int put(final List<O> buffer) {
+			return put(buffer, 0, buffer.size());
+		}
+
+		@Override
+		public Input<O> getInput() {
+			return null;
+		}
+
+		@Override
+		public void close() {}
 	}
 
 	/** Simple collecting output for single-threaded doWork() tests. */

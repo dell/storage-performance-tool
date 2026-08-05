@@ -5,15 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
@@ -573,6 +578,254 @@ func TestConfirmReplayLaunchNoTTY(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires an interactive terminal") {
 		t.Fatalf("confirmReplayLaunch() error = %v", err)
 	}
+}
+
+func replayTestLaunchHooks(state tui.SubmissionState) tui.LaunchHooks {
+	hooks := tui.NewLaunchHooks(nil)
+	switch state {
+	case tui.SubmissionSubmitted:
+		hooks.NotifySubmitted()
+	case tui.SubmissionUnknown:
+		hooks.NotifySubmissionUnknown()
+	}
+	return hooks
+}
+
+func TestWaitForReplayAutoResultsCancelsFailedLaunchBeforeWaiting(t *testing.T) {
+	for _, launchErr := range []error{
+		errors.New("pre-submission launch failure"),
+		context.Canceled,
+		context.DeadlineExceeded,
+	} {
+		t.Run(launchErr.Error(), func(t *testing.T) {
+			done := make(chan autoResultsOutcome, 1)
+			var cancelCalls atomic.Int32
+			var once sync.Once
+			monitor := &autoResultsMonitor{
+				done: done,
+				cancel: func() {
+					cancelCalls.Add(1)
+					once.Do(func() { done <- autoResultsOutcome{} })
+				},
+			}
+			started := time.Now()
+			waitForReplayAutoResults(monitor, launchErr, replayTestLaunchHooks(tui.SubmissionNotSubmitted))
+			if cancelCalls.Load() != 1 || time.Since(started) > 100*time.Millisecond {
+				t.Fatalf("failed launch teardown calls=%d elapsed=%s",
+					cancelCalls.Load(), time.Since(started))
+			}
+		})
+	}
+}
+
+func TestWaitForReplayAutoResultsDoesNotCancelSuccessfulLaunch(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	done <- autoResultsOutcome{}
+	var cancelCalls atomic.Int32
+	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
+	waitForReplayAutoResults(monitor, nil, replayTestLaunchHooks(tui.SubmissionSubmitted))
+	if cancelCalls.Load() != 0 {
+		t.Fatalf("successful launch canceled monitor %d time(s)", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsPreservesArmedMonitorAfterLaunchError(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	done <- autoResultsOutcome{}
+	var cancelCalls atomic.Int32
+	monitor := &autoResultsMonitor{done: done, cancel: func() { cancelCalls.Add(1) }}
+	waitForReplayAutoResults(monitor, errors.New("post-submission UI failure"), replayTestLaunchHooks(tui.SubmissionSubmitted))
+	if cancelCalls.Load() != 0 {
+		t.Fatalf("post-submission launch error canceled monitor %d time(s)", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsCancelsAmbiguousSubmissionExactlyOnce(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	var cancelCalls atomic.Int32
+	var once sync.Once
+	monitor := &autoResultsMonitor{
+		done: done,
+		cancel: func() {
+			cancelCalls.Add(1)
+			once.Do(func() { done <- autoResultsOutcome{} })
+		},
+	}
+	waitForReplayAutoResults(
+		monitor, errors.New("ambiguous submission"), replayTestLaunchHooks(tui.SubmissionUnknown))
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("ambiguous submission cleanup calls = %d, want 1", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsCancelsAcceptedForCleanup(t *testing.T) {
+	done := make(chan autoResultsOutcome, 1)
+	var cancelCalls atomic.Int32
+	monitor := &autoResultsMonitor{
+		done: done,
+		cancel: func() {
+			cancelCalls.Add(1)
+			done <- autoResultsOutcome{}
+		},
+	}
+	hooks := tui.NewLaunchHooks(nil)
+	hooks.NotifyAcceptedForCleanup()
+	waitForReplayAutoResults(monitor, errors.New("invalid response identity"), hooks)
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("accepted-for-cleanup cancellation calls = %d, want 1", cancelCalls.Load())
+	}
+}
+
+func TestWaitForReplayAutoResultsJoinsCoordinator(t *testing.T) {
+	done := make(chan autoResultsOutcome)
+	returned := make(chan struct{})
+	go func() {
+		waitForReplayAutoResults(&autoResultsMonitor{done: done}, nil, replayTestLaunchHooks(tui.SubmissionSubmitted))
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("replay returned before coordinator completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+	done <- autoResultsOutcome{}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("replay did not return after coordinator completion")
+	}
+}
+
+func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
+	server := newReplayArchiveServer(t)
+	defer server.Close()
+	tests := []struct {
+		name     string
+		hosts    string
+		headless bool
+		wantPath string
+		wantErr  error
+	}{
+		{name: "local headless", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed")},
+		{name: "local tui", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed")},
+		{name: "remote headless cancellation", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled},
+		{name: "remote tui", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			origPort := resolvePortConflictFunc
+			origConnect := connectReplayOrchestrator
+			origConfirm := confirmReplayLaunchCommand
+			origRemoteHeadless := startReplayRemoteHeadless
+			origRemoteTUI := startReplayRemoteTUI
+			origLocalHeadless := startReplayLocalHeadless
+			origLocalTUI := startReplayLocalTUI
+			origShouldHeadless := shouldReplayRunHeadless
+			t.Cleanup(func() {
+				resolvePortConflictFunc = origPort
+				connectReplayOrchestrator = origConnect
+				confirmReplayLaunchCommand = origConfirm
+				startReplayRemoteHeadless = origRemoteHeadless
+				startReplayRemoteTUI = origRemoteTUI
+				startReplayLocalHeadless = origLocalHeadless
+				startReplayLocalTUI = origLocalTUI
+				shouldReplayRunHeadless = origShouldHeadless
+			})
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
+			confirmReplayLaunchCommand = func(io.Writer) error { return nil }
+			shouldReplayRunHeadless = func(*cobra.Command) bool { return test.headless }
+			var pathCalls atomic.Int32
+			var sessionManagedCalls atomic.Int32
+			startReplayRemoteHeadless = func(
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+			) error {
+				if test.wantPath == "remote-headless" {
+					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
+				}
+				return test.wantErr
+			}
+			startReplayRemoteTUI = func(
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions,
+			) error {
+				if test.wantPath == "remote-tui" {
+					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
+				}
+				return test.wantErr
+			}
+			startReplayLocalHeadless = func(
+				_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+			) error {
+				if test.wantPath == "local-headless" {
+					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
+				}
+				return test.wantErr
+			}
+			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+				if test.wantPath == "local-tui" {
+					pathCalls.Add(1)
+					if options.LaunchHooks.SessionManaged() {
+						sessionManagedCalls.Add(1)
+					}
+				}
+				return test.wantErr
+			}
+
+			cmd := newReplayCommandForTest(t)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			args := []string{
+				"--from", server.URL, "--endpoints", "http://s3.example",
+				"--test-hosts", test.hosts, "--results-dir", t.TempDir(),
+			}
+			if test.headless {
+				args = append(args, "--headless")
+			}
+			cmd.SetArgs(args)
+			started := time.Now()
+			err := cmd.Execute()
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("Execute() error = %v, want %v", err, test.wantErr)
+			}
+			if pathCalls.Load() != 1 || time.Since(started) > 2*time.Second {
+				t.Fatalf("replay failure path calls=%d elapsed=%s", pathCalls.Load(), time.Since(started))
+			}
+			if sessionManagedCalls.Load() != 1 {
+				t.Fatalf("session-managed replay route calls=%d, want 1", sessionManagedCalls.Load())
+			}
+		})
+	}
+}
+
+func newReplayArchiveServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="scenario.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/scenario.json`)
+	})
+	mux.HandleFunc("/scenario.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+  "type":"sequential",
+  "config":{"storage":{"driver":{"type":"s3"}}},
+  "steps":[{"type":"load","config":{"item":{"data":{"size":"1KB"}},"test":{"step":{"id":"W","limit":{"count":1}}},"load":{"limit":{"concurrency":1}}}}]
+}`)
+	})
+	return httptest.NewServer(mux)
 }
 
 func newReplayCommandForTest(t *testing.T) *cobra.Command {

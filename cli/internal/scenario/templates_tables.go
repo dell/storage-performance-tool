@@ -17,11 +17,6 @@ var sharedStorage = {
         "concurrency": concurrency
       }
     },
-    "auth": {
-      "uid": "{{.TablesAccessKey}}",
-      "secret": "{{.TablesSecretKey}}",
-      "version": 4
-    },
     "s3tables": {
       "bucket": bucket,
       "namespace": namespace,
@@ -81,11 +76,6 @@ var sharedStorage = {
       "limit": {
         "concurrency": {{.TablesConcurrency}}
       }
-    },
-    "auth": {
-      "uid": "{{.TablesAccessKey}}",
-      "secret": "{{.TablesSecretKey}}",
-      "version": 4
     },
     "s3tables": {
       "bucket": bucket,
@@ -175,11 +165,6 @@ var sharedStorage = {
       "limit": {
         "concurrency": {{.TablesConcurrency}}
       }
-    },
-    "auth": {
-      "uid": "{{.TablesAccessKey}}",
-      "secret": "{{.TablesSecretKey}}",
-      "version": 4
     },
     "s3tables": {
       "bucket": bucket,

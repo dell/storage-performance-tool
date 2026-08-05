@@ -1,12 +1,15 @@
 package com.dell.spt.base.load.step.local.context;
 
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
@@ -141,6 +144,35 @@ public class LoadStepContextImplTest {
 		assertTrue(stepCtx.put(op));
 		// timing metrics should receive this op
 		assertEquals(1, metricsOut.received.size());
+	}
+
+	@Test
+	public void metadataManifestOutputFailureIsTerminalWhileOrdinaryOutputRemainsCompatible()
+					throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final MetricsContext metrics = buildMetricsCtx("manifestOutput");
+		final Output<Operation<DataItem>> failingOutput = new ThrowingIoOpOutput<>();
+
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> metadataDriver = mock(StorageDriver.class);
+		when(metadataDriver.metadataIntegrityEnabled()).thenReturn(true);
+		final var metadataContext = new LoadStepContextImpl<>(
+						"metadata-output", generatorMock, metadataDriver, metrics,
+						testConfig.configVal("load"), false);
+		metadataContext.operationsResultsOutput(failingOutput);
+		final var terminal = assertThrows(
+						IntegrityTerminalException.class,
+						() -> metadataContext.put(newSuccDataOp("metadata-item", 8)));
+		assertEquals(IntegrityTerminalException.Category.PUBLICATION, terminal.category());
+
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> ordinaryDriver = mock(StorageDriver.class);
+		final var ordinaryContext = new LoadStepContextImpl<>(
+						"ordinary-output", generatorMock, ordinaryDriver, metrics,
+						testConfig.configVal("load"), false);
+		ordinaryContext.operationsResultsOutput(failingOutput);
+		assertDoesNotThrow(() -> ordinaryContext.put(newSuccDataOp("ordinary-item", 8)));
 	}
 
 	@Test
@@ -467,7 +499,8 @@ public class LoadStepContextImplTest {
 			assertEquals(0, op.opRetryCount(), status + ": should never have been retried");
 		}
 		verify(mockGenerator, never()).retry(any());
-		verify(metrics, times(5)).markFail();
+		verify(metrics, times(4)).markFail();
+		verify(metrics, times(1)).markCorrupt();
 	}
 
 	@Test
@@ -1011,7 +1044,7 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
-	public void markListSuccessIncrementsMetricsUsingObjectCount() throws Exception {
+	public void markListSuccessCountsObjectsWithoutTreatingLogicalSizeAsTransferredBytes() throws Exception {
 		testConfig.val("load-op-recycle-mode", false);
 		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("listMetrics");
 		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(metrics);
@@ -1030,7 +1063,7 @@ public class LoadStepContextImplTest {
 
 		assertTrue(stepCtx.put((Operation) listOp));
 		assertEquals(17L, trackingCtx.successCount.get());
-		assertEquals(3400L, trackingCtx.byteCount.get());
+		assertEquals(0L, trackingCtx.byteCount.get());
 	}
 
 	@Test
@@ -1059,7 +1092,7 @@ public class LoadStepContextImplTest {
 
 		assertTrue(stepCtx.put((Operation) listOp));
 		assertEquals(3L, trackingCtx.successCount.get());
-		assertEquals(123L, trackingCtx.byteCount.get());
+		assertEquals(0L, trackingCtx.byteCount.get());
 		assertEquals(123L, trackingCtx.arrayTtfb.get());
 	}
 
@@ -2413,6 +2446,15 @@ public class LoadStepContextImplTest {
 
 		@Override
 		public void close() {}
+	}
+
+	private static final class ThrowingIoOpOutput<I extends DataItem>
+					extends CollectingOpOutput<I> {
+		@Override
+		public boolean put(final Operation<I> op) {
+			throwUnchecked(new IOException("disk full"));
+			return false;
+		}
 	}
 
 	// flaky output that returns false first N times to trigger backpressure loop in doStop

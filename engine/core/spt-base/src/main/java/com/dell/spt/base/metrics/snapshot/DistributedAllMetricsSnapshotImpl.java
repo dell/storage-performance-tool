@@ -48,6 +48,30 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 		this.nodeCount = nodeCount;
 	}
 
+	public DistributedAllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final int nodeCount,
+					final long elapsedTimeMillis) {
+		super(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis);
+		this.nodeCount = nodeCount;
+	}
+
 	@Override
 	public int nodeCount() {
 		return nodeCount;

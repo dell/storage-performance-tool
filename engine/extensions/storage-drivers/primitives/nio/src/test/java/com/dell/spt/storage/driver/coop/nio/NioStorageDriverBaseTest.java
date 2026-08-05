@@ -358,6 +358,15 @@ public class NioStorageDriverBaseTest {
 		driver.put("limit", limit);
 		schema.put("driver", driver);
 
+		Map<String, Object> integrityInput = new HashMap<>();
+		integrityInput.put("provenance", String.class);
+		integrityInput.put("expectedProducerId", String.class);
+		Map<String, Object> integrity = new HashMap<>();
+		integrity.put("mode", String.class);
+		integrity.put("algorithm", String.class);
+		integrity.put("input", integrityInput);
+		schema.put("integrity", integrity);
+
 		Map<String, Object> netNode = new HashMap<>();
 		netNode.put("slice", Boolean.class);
 		Map<String, Object> net = new HashMap<>();
@@ -383,6 +392,15 @@ public class NioStorageDriverBaseTest {
 		driverVals.put("threads", driverThreads);
 		driverVals.put("limit", limitVals);
 		values.put("driver", driverVals);
+
+		Map<String, Object> integrityInputVals = new HashMap<>();
+		integrityInputVals.put("provenance", "none");
+		integrityInputVals.put("expectedProducerId", "");
+		Map<String, Object> integrityVals = new HashMap<>();
+		integrityVals.put("mode", "none");
+		integrityVals.put("algorithm", "sha256");
+		integrityVals.put("input", integrityInputVals);
+		values.put("integrity", integrityVals);
 
 		Map<String, Object> netNodeVals = new HashMap<>();
 		netNodeVals.put("slice", false);

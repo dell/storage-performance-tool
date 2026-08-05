@@ -12,6 +12,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,7 +21,13 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
-const fileStatusMissing = "missing"
+const (
+	fileStatusError   = "error"
+	fileStatusMissing = "missing"
+	fileStatusOK      = "ok"
+)
+
+var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle)\.node-[0-9]{3}\.csv$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -40,6 +48,15 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"Scenario"}, Suffix: constants.ResultsArtifactSuffixScenario, Required: false},
 	{Loggers: []string{"metrics.threshold.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsThreshold, Required: false},
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
+	{Loggers: []string{"written.csv"}, Suffix: constants.ResultsArtifactSuffixWritten, Required: false},
+	{Loggers: []string{"written.complete.json"}, Suffix: constants.ResultsArtifactSuffixWrittenCompletion, Required: false},
+	{Loggers: []string{"verify-input.csv"}, Suffix: constants.ResultsArtifactSuffixVerifyInput, Required: false},
+	{Loggers: []string{"verify-input.complete.json"}, Suffix: constants.ResultsArtifactSuffixVerifyInputCompletion, Required: false},
+	{Loggers: []string{"verified.csv"}, Suffix: constants.ResultsArtifactSuffixVerified, Required: false},
+	{Loggers: []string{"verified.complete.json"}, Suffix: constants.ResultsArtifactSuffixVerifiedCompletion, Required: false},
+	{Loggers: []string{"IntegrityFailures"}, Suffix: constants.ResultsArtifactSuffixIntegrityFailures, Required: false},
+	{Loggers: []string{"IntegrityPerformance"}, Suffix: constants.ResultsArtifactSuffixIntegrityPerformance, Required: false},
+	{Loggers: []string{"MultipartLifecycle"}, Suffix: constants.ResultsArtifactSuffixMultipartLifecycle, Required: false},
 	// Multipart per-part timings (name standardized to multipart.csv); try common loggers
 	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
 	// S3 Tables metrics (only present on s3-tables runs)
@@ -72,11 +89,51 @@ type StepManifest struct {
 
 // Manifest is the top-level results summary.
 type Manifest struct {
-	BaseURL     string         `json:"baseUrl"`
-	OutputDir   string         `json:"outputDir"`
-	GeneratedAt time.Time      `json:"generatedAt"`
-	Steps       []StepManifest `json:"steps"`
-	RunFiles    []FileStatus   `json:"runFiles,omitempty"`
+	BaseURL     string            `json:"baseUrl"`
+	OutputDir   string            `json:"outputDir"`
+	GeneratedAt time.Time         `json:"generatedAt"`
+	Steps       []StepManifest    `json:"steps"`
+	RunFiles    []FileStatus      `json:"runFiles,omitempty"`
+	Integrity   *IntegritySummary `json:"integrity,omitempty"`
+}
+
+// IntegritySummary is the stable machine-readable verification outcome embedded in index.json.
+type IntegritySummary struct {
+	Complete                   bool                        `json:"complete"`
+	FinalizationError          string                      `json:"finalization_error,omitempty"`
+	SelectionCountsValid       bool                        `json:"selection_counts_valid"`
+	SelectionSourceCount       int64                       `json:"selection_source_count"`
+	SelectionUniqueCount       int64                       `json:"selection_unique_count"`
+	SelectionCount             int64                       `json:"selection_count"`
+	VerificationAttemptedCount int64                       `json:"verification_attempted_count"`
+	VerificationDeferred       bool                        `json:"verification_deferred"`
+	VerifiedCount              int64                       `json:"verified_count"`
+	CorruptCount               int64                       `json:"corrupt_count"`
+	RemainingCount             int64                       `json:"remaining_count"`
+	EmptySelection             bool                        `json:"empty_selection"`
+	EmptyAllowed               bool                        `json:"empty_allowed"`
+	DigestPerformance          IntegrityPerformanceSummary `json:"digest_performance"`
+}
+
+// IntegrityPerformanceSummary reports digest cost independently from ordinary S3 operation metrics.
+type IntegrityPerformanceSummary struct {
+	Objects                         int64                   `json:"objects"`
+	Bytes                           int64                   `json:"bytes"`
+	HashWorkerSeconds               float64                 `json:"hash_worker_seconds"`
+	MeanWorkerHashMiBPerSecond      float64                 `json:"mean_worker_hash_mib_per_second"`
+	InitialWriteDelaySecondsMaxNode *float64                `json:"initial_write_delay_seconds_max_node,omitempty"`
+	AdditionalPayloadPasses         int64                   `json:"additional_payload_passes"`
+	Phases                          []IntegrityPhaseSummary `json:"phases"`
+}
+
+// IntegrityPhaseSummary is the same bounded digest-cost summary for one stable integrity phase.
+type IntegrityPhaseSummary struct {
+	Phase                      string  `json:"phase"`
+	Objects                    int64   `json:"objects"`
+	Bytes                      int64   `json:"bytes"`
+	HashWorkerSeconds          float64 `json:"hash_worker_seconds"`
+	MeanWorkerHashMiBPerSecond float64 `json:"mean_worker_hash_mib_per_second"`
+	AdditionalPayloadPasses    int64   `json:"additional_payload_passes"`
 }
 
 // Fetcher downloads artifacts for steps via the /logs endpoints.
@@ -216,7 +273,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		if err != nil {
 			status := fileStatusMissing
 			if !errors.Is(err, errNotFound) {
-				status = "error"
+				status = fileStatusError
 			}
 			sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: status, Error: err.Error()})
 			continue
@@ -228,7 +285,7 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 			size, sanitizeErr = sanitizeConfigArtifact(outPath)
 			if sanitizeErr != nil {
 				_ = os.Remove(outPath)
-				sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: "error", Error: sanitizeErr.Error()})
+				sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: fileStatusError, Error: sanitizeErr.Error()})
 				continue
 			}
 		case constants.ResultsArtifactSuffixExtResults:
@@ -236,7 +293,27 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		case constants.ResultsArtifactSuffixExtResultsThreshold:
 			size = normalizeResultXML(outPath, "result-with-threshold")
 		}
-		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: "ok", Modified: idxItem.Modified, ContentType: idxItem.ContentType})
+		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: fileStatusOK, Modified: idxItem.Modified, ContentType: idxItem.ContentType})
+	}
+	// Preserve every distributed integrity source as step-prefixed evidence. Canonical artifacts
+	// remain handled by the fixed registry above; these dynamically discovered files are never
+	// promoted over them.
+	var nodeSources []string
+	for logger := range indexMap {
+		if integrityNodeSourcePattern.MatchString(logger) {
+			nodeSources = append(nodeSources, logger)
+		}
+	}
+	sort.Strings(nodeSources)
+	for _, logger := range nodeSources {
+		item := indexMap[logger]
+		name := fmt.Sprintf("%s.%s", stepID, logger)
+		size, err := f.downloadOne(ctx, stepID, logger, filepath.Join(f.OutputDir, name), item.Size)
+		if err != nil {
+			sm.Files = append(sm.Files, FileStatus{Name: name, Status: fileStatusError, Error: err.Error()})
+			continue
+		}
+		sm.Files = append(sm.Files, FileStatus{Name: name, Size: size, Status: fileStatusOK, Modified: item.Modified, ContentType: item.ContentType})
 	}
 	return sm
 }

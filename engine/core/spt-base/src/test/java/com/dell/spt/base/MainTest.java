@@ -1,6 +1,7 @@
 package com.dell.spt.base;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.lang.reflect.Method;
@@ -114,6 +115,29 @@ class MainTest {
 				System.clearProperty("jdk.virtualThreadScheduler.parallelism");
 			}
 		}
+	}
+
+	@Test
+	void initializeRunIdReplacesZeroOnce() {
+		final var config = runIdConfig(0L);
+		Main.initializeRunId(config);
+		final long generated = config.longVal("run-id");
+		assertTrue(generated > 0L);
+
+		Main.initializeRunId(config);
+		assertEquals(generated, config.longVal("run-id"));
+	}
+
+	@Test
+	void initializeRunIdPreservesExplicitValue() {
+		final var config = runIdConfig(123456789L);
+		Main.initializeRunId(config);
+		assertEquals(123456789L, config.longVal("run-id"));
+	}
+
+	private static BasicConfig runIdConfig(final long runId) {
+		return new BasicConfig(
+						"-", Map.of("run", Map.of("id", Long.class)), Map.of("run", Map.of("id", runId)));
 	}
 
 	private static void invokeApplyLogLevel(final com.github.akurilov.confuse.Config config)

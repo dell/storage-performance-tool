@@ -54,3 +54,13 @@ func TestBuildStepPlanFromScenario_MockCleanup(t *testing.T) {
 		t.Fatalf("unexpected second step: %#v", plan.Steps[1])
 	}
 }
+
+func TestBuildStepPlanFromScenarioRejectsDuplicateStepIDs(t *testing.T) {
+	scenario := `
+		var first = {"id":"mt-001-20260802.120000.000-create"};
+		var duplicate = {"id":"mt-001-20260802.120000.000-create"};
+	`
+	if _, err := BuildStepPlanFromScenario(scenario); err == nil {
+		t.Fatal("duplicate rendered step IDs unexpectedly produced a plan")
+	}
+}

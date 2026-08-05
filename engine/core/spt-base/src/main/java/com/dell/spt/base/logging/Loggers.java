@@ -14,6 +14,8 @@ public interface Loggers {
 	Logger CLI = LogManager.getLogger(BASE + "Cli");
 	Logger CONFIG = LogManager.getLogger(BASE + "Config");
 	Logger ERR = LogManager.getLogger(BASE + "Errors");
+	Logger INTEGRITY_FAILURES = LogManager.getLogger(BASE + "IntegrityFailures");
+	Logger INTEGRITY_PERFORMANCE = LogManager.getLogger(BASE + "IntegrityPerformance");
 	Logger OP_TRACES = LogManager.getLogger(BASE + "OpTraces");
 	Logger METRICS_EXT_RESULTS_FILE = LogManager.getLogger(BASE_METRICS + "ExtResultsFile");
 	Logger METRICS_FILE = LogManager.getLogger(BASE_METRICS + "File");
@@ -23,6 +25,7 @@ public interface Loggers {
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
+	Logger MULTIPART_LIFECYCLE = LogManager.getLogger(BASE + "MultipartLifecycle");
 	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
@@ -31,6 +34,8 @@ public interface Loggers {
 					Map.entry(CLI.getName().substring(BASE.length()), "CLI args"),
 					Map.entry(CONFIG.getName().substring(BASE.length()), "Base config"),
 					Map.entry(ERR.getName().substring(BASE.length()), "Errors"),
+					Map.entry(INTEGRITY_FAILURES.getName().substring(BASE.length()), "Integrity Failures"),
+					Map.entry(INTEGRITY_PERFORMANCE.getName().substring(BASE.length()), "Integrity Performance"),
 					Map.entry(OP_TRACES.getName().substring(BASE.length()), "Operation Traces"),
 					Map.entry(METRICS_EXT_RESULTS_FILE.getName().substring(BASE.length()), "Ext Results XML"),
 					Map.entry(METRICS_FILE.getName().substring(BASE.length()), "Metrics"),
@@ -43,6 +48,7 @@ public interface Loggers {
 									"Threshold Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
 					Map.entry(MULTIPART.getName().substring(BASE.length()), "Multipart Upload Phases"),
+					Map.entry(MULTIPART_LIFECYCLE.getName().substring(BASE.length()), "Multipart Upload Lifecycle"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),
 					Map.entry(TABLES_METRICS.getName().substring(BASE.length()), "S3 Tables Metrics"));
 }

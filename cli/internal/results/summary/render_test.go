@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
 func TestRendererFullReportIncludesSections(t *testing.T) {
@@ -89,6 +91,59 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 	if !headerFound {
 		t.Fatalf("table header not found in report:\n%s", report)
 	}
+}
+
+func TestRendererReportsIntegrityDigestCostSeparately(t *testing.T) {
+	t.Parallel()
+	delay := 0.25
+	summary := &RunSummary{
+		Integrity: &results.IntegritySummary{
+			Complete: false, FinalizationError: "completion marker mismatch",
+			SelectionCount: 4, VerificationAttemptedCount: 4, VerifiedCount: 3,
+			RemainingCount: 1, CorruptCount: 1,
+			DigestPerformance: results.IntegrityPerformanceSummary{
+				Objects: 8, Bytes: 8 * 1024 * 1024, HashWorkerSeconds: 0.5,
+				MeanWorkerHashMiBPerSecond: 16, InitialWriteDelaySecondsMaxNode: &delay,
+				AdditionalPayloadPasses: 2,
+			},
+		},
+	}
+
+	report := NewRenderer(RenderOptions{}).FullReport(summary)
+	for _, want := range []string{
+		"Integrity Verification", "selected 4, attempted 4, verified 3, remaining 1, corrupt 1",
+		"Finalization       incomplete", "Finalization error completion marker mismatch",
+		"Empty selection    false (allowed: false)",
+		"8 objects, 8.00 MiB", "0.500000 s cumulative worker time", "16.000 MiB/s",
+		"0.250000 s (maximum node interval)", "2 full payload passes",
+	} {
+		mustContain(t, report, want)
+	}
+	mustNotContain(t, report, "overhead")
+	compact := NewRenderer(RenderOptions{}).CompactSnippet(summary)
+	for _, want := range []string{
+		"Integrity Verification",
+		"Finalization       incomplete",
+		"Finalization error completion marker mismatch",
+		"Selection          selected 4, attempted 4, verified 3, remaining 1, corrupt 1",
+		"Empty selection    false (allowed: false)",
+	} {
+		mustContain(t, compact, want)
+	}
+	performanceAt := strings.Index(compact, "Performance by Phase")
+	integrityAt := strings.Index(compact, "Integrity Verification")
+	if performanceAt < 0 || integrityAt <= performanceAt {
+		t.Fatalf("integrity section does not follow performance table:\n%s", compact)
+	}
+}
+
+func TestRendererLabelsDeferredVerification(t *testing.T) {
+	summary := &RunSummary{
+		Integrity: &results.IntegritySummary{Complete: true, VerificationDeferred: true, SelectionCount: 32},
+	}
+	report := NewRenderer(RenderOptions{}).CompactSnippet(summary)
+	mustContain(t, report, "Verification       deferred")
+	mustContain(t, report, "selected 32, attempted 0, verified 0")
 }
 
 func TestRendererDurationWorkloadOmitsZeroObjectCount(t *testing.T) {
@@ -198,15 +253,20 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 		Steps: []StepSummary{
 			{
 				PhaseLabel: "List",
+				Operation:  "LIST",
 				Metrics: &PhaseMetrics{
 					SuccessCount:      128,
 					ThroughputAvgOps:  256.4,
 					LatencyHeadlineMs: 12.5,
-					BandwidthAvgMiBps: 0,
+					BandwidthAvgMiBps: 512,
 				},
 			},
 		},
 		Totals: RunTotals{DurationHuman: "12.0s"},
+		Integrity: &results.IntegritySummary{
+			Complete: true, SelectionCountsValid: true,
+			SelectionSourceCount: 384, SelectionUniqueCount: 128, SelectionCount: 128,
+		},
 	}
 
 	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
@@ -214,12 +274,44 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 
 	mustContain(t, report, "• Object size        not applicable")
 	mustContain(t, report, "• Prefix             daily/")
-	mustContain(t, report, "Ops/s Avg")
+	mustContain(t, report, "Rate Avg")
+	mustContain(t, report, "256 objects/s")
+	mustContain(t, report, "source 384, unique 128, selected 128")
 
+	mustNotContain(t, report, "512 MiB/s")
 	table := renderer.performanceTable(summary)
 	if !strings.Contains(table, "—") {
 		t.Fatalf("expected object size column to use em dash, got:\n%s", table)
 	}
+}
+
+func TestRendererReadVerifyDisplaysRuntimeDiscoveredAverageObjectSize(t *testing.T) {
+	t.Parallel()
+
+	summary := &RunSummary{
+		Workload: WorkloadSummary{Type: "read-verify", Threads: 1},
+		Steps: []StepSummary{
+			{PhaseLabel: "List", Operation: "LIST", Metrics: &PhaseMetrics{SuccessCount: 1000}},
+			{
+				PhaseLabel: "Verify", Operation: "READ",
+				Metrics: &PhaseMetrics{
+					ObjectSizeHuman: "1.00 MiB avg", SuccessCount: 1000,
+					DataBytes: 1000 * 1024 * 1024, HasDataTransfer: true,
+				},
+			},
+		},
+		Integrity: &results.IntegritySummary{Complete: true, SelectionCount: 1000, VerifiedCount: 1000},
+	}
+	renderer := NewRenderer(RenderOptions{MaxWidth: 100})
+	report := renderer.FullReport(summary)
+	compact := renderer.CompactSnippet(summary)
+
+	mustContain(t, report, "• Object size        discovered at runtime")
+	mustContain(t, report, "1.00 MiB avg")
+	mustContain(t, compact, "1.00 MiB avg")
+	mustNotContain(t, report, "Object size        0 B")
+	mustNotContain(t, report, "│ Verify │ 0 B")
+	mustNotContain(t, compact, "│ Verify │ 0 B")
 }
 
 func TestRendererFullReportIncludesMixedBreakdown(t *testing.T) {

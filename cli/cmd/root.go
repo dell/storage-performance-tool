@@ -7,10 +7,13 @@ Copyright © 2025 Dell Technologies
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/config"
@@ -72,12 +75,17 @@ It provides a user-friendly interface to execute various benchmark tests (e.g., 
 
 // ExitCodeError carries a specific process exit code for command failures.
 type ExitCodeError struct {
-	Code int
-	Msg  string
+	Code  int
+	Msg   string
+	Cause error
 }
 
 func (e *ExitCodeError) Error() string {
 	return e.Msg
+}
+
+func (e *ExitCodeError) Unwrap() error {
+	return e.Cause
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -91,7 +99,9 @@ func executeRoot() int {
 }
 
 func executeCommandCode(cmd *cobra.Command) int {
-	err := cmd.Execute()
+	ctx, stop := signal.NotifyContext(commandContext(cmd), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := cmd.ExecuteContext(ctx)
 	if err == nil {
 		return 0
 	}
@@ -100,6 +110,15 @@ func executeCommandCode(cmd *cobra.Command) int {
 		return exitErr.Code
 	}
 	return 1
+}
+
+func commandContext(cmd *cobra.Command) context.Context {
+	if cmd != nil {
+		if ctx := cmd.Context(); ctx != nil {
+			return ctx
+		}
+	}
+	return context.Background()
 }
 
 // initializeLogger sets up the slog logger based on command-line flags

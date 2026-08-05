@@ -8,6 +8,7 @@ package headless
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -40,12 +41,14 @@ type HeadlessRunner struct {
 	apiPort       string
 	networkMode   string
 	resultsRoot   string
+	launchHooks   tui.LaunchHooks
 }
 
 // HeadlessOptions holds configuration for headless mode
 //
 //revive:disable-next-line:exported
 type HeadlessOptions struct {
+	Context     context.Context
 	TraceFile   string
 	TraceAppend bool
 	Verbose     bool
@@ -61,6 +64,9 @@ type HeadlessOptions struct {
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
 	ExpectedStepIDs        []string
+	LaunchHooks            tui.LaunchHooks
+	ScenarioContent        []byte
+	DefaultsContent        []byte
 }
 
 // AutoTerminateError indicates a headless multi-host run reached the configured
@@ -68,6 +74,19 @@ type HeadlessOptions struct {
 // stopped managed containers before returning.
 type AutoTerminateError struct {
 	CleanupComplete bool
+}
+
+func stopAllContainersAfterRun(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
+	if orchestrator == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), constants.ContainerCleanupTimeout)
+	defer cancel()
+	return orchestrator.StopAllContainers(cleanupCtx)
 }
 
 func (e *AutoTerminateError) Error() string {
@@ -105,6 +124,7 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		apiPort:       apiPort,
 		networkMode:   networkMode,
 		resultsRoot:   options.ResultsRoot,
+		launchHooks:   options.LaunchHooks,
 		// keepScenario will be set when RunWithScenario is called
 	}
 
@@ -138,6 +158,7 @@ type MultiHostHeadlessRunner struct {
 	verbose                bool
 	delegateNormalShutdown bool
 	expectedStepIDs        []string
+	launchHooks            tui.LaunchHooks
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
@@ -147,6 +168,7 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 		verbose:                options.Verbose,
 		delegateNormalShutdown: options.DelegateNormalShutdown,
 		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
+		launchHooks:            options.LaunchHooks,
 	}
 
 	// Set up trace file if specified
@@ -191,9 +213,14 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 
 	// Start the distributed test on all hosts via orchestrator wrapper
 	testOrchestrator := tui.NewMultiHostTestOrchestrator(r.orchestrator)
+	if err := r.launchHooks.RegisterResourceFinalizer(
+		r.orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 	testOrchestrator.SetExpectedStepIDs(r.expectedStepIDs)
 	// Standardize progress output in headless mode as well
 	r.orchestrator.SetNotifier(func(msg string) {
@@ -206,13 +233,14 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	})
 	var err error
 	if scenarioContent != nil {
-		err = testOrchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		err = testOrchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	} else {
-		err = testOrchestrator.StartTest(ctx, image, params)
+		err = testOrchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
 	}
 	if err != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
-		if stopErr := r.orchestrator.StopAllContainers(ctx); stopErr != nil {
+		if stopErr := stopMultiHostAfterLaunchError(ctx, r.orchestrator, r.launchHooks); stopErr != nil {
 			r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 			if err == nil {
 				err = stopErr
@@ -232,6 +260,8 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 			done <- ctx.Err()
 		case <-testOrchestrator.CompletionCh():
 			done <- nil
+		case <-r.launchHooks.WorkloadTerminal():
+			done <- nil
 		case sig := <-sigChan:
 			r.output("SIGNAL", fmt.Sprintf("Received signal: %v", sig))
 			done <- fmt.Errorf("interrupted by signal: %v", sig)
@@ -246,14 +276,26 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		} else {
 			r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
 		}
+	} else if r.launchHooks.SessionManaged() {
+		// Release presentation-only metrics and log polling; resource
+		// finalization remains owned by the RunSession.
+		if stopErr := testOrchestrator.StopTest(); stopErr != nil {
+			return fmt.Errorf("stop multi-host presentation monitoring: %w", stopErr)
+		}
+		r.output("SHUTDOWN", "Normal completion detected; RunSession owns evidence and resource finalization")
+		return nil
 	} else if r.delegateNormalShutdown {
 		r.output("SHUTDOWN", "Normal completion detected; auto-results will fetch artifacts and stop containers")
 		return nil
 	}
 
+	if r.launchHooks.SessionManaged() {
+		return err
+	}
+
 	// Stop all containers
 	r.output("SHUTDOWN", "Stopping all containers...")
-	stopErr := r.orchestrator.StopAllContainers(ctx)
+	stopErr := stopAllContainersAfterRun(ctx, r.orchestrator)
 	if stopErr != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
 		if err == nil {
@@ -280,6 +322,13 @@ func multiHostShutdownResult(runErr, stopErr error) error {
 		return &AutoTerminateError{CleanupComplete: true}
 	}
 	return runErr
+}
+
+func stopMultiHostAfterLaunchError(ctx context.Context, orchestrator *tui.MultiHostOrchestrator, hooks tui.LaunchHooks) error {
+	if hooks.SessionManaged() {
+		return nil
+	}
+	return stopAllContainersAfterRun(ctx, orchestrator)
 }
 
 // Close cleans up resources
@@ -388,29 +437,24 @@ func (r *HeadlessRunner) runDryModeWithParams(image string, scenarioPath string,
 	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
 	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
 
-	// Generate and display scenario content
+	// Generate scenario content and disclose only its identity. Scenario and
+	// defaults bytes may contain credentials supplied through overrides.
 	scenarioContent, err := scenario.GenerateScenario(params)
 	if err != nil {
 		r.output("ERROR", "Failed to generate scenario: %v", err)
 		return err
 	}
 
-	r.output("DRY-RUN", "Generated scenario content:")
-	r.output("DRY-RUN", "%s", scenarioContent)
+	r.outputDryRunContentIdentity("Generated scenario content", []byte(scenarioContent))
 
-	// Generate and display defaults configuration
+	// Generate defaults configuration and disclose only its identity.
 	defaultsContent, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		r.output("ERROR", "Failed to generate defaults: %v", err)
 		return err
 	}
 
-	if defaultsContent != nil {
-		r.output("DRY-RUN", "Defaults configuration:")
-		r.output("DRY-RUN", "%s", string(defaultsContent))
-	} else {
-		r.output("DRY-RUN", "Defaults configuration: (none - mock workload)")
-	}
+	r.outputDryRunContentIdentity("Generated defaults configuration", defaultsContent)
 
 	r.output("DRY-RUN", "Would start container with --run-node")
 	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
@@ -429,15 +473,8 @@ func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string
 	r.output("DRY-RUN", "  Input scenario: %s", scenarioPath)
 	r.output("DRY-RUN", "  API Port: %s", r.apiPort)
 
-	r.output("DRY-RUN", "Provided scenario content:")
-	r.output("DRY-RUN", "%s", string(scenarioContent))
-
-	if defaultsContent != nil {
-		r.output("DRY-RUN", "Provided defaults configuration:")
-		r.output("DRY-RUN", "%s", string(defaultsContent))
-	} else {
-		r.output("DRY-RUN", "Defaults configuration: (none)")
-	}
+	r.outputDryRunContentIdentity("Provided scenario content", scenarioContent)
+	r.outputDryRunContentIdentity("Provided defaults configuration", defaultsContent)
 
 	r.output("DRY-RUN", "Would start container with --run-node")
 	r.output("DRY-RUN", "Would wait for API to be ready on http://localhost:%s", r.apiPort)
@@ -449,18 +486,24 @@ func (r *HeadlessRunner) runDryModeWithContent(image string, scenarioPath string
 	r.output("COMPLETE", "Dry run completed")
 }
 
+func (r *HeadlessRunner) outputDryRunContentIdentity(label string, content []byte) {
+	digest := sha256.Sum256(content)
+	r.output("DRY-RUN", "%s: bytes=%d sha256=%x", label, len(content), digest)
+}
+
 // runBenchmark removed as unused (dead code); use runBenchmarkWithParams instead
 
 // runBenchmarkWithParams executes the actual benchmark with scenario parameters
 func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
 	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
-		return orchestrator.StartTest(ctx, image, params)
+		return orchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
 	})
 }
 
 func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
 	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
-		return orchestrator.StartTestWithContent(ctx, image, params, scenarioContent, defaultsContent)
+		return orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	})
 }
 
@@ -468,6 +511,10 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	// Create the orchestrator for API-based control
 	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort, r.resultsRoot)
 	r.orchestrator.SetNetworkMode(r.networkMode)
+	if err := r.launchHooks.RegisterResourceFinalizer(
+		r.orchestrator.FinalizeDiagnosticsAndCleanupOutcome); err != nil {
+		return fmt.Errorf("register session resource finalizer: %w", err)
+	}
 
 	// Set up callbacks to handle orchestrator events
 	r.orchestrator.SetCallbacks(
@@ -523,7 +570,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	if err := startTest(r.orchestrator); err != nil {
 		r.output("ERROR", "Failed to start test: %v", err)
 		// Try to clean up any partially created resources
-		if stopErr := r.orchestrator.StopTest(); stopErr != nil {
+		if stopErr := stopLocalAfterLaunchError(r.orchestrator, r.launchHooks); stopErr != nil {
 			r.output("ERROR", "Failed to cleanup after start failure: %v", stopErr)
 		} else {
 			r.output("CLEANUP", "Cleaned up after start failure")
@@ -540,6 +587,11 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	select {
 	case <-ctx.Done():
 	case <-r.orchestrator.CompletionCh():
+	case <-r.launchHooks.WorkloadTerminal():
+	}
+	if r.launchHooks.SessionManaged() {
+		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")
+		return ctx.Err()
 	}
 
 	// Stop the test gracefully
@@ -563,6 +615,13 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 
 	r.output("COMPLETE", "Benchmark completed")
 	return nil
+}
+
+func stopLocalAfterLaunchError(orchestrator *tui.TestOrchestrator, hooks tui.LaunchHooks) error {
+	if hooks.SessionManaged() || orchestrator == nil {
+		return nil
+	}
+	return orchestrator.StopTest()
 }
 
 // output writes a formatted message to both console and trace file
@@ -665,7 +724,8 @@ func StartHeadlessMode(image string, scenarioPath string, options HeadlessOption
 
 // StartHeadlessModeWithParams is the entry point for headless mode with scenario parameters
 func StartHeadlessModeWithParams(image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
-	return startHeadlessModeWithParams(image, scenarioPath, params, options, nil, nil)
+	return startHeadlessModeWithParams(
+		image, scenarioPath, params, options, options.ScenarioContent, options.DefaultsContent)
 }
 
 // StartHeadlessModeWithScenarioContentAndParams runs headless mode with caller-provided scenario/defaults content.
@@ -689,7 +749,10 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 	defer func() { _ = runner.Close() }()
 
 	// Run the benchmark with optional auto-terminate timeout
-	baseCtx := context.Background()
+	baseCtx := options.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()
@@ -706,7 +769,8 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 
 // StartHeadlessModeWithOrchestrator is the entry point for multi-host headless mode
 func StartHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, image string, scenarioPath string, params scenario.Params, options HeadlessOptions) error {
-	return startHeadlessModeWithOrchestrator(orchestrator, image, scenarioPath, params, options, nil, nil)
+	return startHeadlessModeWithOrchestrator(
+		orchestrator, image, scenarioPath, params, options, options.ScenarioContent, options.DefaultsContent)
 }
 
 // StartHeadlessModeWithOrchestratorContent is the entry point for multi-host
@@ -724,7 +788,10 @@ func startHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, 
 	defer func() { _ = runner.Close() }()
 
 	// Run the multi-host benchmark with optional auto-terminate timeout
-	baseCtx := context.Background()
+	baseCtx := options.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	if options.AutoTerminateSeconds > 0 {
 		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
 		defer cancel()

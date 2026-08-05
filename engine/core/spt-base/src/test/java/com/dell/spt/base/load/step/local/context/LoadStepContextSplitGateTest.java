@@ -334,18 +334,24 @@ public class LoadStepContextSplitGateTest {
 		doNothing().when(driverMock).operationResultOutput(any());
 		when(((ListDiscoveryProbe) driverMock)
 						.probeCommonPrefixes(anyString(), anyString(), anyString(), anyInt()))
-						.thenReturn(new ListDiscoveryProbe.DiscoverResult(List.of("p-1", "p-2"), true, false));
+						.thenReturn(
+										new ListDiscoveryProbe.DiscoverResult(
+														List.of("truncated-1", "truncated-2", "truncated-3"), false, true),
+										new ListDiscoveryProbe.DiscoverResult(List.of("p-1", "p-2"), true, false));
 		@SuppressWarnings("unchecked")
 		final LoadGenerator<Item, Operation<Item>> generatorMock = mock(LoadGenerator.class);
 		doNothing().when(generatorMock).recycle(any());
 		when(generatorMock.generatedOpCount()).thenReturn(0L);
 		when(generatorMock.isNothingToRecycle()).thenReturn(false);
+		final int[] selectedChildCount = {-1
+		};
 		final var recorder = new ListShardMetricsRecorder() {
 			@Override
 			public void onSplit(
 							final ListShard parent,
 							final com.dell.spt.base.item.op.list.shard.ListShardSplitHeuristics.Decision decision,
 							final java.util.List<ListShard> children) {
+				selectedChildCount[0] = children.size();
 				throw new RuntimeException("boom");
 			}
 		};
@@ -380,6 +386,7 @@ public class LoadStepContextSplitGateTest {
 		method.setAccessible(true);
 		final Object result = assertDoesNotThrow(() -> method.invoke(ctx, shard, listOp));
 		assertEquals(Boolean.TRUE, result);
+		assertEquals(2, selectedChildCount[0], "truncated probe results must not become split shards");
 	}
 
 	private static Config minimalLoadConfig() {

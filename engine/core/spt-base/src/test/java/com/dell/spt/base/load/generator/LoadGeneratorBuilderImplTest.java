@@ -2,7 +2,9 @@ package com.dell.spt.base.load.generator;
 
 import static com.dell.spt.base.Constants.APP_NAME;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.env.Extension;
@@ -15,13 +17,18 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
+import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.collection.TreeUtil;
+import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.io.collection.IoBuffer;
 import com.github.akurilov.commons.io.collection.LimitedQueueBuffer;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -223,6 +230,84 @@ public class LoadGeneratorBuilderImplTest {
 		assertEquals(
 						List.of("base/s0000001/1", "base/s0000002/2", "base/s0000000/3"),
 						ops.stream().map(op -> op.item().name()).toList());
+	}
+
+	@Test
+	void integrityDiscoveryUsesExactPrefixWhenDelimiterProbesFail() throws Exception {
+		final var seeds = integrityListSeeds(
+						null, new IOException("injected delimiter probe failure"));
+
+		assertEquals(List.of("campaign/!unicode/"), seeds.stream().map(ListShard::prefix).toList());
+	}
+
+	@Test
+	void integrityDiscoveryRejectsIncompleteDelimiterPartitions() throws Exception {
+		final var incompleteResults = List.of(
+						new ListDiscoveryProbe.DiscoverResult(
+										List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+										true,
+										false),
+						new ListDiscoveryProbe.DiscoverResult(
+										List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+										false,
+										true),
+						new ListDiscoveryProbe.DiscoverResult(
+										List.of("campaign/a/", "campaign/b/"), false, false));
+
+		for (final var result : incompleteResults) {
+			final var seeds = integrityListSeeds(result, null);
+			assertEquals(
+							List.of("campaign/!unicode/"),
+							seeds.stream().map(ListShard::prefix).toList(),
+							"incomplete delimiter evidence must fall back to the exact requested prefix");
+		}
+	}
+
+	@Test
+	void integrityDiscoveryUsesProvenCompleteDelimiterPartition() throws Exception {
+		final var result = new ListDiscoveryProbe.DiscoverResult(
+						List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+						false,
+						false);
+
+		final var seeds = integrityListSeeds(result, null);
+
+		assertEquals(result.commonPrefixes(), seeds.stream().map(ListShard::prefix).toList());
+	}
+
+	@Test
+	void integrityDiscoveryDoesNotSwallowUnexpectedProbeFailures() {
+		assertThrows(
+						IllegalStateException.class,
+						() -> integrityListSeeds(null, new IllegalStateException("injected programming failure")));
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private static List<ListShard> integrityListSeeds(
+					final ListDiscoveryProbe.DiscoverResult result, final Throwable failure)
+					throws Exception {
+		final Config opConfig = Mockito.mock(Config.class);
+		final Config listConfig = Mockito.mock(Config.class);
+		Mockito.when(opConfig.configVal("list")).thenReturn(listConfig);
+		final StorageDriver driver = Mockito.mock(
+						StorageDriver.class,
+						Mockito.withSettings().extraInterfaces(ListDiscoveryProbe.class));
+		Mockito.when(driver.metadataIntegrityEnabled()).thenReturn(true);
+		final var probe = (ListDiscoveryProbe) driver;
+		if (failure == null) {
+			Mockito.when(probe.probeCommonPrefixes(
+							Mockito.anyString(), Mockito.anyString(), Mockito.anyString(), Mockito.anyInt()))
+							.thenReturn(result);
+		} else {
+			Mockito.when(probe.probeCommonPrefixes(
+							Mockito.anyString(), Mockito.anyString(), Mockito.anyString(), Mockito.anyInt()))
+							.thenThrow(failure);
+		}
+
+		return new LoadGeneratorBuilderImpl()
+						.seedListShards(
+										opConfig, null, "campaign/!unicode/", "/bucket", 4, (Output) driver);
 	}
 
 	/**

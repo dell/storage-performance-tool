@@ -12,6 +12,7 @@ const (
 	EnvS3AuthVersion   = "S3_AUTH_VERSION"
 	EnvSkipImagePull   = "SPT_SKIP_IMAGE_PULL"
 	EnvSptJavaOpts     = "SPT_JAVA_OPTS"
+	EnvSptLogDir       = "SPT_LOG_DIR"
 	EnvRdmaEnabled     = "SPT_RDMA"
 	EnvS3Driver        = "SPT_S3_DRIVER"
 	EnvServiceThreads  = "SPT_SERVICE_THREADS"
@@ -21,7 +22,10 @@ const (
 	EnvPartSize = "SPT_PART_SIZE"
 
 	// Checksum configuration
-	EnvChecksum = "SPT_CHECKSUM"
+	EnvChecksum                 = "SPT_CHECKSUM"
+	EnvIntegrityMaxConsoleFails = "SPT_INTEGRITY_MAX_CONSOLE_FAILURES"
+	EnvIntegrityRuntimeIdentity = "SPT_INTEGRITY_RUNTIME_IDENTITY_TIER"
+	EnvDeferVerification        = "SPT_DEFER_VERIFICATION"
 
 	// Object data shaping configuration
 	EnvObjectDataCompressibility = "SPT_OBJECT_DATA_COMPRESSIBILITY"

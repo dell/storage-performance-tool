@@ -151,6 +151,14 @@ storage:
         input: 1000000
     threads: 0
     type: dummy-mock
+  integrity:
+    algorithm: sha256
+    input:
+      expectedProducerId: ""
+      provenance: none
+    mode: none
+    selection:
+      maxCount: 0
   namespace: null
   net:
     node:

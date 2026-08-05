@@ -247,7 +247,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			break;
 		}
 		applyChecksum(httpHeaders, op);
-		applyMetaDataHeaders(httpHeaders);
+		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, uriPath, op.credential());
@@ -399,6 +399,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 	protected abstract void applyMetaDataHeaders(final HttpHeaders httpHeaders);
 
+	/** Operation-aware metadata hook retaining the legacy overload for extensions. */
+	protected void applyMetaDataHeaders(final HttpHeaders httpHeaders, final O op) {
+		applyMetaDataHeaders(httpHeaders);
+	}
+
 	protected abstract void applyAuthHeaders(
 					final HttpHeaders httpHeaders,
 					final HttpMethod httpMethod,
@@ -408,15 +413,28 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	protected abstract void applyCopyHeaders(final HttpHeaders httpHeaders, final String srcPath)
 					throws URISyntaxException;
 
+	/** Associates transport-specific attempt state with the leased request channel. */
+	protected void bindRequestChannel(final Channel channel, final O op) {}
+
+	/** Marks transport-specific attempt state eligible for response timeout handling. */
+	protected void onRequestDispatched(final Channel channel, final O op) {}
+
 	@Override
 	protected final void sendRequest(final Channel channel, final O op) {
 		final var nodeAddr = op.nodeAddr();
 		try {
+			if (channel != null) {
+				bindRequestChannel(channel, op);
+			}
 			final var httpRequest = httpRequest(op, nodeAddr);
 			if (channel == null) {
 				return;
 			} else {
 				channel.write(httpRequest).addListener(httpReqSentCallback);
+				onRequestDispatched(channel, op);
+				if (op.integrityMetadata() != null) {
+					markIntegrityRequestDispatched();
+				}
 				if (Loggers.MSG.isTraceEnabled()) {
 					Loggers.MSG.trace(
 									"{} >>>> {} {}", op.hashCode(), httpRequest.method(), httpRequest.uri());

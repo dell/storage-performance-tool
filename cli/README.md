@@ -76,10 +76,16 @@ For read benchmarks, `spt` can seed an item set automatically and optionally wid
   --cleanup
 ```
 
+For persisted-data qualification, use `write-verify` to write each object with
+versioned SHA-256 metadata and either read it back once or preserve its manifest
+for later campaigns, then use `read-verify` for later checks. These are
+correctness workloads, not ordinary benchmarks; corruption returns exit code
+`20` and leaves a resumable `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
-- **Multiple Workload Types**: Support for write, read, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
+- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
@@ -213,6 +219,7 @@ Key points:
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
+- Verification workloads reject `--attach-existing` because SPT cannot establish trusted runtime identity for unmanaged workers.
 
 ## Usage
 
@@ -376,6 +383,8 @@ Executes a benchmark test with the specified workload type.
 
 - `write`: Write-only test, creating new objects
 - `read`: Read-only test on pre-existing objects
+- `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write now or defer readback
+- `read-verify`: Verify v1 metadata objects selected by LIST or `--items-file`
 - `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
 - `delete`: Test to measure object deletion performance (coming soon)
 - `mock`: Run tests with dummy-mock driver (no S3 endpoint required)
@@ -402,10 +411,14 @@ Executes a benchmark test with the specified workload type.
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read` workloads (skips the seed phase)
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` (skips seed/discovery)
+- `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
+- `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
+- `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
+- `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
-- `--cleanup`: Delete all created objects after test completion
+- `--cleanup`: Delete created objects after test completion. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker

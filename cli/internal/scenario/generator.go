@@ -9,28 +9,36 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 const defaultListBatchSize = 1000
 
-// GenerateScenario creates a JavaScript scenario from parameters
+type scenarioGenerator func(Params) (string, error)
+
+var scenarioGenerators = map[string]scenarioGenerator{
+	workload.Write:       GenerateWriteScenario,
+	workload.Read:        GenerateReadScenario,
+	workload.WriteVerify: GenerateWriteVerifyScenario,
+	workload.ReadVerify:  GenerateReadVerifyScenario,
+	workload.Mixed:       GenerateMixedScenario,
+	workload.List:        GenerateListScenario,
+	workload.Mock:        GenerateMockScenario,
+	workload.Tables:      GenerateTablesScenario,
+}
+
+// GenerateScenario creates a JavaScript scenario from parameters. The workload registry controls
+// which public workload names are implemented; the generator map is checked against it by tests.
 func GenerateScenario(params Params) (string, error) {
-	switch params.WorkloadType {
-	case workloadTypeWrite:
-		return GenerateWriteScenario(params)
-	case workloadTypeRead:
-		return GenerateReadScenario(params)
-	case workloadTypeMixed:
-		return GenerateMixedScenario(params)
-	case workloadTypeMock:
-		return GenerateMockScenario(params)
-	case workloadTypeList:
-		return GenerateListScenario(params)
-	case workloadTypeTables:
-		return GenerateTablesScenario(params)
-	default:
+	spec, ok := workload.Lookup(params.WorkloadType)
+	if !ok || !spec.Implemented {
 		return "", fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
 	}
+	generator, ok := scenarioGenerators[spec.Name]
+	if !ok {
+		return "", fmt.Errorf("implemented workload has no scenario generator: %s", spec.Name)
+	}
+	return generator(params)
 }
 
 // GenerateWriteScenario creates a write scenario with optional cleanup

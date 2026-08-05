@@ -137,6 +137,7 @@ Available workload types:
 	newRunCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 
 	newRunCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
+	newRunCmd.Flags().Bool(flagDeferVerification, false, "Defer write-verify readback")
 	newRunCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
 	newRunCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
 	newRunCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")

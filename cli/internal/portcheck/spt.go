@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,9 +20,10 @@ import (
 
 // SptAPIClient handles interactions with the Spt REST API
 type SptAPIClient struct {
-	BaseURL    string
-	HTTPClient *http.Client
-	Clock      Clock
+	BaseURL       string
+	HTTPClient    *http.Client
+	Clock         Clock
+	expectedRunID int64
 }
 
 type readinessPayload struct {
@@ -58,6 +60,15 @@ func NewSptAPIClientWithClock(baseURL string, timeout time.Duration, clock Clock
 		c.Clock = clock
 	}
 	return c
+}
+
+// SetExpectedRunID binds shutdown-status evidence to the run owned by the
+// caller. A zero value preserves the legacy unbound behavior.
+func (c *SptAPIClient) SetExpectedRunID(runID int64) {
+	if c == nil {
+		return
+	}
+	c.expectedRunID = runID
 }
 
 // sptRunResponse represents the JSON response from /run endpoint
@@ -231,29 +242,38 @@ func (c *SptAPIClient) getMetrics(ctx context.Context) (*sptMetricsResponse, err
 	return &metrics, nil
 }
 
-// getStatusSimple retrieves state from /status endpoint if available.
-func (c *SptAPIClient) getStatusSimple(ctx context.Context) (string, error) {
+// terminalStatus is the stable structured /status payload used by completion tracking.
+type terminalStatus struct {
+	State    string `json:"state"`
+	RunID    int64  `json:"run_id"`
+	StepID   string `json:"step_id"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
+}
+
+func (c *SptAPIClient) getStatusDetail(ctx context.Context) (terminalStatus, error) {
 	url := c.BaseURL + "/status"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return terminalStatus{}, fmt.Errorf("failed to create request: %w", err)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
+		return terminalStatus{}, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return terminalStatus{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	var payload map[string]any
+	var payload terminalStatus
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("failed to parse JSON: %w", err)
+		return terminalStatus{}, fmt.Errorf("failed to parse JSON: %w", err)
 	}
-	if s, ok := payload["state"].(string); ok {
-		return strings.ToUpper(strings.TrimSpace(s)), nil
+	payload.State = strings.ToUpper(strings.TrimSpace(payload.State))
+	if payload.State == "" {
+		return terminalStatus{}, fmt.Errorf("missing state")
 	}
-	return "", fmt.Errorf("missing state")
+	return payload, nil
 }
 
 // Shutdown requests a graceful node shutdown via /shutdown.
@@ -280,47 +300,126 @@ func (c *SptAPIClient) Shutdown(ctx context.Context) error {
 	}
 }
 
-// WaitForLinger waits until /status continues to return a terminal state for the given duration.
+// WaitForTerminal waits until an accepted shutdown exposes an attributed
+// terminal state. Distributed coordinators use this as a barrier before
+// shutting down worker nodes whose RMI services are still owned by the entry
+// node's active run.
+func (c *SptAPIClient) WaitForTerminal(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.Clock.After(constants.APILingerPollInterval):
+		}
+		status, err := c.getStatusDetail(ctx)
+		if err != nil {
+			return fmt.Errorf("status probe while waiting for terminal shutdown: %w", err)
+		}
+		terminal, err := c.classifyShutdownStatus(status)
+		if err != nil {
+			return err
+		}
+		if terminal {
+			return nil
+		}
+	}
+}
+
+// WaitForLinger allows the accepted shutdown to transition through its current
+// active state, then requires attributed terminal/idle status for the remainder
+// of the linger window. A nonterminal state after terminal evidence is a state
+// regression and fails immediately.
 func (c *SptAPIClient) WaitForLinger(ctx context.Context, linger time.Duration) error {
 	if linger <= 0 {
 		return nil
 	}
 	start := c.Clock.Now()
-	// First probe must show a terminal state
 	terminalOnce := false
+	lastState := ""
 	for c.Clock.Now().Sub(start) < linger {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-c.Clock.After(200 * time.Millisecond):
+		case <-c.Clock.After(constants.APILingerPollInterval):
 		}
-		st, err := c.getStatusSimple(ctx)
+		status, err := c.getStatusDetail(ctx)
 		if err != nil {
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
-		switch st {
-		case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
+		lastState = status.State
+		terminal, err := c.classifyShutdownStatus(status)
+		if err != nil {
+			return err
+		}
+		if terminal {
 			terminalOnce = true
-		default:
-			return fmt.Errorf("non-terminal state during linger: %s", st)
+		} else if terminalOnce {
+			return fmt.Errorf(
+				"non-terminal state after terminal status during linger: %s", status.State)
 		}
 	}
 	if !terminalOnce {
-		return fmt.Errorf("no terminal status observed during linger")
+		if lastState == "" {
+			return fmt.Errorf("no terminal status observed during linger")
+		}
+		return fmt.Errorf("no terminal status observed during linger; last state: %s", lastState)
 	}
 	return nil
 }
 
+func (c *SptAPIClient) classifyShutdownStatus(status terminalStatus) (bool, error) {
+	if c.expectedRunID > 0 && status.State != constants.StateIdle && status.RunID != c.expectedRunID {
+		return false, fmt.Errorf(
+			"status for run %d does not match the owned run %d",
+			status.RunID, c.expectedRunID)
+	}
+	switch status.State {
+	case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
+		return true, nil
+	case constants.StateStarting, constants.StateInitializing, constants.StateRunning:
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected state during shutdown: %s", status.State)
+	}
+}
+
 // jsonMetricsStep mirrors minimal fields of /metrics/json for idle detection.
 type jsonMetricsStep struct {
-	Timestamp  int64 `json:"timestamp"`
-	Terminal   bool  `json:"terminal"`
+	RunID      flexibleInt64 `json:"run_id"`
+	StepID     string        `json:"step_id"`
+	Timestamp  int64         `json:"timestamp"`
+	Terminal   bool          `json:"terminal"`
 	Operations struct {
 		SuccessRateLast float64 `json:"success_rate_last"`
 	} `json:"operations"`
 	Bandwidth struct {
 		BytesRateLast float64 `json:"bytes_rate_last"`
 	} `json:"bandwidth"`
+}
+
+// flexibleInt64 accepts the engine's string run_id as well as numeric fixtures.
+type flexibleInt64 int64
+
+func (value *flexibleInt64) UnmarshalJSON(data []byte) error {
+	var number int64
+	if err := json.Unmarshal(data, &number); err == nil {
+		*value = flexibleInt64(number)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	if strings.TrimSpace(text) == "" {
+		*value = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid run_id %q: %w", text, err)
+	}
+	*value = flexibleInt64(parsed)
+	return nil
 }
 
 // getMetricsJSON fetches /metrics/json and decodes into steps.

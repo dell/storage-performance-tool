@@ -4,6 +4,8 @@ package cmdline
 import (
 	"strconv"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
 const redactedValue = "***"
@@ -15,6 +17,19 @@ func SanitizeArgs(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flag, hasValue := splitLongArg(arg)
+			if flag == "--engine-override" {
+				if hasValue {
+					_, value, _ := strings.Cut(arg, "=")
+					out[i] = flag + "=" + secretmask.EngineOverride(value)
+				} else {
+					out[i] = flag
+					if i+1 < len(args) {
+						out[i+1] = secretmask.EngineOverride(args[i+1])
+						i++
+					}
+				}
+				continue
+			}
 			if isSensitiveLongFlag(flag) {
 				if hasValue {
 					out[i] = flag + "=" + redactedValue

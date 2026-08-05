@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,9 +20,15 @@ const (
 // DefaultsConfig represents the Spt defaults configuration
 type DefaultsConfig struct {
 	Storage StorageConfig `yaml:"storage"`
+	Run     *RunConfig    `yaml:"run,omitempty"`
 	Item    *ItemConfig   `yaml:"item,omitempty"` // pointer so omitted when nil
 	Output  OutputConfig  `yaml:"output"`
 	Load    *LoadConfig   `yaml:"load,omitempty"` // pointer so omitted when nil
+}
+
+// RunConfig carries a preallocated verification run identity.
+type RunConfig struct {
+	ID int64 `yaml:"id"`
 }
 
 // StorageConfig represents storage configuration
@@ -143,10 +151,13 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 		},
 	}
+	if params.RunID > 0 {
+		config.Run = &RunConfig{ID: params.RunID}
+	}
 
 	// Configure based on workload type
 	switch params.WorkloadType {
-	case "mock":
+	case workload.Mock:
 		// For mock workloads, use dummy-mock driver
 		config.Storage.Driver = DriverConfig{
 			Type: "dummy-mock",
@@ -155,7 +166,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 		}
 
-	case "tables":
+	case workload.Tables:
 		// For tables workloads, endpoint/auth are configured identically to S3 workloads.
 		// The s3-tables driver extends S3StorageDriver and uses the same net config.
 		authVersion := params.AuthVersion
@@ -205,7 +216,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}
 
-	case "write", "read", "mixed", "delete", "list":
+	case workload.Write, workload.Read, workload.WriteVerify, workload.ReadVerify, workload.Mixed, workload.Delete, workload.List:
 		// For S3 workloads, parse one or more endpoints and configure accordingly
 		authVersion := params.AuthVersion
 		if authVersion == 0 {
@@ -445,17 +456,17 @@ func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {
 func applyEngineOverride(root map[string]any, override string) error {
 	rawPath, rawValue, ok := strings.Cut(override, "=")
 	if !ok {
-		return fmt.Errorf("invalid engine override %q: expected path=value", override)
+		return engineOverrideError(override, "expected path=value")
 	}
 
 	parts := splitEngineOverridePath(rawPath)
 	if len(parts) == 0 {
-		return fmt.Errorf("invalid engine override %q: path is empty", override)
+		return engineOverrideError(override, "path is empty")
 	}
 
 	value, err := parseEngineOverrideValue(rawValue)
 	if err != nil {
-		return fmt.Errorf("invalid engine override %q: %w", override, err)
+		return engineOverrideError(override, "value is not valid YAML")
 	}
 
 	node := root
@@ -469,13 +480,20 @@ func applyEngineOverride(root map[string]any, override string) error {
 		}
 		child, ok := next.(map[string]any)
 		if !ok {
-			return fmt.Errorf("invalid engine override %q: %s already contains a scalar value", override, part)
+			return engineOverrideError(
+				override, fmt.Sprintf("%s already contains a scalar value", part))
 		}
 		node = child
 	}
 
 	node[parts[len(parts)-1]] = value
 	return nil
+}
+
+func engineOverrideError(override, reason string) error {
+	return fmt.Errorf(
+		"invalid engine override %q: %s",
+		secretmask.EngineOverride(override), reason)
 }
 
 func splitEngineOverridePath(path string) []string {
@@ -532,19 +550,21 @@ func BuildEngineStartupArgs(params Params) ([]string, error) {
 			continue
 		}
 		if !hasValue {
-			return nil, fmt.Errorf("invalid engine override %q: expected path=value", override)
+			return nil, engineOverrideError(override, "expected path=value")
 		}
 
 		value, err := parseEngineOverrideValue(rawValue)
 		if err != nil {
-			return nil, fmt.Errorf("invalid engine override %q: %w", override, err)
+			return nil, engineOverrideError(override, "value is not valid YAML")
 		}
 		threads, ok := value.(int)
 		if !ok {
-			return nil, fmt.Errorf("invalid engine override %q: load.service.threads must be an integer", override)
+			return nil, engineOverrideError(
+				override, "load.service.threads must be an integer")
 		}
 		if threads < 0 {
-			return nil, fmt.Errorf("invalid engine override %q: load.service.threads must be non-negative", override)
+			return nil, engineOverrideError(
+				override, "load.service.threads must be non-negative")
 		}
 		if overrideSeen && threads != overrideThreads {
 			return nil, fmt.Errorf("conflicting load.service.threads engine overrides: %d and %d", overrideThreads, threads)

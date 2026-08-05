@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -338,6 +340,92 @@ func TestOrchestratorStartTestWithContentPostsProvidedArtifacts(t *testing.T) {
 	}
 }
 
+func TestOrchestratorIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *testing.T) {
+	var runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storage":{"driver":{"type":"string"}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	err := orchestrator.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDM.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+}
+
+func TestOrchestratorCancellationDuringIntegrityCapabilityStopsBeforeRunAndCleansUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			cancel()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(integritySchemaJSON))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	err := orchestrator.StartTestWithContent(
+		ctx,
+		"test-image",
+		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartTestWithContent() error = %v, want context.Canceled", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if mockDM.HasManagedResources() {
+		t.Fatal("canceled capability gate retained container resources")
+	}
+}
+
 func TestOrchestratorStartTestConfiguresItemFileMounts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -442,10 +530,16 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			var launchSubmitted atomic.Bool
+			hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
 
-			err := orchestrator.StartTestWithContent(ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil)
+			err := orchestrator.StartTestWithContentAndLaunchHooks(
+				ctx, "test-image", scenario.ScenarioParams{}, []byte(`Load.run({})`), nil, hooks)
 			if err != nil {
 				t.Fatalf("StartTestWithContent() error = %v", err)
+			}
+			if !launchSubmitted.Load() {
+				t.Fatal("successful local /run POST did not signal launch submission")
 			}
 			cancel()
 
@@ -458,6 +552,60 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 				t.Fatalf("container command = %v, want %s", calls[0].Cmd, wantArg)
 			}
 		})
+	}
+}
+
+func TestOrchestratorSubmissionHookDoesNotHoldLifecycleMutex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/run":
+			w.Header().Set("ETag", "run-hook")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	orchestrator := NewTestOrchestrator(NewMockDockerManager(), constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	hookEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	startDone := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		startDone <- orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, "image", scenario.Params{}, []byte(`Load.run({})`), nil,
+			LaunchHooks{OnSubmitted: func() {
+				close(hookEntered)
+				<-releaseHook
+			}},
+		)
+	}()
+	select {
+	case <-hookEntered:
+	case <-time.After(time.Second):
+		t.Fatal("submission hook was not entered")
+	}
+
+	mutexAcquired := make(chan struct{})
+	go func() {
+		orchestrator.mu.Lock()
+		orchestrator.mu.Unlock()
+		close(mutexAcquired)
+	}()
+	select {
+	case <-mutexAcquired:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseHook)
+		t.Fatal("submission hook retained the orchestrator lifecycle mutex")
+	}
+	close(releaseHook)
+	if err := <-startDone; err != nil {
+		t.Fatalf("StartTestWithContentAndLaunchHooks() error = %v", err)
 	}
 }
 
@@ -1081,4 +1229,112 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestOrchestratorCancelDuringPostReconcilesUnknownAndRollsBack(t *testing.T) {
+	postStarted := make(chan struct{})
+	postCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/ready":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case r.URL.Path == "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.URL.Path == "/run" && r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/run" && r.Method == http.MethodPost:
+			_, _ = io.Copy(io.Discard, r.Body)
+			close(postStarted)
+			<-r.Context().Done()
+			close(postCanceled)
+		case r.URL.Path == "/status":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"state":"IDLE","runId":"41"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	orchestrator.apiClient.submissionReconcileTimeout = 40 * time.Millisecond
+	orchestrator.apiClient.submissionReconcilePollInterval = 5 * time.Millisecond
+	hooks := NewLaunchHooks(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- orchestrator.StartTestWithContentAndLaunchHooks(
+			ctx,
+			"test-image",
+			scenario.ScenarioParams{WorkloadType: "write", RunID: 42},
+			[]byte(`Load.run({})`),
+			nil,
+			hooks,
+		)
+	}()
+
+	select {
+	case <-postStarted:
+	case <-time.After(time.Second):
+		t.Fatal("POST /run did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		var ambiguous *AmbiguousSubmissionError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("launch error = %v, want AmbiguousSubmissionError", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("orchestrator did not return after bounded reconciliation")
+	}
+	if got := hooks.SubmissionState(); got != SubmissionUnknown {
+		t.Fatalf("submission state = %s, want %s", got, SubmissionUnknown)
+	}
+	if mockDM.HasManagedResources() {
+		t.Fatal("ambiguous submission rollback retained managed resources")
+	}
+	select {
+	case <-postCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("POST handler did not observe cancellation")
+	}
+}
+
+func TestAmbiguousSubmissionCleanupDefersToSessionOwner(t *testing.T) {
+	manager := NewMockDockerManager()
+	manager.SetContainerID("ambiguous-container")
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, nil)
+
+	if err := cleanupSingleHostAmbiguousSubmission(
+		context.Background(), manager, hooks); err != nil {
+		t.Fatalf("session-managed ambiguous cleanup: %v", err)
+	}
+	if !manager.HasManagedResources() || manager.GetCleanupCallCount() != 0 {
+		t.Fatalf("session-managed cleanup bypassed owner: managed=%t calls=%d",
+			manager.HasManagedResources(), manager.GetCleanupCallCount())
+	}
+
+	if err := hooks.RegisterResourceFinalizer(func(ctx context.Context) runcontrol.FinalizationOutcome {
+		err := manager.CleanupContext(ctx)
+		disposition := runcontrol.ResourceDispositionRemoved
+		if manager.HasManagedResources() {
+			disposition = runcontrol.ResourceDispositionRetained
+		}
+		return runcontrol.FinalizationOutcome{
+			Removal: runcontrol.CompletedPhase(err), Resources: disposition,
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := session.FinalizeResources(context.Background())
+	if outcome.Error() != nil || outcome.Resources != runcontrol.ResourceDispositionRemoved ||
+		manager.GetCleanupCallCount() != 1 {
+		t.Fatalf("canonical cleanup = %+v calls=%d", outcome, manager.GetCleanupCallCount())
+	}
 }

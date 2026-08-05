@@ -13,6 +13,7 @@ public final class TerminalStepEntry {
 
 	public final long successCount;
 	public final long failedCount;
+	public final long corruptCount;
 	public final long bytesTotal;
 	public final double latencyMeanUs;
 	public final double durationMeanUs;
@@ -93,12 +94,61 @@ public final class TerminalStepEntry {
 					int nodeCount,
 					List<String> nodesPresent,
 					boolean partial) {
+		this(
+						stepId,
+						opType,
+						runId,
+						recordedAtMillis,
+						successCount,
+						failedCount,
+						0,
+						bytesTotal,
+						latencyMeanUs,
+						durationMeanUs,
+						latencySnapshot,
+						durationSnapshot,
+						ttfbSnapshot,
+						concurrencyLast,
+						concurrencyMean,
+						countLimit,
+						timeLimitSec,
+						elapsedTimeMillis,
+						distributed,
+						nodeCount,
+						nodesPresent,
+						partial);
+	}
+
+	public TerminalStepEntry(
+					String stepId,
+					OpType opType,
+					long runId,
+					long recordedAtMillis,
+					long successCount,
+					long failedCount,
+					long corruptCount,
+					long bytesTotal,
+					double latencyMeanUs,
+					double durationMeanUs,
+					TimingMetricSnapshot latencySnapshot,
+					TimingMetricSnapshot durationSnapshot,
+					TimingMetricSnapshot ttfbSnapshot,
+					long concurrencyLast,
+					double concurrencyMean,
+					long countLimit,
+					long timeLimitSec,
+					long elapsedTimeMillis,
+					boolean distributed,
+					int nodeCount,
+					List<String> nodesPresent,
+					boolean partial) {
 		this.stepId = stepId;
 		this.opType = opType;
 		this.runId = runId;
 		this.recordedAtMillis = recordedAtMillis;
 		this.successCount = successCount;
 		this.failedCount = failedCount;
+		this.corruptCount = corruptCount;
 		this.bytesTotal = bytesTotal;
 		this.latencyMeanUs = latencyMeanUs;
 		this.durationMeanUs = durationMeanUs;

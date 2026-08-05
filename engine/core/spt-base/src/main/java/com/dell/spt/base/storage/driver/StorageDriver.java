@@ -7,6 +7,7 @@ import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
@@ -62,6 +63,19 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Returns the maximum concurrent operations supported, or 0 when unlimited. */
 	int concurrencyLimit();
+
+	default String driverType() {
+		return getClass().getSimpleName();
+	}
+
+	default boolean metadataIntegrityEnabled() {
+		return false;
+	}
+
+	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */
+	default IntegrityTerminalException terminalFailure() {
+		return null;
+	}
 
 	int activeOpCount();
 

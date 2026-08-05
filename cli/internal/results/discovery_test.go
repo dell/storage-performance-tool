@@ -1,8 +1,11 @@
 package results
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -131,5 +134,44 @@ func TestDiscoverFleetStepIDs_ServerError(t *testing.T) {
 	}
 	if ids != nil {
 		t.Fatalf("expected nil ids on error, got: %v", ids)
+	}
+	if !strings.Contains(err.Error(), "/metrics/fleet/json status: 500") {
+		t.Fatalf("server error diagnostic = %q", err)
+	}
+}
+
+func TestDiscoverStepIDsForRunFiltersNodeAndFleetRetainedMetrics(t *testing.T) {
+	mux := http.NewServeMux()
+	response := `[
+      {"run_id":"16","step_id":"prior-verify"},
+      {"run_id":"17","step_id":"current-verify"},
+      {"run_id":17,"step_id":"current-create"}
+    ]`
+	mux.HandleFunc("/metrics/json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(response))
+	})
+	mux.HandleFunc("/metrics/fleet/json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(response))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	for _, discover := range []struct {
+		name string
+		fn   func(context.Context, string, int64) ([]string, error)
+	}{
+		{name: "node", fn: DiscoverStepIDsForRunContext},
+		{name: "fleet", fn: DiscoverFleetStepIDsForRunContext},
+	} {
+		t.Run(discover.name, func(t *testing.T) {
+			ids, err := discover.fn(context.Background(), server.URL, 17)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"current-create", "current-verify"}
+			if !reflect.DeepEqual(ids, want) {
+				t.Fatalf("filtered IDs = %v, want %v", ids, want)
+			}
+		})
 	}
 }

@@ -7,16 +7,19 @@ package constants
 
 // Docker command constants
 const (
-	DockerCommand    = "docker"
-	DockerCmdPull    = "pull"
-	DockerCmdRun     = "run"
-	DockerCmdPS      = "ps"
-	DockerCmdRM      = "rm"
-	DockerCmdLogs    = "logs"
-	DockerCmdImages  = "images"
-	DockerCmdInspect = "inspect"
-	DockerCmdVersion = "version"
-	DockerCmdStop    = "stop"
+	DockerCommand       = "docker"
+	DockerCmdPull       = "pull"
+	DockerCmdRun        = "run"
+	DockerCmdExec       = "exec"
+	DockerCmdPS         = "ps"
+	DockerCmdRM         = "rm"
+	DockerCmdLogs       = "logs"
+	DockerCmdImages     = "images"
+	DockerCmdImage      = "image"
+	DockerCmdInspect    = "inspect"
+	DockerCmdVersion    = "version"
+	DockerImageIDPrefix = "sha256:"
+	DockerCmdStop       = "stop"
 )
 
 // Docker CLI flag constants
@@ -33,6 +36,9 @@ const (
 	DockerFlagAll        = "-a"
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
+	DockerFlagRemove     = "--rm"
+	DockerFlagReadOnly   = "--read-only"
+	DockerFlagEntrypoint = "--entrypoint"
 )
 
 // SSH connection constants
@@ -75,6 +81,7 @@ const (
 	JavaOptsEnvVar           = "JAVA_OPTS"
 	JavaToolOptionsEnvVar    = "JAVA_TOOL_OPTIONS"
 	JavaRMIHostnamePrefix    = "-Djava.rmi.server.hostname="
+	ManagedContainerLogRoot  = "/tmp/spt-node-home"
 	SptNodeCommand           = "--run-node"
 
 	DockerLabelManaged = "spt.managed"
@@ -108,7 +115,8 @@ const (
 
 // REST API endpoint constants
 const (
-	SptMetricsEndpoint = "/metrics/json"
+	SptMetricsEndpoint      = "/metrics/json"
+	SptConfigSchemaEndpoint = "/config/schema"
 )
 
 // Engine log artifact constants

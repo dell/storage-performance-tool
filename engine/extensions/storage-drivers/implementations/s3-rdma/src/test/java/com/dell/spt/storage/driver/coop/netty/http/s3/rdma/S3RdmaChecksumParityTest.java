@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
+import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
@@ -54,6 +55,7 @@ class S3RdmaChecksumParityTest {
 							})
 							.filter(Objects::nonNull)
 							.collect(Collectors.toList());
+			configSchemas.add(0, InitialConfigSchemaProvider.provider().schema());
 			SchemaProvider
 							.resolve(APP_NAME, Thread.currentThread().getContextClassLoader())
 							.stream()
@@ -100,6 +102,11 @@ class S3RdmaChecksumParityTest {
 			config.val("storage-auth-secret", TEST_CRED.getSecret());
 			config.val("storage-auth-version", 4);
 			config.val("storage-checksum-enabled", checksumEnabled);
+			config.val("storage-integrity-mode", "none");
+			config.val("storage-integrity-algorithm", "sha256");
+			config.val("storage-integrity-input-provenance", "none");
+			config.val("storage-integrity-input-expectedProducerId", "");
+			config.val("storage-integrity-selection-maxCount", 0L);
 			if (checksumEnabled) {
 				config.val("storage-checksum-algorithm", checksumAlg);
 			}

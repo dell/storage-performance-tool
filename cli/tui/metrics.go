@@ -29,6 +29,8 @@ type PerformanceMetric struct {
 	ConcurrencyMean    float64 // Mean concurrency level
 	SuccessCount       int64   // Successful operations count
 	FailedCount        int64   // Failed operations count
+	CorruptCount       int64   // Integrity corruption failures (a subset of FailedCount)
+	HasCorruptCount    bool    // Whether the engine supplied operations.corrupt_count
 	StepTime           float64 // Step time in seconds
 	OpsPerSec          int64   // Last Rate [op/s] - primary chart metric
 	MiBPerSec          int64   // Last Rate [MiB/s] - secondary chart metric

@@ -5,7 +5,12 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
+import com.dell.spt.base.integrity.IntegrityResponseObserver;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
+import com.dell.spt.storage.driver.coop.netty.http.s3.S3ResponseHandler;
+import com.github.akurilov.commons.io.Output;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
@@ -17,12 +22,15 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.util.AttributeKey;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
@@ -139,6 +148,18 @@ public class S3RdmaStorageDriverOverrideTest {
 		assertTrue(rdmaOps.isEmpty());
 	}
 
+	@Test
+	void integrityReadVerifiesBeforeBufferDeregistration() throws Exception {
+		assertRdmaIntegrityCompletion(
+						"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+						Operation.Status.SUCC);
+	}
+
+	@Test
+	void integrityMismatchBecomesCorruptBeforeBufferDeregistration() throws Exception {
+		assertRdmaIntegrityCompletion("0".repeat(64), Operation.Status.RESP_FAIL_CORRUPT);
+	}
+
 	// ---------- reapTimedOutOps ----------
 
 	@Test
@@ -155,6 +176,12 @@ public class S3RdmaStorageDriverOverrideTest {
 
 		final var ctx = newRdmaContext("tokenExpired", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
+		final var results = Mockito.mock(Output.class);
+		setFieldInHierarchy(driver, "opResultOut", results);
+		final var channel = new EmbeddedChannel();
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		invokeBindRequestChannel(driver, channel, op);
+		invokeOnRequestDispatched(driver, channel, op);
 
 		// Sleep briefly to ensure the 1ms timeout elapses
 		Thread.sleep(10);
@@ -165,6 +192,8 @@ public class S3RdmaStorageDriverOverrideTest {
 		// Context should have been reaped
 		assertTrue(rdmaOps.isEmpty());
 		Mockito.verify(transport).deregisterBuffer(buf, mrHandle);
+		assertEquals(1, Mockito.mockingDetails(results).getInvocations().size());
+		channel.finishAndReleaseAll();
 	}
 
 	@Test
@@ -181,12 +210,16 @@ public class S3RdmaStorageDriverOverrideTest {
 
 		final var ctx = newRdmaContext("tokenFresh", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
+		final var channel = new EmbeddedChannel();
+		invokeBindRequestChannel(driver, channel, op);
+		invokeOnRequestDispatched(driver, channel, op);
 
 		invokeReapTimedOutOps(driver);
 
 		// Should still be present — not timed out
 		assertEquals(1, rdmaOps.size());
 		Mockito.verify(transport, Mockito.never()).deregisterBuffer(Mockito.any(), Mockito.anyLong());
+		channel.finishAndReleaseAll();
 	}
 
 	// ---------- P1.4: applyMetaDataHeaders Content-Length scoping ----------
@@ -339,6 +372,101 @@ public class S3RdmaStorageDriverOverrideTest {
 						"GET request must remain a normal HttpRequest, not FullHttpRequest");
 	}
 
+	@Test
+	void lateCompletionWhileTimeoutCleanupOwnsOperationDoesNotDoubleComplete() throws Exception {
+		final var transport = availableTransport();
+		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
+		final var driver = newMockDriver(config, transport);
+		final var results = Mockito.mock(Output.class);
+		setFieldInHierarchy(driver, "opResultOut", results);
+		final var op = dataOp(OpType.CREATE, THRESHOLD);
+		final ByteBuffer buffer = ByteBuffer.allocateDirect(64);
+		final long handle = 919L;
+		getRdmaOps(driver).put(op, newRdmaContext(
+						"timeout-token", buffer, handle, OpType.CREATE, (int) THRESHOLD));
+		final var channel = new EmbeddedChannel();
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		invokeBindRequestChannel(driver, channel, op);
+		invokeOnRequestDispatched(driver, channel, op);
+		Thread.sleep(10);
+
+		final CountDownLatch timeoutOwnsOperation = new CountDownLatch(1);
+		final CountDownLatch allowTimeoutCleanup = new CountDownLatch(1);
+		Mockito.doAnswer(invocation -> {
+			timeoutOwnsOperation.countDown();
+			assertTrue(allowTimeoutCleanup.await(5, TimeUnit.SECONDS));
+			return null;
+		}).when(transport).deregisterBuffer(buffer, handle);
+		final AtomicReference<Throwable> reaperFailure = new AtomicReference<>();
+		final Thread reaper = new Thread(() -> {
+			try {
+				invokeReapTimedOutOps(driver);
+			} catch (final Throwable e) {
+				reaperFailure.set(e);
+			}
+		});
+		reaper.start();
+		assertTrue(timeoutOwnsOperation.await(5, TimeUnit.SECONDS));
+		try {
+			driver.complete(channel, op);
+		} finally {
+			allowTimeoutCleanup.countDown();
+			reaper.join(5000);
+			channel.finishAndReleaseAll();
+		}
+
+		assertFalse(reaper.isAlive(), "timeout cleanup must finish");
+		assertNull(reaperFailure.get());
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		assertTrue(getRdmaOps(driver).isEmpty());
+		Mockito.verify(transport, Mockito.times(1)).deregisterBuffer(buffer, handle);
+		assertEquals(1, Mockito.mockingDetails(results).getInvocations().size(),
+						"timeout owner must publish exactly one result");
+	}
+
+	@Test
+	void lateTimedOutResponseCannotClaimNewerRetryAttempt() throws Exception {
+		final var transport = availableTransport();
+		final var driver = newMockDriver(
+						new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L), transport);
+		final var results = Mockito.mock(Output.class);
+		setFieldInHierarchy(driver, "opResultOut", results);
+		final var op = dataOp(OpType.CREATE, THRESHOLD);
+		final ByteBuffer firstBuffer = ByteBuffer.allocateDirect(64);
+		final ByteBuffer retryBuffer = ByteBuffer.allocateDirect(64);
+		final var firstContext = newRdmaContext(
+						"first-token", firstBuffer, 1001L, OpType.CREATE, (int) THRESHOLD);
+		getRdmaOps(driver).put(op, firstContext);
+		final var firstChannel = new EmbeddedChannel();
+		firstChannel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		invokeBindRequestChannel(driver, firstChannel, op);
+		invokeOnRequestDispatched(driver, firstChannel, op);
+		Thread.sleep(10);
+		invokeReapTimedOutOps(driver);
+
+		final var retryContext = newRdmaContext(
+						"retry-token", retryBuffer, 1002L, OpType.CREATE, (int) THRESHOLD);
+		getRdmaOps(driver).put(op, retryContext);
+		final var retryChannel = new EmbeddedChannel();
+		retryChannel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		invokeBindRequestChannel(driver, retryChannel, op);
+		invokeOnRequestDispatched(driver, retryChannel, op);
+
+		driver.complete(firstChannel, op);
+		assertSame(retryContext, getRdmaOps(driver).get(op),
+						"late first response must not remove the retry context");
+		Mockito.verify(transport, Mockito.never()).deregisterBuffer(retryBuffer, 1002L);
+
+		op.status(Operation.Status.SUCC);
+		driver.complete(retryChannel, op);
+		assertTrue(getRdmaOps(driver).isEmpty());
+		Mockito.verify(transport).deregisterBuffer(firstBuffer, 1001L);
+		Mockito.verify(transport).deregisterBuffer(retryBuffer, 1002L);
+		assertEquals(2, Mockito.mockingDetails(results).getInvocations().size());
+		firstChannel.finishAndReleaseAll();
+		retryChannel.finishAndReleaseAll();
+	}
+
 	// ---------- P3.4: Concurrency stress test — reaper vs complete vs doClose ----------
 
 	@Test
@@ -475,6 +603,46 @@ public class S3RdmaStorageDriverOverrideTest {
 		return new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 	}
 
+	private static void assertRdmaIntegrityCompletion(
+					final String expectedDigest, final Operation.Status expectedStatus) throws Exception {
+		final var transport = availableTransport();
+		final var driver = newMockDriver(enabledConfig(), transport);
+		final var op = dataOp(OpType.READ, 3);
+		op.status(Operation.Status.SUCC);
+		final byte[] payload = "abc".getBytes(StandardCharsets.UTF_8);
+		final ByteBuffer buffer = ByteBuffer.allocateDirect(payload.length);
+		buffer.put(payload);
+		final long handle = 123L;
+		final var ctx = newRdmaContext("read-token", buffer, handle, OpType.READ, payload.length);
+		final var channel = new EmbeddedChannel();
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM, "sha256");
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST, expectedDigest);
+		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, "3");
+		final Field observerKeyField = S3ResponseHandler.class.getDeclaredField(
+						"INTEGRITY_OBSERVER_ATTR_KEY");
+		observerKeyField.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		final AttributeKey<IntegrityResponseObserver> observerKey = (AttributeKey<IntegrityResponseObserver>) observerKeyField.get(null);
+		channel.attr(observerKey).set(new IntegrityResponseObserver(headers, null));
+		Mockito.doAnswer(invocation -> {
+			assertNotNull(op.integrityVerificationResult(),
+							"verification must finish before registered memory is released");
+			assertEquals(expectedStatus, op.status());
+			return null;
+		}).when(transport).deregisterBuffer(buffer, handle);
+
+		invokeCompleteRdmaContext(driver, channel, op, ctx);
+
+		assertEquals(expectedStatus, op.status());
+		assertNotNull(op.integrityVerificationResult());
+		assertEquals(expectedStatus == Operation.Status.SUCC,
+						op.integrityVerificationResult().verified());
+		Mockito.verify(transport).deregisterBuffer(buffer, handle);
+		channel.finishAndReleaseAll();
+	}
+
 	private static RdmaTransport availableTransport() {
 		final var transport = Mockito.mock(RdmaTransport.class);
 		Mockito.when(transport.isAvailable()).thenReturn(true);
@@ -534,11 +702,60 @@ public class S3RdmaStorageDriverOverrideTest {
 		return (boolean) m.invoke(driver, op);
 	}
 
+	private static void invokeBindRequestChannel(
+					final S3RdmaStorageDriver<?, ?> driver,
+					final EmbeddedChannel channel,
+					final Operation<?> op) throws Exception {
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"bindRequestChannel", io.netty.channel.Channel.class, Operation.class);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op);
+	}
+
+	private static void invokeOnRequestDispatched(
+					final S3RdmaStorageDriver<?, ?> driver,
+					final EmbeddedChannel channel,
+					final Operation<?> op) throws Exception {
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"onRequestDispatched", io.netty.channel.Channel.class, Operation.class);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op);
+	}
+
 	private static void invokeReapTimedOutOps(
 					final S3RdmaStorageDriver<?, ?> driver) throws Exception {
 		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("reapTimedOutOps");
 		m.setAccessible(true);
 		m.invoke(driver);
+	}
+
+	private static void invokeCompleteRdmaContext(
+					final S3RdmaStorageDriver<Item, Operation<Item>> driver,
+					final EmbeddedChannel channel,
+					final Operation<Item> op,
+					final Object context) throws Exception {
+		final Class<?> contextClass = Class.forName(
+						S3RdmaStorageDriver.class.getName() + "$RdmaContext");
+		final Method method = S3RdmaStorageDriver.class.getDeclaredMethod(
+						"completeRdmaContext", io.netty.channel.Channel.class, Operation.class, contextClass);
+		method.setAccessible(true);
+		method.invoke(driver, channel, op, context);
+	}
+
+	private static void setFieldInHierarchy(final Object target, final String name, final Object value)
+					throws Exception {
+		Class<?> type = target.getClass();
+		while (type != null) {
+			try {
+				final Field field = type.getDeclaredField(name);
+				field.setAccessible(true);
+				field.set(target, value);
+				return;
+			} catch (final NoSuchFieldException ignored) {
+				type = type.getSuperclass();
+			}
+		}
+		throw new NoSuchFieldException(name);
 	}
 
 	private static void setField(final Class<?> clazz, final Object obj,

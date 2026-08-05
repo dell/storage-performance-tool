@@ -128,9 +128,26 @@ public class NodeLifecycleIntegrationTest {
 		var delResp = client.send(delRun, HttpResponse.BodyHandlers.discarding());
 		assertEquals(200, delResp.statusCode());
 
-		// Status should be STOPPED during this window
-		statusResp = client.send(getStatus, HttpResponse.BodyHandlers.ofString());
-		assertEquals(200, statusResp.statusCode());
-		assertTrue(statusResp.body().contains("\"STOPPED\""));
+		// STOPPED is published only after the interrupted run finishes cleanup.
+		awaitStatus(client, getStatus, "STOPPED", Duration.ofSeconds(2));
+	}
+
+	private static void awaitStatus(
+					final HttpClient client,
+					final HttpRequest request,
+					final String expectedState,
+					final Duration timeout)
+					throws Exception {
+		final long deadlineNanos = System.nanoTime() + timeout.toNanos();
+		HttpResponse<String> response;
+		do {
+			response = client.send(request, HttpResponse.BodyHandlers.ofString());
+			if (response.statusCode() == 200
+							&& response.body().contains("\"" + expectedState + "\"")) {
+				return;
+			}
+			Thread.sleep(50);
+		} while (System.nanoTime() < deadlineNanos);
+		fail("Status did not become " + expectedState + "; last response=" + response);
 	}
 }

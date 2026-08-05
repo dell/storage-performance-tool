@@ -1,10 +1,14 @@
 package scenario
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 )
 
 const containerItemFilesDir = "/spt-input/items"
@@ -24,9 +28,21 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 	var mounts []FileMount
 	var err error
 	if params.ItemsFile != "" {
-		params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
-		if err != nil {
-			return params, fmt.Errorf("--items-file: %w", err)
+		if params.WorkloadType == WorkloadTypeReadVerify {
+			stagingDir, manifest, marker, stageErr := integrity.StageInputManifest(params.ItemsFile, params.RunID)
+			if stageErr != nil {
+				return params, fmt.Errorf("--items-file: %w", stageErr)
+			}
+			params.ItemStagingDirs = append(params.ItemStagingDirs, stagingDir)
+			params.ItemsFile = containerItemFilesDir + "/" + integrity.VerifyInputName
+			mounts = append(mounts,
+				FileMount{HostPath: manifest, ContainerPath: params.ItemsFile},
+				FileMount{HostPath: marker, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})
+		} else {
+			params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
+			if err != nil {
+				return params, fmt.Errorf("--items-file: %w", err)
+			}
 		}
 	}
 	if params.ReadItemsFile != "" {
@@ -67,4 +83,27 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 	containerPath := containerItemFilesDir + "/" + containerName
 	mounts = append(mounts, FileMount{HostPath: absPath, ContainerPath: containerPath})
 	return containerPath, mounts, nil
+}
+
+// CleanupPreparedItemFiles removes only private staging directories created by this package.
+func CleanupPreparedItemFiles(ctx context.Context, params Params) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("prepared item cleanup canceled: %w", err)
+	}
+	var cleanupErrs []error
+	for _, dir := range params.ItemStagingDirs {
+		if err := ctx.Err(); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("prepared item cleanup canceled: %w", err))
+			break
+		}
+		if strings.HasPrefix(filepath.Base(dir), "spt-integrity-input-") {
+			if err := os.RemoveAll(dir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove prepared item staging %q: %w", dir, err))
+			}
+		}
+	}
+	return errors.Join(cleanupErrs...)
 }

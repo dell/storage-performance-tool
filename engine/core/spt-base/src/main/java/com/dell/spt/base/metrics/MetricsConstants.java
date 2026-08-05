@@ -11,6 +11,7 @@ public interface MetricsConstants {
 	String METRIC_NAME_CONC = "concurrency";
 	String METRIC_NAME_SUCC = "success_op";
 	String METRIC_NAME_FAIL = "failed_op";
+	String METRIC_NAME_CORRUPT = "corrupt_op";
 	String METRIC_NAME_BYTE = "byte";
 	String METRIC_NAME_TIME = "elapsed_time";
 	String METRIC_NAME_TEST_STATE = "test_state";

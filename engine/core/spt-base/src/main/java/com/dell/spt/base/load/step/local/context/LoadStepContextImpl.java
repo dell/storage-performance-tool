@@ -10,6 +10,8 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
@@ -313,6 +315,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public boolean isDone() {
+		final var generatorFailure = generator.terminalFailure();
+		if (generatorFailure != null) {
+			throw generatorFailure;
+		}
+		final var driverFailure = driver.terminalFailure();
+		if (driverFailure != null) {
+			throw driverFailure;
+		}
 		if (!STARTED.equals(state()) && !SHUTDOWN.equals(state())) {
 			Loggers.MSG.debug("{}: done due to {} state", id, state());
 			return true;
@@ -816,7 +826,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} else {
 			Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
 		}
-		resolveMetrics(opResult.type()).markFail();
+		final var metrics = resolveMetrics(opResult.type());
+		if (Operation.Status.RESP_FAIL_CORRUPT.equals(status)) {
+			metrics.markCorrupt();
+			if (driver.metadataIntegrityEnabled() && opResult.integrityVerificationResult() != null) {
+				Loggers.INTEGRITY_FAILURES.info(
+								IntegrityCsvArtifacts.failureRecord(
+												IntegrityCsvArtifacts.nodeIdentity(), id, driver.driverType(), opResult));
+			}
+		} else {
+			metrics.markFail();
+		}
 		counterResults.increment();
 	}
 
@@ -1066,10 +1086,24 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (opsResultsOutput != null) {
 			try {
 				if (!opsResultsOutput.put(opResult)) {
+					if (driver.metadataIntegrityEnabled()) {
+						throw new IntegrityTerminalException(
+										IntegrityTerminalException.Category.PUBLICATION,
+										id,
+										"integrity manifest output rejected a successful operation",
+										null);
+					}
 					Loggers.ERR.warn("Failed to output the I/O result");
 				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
+				if (driver.metadataIntegrityEnabled() && e instanceof IOException) {
+					throw new IntegrityTerminalException(
+									IntegrityTerminalException.Category.PUBLICATION,
+									id,
+									"failed to publish a successful operation to the integrity manifest",
+									e);
+				}
 				if (e instanceof EOFException) {
 					LogUtil.exception(Level.DEBUG, e, "Load operations results destination end of input");
 				} else if (e instanceof IOException) {
@@ -1298,9 +1332,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				listShardMetricsRecorder.onComplete(shard);
 			}
 		}
+		// bytesListed is the logical size of the objects described by the LIST response, not
+		// payload transferred by this operation. Keep it for discovery diagnostics, but do not
+		// feed it into the generic data-transfer and bandwidth meters.
 		metricsCtx.markSucc(
 						objectsListed,
-						bytesListed,
+						0L,
 						new long[]{reqDuration
 						},
 						new long[]{respLatency
@@ -1413,11 +1450,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final String d = String.valueOf(delims.charAt(i));
 			try {
 				final var r = probe.probeCommonPrefixes(bucketPath, lcp, d, 1000);
-				if (r.commonPrefixes() != null && r.commonPrefixes().size() > (best == null ? 0 : best.size())) {
+				if (!r.truncated()
+								&& r.commonPrefixes() != null
+								&& r.commonPrefixes().size() > (best == null ? 0 : best.size())) {
 					best = r.commonPrefixes();
 					usedDelim = d;
 				}
-			} catch (final Exception e) {
+			} catch (final IOException e) {
 				LogUtil.exception(Level.WARN, e, "Delimiter probe failure for '{}' at LCP '{}'", d, lcp);
 			}
 		}

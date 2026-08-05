@@ -12,6 +12,71 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 )
 
+type summaryTraceWriter struct {
+	output   io.Writer
+	trace    *os.File
+	traceErr error
+}
+
+func newSummaryTraceWriter(output io.Writer, tracePath string) (*summaryTraceWriter, error) {
+	if output == nil {
+		output = io.Discard
+	}
+	trace, err := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- validated local trace path
+	if err != nil {
+		return nil, err
+	}
+	return &summaryTraceWriter{output: output, trace: trace}, nil
+}
+
+func (w *summaryTraceWriter) Write(p []byte) (int, error) {
+	n, err := w.output.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	if w.traceErr == nil {
+		traceN, traceErr := w.trace.Write(p)
+		if traceErr != nil {
+			w.traceErr = traceErr
+		} else if traceN != len(p) {
+			w.traceErr = io.ErrShortWrite
+		}
+	}
+	return len(p), nil
+}
+
+func (w *summaryTraceWriter) Flush() {
+	if flusher, ok := w.output.(interface{ Flush() }); ok {
+		flusher.Flush()
+	}
+	if w.traceErr == nil {
+		w.traceErr = w.trace.Sync()
+	}
+}
+
+func (w *summaryTraceWriter) Close() error {
+	w.Flush()
+	return w.trace.Close()
+}
+
+func (w *summaryTraceWriter) Err() error {
+	return w.traceErr
+}
+
+func usesCompactSummaryOutput(out io.Writer) bool {
+	switch typed := out.(type) {
+	case *summaryMessageWriter:
+		return true
+	case *summaryTraceWriter:
+		return usesCompactSummaryOutput(typed.output)
+	default:
+		return false
+	}
+}
+
 // generateRunSummary loads run artifacts from runDir, produces a summary report file,
 // and writes a console-friendly snippet to out. Non-fatal errors are logged and
 // returned so callers can surface warnings without aborting the workflow.
@@ -28,7 +93,7 @@ func generateRunSummary(ctx context.Context, runDir string, out io.Writer) error
 	fullRenderer := summary.NewRenderer(summary.RenderOptions{MaxWidth: 110})
 	fullReport := fullRenderer.FullReport(agg)
 	var snippet string
-	if _, isBuffered := out.(*summaryMessageWriter); isBuffered {
+	if usesCompactSummaryOutput(out) {
 		compactRenderer := summary.NewRenderer(summary.RenderOptions{MaxWidth: 72})
 		snippet = compactRenderer.CompactSnippet(agg)
 	} else {

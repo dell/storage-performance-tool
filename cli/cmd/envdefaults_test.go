@@ -31,6 +31,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().StringArray(flagEngineOverride, []string{}, "")
 	c.Flags().String("s3-driver", "default", "")
 	c.Flags().String("part-size", "", "")
+	c.Flags().Bool(flagDeferVerification, false, "")
 	c.Flags().Int("auth-version", 4, "")
 	return c
 }
@@ -65,6 +66,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		constants.EnvEngineOverrides,
 		constants.EnvPartSize,
 		constants.EnvS3Driver,
+		constants.EnvDeferVerification,
 	} {
 		t.Setenv(key, "")
 	}
@@ -568,5 +570,58 @@ func TestApplyEnvDefaultsToRunFlags_S3DriverFlagWinsOverEnv(t *testing.T) {
 	got, _ := cmd.Flags().GetString("s3-driver")
 	if got != "rdma" {
 		t.Errorf("expected s3-driver=rdma (CLI flag should win), got %q", got)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_DeferVerificationFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	t.Setenv(constants.EnvDeferVerification, "true")
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetBool(flagDeferVerification)
+	if !got {
+		t.Fatal("defer-verification flag was not enabled from env")
+	}
+	if _, ok := cmd.Annotations[envAppliedAnnotationPrefix+flagDeferVerification]; !ok {
+		t.Fatal("defer-verification env application was not annotated")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_DeferVerificationRejectsInvalidEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	t.Setenv(constants.EnvDeferVerification, "sometimes")
+
+	err := applyEnvDefaultsToRunFlags(cmd)
+	if err == nil {
+		t.Fatal("invalid deferred-verification environment value was accepted")
+	}
+	if !strings.Contains(err.Error(), constants.EnvDeferVerification) {
+		t.Fatalf("error %q does not identify %s", err, constants.EnvDeferVerification)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_DeferVerificationFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	t.Setenv(constants.EnvDeferVerification, "true")
+	if err := cmd.Flags().Set(flagDeferVerification, "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+
+	got, _ := cmd.Flags().GetBool(flagDeferVerification)
+	if got {
+		t.Fatal("explicit --defer-verification=false did not win over env")
 	}
 }

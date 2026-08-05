@@ -2,6 +2,7 @@ package com.dell.spt.base.item.op;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.dell.spt.base.integrity.IntegrityMetadata;
 import com.dell.spt.base.item.ItemImpl;
 import org.junit.jupiter.api.Test;
 
@@ -186,6 +187,25 @@ class OperationResultCopyTest {
 		// Mutate the original after copying
 		op.incrementOpRetryCount();
 		assertEquals(2, copy.opRetryCount(), "copy opRetryCount must not change when original is mutated");
+	}
+
+	@Test
+	void resultCopyPreservesExplicitVersionAndIntegrityState() {
+		final var op = newTimedOp();
+		op.requestedVersionId("requested-v1");
+		op.returnedVersionId("returned-v2");
+		final var metadata = new IntegrityMetadata("1", "sha256", "0".repeat(64), 10);
+		op.integrityMetadata(metadata);
+		op.finishResponse();
+
+		final var copy = op.result();
+		op.reset();
+
+		assertEquals("requested-v1", copy.requestedVersionId());
+		assertEquals("returned-v2", copy.returnedVersionId());
+		assertSame(metadata, copy.integrityMetadata());
+		assertEquals("requested-v1", op.requestedVersionId(), "request identity survives retry reset");
+		assertNull(op.returnedVersionId(), "response identity is cleared for retry");
 	}
 
 	@Test

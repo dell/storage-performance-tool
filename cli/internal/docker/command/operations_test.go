@@ -683,6 +683,99 @@ func TestDockerOperationsImpl_ImageOperations(t *testing.T) {
 	})
 }
 
+func TestDockerOperationsImpl_ImmutableImageAvailability(t *testing.T) {
+	t.Run("IsImageAvailable inspects immutable ID", func(t *testing.T) {
+		imageID := "sha256:" + strings.Repeat("a", 64)
+		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandSuccess("docker image inspect "+imageID, `[{"Id":"`+imageID+`"}]`)
+
+		ops := NewDockerOperations(mockExecutor, CreateLocalHost())
+		available, err := ops.IsImageAvailable(context.Background(), imageID)
+		if err != nil {
+			t.Fatalf("IsImageAvailable() error = %v", err)
+		}
+		if !available {
+			t.Fatal("IsImageAvailable() should return true for an inspectable immutable ID")
+		}
+	})
+
+	t.Run("IsImageAvailable propagates immutable inspect failure", func(t *testing.T) {
+		imageID := "sha256:" + strings.Repeat("b", 64)
+		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandFailure("docker image inspect "+imageID, "Error: No such image", fmt.Errorf("exit status 1"))
+
+		ops := NewDockerOperations(mockExecutor, CreateLocalHost())
+		_, err := ops.IsImageAvailable(context.Background(), imageID)
+		if err == nil {
+			t.Fatal("IsImageAvailable() should propagate immutable inspect failure")
+		}
+		if len(mockExecutor.GetExecutedCommands()) != 1 {
+			t.Fatalf("executed commands = %d, want 1", len(mockExecutor.GetExecutedCommands()))
+		}
+	})
+
+	t.Run("entry node launches immutable ID without pulling", func(t *testing.T) {
+		t.Setenv(constants.EnvSkipImagePull, "false")
+		imageID := "sha256:" + strings.Repeat("c", 64)
+		mockExecutor := NewMockCommandExecutor()
+		inspectCommand := "docker image inspect " + imageID
+		mockExecutor.SetCommandSuccess(inspectCommand, `[{"Id":"`+imageID+`"}]`)
+		runCommand := "docker run -d --name immutable-entry -p 9999:9999/tcp " + imageID + " --load-step-node-addrs=worker:9999 --run-node=true"
+		mockExecutor.SetCommandSuccess(runCommand, "entry123")
+
+		ops := NewDockerOperations(mockExecutor, CreateLocalHost()).(*DockerOperationsImpl)
+		containerID, err := ops.StartEntryNodeContainer(context.Background(), imageID, "immutable-entry", []string{"worker:9999"}, NetworkModeBridge)
+		if err != nil {
+			t.Fatalf("StartEntryNodeContainer() error = %v", err)
+		}
+		if containerID != "entry123" {
+			t.Fatalf("container ID = %q, want entry123", containerID)
+		}
+
+		commands := mockExecutor.GetExecutedCommands()
+		if len(commands) != 2 {
+			t.Fatalf("executed commands = %d, want inspect then run", len(commands))
+		}
+		if got := strings.Join(commands[0].Command, " "); got != inspectCommand {
+			t.Fatalf("first command = %q, want %q", got, inspectCommand)
+		}
+		if got := strings.Join(commands[1].Command, " "); got != runCommand {
+			t.Fatalf("second command = %q, want %q", got, runCommand)
+		}
+	})
+}
+
+func TestDockerOperationsImpl_ImmutableImageAvailability_RealDocker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-Docker canary in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	executor := NewCommandExecutor()
+	stdout, stderr, err := executor.ExecuteCommand(ctx, CreateLocalHost(), []string{"docker", "images", "--no-trunc", "-q"})
+	if err != nil {
+		t.Skipf("Docker is unavailable: %v (%s)", err, stderr)
+	}
+	imageIDs := strings.Fields(stdout)
+	if len(imageIDs) == 0 {
+		t.Skip("no local Docker image is available for immutable-ID canary")
+	}
+	imageID := imageIDs[0]
+	if !isImmutableImageID(imageID) {
+		t.Fatalf("docker returned non-immutable image ID %q", imageID)
+	}
+
+	ops := NewDockerOperations(executor, CreateLocalHost())
+	available, err := ops.IsImageAvailable(ctx, imageID)
+	if err != nil {
+		t.Fatalf("inspecting existing immutable image ID %q: %v", imageID, err)
+	}
+	if !available {
+		t.Fatalf("existing immutable image ID %q reported unavailable", imageID)
+	}
+}
+
 func TestDockerOperationsImpl_SpecializedContainerMethods(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
 	// Test the implementation-specific methods by casting to the concrete type
@@ -732,6 +825,7 @@ func TestDockerOperationsImpl_SpecializedContainerMethods(t *testing.T) {
 
 	t.Run("StartEntryNodeContainer host mode", func(t *testing.T) {
 		mockExecutor := NewMockCommandExecutor()
+		mockExecutor.SetCommandSuccess("docker images -q "+constants.DefaultSptImage, "sha256:abc123")
 		expectedCmd := "docker run -d --name entry-host --network host " +
 			constants.DefaultSptImage + " --load-step-node-addrs=worker1:9999 --run-node=true"
 		mockExecutor.SetCommandSuccess(expectedCmd, "entryhost123")

@@ -26,6 +26,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.METADATA_NODE_LIST;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_OP_TYPE;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_RUN_ID;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_STEP_ID;
+import static com.dell.spt.base.metrics.MetricsConstants.METRIC_NAME_CORRUPT;
 import static com.dell.spt.base.metrics.MetricsConstants.METRIC_NAME_TTFB;
 
 public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapshotImpl>
@@ -154,6 +155,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 
 			final RateMetricSnapshot successSnapshot;
 			final RateMetricSnapshot failsSnapshot;
+			final RateMetricSnapshot corruptSnapshot;
 			final RateMetricSnapshot bytesSnapshot;
 			final ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 			final TimingMetricSnapshot durSnapshot;
@@ -165,6 +167,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				final var snapshot = snapshots.get(0);
 				successSnapshot = snapshot.successSnapshot();
 				failsSnapshot = snapshot.failsSnapshot();
+				corruptSnapshot = corruptSnapshot(snapshot);
 				bytesSnapshot = snapshot.byteSnapshot();
 				actualConcurrencySnapshot = snapshot.concurrencySnapshot();
 				durSnapshot = snapshot.durationSnapshot();
@@ -179,6 +182,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				final List<ConcurrencyMetricSnapshot> conSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> succSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> failSnapshots = new ArrayList<>();
+				final List<RateMetricSnapshot> corruptSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> byteSnapshots = new ArrayList<>();
 				for (var i = 0; i < snapshotsCount; i++) {
 					final var snapshot = snapshots.get(i);
@@ -189,11 +193,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 					}
 					succSnapshots.add(snapshot.successSnapshot());
 					failSnapshots.add(snapshot.failsSnapshot());
+					corruptSnapshots.add(corruptSnapshot(snapshot));
 					byteSnapshots.add(snapshot.byteSnapshot());
 					conSnapshots.add(snapshot.concurrencySnapshot());
 				}
 				successSnapshot = RateMetricSnapshotImpl.aggregate(succSnapshots);
 				failsSnapshot = RateMetricSnapshotImpl.aggregate(failSnapshots);
+				corruptSnapshot = RateMetricSnapshotImpl.aggregate(corruptSnapshots);
 				bytesSnapshot = RateMetricSnapshotImpl.aggregate(byteSnapshots);
 				actualConcurrencySnapshot = ConcurrencyMetricSnapshotImpl.aggregate(conSnapshots);
 				durSnapshot = TimingMetricSnapshotImpl.aggregate(durSnapshots);
@@ -207,6 +213,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 							ttfbSnapshot,
 							actualConcurrencySnapshot,
 							failsSnapshot,
+							corruptSnapshot,
 							successSnapshot,
 							bytesSnapshot,
 							nodeCountSupplier.getAsInt(),
@@ -218,6 +225,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				thresholdMetricsCtx.refreshLastSnapshot(force);
 			}
 		}
+	}
+
+	private static RateMetricSnapshot corruptSnapshot(final AllMetricsSnapshot snapshot) {
+		final var corruptSnapshot = snapshot.corruptSnapshot();
+		return corruptSnapshot == null
+						? new RateMetricSnapshotImpl(0.0, 0.0, METRIC_NAME_CORRUPT, 0, snapshot.elapsedTimeMillis())
+						: corruptSnapshot;
 	}
 
 	@Override

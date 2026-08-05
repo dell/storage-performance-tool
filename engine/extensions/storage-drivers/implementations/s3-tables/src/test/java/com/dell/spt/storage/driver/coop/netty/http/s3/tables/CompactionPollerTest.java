@@ -253,6 +253,10 @@ public class CompactionPollerTest {
 			config.val("storage-auth-secret", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 			config.val("storage-auth-version", 4);
 			config.val("storage-checksum-enabled", false);
+			config.val("storage-integrity-mode", "none");
+			config.val("storage-integrity-algorithm", "sha256");
+			config.val("storage-integrity-input-provenance", "none");
+			config.val("storage-integrity-input-expectedProducerId", "");
 			config.val("storage-s3tables-controlPlaneEndpoint", "");
 			config.val("storage-s3tables-bucket", "test-bucket");
 			config.val("storage-s3tables-namespace", "test-ns");

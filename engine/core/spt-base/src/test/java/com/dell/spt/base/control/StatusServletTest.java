@@ -1,5 +1,6 @@
 package com.dell.spt.base.control;
 
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import org.junit.jupiter.api.Test;
 
 import javax.servlet.http.HttpServletRequest;
@@ -66,5 +67,26 @@ class StatusServletTest {
 		servlet.doGet(mock(HttpServletRequest.class), resp);
 		String json = sw.toString();
 		assertTrue(json.contains("\"state\":\"STOPPED\""), json);
+	}
+
+	@Test
+	void includesStructuredFailureFields() throws Exception {
+		final var status = new ApiStatus();
+		status.setRunning("read-verify", 42L);
+		status.setFailed(
+						"read-verify", IntegrityTerminalException.Category.AGGREGATION, "merge failed");
+		final var servlet = new StatusServlet(status);
+		final HttpServletResponse resp = mock(HttpServletResponse.class);
+		final var output = new StringWriter();
+		when(resp.getWriter()).thenReturn(new PrintWriter(output));
+
+		servlet.doGet(mock(HttpServletRequest.class), resp);
+
+		final String json = output.toString();
+		assertTrue(json.contains("\"state\":\"FAILED\""), json);
+		assertTrue(json.contains("\"run_id\":42"), json);
+		assertTrue(json.contains("\"step_id\":\"read-verify\""), json);
+		assertTrue(json.contains("\"category\":\"aggregation\""), json);
+		assertTrue(json.contains("\"message\":\"merge failed\""), json);
 	}
 }

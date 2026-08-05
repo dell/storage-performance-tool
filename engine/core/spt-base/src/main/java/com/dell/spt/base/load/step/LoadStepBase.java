@@ -10,7 +10,11 @@ import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TimeUtil;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityConfig;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -37,6 +41,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected final List<MetricsContext<? extends AllMetricsSnapshot>> metricsContexts = new ArrayList<>();
 
 	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
+	private final boolean integrityModeEnabled;
 	private volatile long startTimeSec = -1;
 
 	protected LoadStepBase(
@@ -48,6 +53,15 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.extensions = extensions;
 		this.ctxConfigs = ctxConfigs;
 		this.metricsMgr = metricsMgr;
+		try {
+			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
+		} catch (final RuntimeException e) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							safeStepId(config),
+							"invalid storage.integrity configuration",
+							e);
+		}
 		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
@@ -90,27 +104,58 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	@Override
 	public final void run() {
+		IntegrityTerminalException terminalCause = null;
 		try {
 			start();
 			try {
 				await(timeLimitSec.get(), TimeUnit.SECONDS);
-			} catch (final IllegalStateException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to await \"{}\"", toString());
+			} catch (final RuntimeException e) {
+				if (IntegrityTerminalException.find(e) != null || integrityModeEnabled) {
+					terminalCause = terminalFailure(
+									IntegrityTerminalException.Category.EXECUTION,
+									"failed to await metadata-mode step",
+									e);
+				} else {
+					LogUtil.exception(Level.WARN, e, "Failed to await \"{}\"", toString());
+				}
 			}
-		} catch (final IllegalStateException e) {
-			LogUtil.exception(Level.ERROR, e, "Failed to start \"{}\"", toString());
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
 		} catch (final Throwable cause) {
-			LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
+			throwUncheckedIfInterrupted(cause);
+			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
+				terminalCause = terminalFailure(
+								IntegrityTerminalException.Category.EXECUTION,
+								"metadata-mode step execution failed",
+								cause);
+			} else if (cause instanceof IllegalStateException) {
+				LogUtil.exception(Level.ERROR, cause, "Failed to start \"{}\"", toString());
+			} else {
+				LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
+			}
 		} finally {
 			try {
 				close();
-			} catch (final Exception e) {
-				throwUncheckedIfInterrupted(e);
-				doStop();
-				LogUtil.trace(Loggers.ERR, Level.WARN, e, "Failed to close \"{}\"", toString());
+			} catch (final Throwable closeCause) {
+				throwUncheckedIfInterrupted(closeCause);
+				if (integrityModeEnabled) {
+					final var cleanupFailure = terminalFailure(
+									IntegrityTerminalException.Category.CLEANUP,
+									"metadata-mode step cleanup failed",
+									closeCause);
+					if (terminalCause == null) {
+						terminalCause = cleanupFailure;
+					} else {
+						terminalCause.addSuppressed(cleanupFailure);
+					}
+				} else {
+					doStop();
+					LogUtil.trace(Loggers.ERR, Level.WARN, closeCause, "Failed to close \"{}\"", toString());
+				}
 			}
+		}
+		if (terminalCause != null) {
+			throw terminalCause;
 		}
 	}
 
@@ -121,6 +166,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 
+			seedIntegrityArtifactHeaders();
 			doStartWrapped();
 
 			final long t;
@@ -137,6 +183,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
+			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.EXECUTION,
+								"metadata-mode step failed to start",
+								cause);
+			}
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
 		}
 
@@ -193,6 +245,55 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doClose() throws IOException {
 		metricsContexts.forEach(MetricsContext::close);
+	}
+
+	private void seedIntegrityArtifactHeaders() {
+		if (!integrityModeEnabled || !emitsOperationArtifacts()) {
+			return;
+		}
+		final OpType opType = OpType.valueOf(config.stringVal("load-op-type").toUpperCase());
+		for (final var artifact : IntegrityCsvArtifacts.applicableHeaders(
+						opType, true, multipartEnabled())) {
+			switch (artifact.kind()) {
+			case FAILURES -> Loggers.INTEGRITY_FAILURES.info(artifact.header());
+			case PERFORMANCE -> Loggers.INTEGRITY_PERFORMANCE.info(artifact.header());
+			case MULTIPART_LIFECYCLE -> Loggers.MULTIPART_LIFECYCLE.info(artifact.header());
+			default -> throw new AssertionError("unsupported integrity artifact kind " + artifact.kind());
+			}
+		}
+	}
+
+	protected boolean emitsOperationArtifacts() {
+		return true;
+	}
+
+	private boolean multipartEnabled() {
+		final var threshold = config.val("item-data-ranges-threshold");
+		return threshold instanceof String
+						? BinarySizeFormat.parseFixedSize((String) threshold) > 0
+						: TypeUtil.typeConvert(threshold, long.class) > 0;
+	}
+
+	protected final boolean integrityModeEnabled() {
+		return integrityModeEnabled;
+	}
+
+	protected final IntegrityTerminalException terminalFailure(
+					final IntegrityTerminalException.Category category,
+					final String message,
+					final Throwable cause) {
+		final var existing = IntegrityTerminalException.find(cause);
+		return existing == null
+						? new IntegrityTerminalException(category, loadStepId(), message, cause)
+						: existing.withStepId(loadStepId());
+	}
+
+	private static String safeStepId(final Config config) {
+		try {
+			return config.stringVal("load-step-id");
+		} catch (final RuntimeException ignored) {
+			return null;
+		}
 	}
 
 	protected int avgPeriod(final Config metricsConfig) {

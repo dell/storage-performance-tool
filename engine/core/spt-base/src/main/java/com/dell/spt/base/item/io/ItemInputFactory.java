@@ -50,10 +50,16 @@ public interface ItemInputFactory {
 		final Path itemInputFilePath = Paths.get(itemInputFile);
 		try {
 			if (itemInputFile.endsWith(".csv")) {
-				try {
-					fileItemInput = new CsvFileItemInput<>(itemInputFilePath, itemFactory);
-				} catch (final NoSuchMethodException e) {
-					throw new AssertionError(e);
+				if (IntegrityManifestItemInput.hasCanonicalHeader(itemInputFilePath)) {
+					@SuppressWarnings("unchecked")
+					final Input<I> integrityInput = (Input<I>) new IntegrityManifestItemInput(itemInputFilePath);
+					fileItemInput = integrityInput;
+				} else {
+					try {
+						fileItemInput = new CsvFileItemInput<>(itemInputFilePath, itemFactory);
+					} catch (final NoSuchMethodException e) {
+						throw new AssertionError(e);
+					}
 				}
 			} else {
 				fileItemInput = new BinFileInput<>(itemInputFilePath);

@@ -1,15 +1,35 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
+	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
+
+func cleanupPreparedForMonitorTest(metadata *runMetadata) runcontrol.PhaseOutcome {
+	if metadata == nil || metadata.preparedCleanup == nil {
+		return runcontrol.PhaseOutcome{}
+	}
+	return runcontrol.CompletedPhase(metadata.preparedCleanup(context.Background()))
+}
 
 func TestDeriveBaseURLSingleHost(t *testing.T) {
 	got := deriveBaseURL("8080", nil)
@@ -146,4 +166,521 @@ func TestRunCmdSingleRemoteHostUsesOrchestratorAndSkipsControllerPortCheck(t *te
 	if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
 		t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
 	}
+}
+
+func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
+	previousGOOS := integrityRuntimeGOOS
+	integrityRuntimeGOOS = "linux"
+	t.Cleanup(func() { integrityRuntimeGOOS = previousGOOS })
+
+	type routeContextKey struct{}
+	tests := []struct {
+		name        string
+		workload    string
+		hosts       string
+		minHosts    string
+		shutdown    string
+		wantLocal   int
+		wantAuto    int
+		connectErr  error
+		wantMulti   int
+		wantConnect int
+		wantPrepare int
+		wantPort    int
+	}{
+		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1, wantAuto: 1},
+		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
+		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
+		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "entry connection failure stops verification launch", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "1", shutdown: "false", wantConnect: 1, connectErr: errors.New("designated entry unavailable")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			for name, value := range map[string]string{
+				"test-hosts": test.hosts, "min-hosts": test.minHosts,
+				"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+				"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+				"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+				"shutdown-on-complete": test.shutdown, "generate-only": "false", "items-file": "",
+			} {
+				setGlobalRunFlagForTest(t, name, value)
+			}
+			runContext := context.WithValue(context.Background(), routeContextKey{}, test.name)
+			previousContext := runCmd.Context()
+			runCmd.SetContext(runContext)
+			t.Cleanup(func() { runCmd.SetContext(previousContext) })
+
+			previousPort := resolvePortConflictFunc
+			previousConnect := connectMultiHostOrchestratorFunc
+			previousPrepare := prepareDistributedIntegrityRuntimeIdentityFunc
+			previousLocal := startLocalHeadlessRunFunc
+			previousMulti := startMultiHostHeadlessRunFunc
+			previousAutoResults := startAutoResultsFunc
+			t.Cleanup(func() {
+				resolvePortConflictFunc = previousPort
+				connectMultiHostOrchestratorFunc = previousConnect
+				prepareDistributedIntegrityRuntimeIdentityFunc = previousPrepare
+				startLocalHeadlessRunFunc = previousLocal
+				startMultiHostHeadlessRunFunc = previousMulti
+				startAutoResultsFunc = previousAutoResults
+			})
+
+			var portCalls, connectCalls, prepareCalls, localCalls, multiCalls, autoResultsCalls int
+			var autoResultsContext context.Context
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				portCalls++
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+				connectCalls++
+				return test.connectErr
+			}
+			prepareDistributedIntegrityRuntimeIdentityFunc = func(
+				context.Context, *tui.MultiHostOrchestrator, string,
+			) (tui.DistributedRuntimeIdentityEvidence, error) {
+				prepareCalls++
+				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
+			}
+			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+				localCalls++
+				options.LaunchHooks.NotifySubmitted()
+				return nil
+			}
+			startMultiHostHeadlessRunFunc = func(
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+			) error {
+				multiCalls++
+				options.LaunchHooks.NotifySubmitted()
+				return nil
+			}
+			startAutoResultsFunc = func(
+				ctx context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
+				_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
+				_ func(context.Context), _ ...*integrity.FinalizeOptions,
+			) *autoResultsMonitor {
+				autoResultsCalls++
+				autoResultsContext = ctx
+				monitor := &autoResultsMonitor{
+					done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
+				}
+				go func() {
+					<-monitor.armed
+					outcome := autoResultsOutcome{
+						Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+						Finalization: &integrity.FinalizeOutcome{Complete: true},
+					}
+					outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+					monitor.done <- outcome
+				}()
+				return monitor
+			}
+
+			runErr := runCmd.RunE(runCmd, []string{test.workload})
+			if test.connectErr != nil {
+				if !errors.Is(runErr, test.connectErr) {
+					t.Fatalf("RunE() error = %v, want connection failure", runErr)
+				}
+			} else if runErr != nil {
+				t.Fatalf("RunE() error = %v", runErr)
+			}
+			if localCalls != test.wantLocal || multiCalls != test.wantMulti ||
+				connectCalls != test.wantConnect || prepareCalls != test.wantPrepare ||
+				portCalls != test.wantPort || autoResultsCalls != test.wantAuto {
+				t.Fatalf(
+					"route calls local=%d multi=%d connect=%d prepare=%d port=%d auto-results=%d",
+					localCalls, multiCalls, connectCalls, prepareCalls, portCalls, autoResultsCalls,
+				)
+			}
+			if test.wantAuto > 0 && (autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name) {
+				t.Fatalf("auto-results context = %#v, want command context marker %q", autoResultsContext, test.name)
+			}
+			if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
+				t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
+			}
+		})
+	}
+}
+
+func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for name, value := range map[string]string{
+		"test-hosts": "127.0.0.1", "min-hosts": "1",
+		"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+		"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+		"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+		"shutdown-on-complete": "false", "generate-only": "false", "items-file": "",
+	} {
+		setGlobalRunFlagForTest(t, name, value)
+	}
+
+	previousPort := resolvePortConflictFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		resolvePortConflictFunc = previousPort
+		startLocalHeadlessRunFunc = previousLocal
+		startAutoResultsFunc = previousAutoResults
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+
+	finalizerStarted := make(chan struct{})
+	releaseFinalizer := make(chan struct{})
+	startLocalHeadlessRunFunc = func(
+		_ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+	) error {
+		if err := options.LaunchHooks.RegisterResourceFinalizer(
+			func(ctx context.Context) runcontrol.FinalizationOutcome {
+				if err := ctx.Err(); err != nil {
+					t.Errorf("finalizer received canceled context: %v", err)
+				}
+				close(finalizerStarted)
+				<-releaseFinalizer
+				return runcontrol.FinalizationOutcome{
+					Removal:   runcontrol.CompletedPhase(nil),
+					Resources: runcontrol.ResourceDispositionRemoved,
+				}
+			}); err != nil {
+			t.Fatalf("register finalizer: %v", err)
+		}
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool,
+		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, metadata *runMetadata,
+		_ io.Writer, _ io.Writer, _ string, preSummaryHook func(context.Context),
+		_ ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		monitor := &autoResultsMonitor{
+			done:  make(chan autoResultsOutcome, 1),
+			armed: make(chan struct{}),
+		}
+		go func() {
+			<-monitor.armed
+			preSummaryHook(context.Background())
+			outcome := autoResultsOutcome{
+				Lifecycle: runcontrol.Outcome{Resources: runcontrol.ResourceDispositionRemoved},
+				Tracker:   &portcheck.RunResult{FinalState: constants.StateCompleted},
+			}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
+		}()
+		return monitor
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- runCmd.RunE(runCmd, []string{WorkloadTypeWrite}) }()
+	select {
+	case <-finalizerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("session finalizer did not start")
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("ordinary command returned before finalizer completed: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseFinalizer)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("RunE() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary command did not return after finalizer completed")
+	}
+}
+
+func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previousGOOS := integrityRuntimeGOOS
+	integrityRuntimeGOOS = "linux"
+	t.Cleanup(func() { integrityRuntimeGOOS = previousGOOS })
+	for name, value := range map[string]string{
+		"test-hosts": "127.0.0.1", "min-hosts": "1",
+		"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+		"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+		"duration": "", "threads": "1", "headless": "true", "auto-results": "true",
+		"shutdown-on-complete": "false", "generate-only": "false", "items-file": "",
+	} {
+		setGlobalRunFlagForTest(t, name, value)
+	}
+
+	previousPort := resolvePortConflictFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		resolvePortConflictFunc = previousPort
+		startLocalHeadlessRunFunc = previousLocal
+		startAutoResultsFunc = previousAutoResults
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	const producerCause = "write verification produced zero successful objects"
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
+		_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
+		_ func(context.Context), options ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		if len(options) != 1 || options[0] == nil || options[0].Workload != WorkloadTypeWriteVerify {
+			t.Fatalf("RunE integrity options = %#v, want write-verify finalization", options)
+		}
+		monitor := &autoResultsMonitor{
+			done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
+		}
+		go func() {
+			<-monitor.armed
+			outcome := autoResultsOutcome{
+				Tracker: &portcheck.RunResult{
+					FinalState: constants.StateFailed, FailureStepID: "mt-001-create",
+					FailureCategory: "execution", FailureMessage: producerCause,
+				},
+				Finalization: &integrity.FinalizeOutcome{EmptySelection: true},
+			}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
+		}()
+		return monitor
+	}
+
+	err := runCmd.RunE(runCmd, []string{WorkloadTypeWriteVerify})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+		!strings.Contains(err.Error(), producerCause) {
+		t.Fatalf("RunE() error = %#v, want exit %d preserving %q",
+			err, constants.ExitCodeWorkloadFailure, producerCause)
+	}
+}
+
+func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
+	topologies := []struct {
+		name, hosts, minHosts string
+	}{
+		{name: "local", hosts: "127.0.0.1", minHosts: "1"},
+		{name: "remote", hosts: "qa-entry.example", minHosts: "1"},
+		{name: "distributed", hosts: "qa-entry.example,qa-worker.example", minHosts: "2"},
+	}
+	for _, topology := range topologies {
+		for _, headlessMode := range []bool{false, true} {
+			for _, submission := range []struct {
+				name               string
+				state              tui.SubmissionState
+				acceptedForCleanup bool
+			}{
+				{name: "pre-submission", state: tui.SubmissionNotSubmitted},
+				{name: "post-submission", state: tui.SubmissionSubmitted},
+				{name: "ambiguous-submission", state: tui.SubmissionUnknown},
+				{name: "accepted-for-cleanup", state: tui.SubmissionSubmitted, acceptedForCleanup: true},
+			} {
+				name := topology.name
+				hosts := topology.hosts
+				if headlessMode {
+					name += "/headless"
+				} else {
+					name += "/tui"
+				}
+				name += "/" + submission.name
+				t.Run(name, func(t *testing.T) {
+					t.Chdir(t.TempDir())
+					for flag, value := range map[string]string{
+						"test-hosts": hosts, "min-hosts": topology.minHosts,
+						"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+						"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
+						"duration": "", "threads": "1", "headless": fmt.Sprint(headlessMode),
+						"auto-results": "true", "shutdown-on-complete": "false", "generate-only": "false",
+						"items-file": "",
+					} {
+						setGlobalRunFlagForTest(t, flag, value)
+					}
+
+					originalPort := resolvePortConflictFunc
+					originalConnect := connectMultiHostOrchestratorFunc
+					originalPrepare := prepareDistributedIntegrityRuntimeIdentityFunc
+					originalLocalHeadless := startLocalHeadlessRunFunc
+					originalRemoteHeadless := startMultiHostHeadlessRunFunc
+					originalLocalTUI := startLocalTUIRunFunc
+					originalRemoteTUI := startMultiHostTUIRunFunc
+					originalAutoResults := startAutoResultsFunc
+					t.Cleanup(func() {
+						resolvePortConflictFunc = originalPort
+						connectMultiHostOrchestratorFunc = originalConnect
+						prepareDistributedIntegrityRuntimeIdentityFunc = originalPrepare
+						startLocalHeadlessRunFunc = originalLocalHeadless
+						startMultiHostHeadlessRunFunc = originalRemoteHeadless
+						startLocalTUIRunFunc = originalLocalTUI
+						startMultiHostTUIRunFunc = originalRemoteTUI
+						startAutoResultsFunc = originalAutoResults
+					})
+					resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+						return &portcheck.ResolutionResult{Success: true}, nil
+					}
+					connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
+					prepareDistributedIntegrityRuntimeIdentityFunc = func(
+						context.Context, *tui.MultiHostOrchestrator, string,
+					) (tui.DistributedRuntimeIdentityEvidence, error) {
+						return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
+					}
+
+					var launchErr error = errors.New("launcher failed")
+					if submission.acceptedForCleanup {
+						launchErr = &tui.SubmissionIdentityError{
+							ExpectedRunID: 77, Cause: errors.New("response run ID mismatch"),
+						}
+					}
+					assertPreparedContent := func(path string, scenarioContent, defaultsContent []byte) {
+						t.Helper()
+						onDisk, readErr := os.ReadFile(path)
+						if readErr != nil {
+							t.Fatalf("read prepared scenario: %v", readErr)
+						}
+						if !bytes.Equal(onDisk, scenarioContent) {
+							t.Fatalf("route scenario differs from prepared file")
+						}
+						if len(defaultsContent) == 0 {
+							t.Fatal("route did not receive prepared defaults")
+						}
+					}
+					launch := func(hooks tui.LaunchHooks) error {
+						if submission.acceptedForCleanup {
+							hooks.NotifyAcceptedForCleanup()
+							return launchErr
+						}
+						switch submission.state {
+						case tui.SubmissionSubmitted:
+							hooks.NotifySubmitted()
+						case tui.SubmissionUnknown:
+							hooks.NotifySubmissionUnknown()
+						}
+						return launchErr
+					}
+					startLocalHeadlessRunFunc = func(_ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
+						return launch(options.LaunchHooks)
+					}
+					startMultiHostHeadlessRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options headless.HeadlessOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
+						return launch(options.LaunchHooks)
+					}
+					startLocalTUIRunFunc = func(_ string, path string, _ scenario.Params, options tui.RunOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
+						return launch(options.LaunchHooks)
+					}
+					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options tui.RunOptions) error {
+						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.LaunchHooks.SessionManaged() {
+							t.Fatal("auto-results route is not session managed")
+						}
+						return launch(options.LaunchHooks)
+					}
+
+					var cancelCalls atomic.Int32
+					startAutoResultsFunc = func(
+						_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool, _ []*hostparse.HostInfo,
+						_ string, _ bool, _ int, _ string, metadata *runMetadata, _ io.Writer, _ io.Writer, _ string,
+						_ func(context.Context), _ ...*integrity.FinalizeOptions,
+					) *autoResultsMonitor {
+						done := make(chan autoResultsOutcome, 1)
+						armed := make(chan struct{})
+						canceled := make(chan struct{})
+						var cancelOnce sync.Once
+						go func() {
+							select {
+							case <-armed:
+							case <-canceled:
+							}
+							outcome := autoResultsOutcome{
+								Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
+								Finalization: &integrity.FinalizeOutcome{Complete: true},
+							}
+							outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+							done <- outcome
+						}()
+						return &autoResultsMonitor{
+							done: done, armed: armed,
+							cancel: func() {
+								cancelCalls.Add(1)
+								cancelOnce.Do(func() { close(canceled) })
+							},
+						}
+					}
+
+					err := runCmd.RunE(runCmd, []string{WorkloadTypeWriteVerify})
+					var exitErr *ExitCodeError
+					if !errors.As(err, &exitErr) || !strings.Contains(err.Error(), launchErr.Error()) {
+						t.Fatalf("RunE() error = %#v, want structured launcher failure", err)
+					}
+					if submission.acceptedForCleanup {
+						var identityErr *tui.SubmissionIdentityError
+						if !errors.As(err, &identityErr) {
+							t.Fatalf("RunE() error = %#v, want preserved SubmissionIdentityError", err)
+						}
+					}
+					wantCancel := int32(1)
+					if submission.state == tui.SubmissionSubmitted && !submission.acceptedForCleanup {
+						wantCancel = 0
+					}
+					if cancelCalls.Load() != wantCancel {
+						t.Fatalf("auto-results cancel calls = %d, want %d", cancelCalls.Load(), wantCancel)
+					}
+				})
+			}
+		}
+	}
+}
+
+func setGlobalRunFlagForTest(t *testing.T, name, value string) {
+	t.Helper()
+	flag := runCmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("run flag %q not found", name)
+	}
+	previousValue := flag.Value.String()
+	type sliceValue interface {
+		GetSlice() []string
+		Replace([]string) error
+	}
+	sliceFlag, isSlice := flag.Value.(sliceValue)
+	var previousSlice []string
+	if isSlice {
+		previousSlice = append([]string(nil), sliceFlag.GetSlice()...)
+	}
+	previousChanged := flag.Changed
+	var err error
+	if isSlice {
+		err = sliceFlag.Replace(strings.Split(value, ","))
+	} else {
+		err = flag.Value.Set(value)
+	}
+	if err != nil {
+		t.Fatalf("set %s=%q: %v", name, value, err)
+	}
+	flag.Changed = true
+	t.Cleanup(func() {
+		if isSlice {
+			err = sliceFlag.Replace(previousSlice)
+		} else {
+			err = flag.Value.Set(previousValue)
+		}
+		if err != nil {
+			t.Errorf("restore %s=%q: %v", name, previousValue, err)
+		}
+		flag.Changed = previousChanged
+	})
 }

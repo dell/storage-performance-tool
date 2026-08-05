@@ -201,6 +201,19 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 
 	// Checksum algorithm: SPT_CHECKSUM env var (values: crc32, crc32c, sha1, sha256, crc64-nvme)
 	_ = setIf("checksum", constants.EnvChecksum)
+	_ = setIf("integrity-max-console-failures", constants.EnvIntegrityMaxConsoleFails)
+	_ = setIf(flagIntegrityRuntimeIdentityTier, constants.EnvIntegrityRuntimeIdentity)
+	if f := cmd.Flags().Lookup(flagDeferVerification); f != nil && !cmd.Flags().Changed(flagDeferVerification) {
+		if value := strings.TrimSpace(os.Getenv(constants.EnvDeferVerification)); value != "" {
+			enabled, err := strconv.ParseBool(value)
+			if err != nil {
+				return fmt.Errorf("invalid %s value %q: %w", constants.EnvDeferVerification, value, err)
+			}
+			if err := setFromEnv(flagDeferVerification, strconv.FormatBool(enabled)); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Object data shaping
 	if f := cmd.Flags().Lookup("object-data-compressibility"); f != nil && !cmd.Flags().Changed("object-data-compressibility") {

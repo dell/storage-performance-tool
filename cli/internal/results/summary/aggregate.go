@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
+	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 // RunSummary represents the aggregated data set used when rendering result summaries.
@@ -20,6 +22,7 @@ type RunSummary struct {
 	MetadataPath      string
 	Environment       EnvironmentSummary
 	Workload          WorkloadSummary
+	Integrity         *results.IntegritySummary
 	Steps             []StepSummary
 	Totals            RunTotals
 	MissingExpected   []string
@@ -111,6 +114,8 @@ type OperationBreakdown struct {
 type PhaseMetrics struct {
 	SuccessCount       int64
 	FailureCount       int64
+	CorruptCount       int64
+	HasCorruptCount    bool
 	DataBytes          int64
 	DataMiB            float64
 	DataGiB            float64
@@ -183,13 +188,16 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 		ActualStepIDs:     append([]string(nil), data.Params.ActualStepIDs...),
 		DiscoveredStepIDs: append([]string(nil), data.Params.DiscoveredStepIDs...),
 	}
+	if data.Manifest != nil {
+		summary.Integrity = data.Manifest.Integrity
+	}
 
 	summary.Environment = buildEnvironmentSummary(data)
 	workload, workloadWarnings := buildWorkloadSummary(data)
 	summary.Workload = workload
 	summary.Warnings = append(summary.Warnings, workloadWarnings...)
 
-	steps, totals, stepWarnings := buildStepSummaries(data, workload)
+	steps, totals, stepWarnings := buildStepSummaries(data, workload, summary.Integrity)
 	summary.Steps = steps
 	summary.Totals = totals
 	summary.Warnings = append(summary.Warnings, stepWarnings...)
@@ -229,7 +237,9 @@ func buildEnvironmentSummary(data *RunData) EnvironmentSummary {
 }
 
 const (
-	workloadTypeList = "list"
+	workloadTypeList        = workloadreg.List
+	workloadTypeReadVerify  = workloadreg.ReadVerify
+	objectSizeAverageSuffix = " avg"
 )
 
 func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
@@ -243,13 +253,17 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	if workloadType == "" {
 		workloadType = strings.ToLower(strings.TrimSpace(params.WorkloadType))
 	}
-	isList := strings.EqualFold(workloadType, workloadTypeList)
+	isList := strings.EqualFold(workloadType, workloadreg.List)
+	objectSizeHuman := ""
+	if strings.TrimSpace(params.ObjectSize) != "" {
+		objectSizeHuman = formatBytes(sizeBytes)
+	}
 	summary := WorkloadSummary{
 		Type:              workloadType,
 		ObjectSizeBytes:   sizeBytes,
 		ObjectSizeMiB:     bytesToMiB(sizeBytes),
 		ObjectSizeGiB:     bytesToGiB(sizeBytes),
-		ObjectSizeHuman:   formatBytes(sizeBytes),
+		ObjectSizeHuman:   objectSizeHuman,
 		ObjectCount:       params.ObjectCount,
 		Threads:           params.Threads,
 		Endpoints:         append([]string(nil), params.Endpoints...),
@@ -267,7 +281,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	return summary, warnings
 }
 
-func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary, RunTotals, []string) {
+func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *results.IntegritySummary) ([]StepSummary, RunTotals, []string) {
 	steps := make([]StepSummary, 0, len(data.StepOrder))
 	totals := RunTotals{}
 	warnings := make([]string, 0)
@@ -301,6 +315,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 		} else {
 			metrics = deriveMetrics(stepData, workload.ObjectSizeBytes)
 		}
+		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
+			normalizeListMetrics(metrics, integrity)
+		}
 		if metrics != nil {
 			summary.Metrics = metrics
 			totals.DurationSeconds += metrics.DurationSeconds
@@ -327,7 +344,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary) ([]StepSummary,
 }
 
 func mixedDistributionFromParams(workloadType string, params ScenarioParams) MixedDistribution {
-	if !strings.EqualFold(workloadType, "mixed") && !strings.EqualFold(params.WorkloadType, "mixed") {
+	if !strings.EqualFold(workloadType, workloadreg.Mixed) && !strings.EqualFold(params.WorkloadType, workloadreg.Mixed) {
 		return MixedDistribution{}
 	}
 	if params.GetDistrib == 0 && params.StatDistrib == 0 && params.PutDistrib == 0 && params.DeleteDistrib == 0 {
@@ -353,7 +370,7 @@ func isMixedStep(stepID string, workload WorkloadSummary, totals *MetricsTotals)
 	if strings.HasSuffix(strings.ToLower(stepID), "-mixed") {
 		return true
 	}
-	if strings.EqualFold(workload.Type, "mixed") {
+	if strings.EqualFold(workload.Type, workloadreg.Mixed) {
 		return true
 	}
 	return allKnown
@@ -444,10 +461,12 @@ func deriveOperationMetrics(rows []MetricsTotalsRow, objectSizeBytes int64) Phas
 		return PhaseMetrics{}
 	}
 	best := rows[0]
-	metrics := PhaseMetrics{}
+	metrics := PhaseMetrics{HasCorruptCount: true}
 	for _, row := range rows {
 		metrics.SuccessCount += row.SuccessCount
 		metrics.FailureCount += row.FailureCount
+		metrics.CorruptCount += row.CorruptCount
+		metrics.HasCorruptCount = metrics.HasCorruptCount && row.HasCorruptCount
 		metrics.DataBytes += row.SizeBytes
 		metrics.ThroughputAvgOps += row.ThroughputAvgOps
 		metrics.ThroughputLastOps += row.ThroughputLastOps
@@ -583,6 +602,8 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 	metrics := &PhaseMetrics{
 		SuccessCount:       row.SuccessCount,
 		FailureCount:       row.FailureCount,
+		CorruptCount:       row.CorruptCount,
+		HasCorruptCount:    row.HasCorruptCount,
 		DataBytes:          row.SizeBytes,
 		DataMiB:            bytesToMiB(row.SizeBytes),
 		DataGiB:            bytesToGiB(row.SizeBytes),
@@ -613,8 +634,35 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
+	} else if strings.EqualFold(row.Operation, reportOperationRead) && row.SuccessCount > 0 && row.SizeBytes > 0 {
+		averageSizeBytes := int64(math.Round(float64(row.SizeBytes) / float64(row.SuccessCount)))
+		metrics.ObjectSizeBytes = averageSizeBytes
+		metrics.ObjectSizeMiB = bytesToMiB(averageSizeBytes)
+		metrics.ObjectSizeGiB = bytesToGiB(averageSizeBytes)
+		metrics.ObjectSizeHuman = formatBytes(averageSizeBytes) + objectSizeAverageSuffix
 	}
 	return metrics
+}
+
+// normalizeListMetrics keeps discovery cardinality separate from payload-transfer accounting.
+// Engine LIST totals count distributed object emissions; once canonical selection evidence is
+// available, the run summary reports the deduplicated, post-cap candidate count instead.
+func normalizeListMetrics(metrics *PhaseMetrics, integrity *results.IntegritySummary) {
+	metrics.DataBytes = 0
+	metrics.DataMiB = 0
+	metrics.DataGiB = 0
+	metrics.HasDataTransfer = false
+	metrics.BandwidthAvgMiBps = 0
+	metrics.BandwidthLastMiBps = 0
+	if integrity == nil || !integrity.SelectionCountsValid {
+		return
+	}
+	metrics.SuccessCount = integrity.SelectionCount
+	metrics.ThroughputAvgOps = 0
+	metrics.ThroughputLastOps = 0
+	if metrics.DurationSeconds > 0 {
+		metrics.ThroughputAvgOps = float64(integrity.SelectionCount) / metrics.DurationSeconds
+	}
 }
 
 func preferredLatencyMicros(row MetricsTotalsRow) float64 {
