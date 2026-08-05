@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,76 @@ func TestRequestShutdownAll_Succeeds(t *testing.T) {
 
 	if err := requestShutdownAll(ctx, hosts, apiPort, 300*time.Millisecond, 77, true); err != nil {
 		t.Fatalf("requestShutdownAll returned error: %v", err)
+	}
+}
+
+func TestRequestShutdownAllWaitsForEntryTerminalBeforeWorkerShutdown(t *testing.T) {
+	var shutdownCalls atomic.Int32
+	var entryTerminal atomic.Bool
+	var workerBeforeTerminal atomic.Bool
+	entryShutdown := make(chan struct{})
+	workerShutdown := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/shutdown":
+			call := shutdownCalls.Add(1)
+			if call == 1 {
+				close(entryShutdown)
+			} else if call == 2 {
+				if !entryTerminal.Load() {
+					workerBeforeTerminal.Store(true)
+				}
+				close(workerShutdown)
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		case "/status":
+			state := "RUNNING"
+			if entryTerminal.Load() {
+				state = "STOPPED"
+			}
+			_, _ = writer.Write([]byte(`{"state":"` + state + `","run_id":77}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts := []*hostparse.HostInfo{
+		{Host: serverURL.Hostname(), Original: "entry"},
+		{Host: serverURL.Hostname(), Original: "worker"},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- requestShutdownAll(ctx, hosts, serverURL.Port(), 300*time.Millisecond, 77, false)
+	}()
+
+	select {
+	case <-entryShutdown:
+	case <-time.After(time.Second):
+		t.Fatal("entry shutdown was not requested")
+	}
+	select {
+	case <-workerShutdown:
+		t.Fatal("worker shutdown was requested before entry became terminal")
+	case <-time.After(50 * time.Millisecond):
+	}
+	entryTerminal.Store(true)
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordered fleet shutdown did not finish")
+	}
+	if workerBeforeTerminal.Load() {
+		t.Fatal("worker shutdown raced ahead of the entry terminal barrier")
 	}
 }
 

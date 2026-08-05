@@ -300,6 +300,31 @@ func (c *SptAPIClient) Shutdown(ctx context.Context) error {
 	}
 }
 
+// WaitForTerminal waits until an accepted shutdown exposes an attributed
+// terminal state. Distributed coordinators use this as a barrier before
+// shutting down worker nodes whose RMI services are still owned by the entry
+// node's active run.
+func (c *SptAPIClient) WaitForTerminal(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.Clock.After(constants.APILingerPollInterval):
+		}
+		status, err := c.getStatusDetail(ctx)
+		if err != nil {
+			return fmt.Errorf("status probe while waiting for terminal shutdown: %w", err)
+		}
+		terminal, err := c.classifyShutdownStatus(status)
+		if err != nil {
+			return err
+		}
+		if terminal {
+			return nil
+		}
+	}
+}
+
 // WaitForLinger allows the accepted shutdown to transition through its current
 // active state, then requires attributed terminal/idle status for the remainder
 // of the linger window. A nonterminal state after terminal evidence is a state
@@ -322,21 +347,15 @@ func (c *SptAPIClient) WaitForLinger(ctx context.Context, linger time.Duration) 
 			return fmt.Errorf("status probe during linger: %w", err)
 		}
 		lastState = status.State
-		if c.expectedRunID > 0 && status.State != constants.StateIdle && status.RunID != c.expectedRunID {
-			return fmt.Errorf(
-				"status for run %d does not match the owned run %d",
-				status.RunID, c.expectedRunID)
+		terminal, err := c.classifyShutdownStatus(status)
+		if err != nil {
+			return err
 		}
-		switch status.State {
-		case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
+		if terminal {
 			terminalOnce = true
-		case constants.StateStarting, constants.StateInitializing, constants.StateRunning:
-			if terminalOnce {
-				return fmt.Errorf(
-					"non-terminal state after terminal status during linger: %s", status.State)
-			}
-		default:
-			return fmt.Errorf("unexpected state during linger: %s", status.State)
+		} else if terminalOnce {
+			return fmt.Errorf(
+				"non-terminal state after terminal status during linger: %s", status.State)
 		}
 	}
 	if !terminalOnce {
@@ -346,6 +365,22 @@ func (c *SptAPIClient) WaitForLinger(ctx context.Context, linger time.Duration) 
 		return fmt.Errorf("no terminal status observed during linger; last state: %s", lastState)
 	}
 	return nil
+}
+
+func (c *SptAPIClient) classifyShutdownStatus(status terminalStatus) (bool, error) {
+	if c.expectedRunID > 0 && status.State != constants.StateIdle && status.RunID != c.expectedRunID {
+		return false, fmt.Errorf(
+			"status for run %d does not match the owned run %d",
+			status.RunID, c.expectedRunID)
+	}
+	switch status.State {
+	case constants.StateCompleted, constants.StateFailed, constants.StateStopped, constants.StateIdle:
+		return true, nil
+	case constants.StateStarting, constants.StateInitializing, constants.StateRunning:
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected state during shutdown: %s", status.State)
+	}
 }
 
 // jsonMetricsStep mirrors minimal fields of /metrics/json for idle detection.

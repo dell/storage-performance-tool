@@ -1627,7 +1627,7 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 	case outcome := <-done:
 		if outcome.TrackerErr != nil || outcome.Tracker == nil ||
 			outcome.Tracker.FinalState != constants.StateStopped ||
-			outcome.Tracker.Steps[stepID].Lifecycle != portcheck.StepLifecycleNotStarted {
+			outcome.Tracker.Steps[stepID].Lifecycle != portcheck.StepLifecycleStarted {
 			t.Fatalf("reconciled tracker outcome = %+v, error = %v", outcome.Tracker, outcome.TrackerErr)
 		}
 	case <-time.After(3 * time.Second):
@@ -1961,6 +1961,7 @@ func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *t
 	}
 
 	resultsRoot := t.TempDir()
+	fetchErr := errors.New("partial artifact fetch")
 	var fetchCalls atomic.Int32
 	newResultsFetcherFunc = func(_, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir, onFetch: func(output string, stepIDs []string) error {
@@ -1979,7 +1980,10 @@ func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *t
 			if err != nil {
 				return err
 			}
-			return os.WriteFile(filepath.Join(output, constants.ResultsManifestFileName), data, 0o600)
+			if err = os.WriteFile(filepath.Join(output, constants.ResultsManifestFileName), data, 0o600); err != nil {
+				return err
+			}
+			return fetchErr
 		}}
 	}
 	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
@@ -2019,6 +2023,9 @@ func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *t
 		}
 		if outcome.CorruptionMetricsErr != nil {
 			t.Fatalf("not-started READ requested live corrupt metrics: %v", outcome.CorruptionMetricsErr)
+		}
+		if !errors.Is(outcome.ArtifactErr, fetchErr) {
+			t.Fatalf("artifact error = %v, want partial fetch failure", outcome.ArtifactErr)
 		}
 		if outcome.Finalization == nil || outcome.Finalization.Complete || outcome.FinalizationErr == nil {
 			t.Fatalf("partial finalization = %+v, error = %v", outcome.Finalization, outcome.FinalizationErr)

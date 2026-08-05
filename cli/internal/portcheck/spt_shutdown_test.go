@@ -120,6 +120,45 @@ func TestSptAPIClientLingerAllowsOwnedRunningToStoppedTransition(t *testing.T) {
 	}
 }
 
+func TestSptAPIClientWaitForTerminalAllowsOwnedRunningToStoppedTransition(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/status" {
+			http.NotFound(writer, request)
+			return
+		}
+		state := "RUNNING"
+		if statusCalls.Add(1) >= 2 {
+			state = "STOPPED"
+		}
+		_, _ = writer.Write([]byte(fmt.Sprintf(`{"state":%q,"run_id":77}`, state)))
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClientWithClock(server.URL, time.Second, &advancingLingerClock{})
+	client.SetExpectedRunID(77)
+	if err := client.WaitForTerminal(context.Background()); err != nil {
+		t.Fatalf("WaitForTerminal() error = %v", err)
+	}
+	if statusCalls.Load() != 2 {
+		t.Fatalf("status calls = %d, want 2", statusCalls.Load())
+	}
+}
+
+func TestSptAPIClientWaitForTerminalRejectsDifferentRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"state":"STOPPED","run_id":78}`))
+	}))
+	defer server.Close()
+
+	client := NewSptAPIClientWithClock(server.URL, time.Second, &advancingLingerClock{})
+	client.SetExpectedRunID(77)
+	err := client.WaitForTerminal(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "does not match the owned run") {
+		t.Fatalf("WaitForTerminal() error = %v, want owned-run attribution failure", err)
+	}
+}
+
 func TestSptAPIClientLingerRejectsWrongRunAndTerminalRegression(t *testing.T) {
 	tests := []struct {
 		name     string

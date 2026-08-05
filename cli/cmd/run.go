@@ -192,6 +192,26 @@ func recordTrackedStepLifecycles(metadata *runMetadata, result *portcheck.RunRes
 	}
 }
 
+// markDiscoveredStoppedStepsStarted reconciles runtime discovery with a
+// STOPPED status carrier. The engine's top-level status may not name the
+// scenario step, while metrics discovery only reports steps which actually
+// started. Preserve that stronger evidence without inventing downstream work.
+func markDiscoveredStoppedStepsStarted(result *portcheck.RunResult, discoveredStepIDs []string) {
+	if result == nil || result.FinalState != constants.StateStopped {
+		return
+	}
+	for _, stepID := range discoveredStepIDs {
+		step, ok := result.Steps[stepID]
+		if !ok || (step.Lifecycle != portcheck.StepLifecycleNotStarted &&
+			step.Lifecycle != portcheck.StepLifecyclePlanned) {
+			continue
+		}
+		step.Lifecycle = portcheck.StepLifecycleStarted
+		step.Started = true
+		result.Steps[stepID] = step
+	}
+}
+
 func mergeTrackedRunResults(observed, terminal *portcheck.RunResult) *portcheck.RunResult {
 	if terminal == nil {
 		return observed
@@ -551,7 +571,6 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 			outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
 			monitor.markWorkloadTerminal()
-			recordTrackedStepLifecycles(metadata, outcome.Tracker)
 			if outcome.TrackerErr != nil {
 				logging.LogError("auto-results", "completion tracking failed", outcome.TrackerErr)
 			}
@@ -597,6 +616,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				}
 			}
 			outcome.StepIDs = append([]string(nil), stepIDs...)
+			markDiscoveredStoppedStepsStarted(outcome.Tracker, runtimeStepIDs)
+			recordTrackedStepLifecycles(metadata, outcome.Tracker)
 			artifactsReady := len(stepIDs) > 0
 			if len(stepIDs) == 0 {
 				var logErr error
@@ -662,16 +683,16 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					logging.LogError("auto-results", "write run metadata", err, "dest", root)
 				}
 			}
+			integrityFinalizationReady := artifactsReady
 			if artifactsReady {
 				fetch := newResultsFetcherFunc(baseURL, root)
 				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
-					artifactsReady = false
 					logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
 					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
 				}
 			}
-			if artifactsReady && verificationRun {
+			if integrityFinalizationReady && verificationRun {
 				options := *integrityOptions[0]
 				if outcome.Tracker != nil {
 					options.StepLifecycles = make(map[string]string, len(outcome.Tracker.Steps))
@@ -1187,51 +1208,92 @@ func copyFileAtomic(srcPath string, destPath string) error {
 	return nil
 }
 
-// requestShutdownAll posts /shutdown to all provided hosts and waits for linger.
+// requestShutdownAll stops the entry node first and waits for its owned run to
+// become terminal before stopping workers. The entry owns distributed RMI step
+// clients, so worker services must remain available through entry cleanup.
 func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPort string, linger time.Duration,
 	expectedRunID int64, debug bool) error {
 	if len(hosts) == 0 {
 		// default to localhost
 		hosts = []*hostparse.HostInfo{{Host: "localhost", Original: "localhost"}}
 	}
+	type target struct {
+		host             *hostparse.HostInfo
+		client           *portcheck.SptAPIClient
+		shutdownAccepted bool
+	}
+	targets := make([]target, 0, len(hosts))
+	for _, host := range hosts {
+		base := fmt.Sprintf("http://%s:%s", host.Host, apiPort)
+		client := portcheck.NewSptAPIClient(base, constants.APIPollingTimeout)
+		client.SetExpectedRunID(expectedRunID)
+		targets = append(targets, target{host: host, client: client})
+	}
+
 	type result struct {
 		host string
 		err  error
 	}
-	ch := make(chan result, len(hosts))
-	for _, h := range hosts {
-		host := h
-		go func() {
-			base := fmt.Sprintf("http://%s:%s", host.Host, apiPort)
-			client := portcheck.NewSptAPIClient(base, constants.APIPollingTimeout)
-			client.SetExpectedRunID(expectedRunID)
-			// 1) POST /shutdown
-			if err := client.Shutdown(ctx); err != nil {
-				ch <- result{host: host.Original, err: fmt.Errorf("shutdown error: %w", err)}
-				return
-			}
-			if debug {
-				logging.LogDebug("auto-results", "shutdown requested", "host", host.Original)
-			}
-			// 2) Wait for linger on /status
-			if err := client.WaitForLinger(ctx, linger); err != nil {
-				ch <- result{host: host.Original, err: fmt.Errorf("linger wait error: %w", err)}
-				return
-			}
-			ch <- result{host: host.Original, err: nil}
-		}()
-	}
 	var errs []string
-	for i := 0; i < len(hosts); i++ {
+	entry := &targets[0]
+	if err := entry.client.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Sprintf("%s: shutdown error: %v", entry.host.Original, err))
+	} else {
+		entry.shutdownAccepted = true
+		if debug {
+			logging.LogDebug("auto-results", "entry shutdown requested", "host", entry.host.Original)
+		}
+		terminalCtx, cancelTerminal := context.WithTimeout(ctx, constants.AutoResultsEntryTerminalTimeout)
+		terminalErr := entry.client.WaitForTerminal(terminalCtx)
+		cancelTerminal()
+		if terminalErr != nil {
+			errs = append(errs, fmt.Sprintf(
+				"%s: entry terminal wait error: %v", entry.host.Original, terminalErr))
+		} else if debug {
+			logging.LogDebug("auto-results", "entry run reached terminal shutdown", "host", entry.host.Original)
+		}
+	}
+
+	ch := make(chan result, len(targets))
+	pending := 0
+	for index := range targets {
+		shutdownTarget := &targets[index]
+		if index == 0 && !shutdownTarget.shutdownAccepted {
+			continue
+		}
+		pending++
+		go func(current *target) {
+			if !current.shutdownAccepted {
+				if err := current.client.Shutdown(ctx); err != nil {
+					ch <- result{host: current.host.Original, err: fmt.Errorf("shutdown error: %w", err)}
+					return
+				}
+				if debug {
+					logging.LogDebug("auto-results", "worker shutdown requested", "host", current.host.Original)
+				}
+			}
+			if err := current.client.WaitForLinger(ctx, linger); err != nil {
+				ch <- result{host: current.host.Original, err: fmt.Errorf("linger wait error: %w", err)}
+				return
+			}
+			ch <- result{host: current.host.Original, err: nil}
+		}(shutdownTarget)
+	}
+	for i := 0; i < pending; i++ {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case r := <-ch:
-			if r.err != nil {
-				errs = append(errs, fmt.Sprintf("%s: %v", r.host, r.err))
-				logging.LogError("auto-results", "shutdown host error", r.err, "host", r.host)
+			if len(errs) == 0 {
+				return ctx.Err()
+			}
+			return fmt.Errorf(
+				"some hosts failed shutdown: %s: %w", strings.Join(errs, "; "), ctx.Err())
+		case shutdownResult := <-ch:
+			if shutdownResult.err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", shutdownResult.host, shutdownResult.err))
+				logging.LogError(
+					"auto-results", "shutdown host error", shutdownResult.err, "host", shutdownResult.host)
 			} else if debug {
-				logging.LogDebug("auto-results", "shutdown host ok", "host", r.host)
+				logging.LogDebug("auto-results", "shutdown host ok", "host", shutdownResult.host)
 			}
 		}
 	}
