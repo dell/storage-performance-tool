@@ -19,6 +19,7 @@ dependencies {
 	implementation libs.aws.sts
 	implementation libs.aws.http.client.spi
 	implementation libs.aws.crt
+	implementation libs.aws.crt.client
 	implementation libs.aws.sdk.core
 	implementation libs.aws.utils
 	implementation libs.aws.profiles

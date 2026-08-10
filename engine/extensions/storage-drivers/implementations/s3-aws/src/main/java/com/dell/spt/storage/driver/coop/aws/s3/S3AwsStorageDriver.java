@@ -89,6 +89,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_MPU_FAILURE = "mpuFailure";
 
 	private final S3AsyncClient s3AsyncClient;
+	private final S3AsyncClient exactVersionS3Client;
 	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
@@ -110,6 +111,21 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient, s3AsyncClient,
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	public S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final S3AsyncClient exactVersionS3Client,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
 			throw new IllegalConfigurationException(
@@ -117,6 +133,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 											+ "use storage.integrity.mode=metadata for whole-object verification");
 		}
 		this.s3AsyncClient = s3AsyncClient;
+		this.exactVersionS3Client = exactVersionS3Client;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
 
@@ -342,7 +359,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 			op.status(originalStatus);
-			LOG.error("{} {} failed: {}", op.type(), op.item().name(), originalStatus);
+			final Throwable failure = e instanceof java.util.concurrent.CompletionException
+							&& e.getCause() != null ? e.getCause() : e;
+			LOG.error(
+							"{} {} requested version {} failed: {}: {}",
+							op.type(), op.item().name(), op.requestedVersionId(),
+							originalStatus, failure);
 			LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			try {
 				op.startResponse();
@@ -782,7 +804,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			reqBuilder.versionId(versionId);
 		}
 
-		try (var response = s3AsyncClient.getObject(
+		final S3AsyncClient readClient = versionId == null || versionId.isEmpty()
+						? s3AsyncClient
+						: exactVersionS3Client;
+		try (var response = readClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream()).join()) {
 			final GetObjectResponse getResponse = response.response();
@@ -1472,14 +1497,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	protected void doClose()
 					throws IOException {
 		try {
-			// Close the S3AsyncClient to release native CRT resources
-			// This closes the underlying event loops and connection pools
 			if (s3AsyncClient != null) {
 				s3AsyncClient.close();
 				LOG.info("S3AsyncClient closed successfully");
 			}
 		} catch (Exception e) {
 			LOG.warn("Failed to close S3AsyncClient: {}", e.getMessage());
+		}
+		try {
+			if (exactVersionS3Client != null && exactVersionS3Client != s3AsyncClient) {
+				exactVersionS3Client.close();
+				LOG.info("Exact-version S3AsyncClient closed successfully");
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to close exact-version S3AsyncClient: {}", e.getMessage());
 		}
 
 		try {

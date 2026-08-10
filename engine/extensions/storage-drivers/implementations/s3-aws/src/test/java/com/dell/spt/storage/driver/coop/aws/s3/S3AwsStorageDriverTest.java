@@ -118,6 +118,9 @@ public class S3AwsStorageDriverTest {
 		Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3AsyncClient");
 		clientField.setAccessible(true);
 		clientField.set(driver, s3Client);
+		Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
+		exactClientField.setAccessible(true);
+		exactClientField.set(driver, s3Client);
 	}
 
 	private void setChecksumFields(
@@ -223,6 +226,11 @@ public class S3AwsStorageDriverTest {
 		@SuppressWarnings("unchecked")
 		void readUsesExactManifestVersionAndVerifiesTheCompleteBody() throws Exception {
 			enableIntegrityMetadata(drv);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setS3Client(drv, mockS3Client);
+			final Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
+			exactClientField.setAccessible(true);
+			exactClientField.set(drv, exactVersionS3Client);
 			final byte[] content = "body".getBytes(StandardCharsets.UTF_8);
 			final IntegrityMetadata metadata = metadataFor(content);
 			final GetObjectResponse getResponse = GetObjectResponse.builder()
@@ -230,7 +238,7 @@ public class S3AwsStorageDriverTest {
 							.contentLength((long) content.length)
 							.versionId("returned-version")
 							.build();
-			when(mockS3Client.getObject(
+			when(exactVersionS3Client.getObject(
 							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
 							.thenReturn(CompletableFuture.completedFuture(
 											new ResponseInputStream<>(getResponse, new ByteArrayInputStream(content))));
@@ -245,7 +253,9 @@ public class S3AwsStorageDriverTest {
 			drv.invokeNio((Operation<Item>) (Operation<?>) op);
 
 			final ArgumentCaptor<GetObjectRequest> request = ArgumentCaptor.forClass(GetObjectRequest.class);
-			verify(mockS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			verify(exactVersionS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			verify(mockS3Client, never()).getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class));
 			assertEquals("folder/key~literal", request.getValue().key());
 			assertEquals("requested-version", request.getValue().versionId());
 			assertEquals("returned-version", op.returnedVersionId());
@@ -2907,6 +2917,7 @@ public class S3AwsStorageDriverTest {
 		@Test
 		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
 			S3AsyncClient mockClient = mock(S3AsyncClient.class);
+			S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
 
 			// Mock parent class config requirements
 			Config driverConfig = mock(Config.class);
@@ -2941,13 +2952,14 @@ public class S3AwsStorageDriverTest {
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, exactVersionClient, 100 * 1024L, 8 * 1024 * 1024L);
 
 			// Act: Call the close method on the driver
 			driver.close();
 
 			// Assert: Verify the S3 client was closed
 			verify(mockClient, times(1)).close();
+			verify(exactVersionClient, times(1)).close();
 
 			// Assert: Verify the thread pools were shut down
 			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");

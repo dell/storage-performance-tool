@@ -1119,6 +1119,57 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	void metadataListPublishesTruncatedPageBeforeSingleResultRecycle() throws Exception {
+		assertMetadataListPagePublished(false);
+	}
+
+	@Test
+	void metadataListPublishesTruncatedPageBeforeBatchResultRecycle() throws Exception {
+		assertMetadataListPagePublished(true);
+	}
+
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	private void assertMetadataListPagePublished(final boolean batched) throws Exception {
+		final Config listConfig = TestConfigBuilder.config();
+		listConfig.val("item-type", "path");
+		listConfig.val("load-op-type", "list");
+		listConfig.val("load-op-recycle-mode", true);
+		listConfig.val("load-op-recycle-content-update", false);
+
+		final LoadGenerator<Item, Operation<Item>> listGenerator = mock(LoadGenerator.class);
+		final StorageDriver<Item, Operation<Item>> listDriver = mock(StorageDriver.class);
+		when(listDriver.metadataIntegrityEnabled()).thenReturn(true);
+		final Output<Operation<Item>> resultsOutput = mock(Output.class);
+		when(resultsOutput.put(any(Operation.class))).thenReturn(true);
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"metadata-list-page",
+						listGenerator,
+						listDriver,
+						buildMetricsCtx("metadata-list-page"),
+						listConfig.configVal("load"),
+						false);
+		stepCtx.operationsResultsOutput(resultsOutput);
+
+		final ListOperationImpl<PathItemImpl> page = new ListOperationImpl<>(
+						0, OpType.LIST, new PathItemImpl("prefix/"), null);
+		page.status(Operation.Status.SUCC);
+		page.objectsListed(1000);
+		page.truncated(true);
+		page.continuationToken("next-page");
+		final Operation<Item> result = (Operation<Item>) (Operation<?>) page;
+
+		if (batched) {
+			assertEquals(1, stepCtx.put(List.of(result), 0, 1));
+		} else {
+			assertTrue(stepCtx.put(result));
+		}
+
+		verify(resultsOutput).put(result);
+		verify(listGenerator).recycle(result);
+	}
+
+	@Test
 	public void listWorkloadCompletesOnceNamespaceExhausted() {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");

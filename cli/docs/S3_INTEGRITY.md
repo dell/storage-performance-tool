@@ -325,22 +325,56 @@ the exact running container before scenario submission. Any required remote
 inspection failure is fatal. A local run records the available image evidence
 or its collection error in `spt_run_params.json`.
 
+## End-to-end qualification
+
+Use `cli/tools/testreadverifyversions.sh` to seed a dedicated versioned fixture,
+build independent `mc` oracles, run the candidate CLI and engine image, and
+compare every canonical identity and result artifact. The full suite covers
+current and all-version discovery, deterministic caps, historical digest and
+metadata failures, more than 1,000 data versions with interleaved delete
+markers, suspended and unversioned buckets, and both Netty and AWS drivers.
+
+Seed and run can be separated so the same fixture qualifies a commit-specific
+image:
+
+```bash
+cli/tools/testreadverifyversions.sh --phase seed --confirm-target-mutation
+
+cli/tools/testreadverifyversions.sh \
+  --phase run \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit> \
+  --skip-image-pull \
+  --drivers netty,aws
+
+cli/tools/testreadverifyversions.sh \
+  --phase cleanup \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --confirm-target-mutation
+```
+
+A full qualification also expects credentials that can read objects but cannot
+list object versions, plus an identity-verified multi-host target. Use
+`--allow-incomplete` only for a local qualification; the summary then records
+those cases as explicit gaps. The harness refuses native RDMA because its
+hardware path must be qualified separately on RDMA-capable systems. It only
+creates or removes bucket names beginning with `spt-version-qual-`, and every
+mutating phase requires `--confirm-target-mutation`.
+
 ## Version 1 boundaries
 
 - Verification commands require the Linux CLI; Windows fails preflight before
   evidence creation because its required directory-durability primitive is unavailable.
 - SHA-256 metadata and complete-object GET only; range verification is out of scope.
 - Generated object content for writes; file-backed write payloads are out of scope.
-- Isolated, unversioned prefixes are the normal discovery contract. Automatic
-  LIST discovery selects current versions only; it does not enumerate historical
-  versions. Exact historical versions require a manifest with `version_id`
-  values, and automatic all-version discovery is deferred to a later release.
+- `--versions=current` is the default LIST discovery contract. `--versions=all`
+  enumerates historical data versions by exact identity and excludes delete markers.
+  Version listing is not a snapshot, so qualification requires a quiescent prefix.
 - Concurrent overwrite or replication change during current-version discovery
   can otherwise be mistaken for corruption.
 - Copy and update operations do not maintain the v1 metadata contract.
-- Release qualification did not include a PowerStore target or a real versioned
-  bucket. Those compatibility paths remain unvalidated; exact-version manifest
-  support is implemented but was not target-qualified in this release.
+- Local qualification covers a real versioned S3-compatible target. PowerStore and
+  distributed target compatibility remain separate qualification gates.
 - Netty and AWS S3 paths have execution qualification. The RDMA metadata path is
   implemented and software-path tested, but its hardware path was not qualified;
   do not infer RDMA hardware parity from this release.

@@ -553,7 +553,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					outputResults(opResult);
 				} else {
 					// for recycled ops we might want to print them once or every time
-					if (outputDuplicates) {
+					// Metadata discovery must publish every page before the mutable LIST op is recycled.
+					if (outputDuplicates || (opResult instanceof ListOperation && driver.metadataIntegrityEnabled())) {
 						outputResults(opResult);
 					} else {
 						// this way we only add duplicate items once to the output list
@@ -665,7 +666,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						outputResults(opResult);
 					} else {
 						// for recycled ops we might want to print them once or every time
-						if (outputDuplicates) {
+						// Metadata discovery must publish every page before the mutable LIST op is recycled.
+						if (outputDuplicates || (opResult instanceof ListOperation && driver.metadataIntegrityEnabled())) {
 							outputResults(opResult);
 						} else {
 							// this way we only add duplicate items once to the output list
