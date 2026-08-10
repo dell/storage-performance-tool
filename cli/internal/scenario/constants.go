@@ -29,6 +29,11 @@ const (
 	// S3DriverRdma selects the RDMA-accelerated S3 driver.
 	S3DriverRdma = "rdma"
 
+	// VersionsCurrent discovers only each key's current visible object.
+	VersionsCurrent = "current"
+	// VersionsAll discovers every data version and excludes delete markers.
+	VersionsAll = "all"
+
 	// ChecksumCRC32 selects CRC-32 checksum validation.
 	ChecksumCRC32 = "crc32"
 	// ChecksumCRC32C selects CRC-32C checksum validation.

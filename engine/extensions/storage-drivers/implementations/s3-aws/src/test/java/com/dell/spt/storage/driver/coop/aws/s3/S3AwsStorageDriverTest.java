@@ -19,6 +19,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
@@ -1474,6 +1475,112 @@ public class S3AwsStorageDriverTest {
 
 			verify(op).bytesListed(0L);
 		}
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void listsAllVersionsWithExactIdsMarkersAndDeleteMarkerCount() throws Exception {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("/prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.respDataTimeStart()).thenReturn(1L);
+		ListOptions options = ListOptions.builder()
+						.includeVersions(true)
+						.fetchMetadata(true)
+						.keyMarker("prior-key")
+						.versionIdMarker("prior-version")
+						.maxKeys(1000)
+						.build();
+		when(op.options()).thenReturn(options);
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(
+										ObjectVersion.builder().key("prefix/key").versionId("v2").size(7L).build(),
+										ObjectVersion.builder().key("prefix/key").versionId("null").size(5L).build())
+						.deleteMarkers(
+										DeleteMarkerEntry.builder().key("prefix/key").versionId("marker-v").build())
+						.isTruncated(true)
+						.nextKeyMarker("next-key")
+						.nextVersionIdMarker("next-version")
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+		ArgumentCaptor<ListObjectVersionsRequest> request = ArgumentCaptor.forClass(ListObjectVersionsRequest.class);
+		verify(mockS3Client).listObjectVersions(request.capture());
+		verify(mockS3Client, never()).listObjectsV2(any(ListObjectsV2Request.class));
+		assertEquals("bucket", request.getValue().bucket());
+		assertEquals("prefix/", request.getValue().prefix());
+		assertEquals("prior-key", request.getValue().keyMarker());
+		assertEquals("prior-version", request.getValue().versionIdMarker());
+
+		@SuppressWarnings("rawtypes")
+		ArgumentCaptor<List> objects = ArgumentCaptor.forClass(List.class);
+		verify(op).listedObjects(objects.capture());
+		ListedObject first = (ListedObject) objects.getValue().get(0);
+		ListedObject second = (ListedObject) objects.getValue().get(1);
+		assertEquals("v2", first.versionId());
+		assertEquals("null", second.versionId());
+		verify(op).objectsListed(3);
+		verify(op).deleteMarkersListed(1);
+		verify(op).bytesListed(12L);
+		verify(op).truncated(true);
+		ArgumentCaptor<ListOptions> next = ArgumentCaptor.forClass(ListOptions.class);
+		verify(op).options(next.capture());
+		assertEquals("next-key", next.getValue().keyMarker());
+		assertEquals("next-version", next.getValue().versionIdMarker());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryRejectsMissingExactVersionId() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder().key("key").size(1L).build())
+						.isTruncated(false)
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		verify(op, never()).listedObjects(anyList());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryPropagatesPermissionDeniedWithoutResults() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		S3Exception denied = (S3Exception) S3Exception.builder()
+						.statusCode(403)
+						.message("AccessDenied")
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.failedFuture(denied));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+		assertSame(denied, failure.getCause());
+		verify(op, never()).listedObjects(anyList());
 	}
 
 	// -----------------------------------------------------------------------

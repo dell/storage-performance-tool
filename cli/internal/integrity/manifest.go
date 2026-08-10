@@ -123,7 +123,7 @@ func validateCompletionRecord(
 	producerKind, producerID, artifact string,
 	requireCanonicalManifestName bool,
 ) error {
-	if marker.Version != 1 || marker.Status != "complete" {
+	if (marker.Version != 1 && marker.Version != 2) || marker.Status != "complete" {
 		return fmt.Errorf("completion record has unsupported version/status %d/%q", marker.Version, marker.Status)
 	}
 	if runID <= 0 || marker.RunID != runID {
@@ -141,6 +141,9 @@ func validateCompletionRecord(
 	if marker.SourceRecordCount < 0 || marker.UniqueRecordCount < 0 || marker.SelectedRecordCount < 0 ||
 		marker.SourceRecordCount < marker.UniqueRecordCount || marker.UniqueRecordCount < marker.SelectedRecordCount {
 		return fmt.Errorf("completion record counts are inconsistent")
+	}
+	if marker.ExcludedDeleteMarkerCount < 0 || (marker.Version == 1 && marker.ExcludedDeleteMarkerCount != 0) {
+		return fmt.Errorf("completion record excluded delete marker count is inconsistent")
 	}
 
 	evidence, err := validateCanonicalManifestEvidence(manifestPath)

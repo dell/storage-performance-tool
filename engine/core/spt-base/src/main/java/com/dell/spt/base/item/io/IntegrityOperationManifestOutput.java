@@ -30,6 +30,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 	private final OpType opType;
 	private final CSVPrinter printer;
 	private long emittedRecordCount;
+	private long excludedDeleteMarkerCount;
 	private boolean closed;
 
 	public IntegrityOperationManifestOutput(
@@ -61,9 +62,11 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		try {
 			if (result instanceof ListOperation<?> listOperation) {
 				for (final var listedObject : listOperation.listedObjects()) {
-					printer.printRecord(configuredBucket, listedObject.key(), listedObject.size(), "");
+					printer.printRecord(configuredBucket, listedObject.key(), listedObject.size(),
+									listedObject.versionId() == null ? "" : listedObject.versionId());
 					emittedRecordCount++;
 				}
+				excludedDeleteMarkerCount = Math.addExact(excludedDeleteMarkerCount, listOperation.deleteMarkersListed());
 				return true;
 			}
 			final Item item = result.item();
@@ -119,17 +122,19 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 			printer.close(true);
 			CrashDurableFilePublisher.syncExisting(manifestPath);
 			if (OpType.LIST.equals(opType)) {
-				publishEmissionCount();
+				publishCount(IntegrityManifestCompletion.emissionCountPath(manifestPath),
+								emittedRecordCount, "emission");
+				publishCount(IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath),
+								excludedDeleteMarkerCount, "delete-marker");
 			}
 		} catch (final IOException e) {
 			throwUnchecked(e);
 		}
 	}
 
-	private void publishEmissionCount() throws IOException {
-		final Path countPath = IntegrityManifestCompletion.emissionCountPath(manifestPath);
+	private void publishCount(final Path countPath, final long count, final String description) throws IOException {
 		if (Files.exists(countPath)) {
-			throw new IOException("refusing to replace existing emission count " + countPath);
+			throw new IOException("refusing to replace existing " + description + " count " + countPath);
 		}
 		final Path parent = countPath.toAbsolutePath().getParent();
 		final Path staging = Files.createTempFile(parent, "." + countPath.getFileName(), ".staging");
@@ -137,7 +142,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		try {
 			Files.writeString(
 							staging,
-							Long.toString(emittedRecordCount) + "\n",
+							Long.toString(count) + "\n",
 							StandardCharsets.US_ASCII,
 							StandardOpenOption.TRUNCATE_EXISTING);
 			IntegrityManifestCompletion.atomicMove(staging, countPath);

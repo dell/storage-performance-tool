@@ -862,6 +862,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		final var maxKeys = options.maxKeys() > 0 ? Math.min(options.maxKeys(), 1000) : 1000;
+		if (options.includeVersions()) {
+			return listObjectVersions(op, listOp, options, targetBucket, maxKeys);
+		}
 
 		ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
 						.bucket(targetBucket)
@@ -937,6 +940,80 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							listOp.countBytesDone(listOp.bytesListed());
 							if (listOp.respDataTimeStart() == 0) {
 								LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
+							}
+						});
+	}
+
+	private CompletableFuture<Void> listObjectVersions(
+					final O op,
+					final ListOperation<? extends PathItem> listOp,
+					final ListOptions options,
+					final String targetBucket,
+					final int maxKeys) {
+		final ListObjectVersionsRequest.Builder request = ListObjectVersionsRequest.builder()
+						.bucket(targetBucket)
+						.maxKeys(maxKeys)
+						.overrideConfiguration(b -> b
+										.putExecutionAttribute(LIST_TTFB_OPERATION_ATTRIBUTE, listOp)
+										.addPlugin(LIST_TTFB_SDK_PLUGIN));
+		final String prefix = op.item().name();
+		if (prefix != null && !prefix.isEmpty()) {
+			request.prefix(prefix.startsWith("/") ? prefix.substring(1) : prefix);
+		}
+		if (options.delimiter() != null && !options.delimiter().isEmpty()) {
+			request.delimiter(options.delimiter());
+		}
+		if (options.keyMarker() != null && !options.keyMarker().isEmpty()) {
+			request.keyMarker(options.keyMarker());
+		}
+		if (options.versionIdMarker() != null && !options.versionIdMarker().isEmpty()) {
+			request.versionIdMarker(options.versionIdMarker());
+		}
+
+		return s3AsyncClient.listObjectVersions(request.build())
+						.thenAccept(response -> {
+							final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
+							long bytesTotal = 0;
+							String firstKey = null;
+							for (final ObjectVersion version : response.versions()) {
+								final String key = version.key();
+								final String versionId = version.versionId();
+								if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
+									throw new IllegalStateException(
+													"ListObjectVersions returned a data version without an exact identity");
+								}
+								final long size = Math.max(0L, version.size());
+								listedObjects.add(new ListedObject(key, size, versionId));
+								if (options.fetchMetadata()) {
+									bytesTotal = Math.addExact(bytesTotal, size);
+								}
+								if (firstKey == null) {
+									firstKey = key;
+								}
+							}
+							if (firstKey == null && !response.deleteMarkers().isEmpty()) {
+								firstKey = response.deleteMarkers().get(0).key();
+							}
+							listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
+							listOp.listedObjects(listedObjects);
+							listOp.deleteMarkersListed(response.deleteMarkers().size());
+							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+							listOp.truncated(Boolean.TRUE.equals(response.isTruncated()));
+							if (firstKey != null) {
+								listOp.pageFirstKey(firstKey);
+							}
+							listOp.continuationToken(response.nextKeyMarker());
+							listOp.options(
+											options.toBuilder()
+															.continuationToken(null)
+															.keyMarker(response.nextKeyMarker())
+															.versionIdMarker(response.nextVersionIdMarker())
+															.build());
+							listOp.countBytesDone(listOp.bytesListed());
+							if (listOp.respDataTimeStart() == 0) {
+								LOG.debug(
+												"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
+												listOp);
 							}
 						});
 	}

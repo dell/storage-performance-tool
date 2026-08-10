@@ -1913,6 +1913,7 @@ func init() {
 	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
 	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
+	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
 	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
 	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
@@ -2119,6 +2120,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	// Get behavior flags
 	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	params.Cleanup = cleanup
+	params.Versions, _ = cmd.Flags().GetString(flagVersions)
 	params.DeferVerification, _ = cmd.Flags().GetBool(flagDeferVerification)
 
 	seedObjects, _ := cmd.Flags().GetInt("seed-objects")

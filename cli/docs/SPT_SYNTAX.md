@@ -110,6 +110,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` (skips seed/discovery) |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
+| `--versions` | | `current` | `read-verify` bucket/prefix discovery only. `current` uses ordinary object listing; `all` uses `ListObjectVersions`, preserves exact version IDs, and excludes delete markers. Omit with `--items-file` |
 | `--integrity-max-console-failures` | | `20` | Verification only. Maximum corruption samples printed to the console (`0` suppresses samples; env: `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`) |
 | `--shuffle` | | `false` | `read` only. Shuffle items within each fetched read batch before issuing reads |
 | `--shuffle-batch-size` | | `0` | `read` only. Batch size override used with `--shuffle` (`0` = bounded default `512000`, max `1000000`) |
@@ -126,6 +127,9 @@ objects: `--object-count` caps its deterministic discovery selection and
 `--attach-existing`; both require automatic result collection. See
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
+
+All-version discovery requires list-version permission and a quiescent prefix;
+S3 version pagination is not a snapshot of concurrent mutations.
 
 **`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
 

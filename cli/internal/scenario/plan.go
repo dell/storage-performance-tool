@@ -120,10 +120,15 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 		return integrityplan.Plan{}, fmt.Errorf(
 			"verification cleanup step presence does not match requested cleanup=%t", params.Cleanup)
 	}
+	versions := params.Versions
+	if versions == "" {
+		versions = VersionsCurrent
+	}
 	plan := integrityplan.Plan{
 		RunID: params.RunID, Workload: params.WorkloadType,
 		Cleanup: cleanup, Multipart: params.PartSize != "",
-		AllowEmpty: params.AllowEmptySelection,
+		AllowEmpty:        params.AllowEmptySelection,
+		DiscoveryVersions: integrityplan.DiscoveryVersions(versions),
 	}
 	if verifier != nil {
 		plan.Verifier = *verifier

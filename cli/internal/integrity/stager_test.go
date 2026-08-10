@@ -228,7 +228,7 @@ func TestValidateCompletionRejectsTrustBoundaryMismatches(t *testing.T) {
 		mutate     func(*Completion)
 		wantDetail string
 	}{
-		{name: "version", mutate: func(c *Completion) { c.Version++ }, wantDetail: "unsupported version/status"},
+		{name: "version", mutate: func(c *Completion) { c.Version = 3 }, wantDetail: "unsupported version/status"},
 		{name: "status", mutate: func(c *Completion) { c.Status = "pending" }, wantDetail: "unsupported version/status"},
 		{name: "run", mutate: func(c *Completion) { c.RunID++ }, wantDetail: "completion run_id"},
 		{name: "producer kind", mutate: func(c *Completion) {

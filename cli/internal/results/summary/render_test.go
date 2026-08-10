@@ -266,6 +266,7 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 		Integrity: &results.IntegritySummary{
 			Complete: true, SelectionCountsValid: true,
 			SelectionSourceCount: 384, SelectionUniqueCount: 128, SelectionCount: 128,
+			ExcludedDeleteMarkerCount: 9,
 		},
 	}
 
@@ -276,7 +277,7 @@ func TestRendererListWorkloadDisplaysPrefix(t *testing.T) {
 	mustContain(t, report, "• Prefix             daily/")
 	mustContain(t, report, "Rate Avg")
 	mustContain(t, report, "256 objects/s")
-	mustContain(t, report, "source 384, unique 128, selected 128")
+	mustContain(t, report, "source 384, unique 128, selected 128, delete markers excluded 9")
 
 	mustNotContain(t, report, "512 MiB/s")
 	table := renderer.performanceTable(summary)

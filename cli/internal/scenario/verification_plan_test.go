@@ -31,7 +31,7 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 		{
 			name: "read verify discovery",
 			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 102,
-				Bucket: "b", ObjectCount: 1, Threads: 1, BaseTimestamp: "20260802.120000.000"},
+				Bucket: "b", ObjectCount: 1, Threads: 1, Versions: VersionsAll, BaseTimestamp: "20260802.120000.000"},
 			wantKind: integrityplan.PlanKindReadDiscovered, wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList, wantVerifier: true,
 		},
 		{
@@ -70,6 +70,9 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 				t.Fatalf("typed plan = %+v", plan)
 			}
 			if test.wantRole == "" {
+				if test.params.Versions == VersionsAll && plan.DiscoveryVersions != integrityplan.DiscoveryVersionsAll {
+					t.Fatalf("typed plan versions = %q, want all", plan.DiscoveryVersions)
+				}
 				if plan.Producer != nil {
 					t.Fatalf("external plan producer = %+v, want nil", plan.Producer)
 				}

@@ -88,6 +88,7 @@ class CsvArtifactAggregatorTest {
 										+ "b,a,2,\r\n"
 										+ "b,a,2,\r\n");
 		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "3\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "4\n");
 
 		new CsvArtifactAggregator(
 						"list-step",
@@ -105,6 +106,7 @@ class CsvArtifactAggregatorTest {
 						manifest, 100, IntegrityInputProvenance.ENGINE_STEP, "list-step");
 		assertEquals(3, completion.sourceRecordCount());
 		assertEquals(2, completion.uniqueRecordCount());
+		assertEquals(4, completion.excludedDeleteMarkerCount());
 		assertEquals(1, completion.selectedRecordCount());
 		assertFalse(Files.exists(tempDir.resolve("verify-input.node-001.csv")));
 	}
@@ -114,6 +116,7 @@ class CsvArtifactAggregatorTest {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,\r\n");
 		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "2\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
 
 		final var failure = assertThrows(
 						IntegrityTerminalException.class,

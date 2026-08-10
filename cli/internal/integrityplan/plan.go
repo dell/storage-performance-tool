@@ -39,6 +39,16 @@ const (
 	InputExternal InputProvenance = "external"
 )
 
+// DiscoveryVersions binds a read-verification plan to its LIST identity policy.
+type DiscoveryVersions string
+
+const (
+	// DiscoveryVersionsCurrent selects only current visible objects.
+	DiscoveryVersionsCurrent DiscoveryVersions = "current"
+	// DiscoveryVersionsAll selects every data version while excluding delete markers.
+	DiscoveryVersionsAll DiscoveryVersions = "all"
+)
+
 // PlanKind identifies one complete, immutable integrity scenario shape.
 type PlanKind string
 
@@ -64,15 +74,16 @@ var runtimeStepID = regexp.MustCompile(`^mt-([0-9]{3})-[0-9]{8}\.[0-9]{6}\.[0-9]
 
 // Plan is the typed verification contract generated once before launch.
 type Plan struct {
-	RunID      int64
-	Workload   string
-	Kind       PlanKind
-	Producer   *PlannedStep
-	Verifier   PlannedStep
-	Cleanup    *PlannedStep
-	Input      InputProvenance
-	Multipart  bool
-	AllowEmpty bool
+	RunID             int64
+	Workload          string
+	Kind              PlanKind
+	Producer          *PlannedStep
+	Verifier          PlannedStep
+	Cleanup           *PlannedStep
+	Input             InputProvenance
+	Multipart         bool
+	AllowEmpty        bool
+	DiscoveryVersions DiscoveryVersions
 }
 
 // Valid reports whether the complete immutable verification shape is internally consistent.
@@ -116,19 +127,27 @@ func (p Plan) Valid() bool {
 	producerIs := func(role StepRole) bool {
 		return p.Producer != nil && p.Producer.Role == role
 	}
+	versions := p.DiscoveryVersions
+	if versions == "" {
+		versions = DiscoveryVersionsCurrent
+	}
 	switch p.Kind {
 	case PlanKindWriteRead:
 		return p.Workload == workload.WriteVerify && p.Input == InputWritten &&
+			versions == DiscoveryVersionsCurrent &&
 			producerIs(StepRoleCreate) && !p.AllowEmpty &&
 			(p.Cleanup == nil || p.Cleanup.Role == StepRoleCleanup)
 	case PlanKindWriteSeed:
 		return p.Workload == workload.WriteVerify && p.Input == InputWritten &&
+			versions == DiscoveryVersionsCurrent &&
 			producerIs(StepRoleCreate) && p.Cleanup == nil && !p.AllowEmpty
 	case PlanKindReadDiscovered:
 		return p.Workload == workload.ReadVerify && p.Input == InputDiscovered &&
+			(versions == DiscoveryVersionsCurrent || versions == DiscoveryVersionsAll) &&
 			producerIs(StepRoleList) && p.Cleanup == nil
 	case PlanKindReadExternal:
 		return p.Workload == workload.ReadVerify && p.Input == InputExternal &&
+			versions == DiscoveryVersionsCurrent &&
 			p.Producer == nil && p.Cleanup == nil
 	default:
 		return false

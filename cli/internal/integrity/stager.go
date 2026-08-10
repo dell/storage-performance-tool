@@ -35,17 +35,18 @@ func (r ManifestRecord) identity() string { return r.bucket + "\x00" + r.key + "
 
 // Completion is the versioned commit record for one canonical manifest.
 type Completion struct {
-	Version             int    `json:"version"`
-	Status              string `json:"status"`
-	RunID               int64  `json:"run_id"`
-	ProducerKind        string `json:"producer_kind"`
-	ProducerID          string `json:"producer_id"`
-	Artifact            string `json:"artifact"`
-	SourceRecordCount   int    `json:"source_record_count"`
-	UniqueRecordCount   int    `json:"unique_record_count"`
-	SelectedRecordCount int    `json:"selected_record_count"`
-	ManifestBytes       int64  `json:"manifest_bytes"`
-	ManifestSHA256      string `json:"manifest_sha256"`
+	Version                   int    `json:"version"`
+	Status                    string `json:"status"`
+	RunID                     int64  `json:"run_id"`
+	ProducerKind              string `json:"producer_kind"`
+	ProducerID                string `json:"producer_id"`
+	Artifact                  string `json:"artifact"`
+	SourceRecordCount         int    `json:"source_record_count"`
+	UniqueRecordCount         int    `json:"unique_record_count"`
+	SelectedRecordCount       int    `json:"selected_record_count"`
+	ExcludedDeleteMarkerCount int    `json:"excluded_delete_marker_count,omitempty"`
+	ManifestBytes             int64  `json:"manifest_bytes"`
+	ManifestSHA256            string `json:"manifest_sha256"`
 }
 
 // StageInputManifest validates a complete canonical user manifest, makes a deterministic immutable

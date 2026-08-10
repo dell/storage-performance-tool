@@ -140,6 +140,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		final boolean discovery = OpType.LIST.equals(artifactOpType);
 		final List<Path> nodeSources = new ArrayList<>(sourceNames.size());
 		final List<Path> emissionCounts = new ArrayList<>(sourceNames.size());
+		final List<Path> deleteMarkerCounts = new ArrayList<>(sourceNames.size());
 		for (int i = 0; i < sourceNames.size(); i++) {
 			final Path nodePath = nodeSourcePath(manifestPath, i);
 			if (Files.exists(nodePath)) {
@@ -171,6 +172,24 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					copyRemoteSource(fileManagers.get(i), remoteCount, nodeCount);
 				}
 				emissionCounts.add(nodeCount);
+				final Path nodeDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(nodePath);
+				if (Files.exists(nodeDeleteMarkerCount)) {
+					throw terminal(Category.PUBLICATION,
+									"stale node delete-marker count exists: " + nodeDeleteMarkerCount, null);
+				}
+				if (i == 0) {
+					final Path sourceDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath);
+					if (!Files.isRegularFile(sourceDeleteMarkerCount)) {
+						throw terminal(Category.AGGREGATION,
+										"entry-node LIST delete-marker count is missing", null);
+					}
+					IntegrityManifestCompletion.atomicMove(sourceDeleteMarkerCount, nodeDeleteMarkerCount);
+				} else {
+					final String remoteDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(
+									Path.of(sourceNames.get(i))).toString();
+					copyRemoteSource(fileManagers.get(i), remoteDeleteMarkerCount, nodeDeleteMarkerCount);
+				}
+				deleteMarkerCounts.add(nodeDeleteMarkerCount);
 			}
 
 		}
@@ -188,10 +207,15 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			throw e;
 		}
 		long emittedCount = counts.source();
+		long excludedDeleteMarkerCount = 0;
 		if (discovery) {
 			emittedCount = 0;
 			for (final Path countPath : emissionCounts) {
 				emittedCount = Math.addExact(emittedCount, readEmissionCount(countPath));
+			}
+			for (final Path countPath : deleteMarkerCounts) {
+				excludedDeleteMarkerCount = Math.addExact(
+								excludedDeleteMarkerCount, readEmissionCount(countPath));
 			}
 			if (emittedCount != counts.source()) {
 				final IntegrityTerminalException failure = terminal(
@@ -210,7 +234,8 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 						loadStepId,
 						counts.source(),
 						counts.unique(),
-						counts.selected());
+						counts.selected(),
+						excludedDeleteMarkerCount);
 		try {
 			completion.publish(manifestPath);
 		} catch (final IOException e) {

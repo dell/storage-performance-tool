@@ -106,6 +106,38 @@ fall back to generated content or accept arbitrary objects written by older SPT
 versions and other tools. It never deletes selected objects and rejects
 `--cleanup`.
 
+To verify every historical data version under the prefix, add
+`--versions=all`:
+
+```bash
+spt run read-verify \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket qualification \
+  --prefix campaign-42/ \
+  --versions=all \
+  --threads 32 \
+  --headless
+```
+
+This mode uses S3 `ListObjectVersions` and requires the corresponding
+list-version permission. Every data version is selected by exact
+`(bucket,key,version_id)` identity; `--object-count` caps those identities rather
+than distinct keys. Delete markers are never read as object data and their
+excluded count is reported in the completion evidence, console summary, and
+`index.json`. A suspended bucket's literal `null` version ID is preserved and
+sent on the exact-version GET. An unversioned bucket normally produces an empty
+all-version selection, subject to the target's S3 compatibility behavior and
+the usual `--allow-empty-selection` policy.
+
+Version listing is not a snapshot. Use a quiescent, controlled prefix: concurrent
+version creation or deletion during pagination can change the observed set.
+Archived versions are selected normally, but a version that has not been
+restored will fail its GET and remain in `verify-remaining.csv`. Omit
+`--versions` with `--items-file` because the manifest already supplies exact
+identities.
+
 For QA-controlled selection, supply a canonical manifest instead of LIST:
 
 ```bash
@@ -200,12 +232,15 @@ using an ordinary item-file deletion scenario to reclaim preserved objects.
 Manifest completion records use a crash-durable two-file commit. SPT flushes
 and synchronizes each completed file, atomically creates its final name without
 replacing an existing name, and synchronizes the containing directory. The CSV
-is committed before its JSON marker. The marker contains exactly these v1
-members: `version`, `status`, `run_id`, `producer_kind`, `producer_id`,
-`artifact`, `source_record_count`, `unique_record_count`,
-`selected_record_count`, `manifest_bytes`, and `manifest_sha256`. Unknown
-members are rejected. A missing, staging-only, stale, or mismatched marker
-prevents a dependent engine step from starting.
+is committed before its JSON marker. Readers accept legacy v1 markers so
+manifests created by the first integrity release remain reusable. New engine
+records use v2, which retains the v1 members (`version`, `status`, `run_id`,
+`producer_kind`, `producer_id`, `artifact`, `source_record_count`,
+`unique_record_count`, `selected_record_count`, `manifest_bytes`, and
+`manifest_sha256`) and adds `excluded_delete_marker_count`. That count is zero
+outside version discovery. Unknown members and a marker field inconsistent with
+its declared schema version are rejected. A missing, staging-only, stale, or
+mismatched marker prevents a dependent engine step from starting.
 The marker must contain exactly one JSON object plus optional trailing
 whitespace. Publication never replaces an existing canonical name. A retry
 may reuse a fully validated matching pair or complete a matching manifest-only

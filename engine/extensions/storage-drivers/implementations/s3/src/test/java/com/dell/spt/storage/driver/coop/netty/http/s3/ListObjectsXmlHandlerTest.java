@@ -58,6 +58,32 @@ final class ListObjectsXmlHandlerTest {
 		assertEquals("version-marker", op.options().versionIdMarker());
 		assertEquals(1, op.listedObjects().size());
 		assertEquals("a.txt", op.listedObjects().get(0).key());
+		assertEquals("version-1", op.listedObjects().get(0).versionId());
+		assertEquals(1, op.deleteMarkersListed());
+	}
+
+	@Test
+	void preservesLiteralNullVersionAndRejectsMissingVersionIds() throws Exception {
+		final var valid = newOperation(true);
+		parse(
+						"<ListVersionsResult><IsTruncated>false</IsTruncated>"
+										+ "<Version><Key>k</Key><VersionId>null</VersionId><Size>1</Size></Version>"
+										+ "</ListVersionsResult>",
+						valid,
+						true);
+		assertEquals("null", valid.listedObjects().get(0).versionId());
+
+		for (final String entry : List.of(
+						"<Version><Key>k</Key><Size>1</Size></Version>",
+						"<DeleteMarker><Key>k</Key></DeleteMarker>",
+						"<Version><Key>k</Key><VersionId></VersionId><Size>1</Size></Version>")) {
+			final var invalid = newOperation(true);
+			final String xml = "<ListVersionsResult><IsTruncated>false</IsTruncated>"
+							+ entry + "</ListVersionsResult>";
+			assertThrows(Exception.class, () -> parse(xml, invalid, true), xml);
+			assertEquals(0, invalid.objectsListed(), xml);
+			assertTrue(invalid.listedObjects().isEmpty(), xml);
+		}
 	}
 
 	@Test
@@ -149,8 +175,8 @@ final class ListObjectsXmlHandlerTest {
 
 	private static final String LIST_VERSIONS_RESPONSE = "<ListVersionsResult>" +
 					"<IsTruncated>true</IsTruncated>" +
-					"<Version><Key>a.txt</Key><Size>42</Size></Version>" +
-					"<DeleteMarker><Key>a.txt</Key></DeleteMarker>" +
+					"<Version><Key>a.txt</Key><VersionId>version-1</VersionId><Size>42</Size></Version>" +
+					"<DeleteMarker><Key>a.txt</Key><VersionId>marker-1</VersionId></DeleteMarker>" +
 					"<NextKeyMarker>key-marker</NextKeyMarker>" +
 					"<NextVersionIdMarker>version-marker</NextVersionIdMarker>" +
 					"</ListVersionsResult>";

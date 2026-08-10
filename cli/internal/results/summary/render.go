@@ -227,8 +227,9 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 		r.writeBullet(b, "Verification", "deferred")
 	}
 	if integrity.SelectionCountsValid && hasListStep(summary) {
-		r.writeBullet(b, "Discovery", fmt.Sprintf("source %d, unique %d, selected %d",
-			integrity.SelectionSourceCount, integrity.SelectionUniqueCount, integrity.SelectionCount))
+		r.writeBullet(b, "Discovery", fmt.Sprintf("source %d, unique %d, selected %d, delete markers excluded %d",
+			integrity.SelectionSourceCount, integrity.SelectionUniqueCount, integrity.SelectionCount,
+			integrity.ExcludedDeleteMarkerCount))
 	}
 	if integrity.FinalizationError != "" {
 		r.writeBullet(b, "Finalization error", integrity.FinalizationError)

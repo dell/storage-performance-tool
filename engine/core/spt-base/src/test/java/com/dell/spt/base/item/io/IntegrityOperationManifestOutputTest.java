@@ -60,18 +60,23 @@ class IntegrityOperationManifestOutputTest {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		final var op = new ListOperationImpl<PathItemImpl>(
 						0, OpType.LIST, new PathItemImpl("prefix"), Credential.NONE);
-		op.listedObjects(List.of(new ListedObject("prefix/a", 7), new ListedObject("prefix/b", 8)));
+		op.listedObjects(List.of(new ListedObject("prefix/a", 7, "null"), new ListedObject("prefix/b", 8, "v2")));
+		op.deleteMarkersListed(3);
 		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/bucket", OpType.LIST)) {
 			output.put(op);
 		}
 		assertEquals("2", java.nio.file.Files.readString(
 						IntegrityManifestCompletion.emissionCountPath(manifest)).trim());
+		assertEquals("3", java.nio.file.Files.readString(
+						IntegrityManifestCompletion.deleteMarkerCountPath(manifest)).trim());
 
 		final var records = CSVFormat.RFC4180.parse(java.nio.file.Files.newBufferedReader(manifest)).getRecords();
 		assertEquals(3, records.size());
 		assertEquals("prefix/a", records.get(1).get(1));
 		assertEquals("7", records.get(1).get(2));
+		assertEquals("null", records.get(1).get(3));
 		assertEquals("prefix/b", records.get(2).get(1));
+		assertEquals("v2", records.get(2).get(3));
 	}
 
 	@Test

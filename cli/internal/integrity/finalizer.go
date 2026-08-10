@@ -74,6 +74,7 @@ type FinalizeOutcome struct {
 	SelectionSourceCount       int64                               `json:"selection_source_count"`
 	SelectionUniqueCount       int64                               `json:"selection_unique_count"`
 	SelectionCount             int64                               `json:"selection_count"`
+	ExcludedDeleteMarkerCount  int64                               `json:"excluded_delete_marker_count"`
 	VerificationAttemptedCount int64                               `json:"verification_attempted_count"`
 	VerificationDeferred       bool                                `json:"verification_deferred"`
 	VerifiedCount              int64                               `json:"verified_count"`
@@ -267,6 +268,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	outcome.SelectionSourceCount = int64(inputCompletion.SourceRecordCount)
 	outcome.SelectionUniqueCount = int64(inputCompletion.UniqueRecordCount)
 	outcome.SelectionCount = int64(inputCompletion.SelectedRecordCount)
+	outcome.ExcludedDeleteMarkerCount = int64(inputCompletion.ExcludedDeleteMarkerCount)
 	if options.Workload == workload.WriteVerify {
 		createCounts, countsErr := readOperationMetrics(options.ResultsRoot, createStep, "CREATE")
 		if countsErr != nil {
@@ -377,6 +379,7 @@ func integritySummary(outcome FinalizeOutcome, finalErr error) *results.Integrit
 		SelectionSourceCount:       outcome.SelectionSourceCount,
 		SelectionUniqueCount:       outcome.SelectionUniqueCount,
 		SelectionCount:             outcome.SelectionCount,
+		ExcludedDeleteMarkerCount:  outcome.ExcludedDeleteMarkerCount,
 		VerificationAttemptedCount: outcome.VerificationAttemptedCount,
 		VerificationDeferred:       outcome.VerificationDeferred,
 		VerifiedCount:              outcome.VerifiedCount,

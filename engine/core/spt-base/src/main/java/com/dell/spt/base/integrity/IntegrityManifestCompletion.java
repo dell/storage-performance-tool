@@ -11,7 +11,7 @@ import java.nio.file.Path;
 /**
  * Identity-bound completion record for a canonical integrity manifest.
  *
- * <p>Version 1 is a closed schema: unknown members and trailing JSON values are rejected.
+ * <p>Every supported version is a closed schema: unknown members and trailing JSON values are rejected.
  */
 public final class IntegrityManifestCompletion {
 
@@ -42,6 +42,9 @@ public final class IntegrityManifestCompletion {
 	@JsonProperty("selected_record_count")
 	private final long selectedRecordCount;
 
+	@JsonProperty("excluded_delete_marker_count")
+	private final long excludedDeleteMarkerCount;
+
 	@JsonProperty("manifest_bytes")
 	private final long manifestBytes;
 
@@ -59,6 +62,7 @@ public final class IntegrityManifestCompletion {
 					@JsonProperty("source_record_count") final long sourceRecordCount,
 					@JsonProperty("unique_record_count") final long uniqueRecordCount,
 					@JsonProperty("selected_record_count") final long selectedRecordCount,
+					@JsonProperty("excluded_delete_marker_count") final long excludedDeleteMarkerCount,
 					@JsonProperty("manifest_bytes") final long manifestBytes,
 					@JsonProperty("manifest_sha256") final String manifestSha256) {
 		this.version = version;
@@ -70,6 +74,7 @@ public final class IntegrityManifestCompletion {
 		this.sourceRecordCount = sourceRecordCount;
 		this.uniqueRecordCount = uniqueRecordCount;
 		this.selectedRecordCount = selectedRecordCount;
+		this.excludedDeleteMarkerCount = excludedDeleteMarkerCount;
 		this.manifestBytes = manifestBytes;
 		this.manifestSha256 = manifestSha256;
 	}
@@ -110,6 +115,10 @@ public final class IntegrityManifestCompletion {
 		return selectedRecordCount;
 	}
 
+	public long excludedDeleteMarkerCount() {
+		return excludedDeleteMarkerCount;
+	}
+
 	public long manifestBytes() {
 		return manifestBytes;
 	}
@@ -118,7 +127,8 @@ public final class IntegrityManifestCompletion {
 		return manifestSha256;
 	}
 
-	public static final int VERSION = 1;
+	public static final int LEGACY_VERSION = 1;
+	public static final int VERSION = 2;
 	public static final String STATUS_COMPLETE = "complete";
 	public static final String PRODUCER_ENGINE_STEP = "engine_step";
 	public static final String PRODUCER_CLI_STAGER = "cli_stager";
@@ -129,6 +139,10 @@ public final class IntegrityManifestCompletion {
 
 	public static Path emissionCountPath(final Path manifest) {
 		return manifest.resolveSibling(manifest.getFileName() + ".emitted.count");
+	}
+
+	public static Path deleteMarkerCountPath(final Path manifest) {
+		return manifest.resolveSibling(manifest.getFileName() + ".delete-markers.count");
 	}
 
 	public static Path completionPath(final Path manifest) {
@@ -147,8 +161,26 @@ public final class IntegrityManifestCompletion {
 					final long uniqueCount,
 					final long selectedCount)
 					throws IOException {
+		return create(
+						manifest, runId, producerKind, producerId,
+						sourceCount, uniqueCount, selectedCount, 0);
+	}
+
+	public static IntegrityManifestCompletion create(
+					final Path manifest,
+					final long runId,
+					final String producerKind,
+					final String producerId,
+					final long sourceCount,
+					final long uniqueCount,
+					final long selectedCount,
+					final long excludedDeleteMarkerCount)
+					throws IOException {
 		requirePositiveRunId(runId);
 		validateCounts(sourceCount, uniqueCount, selectedCount);
+		if (excludedDeleteMarkerCount < 0) {
+			throw new IOException("excluded delete marker count must be nonnegative");
+		}
 		final IntegrityManifestValidator.Evidence evidence = IntegrityManifestValidator.validate(manifest);
 		if (evidence.rows() != selectedCount) {
 			throw new IOException(
@@ -165,6 +197,7 @@ public final class IntegrityManifestCompletion {
 						sourceCount,
 						uniqueCount,
 						selectedCount,
+						excludedDeleteMarkerCount,
 						evidence.bytes(),
 						evidence.sha256());
 	}
@@ -227,13 +260,15 @@ public final class IntegrityManifestCompletion {
 		case CLI_STAGER -> PRODUCER_CLI_STAGER;
 		default -> throw new IOException("completion records are not valid for provenance " + provenance);
 		};
-		if (record.version != VERSION
+		if ((record.version != VERSION && record.version != LEGACY_VERSION)
 						|| !STATUS_COMPLETE.equals(record.status)
 						|| record.runId != expectedRunId
 						|| !expectedKind.equals(record.producerKind)
 						|| !requireText(expectedProducerId, "expected producer id").equals(record.producerId)
 						|| !manifest.getFileName().toString().equals(record.artifact)
-						|| record.manifestBytes < 0) {
+						|| record.manifestBytes < 0
+						|| record.excludedDeleteMarkerCount < 0
+						|| (record.version == LEGACY_VERSION && record.excludedDeleteMarkerCount != 0)) {
 			throw new IOException("integrity input completion record does not match manifest identity");
 		}
 		final IntegrityManifestValidator.Evidence evidence = IntegrityManifestValidator.validate(manifest);
