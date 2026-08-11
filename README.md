@@ -45,6 +45,10 @@ mv spt-*-linux-amd64 spt
   used in a distributed run.
 - Credentials for a dedicated test target when running real S3 workloads.
 
+After configuring the target and hosts below, run `./spt verify` to check these
+prerequisites automatically. For a distributed configuration, it validates SSH
+connectivity, Docker availability, and required ports on every configured node.
+
 ### Engine image selection
 
 The CLI runs a matching SPT engine container:
@@ -88,9 +92,8 @@ Verify the local environment and configured target hosts:
 ./spt verify
 ```
 
-With no `HOSTS` setting, this checks localhost. When `HOSTS` is set, SPT also
-checks SSH connectivity, Docker availability, and required ports on each
-remote node.
+With no `HOSTS` setting, this checks localhost. With `HOSTS`, it runs the
+distributed prerequisite checks described above.
 
 ### Run your first test
 
