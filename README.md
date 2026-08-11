@@ -16,6 +16,8 @@ SPT consists of two integrated components:
 - **SPT Engine**: a Java benchmarking engine that the CLI normally runs in
   managed containers. Advanced users can also run the engine standalone.
 
+![SPT distributed write workload in the terminal UI](cli/docs/images/spt-distributed-write-tui.png)
+
 ## Quick Start
 
 ### Download a pre-built binary
@@ -45,9 +47,10 @@ mv spt-*-linux-amd64 spt
   used in a distributed run.
 - Credentials for a dedicated test target when running real S3 workloads.
 
-After configuring the target and hosts below, run `./spt verify` to check these
-prerequisites automatically. For a distributed configuration, it validates SSH
-connectivity, Docker availability, and required ports on every configured node.
+After configuring the target and hosts below, run `./spt verify` to check the
+runtime infrastructure automatically. For a distributed configuration, it
+validates SSH connectivity, Docker availability, and required ports on every
+configured node.
 
 ### Engine image selection
 
