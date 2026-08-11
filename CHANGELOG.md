@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.14.1] - 2026-08-11
+
 ### Added
 
 - **Historical S3 version verification** — Added `read-verify --versions=current|all`; all-version discovery preserves exact `(bucket,key,version_id)` identities across every `ListObjectVersions` page, excludes and reports delete markers, and records `excluded_delete_marker_count` in completion evidence, the console summary, and `index.json`.
@@ -13,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Changed
 
 - **Integrity completion schema v2** — Engine-produced completion records now use schema v2 to account explicitly for excluded delete markers; strict readers continue to accept legacy v1 records where that count is necessarily zero.
+- **Root documentation** — Reorganized the README around a focused quick start and capability guide, clarified distributed Docker and SSH prerequisites and `spt verify`, documented version-matched engine images, and added a distributed TUI preview.
+- **Dependency updates** — Updated the GitHub Actions Java setup action used by CI, artifact, and release workflows.
 
 ### Fixed
 
