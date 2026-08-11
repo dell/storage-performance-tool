@@ -1,38 +1,29 @@
 # Dell Storage Performance Tool (SPT)
 
-The Dell **Storage Performance Tool (SPT)** is an open-source benchmark suite purpose-built for S3-compatible storage. SPT couples a task-oriented CLI/TUI with a high-performance engine so you can:
+The Dell **Storage Performance Tool (SPT)** is an open-source benchmark suite
+for S3-compatible storage. It combines a task-oriented CLI/TUI with a
+high-performance engine so you can:
 
-- spin up realistic object workloads in minutes;
-- orchestrate single-node or distributed runs without handcrafting scripts;
-- monitor live throughput and latency in an interactive terminal UI or headless CI logs;
-- reuse the same configuration flow for both mock runs and production endpoints.
+- launch realistic object workloads without handcrafting engine scenarios;
+- orchestrate local or distributed runs;
+- monitor throughput and latency interactively or in headless automation; and
+- use the same workflow for mock tests and real S3 endpoints.
 
-SPT packages two tightly integrated components:
+SPT consists of two integrated components:
 
-- **SPT CLI/TUI** – a Go-based command-line and terminal UI experience for configuring, launching, and monitoring workloads.
-- **SPT Engine** – a Java-based benchmarking engine that executes those workloads inside managed containers.
-
-The CLI orchestrates the engine for you: it prepares configurations, pulls Docker images, starts benchmark runs, and streams live metrics in both interactive and headless modes.
-
----
-
-## Project Layout
-
-```
-storage-performance-tool/
-├── cli/     # Go CLI/TUI source (builds the `spt` binary)
-└── engine/  # Java engine source (builds spt.jar and the Docker bundle)
-```
-
-The top-level repository represents the SPT product. The `cli` and `engine` directories have their own README files for deep dives, but most users interact only with the CLI binary. Direct use of the Java artifacts is reserved for contributors and CI builds.
-
----
+- **SPT CLI/TUI**: a Go application for configuring, launching, and monitoring
+  workloads.
+- **SPT Engine**: a Java benchmarking engine that the CLI normally runs in
+  managed containers. Advanced users can also run the engine standalone.
 
 ## Quick Start
 
 ### Download a pre-built binary
 
-Pre-built `spt` binaries for Linux, macOS, and Windows are published with each [GitHub Release](https://github.com/dell/storage-performance-tool/releases). Download the latest release for your platform, extract, and run:
+Pre-built `spt` binaries for Linux, macOS, and Windows are published with each
+[GitHub Release](https://github.com/dell/storage-performance-tool/releases).
+Download the archive for your platform, extract it, and make the binary
+executable when required:
 
 ```bash
 # Example: Linux amd64 (use linux-arm64 on Arm systems)
@@ -46,228 +37,210 @@ mv spt-*-linux-amd64 spt
 
 ### Prerequisites
 
-- Docker (daemon running)
+- Docker with a running daemon.
+- An SSH client and key-based access for distributed runs.
+- Credentials for a dedicated test target when running real S3 workloads.
 
-### Environment setup (optional but recommended)
+### Engine image selection
 
-SPT automatically reads `.env` files from the current directory — no manual sourcing required. Copy the example and fill in your defaults:
+The CLI runs a matching SPT engine container:
+
+1. Release builds select
+   `ghcr.io/dell/storage-performance-tool:v<cli-version>`.
+2. Local development builds select
+   `ghcr.io/dell/storage-performance-tool:spt_dev`.
+3. `--spt-image <ref>` or `SPT_IMAGE` overrides either default verbatim.
+
+SPT never silently falls back to `latest`; a missing version-matched image is
+an error. Development images are local-only and are not pulled. Build the
+default development image from the repository root with:
 
 ```bash
-cp cli/.env.example .env
-$EDITOR .env
+make -C engine docker-local
 ```
 
-Key variables:
+For distributed development, preload that image on the workers with
+`engine/tools/push-worker-image.sh`.
 
-```bash
+### Configure a test target
+
+SPT automatically reads `$HOME/.env` and `.env` in the current directory; no
+manual sourcing is required. Create `.env` in the directory where you run SPT.
+Common settings are:
+
+```dotenv
 S3_ENDPOINT=https://s3.example.com
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
 S3_BUCKET=test-bucket
 
-# For distributed runs, SPT uses SSH to launch and manage engine
-# containers on remote hosts. List them as comma-separated user@host pairs:
-HOSTS=root@node1,root@node2,root@node3
+# Optional: comma-separated user@host entries for distributed runs
+HOSTS=user@node1,user@node2,user@node3
 ```
 
-### Verify your environment
+Verify the local environment and configured target hosts:
 
 ```bash
 ./spt verify
 ```
 
-This checks localhost by default. When `HOSTS` is set, it verifies SSH connectivity, Docker availability, and port accessibility on each remote node.
+With no `HOSTS` setting, this checks localhost. When `HOSTS` is set, SPT also
+checks SSH connectivity, Docker availability, and required ports on each
+remote node.
 
----
+### Run your first test
 
-## Running Your First Test
-
-Run a local mock workload (no S3 endpoint required):
+Start with a local mock workload, which requires no S3 endpoint:
 
 ```bash
-./spt run mock --duration 30s --threads 4 --auto-terminate-seconds 60
+./spt run mock --duration 30s --threads 4
 ```
 
-Run an S3 write workload:
+> **Data safety:** S3 write and mixed workloads mutate the target, and mixed
+> workloads include DELETE operations. Use a dedicated benchmark bucket or an
+> isolated prefix; never point them at production data.
+
+After configuring `.env`, run an S3 write workload in an isolated prefix:
 
 ```bash
 ./spt run write \
-  --endpoints https://s3.example.com \
-  --access-key "$S3_ACCESS_KEY" \
-  --secret-key "$S3_SECRET_KEY" \
-  --bucket test-bucket \
+  --prefix spt-quickstart/write/ \
   --duration 2m \
   --threads 8 \
-  --object-size 1MB \
-  --auto-terminate-seconds 180
+  --object-size 1MB
 ```
 
-Run a mixed workload (concurrent GET/PUT/DELETE/STAT):
+For unattended execution, add `--headless` and a bounded
+`--auto-terminate-seconds` value. Add `--cleanup` when you want SPT to remove
+objects created by the workload.
 
-```bash
-./spt run mixed \
-  --endpoints https://s3.example.com \
-  --access-key "$S3_ACCESS_KEY" \
-  --secret-key "$S3_SECRET_KEY" \
-  --bucket test-bucket \
-  --duration 5m \
-  --threads 16 \
-  --object-size 1MB \
-  --seed-objects 5000 \
-  --auto-terminate-seconds 600
-```
+### TUI navigation
 
-The default distribution is GET 45% / STAT 30% / PUT 15% / DELETE 10%. Use `--get-distrib`, `--put-distrib`, `--delete-distrib`, and `--stat-distrib` to customize (must sum to 100).
+- `g` toggles the live performance charts, which start hidden.
+- `m` toggles the CLI message pane.
+- `Tab` switches between viewports.
+- Arrow keys or `j`/`k` scroll.
+- `q` or `Ctrl+C` exits the session.
 
-> ✅ Tip: Always set `--auto-terminate-seconds` for unattended runs to prevent long-lived containers from hanging CI jobs.
+Headless mode activates automatically when no TTY is available; use
+`--headless` to force it.
 
-### TUI Navigation Highlights
+## Core Capabilities
 
-- `g` toggles the live performance charts (hidden by default)
-- `m` toggles the CLI message pane
-- `TAB` switches between viewports
-- Arrow keys or `j/k` scroll
-- `q` or `Ctrl+C` exits the session
-
-Headless mode activates automatically when no TTY is available; use `--headless` to force it manually.
-
-For the full CLI reference (all flags, workload types, distributed options, RDMA, S3 Tables), see [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md). For persisted-object correctness testing, see [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md).
-
----
-
-## Features
-
-- **Unified Experience** -- SPT CLI orchestrates the engine inside Docker, so users never touch raw JARs.
-- **Multi-Workload Support** -- write, read, write-verify, read-verify, list, mixed, and mock workloads out of the box, with S3 Tables (Iceberg) benchmarks.
-- **Pluggable S3 Storage Drivers** -- choose the backend that fits your target: `default` (Netty), `aws` (AWS SDK v2), or `rdma` (hardware-accelerated). Select with `--s3-driver`.
-- **S3 Multipart Upload** -- upload large objects in parallel parts with automatic abort on failure, per-part retry (up to 3 attempts), and per-part checksum support. Enable with `--part-size`.
-- **S3 Checksum Validation** -- compute and send checksums on write requests with `--checksum` (`crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`). When combined with multipart upload, checksums are applied per part. Supported by the Netty, AWS SDK, and RDMA drivers.
-- **Persisted-Data Verification** -- `write-verify` and `read-verify` attach versioned SHA-256 object metadata and later validate complete GET responses, with resumable manifests and corruption-specific exit status (see [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md)).
-- **Data Compressibility & Deduplication Controls** -- shape generated object data for storage-efficiency benchmarks with `--object-data-compressibility` (0-100% target compressibility) and `--object-data-dedupable=false` (per-4KB anti-dedupe stamping).
-- **Interactive & Headless** -- flip between a terminal UI for live monitoring and headless mode for CI/CD.
-- **Distributed Runs** – preflight checks, node orchestration, and attachment support are built into the CLI.
-- **Scenario Generation** – the CLI generates scenario files on the fly for the engine, sparing users from manual scripting.
-- **Replay Archived Workloads** – import archived SPT or legacy Mongoose artifacts from a result-folder URL and replay the equivalent S3 workload against your current target configuration.
-- **Decoupled Write-Then-Read** – save item lists from write benchmarks (`--save-items`) and replay them in independent read passes (`--items-file`) with different concurrency, duration, or RDMA settings.
-- **Mixed Workloads** – run GET, PUT, DELETE, and STAT operations concurrently with configurable weights (`spt run mixed`). Seed objects automatically, tune the operation distribution, and optionally clean up when done.
-- **Post-Quantum TLS** -- hybrid PQC key exchange on the Netty HTTPS path, enabled by default with classical fallback (see [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md)).
-- **SigV4-first Authentication** – defaults to AWS Signature Version 4 with opt-in fallback for legacy targets.
-- **S3-RDMA Acceleration** – optional hardware-accelerated data path for compatible storage targets (see [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md)).
-- **S3 Tables (Iceberg)** – benchmark Amazon S3 Tables across three vectors: snapshot commit TPS, compaction latency, and catalog discovery latency (see [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md)).
-- **Logging & Trace Capture** – configurable logs plus optional trace files for deeper troubleshooting.
-
----
+- **Workload coverage**: run write, read, write-verify, read-verify, list,
+  mixed, mock, and S3 Tables workloads.
+- **Pluggable S3 drivers**: select the Netty, AWS SDK v2, or optional RDMA
+  backend with `--s3-driver`.
+- **Multipart uploads and checksums**: exercise multipart object creation and
+  request checksums including CRC32, CRC32C, SHA-1, SHA-256, and CRC64-NVME.
+- **Persisted-data verification**: write SHA-256 integrity metadata and verify
+  stored objects later with resumable manifests and corruption-specific exit
+  status. See [S3 integrity testing](cli/docs/S3_INTEGRITY.md).
+- **Data-shaping controls**: tune compressibility and deduplication resistance
+  for storage-efficiency tests.
+- **Distributed execution**: run preflight checks and orchestrate benchmark
+  containers across multiple clients.
+- **Interactive and automated operation**: monitor runs in the TUI or emit
+  headless logs and result artifacts for CI/CD.
+- **Replay and decoupled workflows**: replay archived workloads or save object
+  lists for independent read passes.
+- **Modern transport options**: use SigV4-first authentication and optional
+  post-quantum TLS negotiation on supported Netty HTTPS paths.
+- **Specialized backends**: exercise compatible S3-RDMA targets and Amazon S3
+  Tables workloads.
 
 ## Storage Drivers
 
-SPT supports multiple S3 storage driver backends. Use `--s3-driver` to select one:
+Use `--s3-driver` to select an S3 backend:
 
 | Driver | Flag value | Description |
-|--------|-----------|-------------|
-| Netty (default) | `default` or `netty` | Custom Netty-based HTTP client. Battle-tested, highest throughput on most targets. |
-| AWS SDK | `aws` | AWS SDK for Java v2 with the Apache HTTP client. Broadest S3 compatibility, standard error handling. |
-| RDMA | `rdma` | Hardware-accelerated data path for compatible storage targets (e.g., Dell ECS). |
+|---|---|---|
+| Netty (default) | `default` or `netty` | SPT's asynchronous Netty HTTP implementation. |
+| AWS SDK | `aws` | AWS SDK for Java v2 using the Apache HTTP client. |
+| RDMA | `rdma` | Optional RDMA data path for compatible Linux clients and storage targets. |
 
-Example:
+For example, run a read workload through the AWS SDK driver while using the
+target settings from `.env`:
 
 ```bash
-# Use the AWS SDK driver for a read workload
 ./spt run read --s3-driver aws \
-  --endpoints https://s3.example.com \
-  --bucket test-bucket \
-  --duration 2m --threads 8 --object-size 1MB
+  --duration 2m \
+  --threads 8 \
+  --object-size 1MB
 ```
 
-The driver flag works with all S3 workload types (write, read, list, mixed). See [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) for the full reference.
+Driver and workload compatibility differs by feature. See the
+[CLI syntax reference](cli/docs/SPT_SYNTAX.md) for the complete matrix. RDMA
+acceleration requires compatible hardware and currently applies to write and
+read data paths; see the [S3-RDMA guide](cli/docs/S3_RDMA.md).
 
----
+## Documentation
 
-## S3-RDMA Acceleration
+- [CLI overview](cli/README.md) - installation, commands, configuration, and
+  distributed operation.
+- [CLI syntax reference](cli/docs/SPT_SYNTAX.md) - all commands, flags, and
+  examples.
+- [S3 integrity testing](cli/docs/S3_INTEGRITY.md) - persisted-object write/read
+  verification, artifacts, and automation contracts.
+- [Archived workload replay](cli/docs/REPLAY.md) - import and replay SPT or
+  legacy Mongoose workloads.
+- [S3-RDMA](cli/docs/S3_RDMA.md) - setup, tuning, architecture, and
+  troubleshooting.
+- [S3 Tables](cli/docs/S3_TABLES.md) - Iceberg benchmark vectors and usage.
+- [Post-quantum TLS](cli/docs/PQC_TLS.md) - negotiation behavior and engine
+  configuration.
+- [Engine overview](engine/README.md) - standalone usage, architecture, and
+  extension development.
 
-SPT supports an optional RDMA (Remote Direct Memory Access) data path for S3 workloads. When enabled, object transfers bypass the kernel networking stack for significantly lower latency and higher throughput on supported hardware. Add `--use-rdma` to any S3 write or read command to activate the RDMA driver.
+## Project Layout
 
-**Requirements:** Linux, RDMA-capable NICs (Mellanox ConnectX-4+), an RDMA-capable storage target (e.g., Dell ECS), and `rdma-core` system packages.
+```text
+storage-performance-tool/
+├── cli/     # Go CLI/TUI source; builds the spt binary
+└── engine/  # Java engine source; builds spt.jar and the Docker bundle
+```
 
-See [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) for CLI flags, threshold tuning, architecture details, and troubleshooting.
+Most users interact only with the CLI. Contributors and advanced users can use
+the component documentation for lower-level build, runtime, and extension
+details.
 
----
+## Building and Contributing
 
-## Build & Contribution Overview
+Run `make setup` from the repository root to check the required Go, Java,
+Docker, and build tooling for full-project development.
 
-- The **MIT License** applies to the entire project (see [`LICENSE`](LICENSE)).
-- Contributions and bug reports are welcome via GitHub issues and pull requests.
-- Support follows standard open-source conventions; there is no dedicated escalation path.
-
-### Building from Source
-
-Prerequisites: Go 1.25+, Java 21 (JDK), Docker, GNU Make.
+For CLI-only development:
 
 ```bash
-git clone https://github.com/dell/storage-performance-tool.git
-cd storage-performance-tool
-make build-cli        # produces ./cli/spt
+make -C cli build
+make -C cli test
+make -C cli lint
+make -C cli ci-local
 ```
 
-### CLI (Go) Tooling Highlights
+For engine development:
 
-- `make build` / `make run` – compile or run the CLI locally.
-- `make test` / `make lint` – execute the Go test suite and two-pass lint policy (production vs. test rules).
-- `make ci-local` – the local CI workflow (tidy, fmt-check, vet, build, lint policy).
-- Dependencies use Go modules (no vendoring); ensure outbound network access or a pre-warmed module cache.
+```bash
+make -C engine bundle
+make -C engine test
+make -C engine lint
+```
 
-### Engine (Java) Tooling Highlights
+Use the root `make build`, `make test`, and `make lint` targets when working
+across both components. First-time builds may require network access or
+pre-populated Go and Gradle caches.
 
-- `./gradlew build` (from `engine/`) – builds `spt.jar` and supporting artifacts.
-- `./gradlew :bundle:build` – produces the Docker-ready bundle consumed by the CLI.
-- See `engine/README.md` for detailed module structure and advanced usage.
+See the [CLI contribution guide](cli/CONTRIBUTING.md) and
+[engine contribution guide](engine/CONTRIBUTING.md) for component-specific
+guidance.
 
----
+## Getting Help and Providing Feedback
 
-## Roadmap Snapshot
-
-- Continue expanding CI/CD pipeline: automated release publishing of `spt` binaries and versioned Docker images to GitHub Releases and GHCR.
-- Streamline documentation so contributors and users find SPT-first concepts across CLI and engine guides.
-
-For detailed engineering notes and planning documents, browse the `docs/` directories inside `cli/` and `engine/`.
-
-- [`cli/docs/SPT_SYNTAX.md`](cli/docs/SPT_SYNTAX.md) — Full CLI syntax reference (all commands, flags, and examples)
-- [`cli/docs/S3_INTEGRITY.md`](cli/docs/S3_INTEGRITY.md) — Persisted-object write/read verification, artifacts, and automation contract
-- [`cli/docs/REPLAY.md`](cli/docs/REPLAY.md) — Replay archived SPT or legacy Mongoose workloads against a current S3 target
-- [`cli/docs/S3_RDMA.md`](cli/docs/S3_RDMA.md) — S3-RDMA acceleration setup, tuning, and architecture
-- [`cli/docs/S3_TABLES.md`](cli/docs/S3_TABLES.md) — S3 Tables (Iceberg) test vectors and usage guide
-- [`cli/docs/PQC_TLS.md`](cli/docs/PQC_TLS.md) — Post-quantum TLS handshake support and configuration
-
----
-
-## Getting Help / Providing Feedback
-
-- File bugs or feature requests via [GitHub Issues](https://github.com/dell/storage-performance-tool/issues).
-- Join the conversation via [GitHub Discussions](https://github.com/dell/storage-performance-tool/discussions).
-- Contributions should follow the standard fork-and-PR workflow.
-
----
+- File bugs and feature requests through
+  [GitHub Issues](https://github.com/dell/storage-performance-tool/issues).
+- Submit changes using the standard fork-and-pull-request workflow.
 
 ## License
 
-SPT is released under the [MIT License](LICENSE). By submitting a pull request, you agree that your contribution will be licensed under MIT.
-
-## Engine image selection
-
-The CLI launches an engine container image whose tag is **derived from the CLI's
-own version**, so the engine you run always matches the CLI you invoked.
-
-Resolution order (highest precedence first):
-
-1. **`--spt-image <ref>`** flag, or the **`SPT_IMAGE`** environment variable — used
-   verbatim. This is how the comparison harness pins a specific version per run.
-2. **Release builds** → `ghcr.io/dell/storage-performance-tool:v<version>`
-   (e.g. a `5.10.3` CLI runs `...:v5.10.3`). Matches the published tag scheme.
-3. **Local/dev builds** → `ghcr.io/dell/storage-performance-tool:spt_dev`, the
-   local-only image produced by `make docker-local` and distributed to workers
-   with `engine/tools/push-worker-image.sh`. Dev images are never pulled from a
-   registry (the pull is auto-skipped).
-
-There is **no fallback to `:latest`**: if a release's matching image tag cannot be
-found it fails loudly rather than silently running a different engine version —
-this keeps benchmark comparisons honest. Use `--spt-image` / `SPT_IMAGE` if you
-explicitly want a floating tag such as `...:latest`.
+SPT is released under the [MIT License](LICENSE). By submitting a pull request,
+you agree that your contribution will be licensed under MIT.
