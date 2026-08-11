@@ -226,7 +226,7 @@ Also there's a shortcut alias for the load operation types:
 |---------------------------|---------------|---------|-------------|
 | load-op-list-delimiter    | String/null   | null    | Optional delimiter for pseudo-directory listings. When null, full object keys are returned. |
 | load-op-list-fetch_metadata | Flag        | false   | When true, aggregate size/etag metadata available in `ListObjectsV2` responses; remains lightweight when false. |
-| load-op-list-include_versions | Flag     | false   | Switches to `ListObjectVersions`, returning each version as a distinct success. Buckets without versioning return empty results and emit a warning. |
+| load-op-list-include_versions | Flag     | false   | Switches to paginated `ListObjectVersions`, returning each data version with its exact version ID and excluding delete markers while counting them separately. Unversioned-bucket results are target-specific and may be empty or contain a literal `null` version. |
 | load-op-list-max_keys     | Integer >= 0  | 0       | Overrides the per-request page size. 0 defers to S3 defaults; positive values are capped at the service limit (1000). |
 | load-op-list-sharding-mode | String       | auto      | When unset, `auto` selects `none` for single-threaded runs and `static` when concurrency > 1. Explicit values override the default: `none` runs a single LIST stream; `static` seeds multiple prefixes locally so each worker enumerates a unique prefix. |
 | load-op-list-sharding-radix | Integer >= 0 | 0      | Number of static prefixes to seed. 0 defaults to the length of `load-op-list-sharding-charset`. Profiles set this automatically but you can override it. |

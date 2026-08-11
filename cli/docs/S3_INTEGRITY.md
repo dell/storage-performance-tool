@@ -121,14 +121,19 @@ spt run read-verify \
   --headless
 ```
 
-This mode uses S3 `ListObjectVersions` and requires the corresponding
-list-version permission. Every data version is selected by exact
-`(bucket,key,version_id)` identity; `--object-count` caps those identities rather
-than distinct keys. Delete markers are never read as object data and their
-excluded count is reported in the completion evidence, console summary, and
-`index.json`. A suspended bucket's literal `null` version ID is preserved and
-sent on the exact-version GET. An unversioned bucket normally produces an empty
-all-version selection, subject to the target's S3 compatibility behavior and
+This mode follows every S3 `ListObjectVersions` page and requires the target's
+list-version permission (`s3:ListBucketVersions` in AWS IAM). A denied version
+listing fails closed without publishing usable discovery completion evidence;
+SPT never falls back to current-version listing. Every data version is selected
+by exact `(bucket,key,version_id)` identity. `--object-count` applies after
+canonical sorting and de-duplication, so it caps version identities rather than
+distinct keys. Delete markers are never read as object data and their excluded
+count is reported in the completion evidence, console summary, and `index.json`.
+
+Suspended and unversioned behavior depends on the target's S3 compatibility.
+Some targets return no version entries for an unversioned bucket; others return
+the current object with the literal `null` version ID. SPT preserves a returned
+`null` ID and sends it on the exact-version GET. A genuinely empty result follows
 the usual `--allow-empty-selection` policy.
 
 Version listing is not a snapshot. Use a quiescent, controlled prefix: concurrent
@@ -266,6 +271,14 @@ Distributed engine sources remain under
 and node-level evidence and promotes canonical run files without deleting the
 sources.
 
+Distributed completion counts distinguish raw observations from canonical
+identities. When multiple nodes receive overlapping LIST seeds,
+`source_record_count` and `excluded_delete_marker_count` include every node's
+observations. `unique_record_count`, `selected_record_count`, and the canonical
+manifest describe the post-de-duplication set. Thus three nodes may report
+3,015 source rows for the same 1,005 unique version identities without issuing
+duplicate verification reads.
+
 ## Digest-cost reporting
 
 Metadata writes pre-hash the full final object before dispatching PUT or
@@ -291,7 +304,11 @@ Before any distributed verification I/O, the CLI proves that every participant
 resolves the selected engine image to the same immutable image ID. A matching
 mutable tag is not sufficient. It records each participant and the selected
 identity tier in `spt_run_params.json`, then checks the entry node's existing
-`/config/schema` endpoint for the four required integrity paths.
+`/config/schema` endpoint for the five required integrity paths:
+`storage.integrity.mode`, `storage.integrity.algorithm`,
+`storage.integrity.input.provenance`,
+`storage.integrity.input.expectedProducerId`, and
+`storage.integrity.selection.maxCount`.
 
 Controlled comparison and release-evidence procedures additionally require the
 strong payload tier: every participant must have an identical canonical
@@ -353,10 +370,29 @@ cli/tools/testreadverifyversions.sh \
   --confirm-target-mutation
 ```
 
-A full qualification also expects credentials that can read objects but cannot
-list object versions, plus an identity-verified multi-host target. Use
-`--allow-incomplete` only for a local qualification; the summary then records
-those cases as explicit gaps. The harness refuses native RDMA because its
+For the distributed pagination gate, preload the same commit-specific image on
+every configured host and explicitly opt the profile into the harness:
+
+```bash
+engine/tools/push-worker-image.sh \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit>
+
+source cli/.env
+cli/tools/testreadverifyversions.sh \
+  --phase run \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit> \
+  --skip-image-pull \
+  --distributed-hosts "$HOSTS" \
+  --distributed-min-hosts 3
+```
+
+The harness requires the stronger payload-identity tier for distributed release
+evidence and compares the de-duplicated result with its independent oracle. A
+full qualification also expects credentials that can read objects but cannot
+list object versions. `--allow-incomplete` permits either missing external gate
+and records the exact gap in `qualification-summary.json`; it does not silently
+convert a skipped gate into a pass. The harness refuses native RDMA because its
 hardware path must be qualified separately on RDMA-capable systems. It only
 creates or removes bucket names beginning with `spt-version-qual-`, and every
 mutating phase requires `--confirm-target-mutation`.
@@ -373,9 +409,8 @@ mutating phase requires `--confirm-target-mutation`.
 - Concurrent overwrite or replication change during current-version discovery
   can otherwise be mistaken for corruption.
 - Copy and update operations do not maintain the v1 metadata contract.
-- Local qualification covers a real versioned S3-compatible target. PowerStore and
-  distributed target compatibility remain separate qualification gates.
-- Netty and AWS S3 paths have execution qualification. The RDMA metadata path is
+- Netty and AWS S3 paths have local and three-client execution qualification on
+  a real versioned S3-compatible target. The RDMA metadata path is
   implemented and software-path tested, but its hardware path was not qualified;
   do not infer RDMA hardware parity from this release.
 

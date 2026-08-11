@@ -140,8 +140,10 @@ The marker is published only after its CSV and binds version/status, positive
 `run_id`, producer kind and ID, source/unique/selected counts, byte length, and
 SHA-256. `engine_step` provenance requires the exact producing step ID;
 `cli_stager` requires `spt-cli-items-stager-v1`. A missing, malformed, stale, or
-mismatched marker prevents dependent I/O. Completion v1 is a closed schema:
-unknown JSON members and trailing JSON values are rejected.
+mismatched marker prevents dependent I/O. Completion v2 adds
+`excluded_delete_marker_count`, which is zero outside all-version discovery.
+Each completion version is a closed schema: unknown JSON members and trailing
+JSON values are rejected.
 
 LIST discovery streams complete object entries into per-node sources, merges
 RFC 4180 records, canonical external-sorts them by `(bucket,key,version_id)`,
@@ -149,3 +151,9 @@ de-duplicates shard overlap, applies the configured selection maximum,
 publishes `verify-input.csv`, and only then starts READ. QA-owned `external`
 input is parsed and validated but intentionally does not require an engine
 completion marker.
+
+With `load-op-list-include_versions=true`, LIST discovery preserves every data
+version's exact ID in the canonical identity and excludes delete markers while
+recording their count in completion v2. Distributed source counts include
+overlapping per-node observations; unique and selected counts describe the
+canonical post-de-duplication manifest.

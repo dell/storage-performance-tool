@@ -128,8 +128,13 @@ objects: `--object-count` caps its deterministic discovery selection and
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
 
-All-version discovery requires list-version permission and a quiescent prefix;
-S3 version pagination is not a snapshot of concurrent mutations.
+All-version discovery requires the target's list-version permission
+(`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never
+falls back to current-version discovery. SPT follows version pagination,
+de-duplicates exact `(bucket,key,version_id)` identities, and excludes and
+reports delete markers. Use a quiescent prefix because version pagination is not
+a snapshot of concurrent mutations. Unversioned-bucket results are target-specific;
+see [S3_INTEGRITY.md](S3_INTEGRITY.md).
 
 **`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
 
