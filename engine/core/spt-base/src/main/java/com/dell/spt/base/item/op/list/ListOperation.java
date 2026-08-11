@@ -24,6 +24,14 @@ public interface ListOperation<I extends PathItem> extends PathOperation<I> {
 	/** Replaces the concrete object records returned by this page. */
 	default void listedObjects(final List<ListedObject> objects) {}
 
+	/** Returns the number of delete markers excluded from this page's data-version results. */
+	default int deleteMarkersListed() {
+		return 0;
+	}
+
+	/** Records the number of delete markers excluded from this page's data-version results. */
+	default void deleteMarkersListed(final int n) {}
+
 	/** Returns aggregated bytes across listed objects (0 when metadata absent). */
 	long bytesListed();
 

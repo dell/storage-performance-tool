@@ -74,6 +74,7 @@ type FinalizeOutcome struct {
 	SelectionSourceCount       int64                               `json:"selection_source_count"`
 	SelectionUniqueCount       int64                               `json:"selection_unique_count"`
 	SelectionCount             int64                               `json:"selection_count"`
+	ExcludedDeleteMarkerCount  int64                               `json:"excluded_delete_marker_count"`
 	VerificationAttemptedCount int64                               `json:"verification_attempted_count"`
 	VerificationDeferred       bool                                `json:"verification_deferred"`
 	VerifiedCount              int64                               `json:"verified_count"`
@@ -247,6 +248,21 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 		inputSourceCompletionPath = filepath.Join(options.ResultsRoot, producerStep+"."+inputCompletionName)
 		inputPromotionSource = fmt.Sprintf("%s from step %s", inputName, producerStep)
 	}
+	if options.Workload == workload.ReadVerify && options.StagedManifest == "" && !readNotStarted {
+		listCounts, countsErr := readOperationMetrics(options.ResultsRoot, listStep, "LIST")
+		if countsErr != nil {
+			return outcome, countsErr
+		}
+		if listCounts.failure > 0 {
+			failureLabel := "failed operations"
+			if listCounts.failure == 1 {
+				failureLabel = "failed operation"
+			}
+			return outcome, fmt.Errorf(
+				"LIST discovery recorded %d %s; refusing partial verification selection",
+				listCounts.failure, failureLabel)
+		}
+	}
 	if err = promoteCompletionPair(
 		inputSourcePath, inputSourceCompletionPath,
 		inputPath, inputCompletionPath,
@@ -267,6 +283,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 	outcome.SelectionSourceCount = int64(inputCompletion.SourceRecordCount)
 	outcome.SelectionUniqueCount = int64(inputCompletion.UniqueRecordCount)
 	outcome.SelectionCount = int64(inputCompletion.SelectedRecordCount)
+	outcome.ExcludedDeleteMarkerCount = int64(inputCompletion.ExcludedDeleteMarkerCount)
 	if options.Workload == workload.WriteVerify {
 		createCounts, countsErr := readOperationMetrics(options.ResultsRoot, createStep, "CREATE")
 		if countsErr != nil {
@@ -377,6 +394,7 @@ func integritySummary(outcome FinalizeOutcome, finalErr error) *results.Integrit
 		SelectionSourceCount:       outcome.SelectionSourceCount,
 		SelectionUniqueCount:       outcome.SelectionUniqueCount,
 		SelectionCount:             outcome.SelectionCount,
+		ExcludedDeleteMarkerCount:  outcome.ExcludedDeleteMarkerCount,
 		VerificationAttemptedCount: outcome.VerificationAttemptedCount,
 		VerificationDeferred:       outcome.VerificationDeferred,
 		VerifiedCount:              outcome.VerifiedCount,

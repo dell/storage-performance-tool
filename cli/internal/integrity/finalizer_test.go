@@ -199,6 +199,10 @@ func TestFinalizeReadVerifyPreservesDiscoveryReconciliationCounts(t *testing.T) 
 		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
 		{"READ", "64", "0", "0"},
 	})
+	writeCSVFixture(t, filepath.Join(root, listStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
+		{"LIST", "1", "0", "0"},
+	})
 
 	outcome, err := FinalizeResults(FinalizeOptions{
 		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 151,
@@ -220,6 +224,41 @@ func TestFinalizeReadVerifyPreservesDiscoveryReconciliationCounts(t *testing.T) 
 		manifest.Integrity.SelectionUniqueCount != 64 ||
 		manifest.Integrity.SelectionCount != 64 {
 		t.Fatalf("index.json lost discovery reconciliation counts: %+v", manifest.Integrity)
+	}
+}
+
+func TestFinalizeReadVerifyRejectsPartialDiscoveryWhenListOperationFailed(t *testing.T) {
+	root := t.TempDir()
+	listStep := "mt-001-test-list"
+	readStep := "mt-002-test-verify"
+	writeResultsIndex(t, root, listStep, readStep)
+	writeCommittedFixture(t, root, listStep, VerifyInputName, 152, listStep, [][]string{
+		canonicalHeader,
+		{"b", "first-page-object", "1", "v1"},
+	})
+	writeCSVFixture(t, filepath.Join(root, listStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
+		{"LIST", "1", "1", "0"},
+	})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
+		{"READ", "1", "0", "0"},
+	})
+
+	outcome, err := FinalizeResults(FinalizeOptions{
+		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 152,
+		StepIDs: []string{listStep, readStep},
+	})
+	if err == nil || !strings.Contains(err.Error(), "LIST discovery recorded 1 failed operation") {
+		t.Fatalf("FinalizeResults() error = %v, want failed discovery rejection", err)
+	}
+	if outcome.Complete {
+		t.Fatalf("partial discovery must not finalize complete: %+v", outcome)
+	}
+	for _, name := range []string{VerifyInputName, VerifyInputCompletionName} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("partial discovery unexpectedly promoted %s: %v", name, statErr)
+		}
 	}
 }
 

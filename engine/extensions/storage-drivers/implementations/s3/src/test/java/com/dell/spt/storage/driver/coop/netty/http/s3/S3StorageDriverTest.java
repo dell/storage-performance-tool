@@ -9,12 +9,16 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.item.ItemImpl;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
+import com.dell.spt.base.item.io.IntegrityOperationManifestOutput;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.ListOperationImpl;
+import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.path.PathOperationsBuilderImpl;
 import com.dell.spt.base.storage.Credential;
@@ -53,6 +57,7 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -61,6 +66,7 @@ import java.lang.reflect.Method;
 import java.net.ConnectException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.Base64;
 import java.util.ArrayDeque;
 import java.util.AbstractList;
@@ -90,6 +96,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 
 public class S3StorageDriverTest {
+
+	@TempDir
+	Path tempDir;
 
 	private S3StorageDriver<Item, Operation<Item>> newDriverMock() {
 		// Create a mock that calls real methods; constructor is not invoked
@@ -2183,6 +2192,30 @@ public class S3StorageDriverTest {
 						"/bucket/prefix/key~literal?versionId=version%2Fwith%2Bchars", request.uri());
 		assertEquals("prefix/key~literal", item.name());
 		assertNull(request.headers().get("x-amz-version-id"));
+	}
+
+	@Test
+	void suspendedBucketNullVersionSurvivesManifestRoundTripIntoGetQuery() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final var listOp = new ListOperationImpl<PathItemImpl>(
+						0, OpType.LIST, new PathItemImpl("prefix"), Credential.NONE);
+		listOp.listedObjects(List.of(new ListedObject("prefix/key", 3, "null")));
+		try (final var output = new IntegrityOperationManifestOutput<>(
+						manifest, "/bucket", OpType.LIST)) {
+			output.put(listOp);
+		}
+
+		final IntegrityManifestDataItem item;
+		try (final var input = new IntegrityManifestItemInput(manifest)) {
+			item = input.get();
+		}
+		final Operation<Item> op = new OperationImpl<>(
+						1, OpType.READ, item, null, null, TEST_CRED);
+		assertEquals("null", op.requestedVersionId());
+
+		final var driver = new TestS3Driver(metadataConfig(false));
+		final HttpRequest request = driver.httpRequest(op, "s3.us-east-1.amazonaws.com:443");
+		assertEquals("/bucket/prefix/key?versionId=null", request.uri());
 	}
 
 	@Test

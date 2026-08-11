@@ -414,6 +414,7 @@ Executes a benchmark test with the specified workload type.
 - `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` (skips seed/discovery)
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
+- `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
 - `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
 - `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.

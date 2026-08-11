@@ -14,6 +14,7 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 
 	private int objectsListed;
 	private List<ListedObject> listedObjects = List.of();
+	private int deleteMarkersListed;
 	private long bytesListed;
 	private String continuationToken;
 	private boolean truncated;
@@ -35,6 +36,7 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 		super(other);
 		this.objectsListed = other.objectsListed;
 		this.listedObjects = other.listedObjects;
+		this.deleteMarkersListed = other.deleteMarkersListed;
 		this.bytesListed = other.bytesListed;
 		this.continuationToken = other.continuationToken;
 		this.truncated = other.truncated;
@@ -56,6 +58,16 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 	@Override
 	public void objectsListed(final int n) {
 		this.objectsListed = n;
+	}
+
+	@Override
+	public int deleteMarkersListed() {
+		return deleteMarkersListed;
+	}
+
+	@Override
+	public void deleteMarkersListed(final int n) {
+		deleteMarkersListed = n;
 	}
 
 	@Override
@@ -129,6 +141,7 @@ public class ListOperationImpl<I extends PathItem> extends PathOperationImpl<I>
 		super.reset();
 		objectsListed = 0;
 		listedObjects = List.of();
+		deleteMarkersListed = 0;
 		bytesListed = 0;
 		truncated = false;
 		countBytesDone(0);

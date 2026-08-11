@@ -160,6 +160,7 @@ aws-sdk-core = { module = "software.amazon.awssdk:sdk-core", version.ref = "awsS
 aws-utils = { module = "software.amazon.awssdk:utils", version.ref = "awsSdk" }
 aws-profiles = { module = "software.amazon.awssdk:profiles", version.ref = "awsSdk" }
 aws-crt = { module = "software.amazon.awssdk.crt:aws-crt", version.ref = "awsCrt" }
+aws-crt-client = { module = "software.amazon.awssdk:aws-crt-client", version.ref = "awsSdk" }
 
 # Bouncy Castle
 bouncycastle-bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }

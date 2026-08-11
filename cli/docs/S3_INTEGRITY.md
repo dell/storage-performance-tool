@@ -106,6 +106,50 @@ fall back to generated content or accept arbitrary objects written by older SPT
 versions and other tools. It never deletes selected objects and rejects
 `--cleanup`.
 
+To verify every historical data version under the prefix, add
+`--versions=all`:
+
+```bash
+spt run read-verify \
+  --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" \
+  --secret-key "$S3_SECRET_KEY" \
+  --bucket qualification \
+  --prefix campaign-42/ \
+  --versions=all \
+  --threads 32 \
+  --headless
+```
+
+All-version discovery intentionally uses one exact-prefix LIST stream so a
+sub-prefix containing only deleted keys cannot be omitted by a current-object
+partition probe. The discovery LIST phase is therefore serialized regardless of
+`--threads`; `--threads` still controls the concurrent exact-version GETs in the
+verification phase.
+
+This mode follows every S3 `ListObjectVersions` page and requires the target's
+list-version permission (`s3:ListBucketVersions` in AWS IAM). A denied version
+listing fails closed without publishing usable discovery completion evidence;
+SPT never falls back to current-version listing. Every data version is selected
+by exact `(bucket,key,version_id)` identity. `--object-count` applies after
+canonical sorting and de-duplication, so it caps version identities rather than
+distinct keys. Delete markers are never read as object data and their excluded
+count is reported in the completion evidence, console summary, and `index.json`.
+
+Suspended and unversioned behavior depends on the target's S3 compatibility.
+Some targets return no version entries for an unversioned bucket; others return
+the current object with the literal `null` version ID. SPT preserves a returned
+`null` ID and sends it on the exact-version GET. A version entry without a
+nonempty version ID is a hard discovery failure, not an empty selection. A
+genuinely empty result follows the usual `--allow-empty-selection` policy.
+
+Version listing is not a snapshot. Use a quiescent, controlled prefix: concurrent
+version creation or deletion during pagination can change the observed set.
+Archived versions are selected normally, but a version that has not been
+restored will fail its GET and remain in `verify-remaining.csv`. Omit
+`--versions` with `--items-file` because the manifest already supplies exact
+identities.
+
 For QA-controlled selection, supply a canonical manifest instead of LIST:
 
 ```bash
@@ -200,12 +244,15 @@ using an ordinary item-file deletion scenario to reclaim preserved objects.
 Manifest completion records use a crash-durable two-file commit. SPT flushes
 and synchronizes each completed file, atomically creates its final name without
 replacing an existing name, and synchronizes the containing directory. The CSV
-is committed before its JSON marker. The marker contains exactly these v1
-members: `version`, `status`, `run_id`, `producer_kind`, `producer_id`,
-`artifact`, `source_record_count`, `unique_record_count`,
-`selected_record_count`, `manifest_bytes`, and `manifest_sha256`. Unknown
-members are rejected. A missing, staging-only, stale, or mismatched marker
-prevents a dependent engine step from starting.
+is committed before its JSON marker. Readers accept legacy v1 markers so
+manifests created by the first integrity release remain reusable. New engine
+records use v2, which retains the v1 members (`version`, `status`, `run_id`,
+`producer_kind`, `producer_id`, `artifact`, `source_record_count`,
+`unique_record_count`, `selected_record_count`, `manifest_bytes`, and
+`manifest_sha256`) and adds `excluded_delete_marker_count`. That count is zero
+outside version discovery. Unknown members and a marker field inconsistent with
+its declared schema version are rejected. A missing, staging-only, stale, or
+mismatched marker prevents a dependent engine step from starting.
 The marker must contain exactly one JSON object plus optional trailing
 whitespace. Publication never replaces an existing canonical name. A retry
 may reuse a fully validated matching pair or complete a matching manifest-only
@@ -230,6 +277,14 @@ Distributed engine sources remain under
 `${home_dir}/log/${step_id}/<artifact>`. CLI retrieval keeps the step-prefixed
 and node-level evidence and promotes canonical run files without deleting the
 sources.
+
+Distributed completion counts distinguish raw observations from canonical
+identities. When multiple nodes receive overlapping LIST seeds,
+`source_record_count` and `excluded_delete_marker_count` include every node's
+observations. `unique_record_count`, `selected_record_count`, and the canonical
+manifest describe the post-de-duplication set. Thus three nodes may report
+3,015 source rows for the same 1,005 unique version identities without issuing
+duplicate verification reads.
 
 ## Digest-cost reporting
 
@@ -256,7 +311,11 @@ Before any distributed verification I/O, the CLI proves that every participant
 resolves the selected engine image to the same immutable image ID. A matching
 mutable tag is not sufficient. It records each participant and the selected
 identity tier in `spt_run_params.json`, then checks the entry node's existing
-`/config/schema` endpoint for the four required integrity paths.
+`/config/schema` endpoint for the five required integrity paths:
+`storage.integrity.mode`, `storage.integrity.algorithm`,
+`storage.integrity.input.provenance`,
+`storage.integrity.input.expectedProducerId`, and
+`storage.integrity.selection.maxCount`.
 
 Controlled comparison and release-evidence procedures additionally require the
 strong payload tier: every participant must have an identical canonical
@@ -290,23 +349,75 @@ the exact running container before scenario submission. Any required remote
 inspection failure is fatal. A local run records the available image evidence
 or its collection error in `spt_run_params.json`.
 
+## End-to-end qualification
+
+Use `cli/tools/testreadverifyversions.sh` to seed a dedicated versioned fixture,
+build independent `mc` oracles, run the candidate CLI and engine image, and
+compare every canonical identity and result artifact. The full suite covers
+current and all-version discovery, deterministic caps, historical digest and
+metadata failures, more than 1,000 data versions with interleaved delete
+markers, suspended and unversioned buckets, and both Netty and AWS drivers.
+
+Seed and run can be separated so the same fixture qualifies a commit-specific
+image:
+
+```bash
+cli/tools/testreadverifyversions.sh --phase seed --confirm-target-mutation
+
+cli/tools/testreadverifyversions.sh \
+  --phase run \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit> \
+  --skip-image-pull \
+  --drivers netty,aws
+
+cli/tools/testreadverifyversions.sh \
+  --phase cleanup \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --confirm-target-mutation
+```
+
+For the distributed pagination gate, preload the same commit-specific image on
+every configured host and explicitly opt the profile into the harness:
+
+```bash
+engine/tools/push-worker-image.sh \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit>
+
+source cli/.env
+cli/tools/testreadverifyversions.sh \
+  --phase run \
+  --evidence-dir cli/results/version-qualification-<id> \
+  --image ghcr.io/dell/storage-performance-tool:allversions-<commit> \
+  --skip-image-pull \
+  --distributed-hosts "$HOSTS" \
+  --distributed-min-hosts 3
+```
+
+The harness requires the stronger payload-identity tier for distributed release
+evidence and compares the de-duplicated result with its independent oracle. A
+full qualification also expects credentials that can read objects but cannot
+list object versions. `--allow-incomplete` permits either missing external gate
+and records the exact gap in `qualification-summary.json`; it does not silently
+convert a skipped gate into a pass. The harness refuses native RDMA because its
+hardware path must be qualified separately on RDMA-capable systems. It only
+creates or removes bucket names beginning with `spt-version-qual-`, and every
+mutating phase requires `--confirm-target-mutation`.
+
 ## Version 1 boundaries
 
 - Verification commands require the Linux CLI; Windows fails preflight before
   evidence creation because its required directory-durability primitive is unavailable.
 - SHA-256 metadata and complete-object GET only; range verification is out of scope.
 - Generated object content for writes; file-backed write payloads are out of scope.
-- Isolated, unversioned prefixes are the normal discovery contract. Automatic
-  LIST discovery selects current versions only; it does not enumerate historical
-  versions. Exact historical versions require a manifest with `version_id`
-  values, and automatic all-version discovery is deferred to a later release.
+- `--versions=current` is the default LIST discovery contract. `--versions=all`
+  enumerates historical data versions by exact identity and excludes delete markers.
+  Version listing is not a snapshot, so qualification requires a quiescent prefix.
 - Concurrent overwrite or replication change during current-version discovery
   can otherwise be mistaken for corruption.
 - Copy and update operations do not maintain the v1 metadata contract.
-- Release qualification did not include a PowerStore target or a real versioned
-  bucket. Those compatibility paths remain unvalidated; exact-version manifest
-  support is implemented but was not target-qualified in this release.
-- Netty and AWS S3 paths have execution qualification. The RDMA metadata path is
+- Netty and AWS S3 paths have local and three-client execution qualification on
+  a real versioned S3-compatible target. The RDMA metadata path is
   implemented and software-path tested, but its hardware path was not qualified;
   do not infer RDMA hardware parity from this release.
 

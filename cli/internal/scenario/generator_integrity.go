@@ -82,6 +82,17 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 		return "", fmt.Errorf("read-verify object count must be non-negative")
 	}
 	ts := resolveTimestamp(params)
+	versions := params.Versions
+	if versions == "" {
+		versions = VersionsCurrent
+	}
+	if versions != VersionsCurrent && versions != VersionsAll {
+		return "", fmt.Errorf("read-verify versions must be %q or %q", VersionsCurrent, VersionsAll)
+	}
+	if params.ItemsFile != "" && versions != VersionsCurrent {
+		return "", fmt.Errorf("read-verify all-version discovery cannot be used with an items file")
+	}
+	params.Versions = versions
 	driver := resolveStorageDriverType(params.S3Driver)
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	readNumber := 2
@@ -112,9 +123,10 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 				Provenance: provenance, ExpectedProducerID: producerID,
 			},
 		},
-		BucketPath: bucketPath,
-		Prefix:     params.Prefix,
-		ItemsFile:  params.ItemsFile,
+		BucketPath:      bucketPath,
+		Prefix:          params.Prefix,
+		ItemsFile:       params.ItemsFile,
+		IncludeVersions: versions == VersionsAll,
 	})
 }
 

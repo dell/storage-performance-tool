@@ -99,7 +99,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
-| `--object-count` | `-n` | `0` | Fixed number of objects to process |
+| `--object-count` | `-n` | `0` | Fixed number of objects to process. With `read-verify --versions=all`, caps canonical version identities rather than distinct keys |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--prefix-shards` | | `-1` | Prefix directories for generated object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
@@ -110,6 +110,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` (skips seed/discovery) |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
+| `--versions` | | `current` | `read-verify` bucket/prefix discovery only. `current` uses ordinary object listing; `all` uses `ListObjectVersions`, preserves exact version IDs, and excludes delete markers. Omit with `--items-file` |
 | `--integrity-max-console-failures` | | `20` | Verification only. Maximum corruption samples printed to the console (`0` suppresses samples; env: `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`) |
 | `--shuffle` | | `false` | `read` only. Shuffle items within each fetched read batch before issuing reads |
 | `--shuffle-batch-size` | | `0` | `read` only. Batch size override used with `--shuffle` (`0` = bounded default `512000`, max `1000000`) |
@@ -126,6 +127,16 @@ objects: `--object-count` caps its deterministic discovery selection and
 `--attach-existing`; both require automatic result collection. See
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
+
+All-version discovery requires the target's list-version permission
+(`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never
+falls back to current-version discovery. SPT follows version pagination,
+de-duplicates exact `(bucket,key,version_id)` identities, and excludes and
+reports delete markers. For completeness, this version LIST phase uses one
+serialized exact-prefix stream; `--threads` controls the later verification GETs,
+not discovery LIST concurrency. Use a quiescent prefix because version pagination
+is not a snapshot of concurrent mutations. Unversioned-bucket results are target-specific;
+see [S3_INTEGRITY.md](S3_INTEGRITY.md).
 
 **`--save-items` / `--items-file` workflow:** By default, `read` workloads seed their own objects via an internal write phase. When you need independent control over the write and read phases (different concurrency, duration, or to reuse a data set across multiple reads), use `--save-items` on a `write` run to persist the object list, then pass the resulting `items.csv` to a `read` run via `--items-file`. See [Write-Then-Read Workflow](#write-then-read-workflow) below for examples.
 

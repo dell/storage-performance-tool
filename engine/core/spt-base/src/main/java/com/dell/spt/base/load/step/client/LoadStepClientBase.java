@@ -31,6 +31,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
+import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -625,6 +626,25 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return metricsAggregator == null ? Collections.emptyList() : metricsAggregator.metricsSnapshotsByIndex(originIndex);
 	}
 
+	static Map<OpType, Long> terminalFailureCounts(
+					final List<? extends MetricsContext<? extends AllMetricsSnapshot>> contexts) {
+		final Map<OpType, Long> counts = new HashMap<>();
+		for (final var context : contexts) {
+			final AllMetricsSnapshot snapshot = context.lastSnapshot();
+			if (snapshot == null || snapshot.failsSnapshot() == null) {
+				throw new IllegalStateException(
+								"terminal failure metrics are unavailable for " + context.opType());
+			}
+			final long failureCount = snapshot.failsSnapshot().count();
+			if (failureCount < 0) {
+				throw new IllegalStateException(
+								"terminal failure metrics are negative for " + context.opType());
+			}
+			counts.merge(context.opType(), failureCount, Math::addExact);
+		}
+		return counts;
+	}
+
 	@Override
 	protected final void doShutdown() {
 		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
@@ -718,6 +738,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throws IOException {
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			IntegrityTerminalException terminalCause = null;
+			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
+			if (integrityModeEnabled()) {
+				try {
+					terminalFailureCountsByOpType = terminalFailureCounts(metricsContexts);
+				} catch (final Throwable cause) {
+					throwUncheckedIfInterrupted(cause);
+					terminalCause = appendTerminalFailure(
+									terminalCause,
+									IntegrityTerminalException.Category.EXECUTION,
+									"failed to capture terminal metadata-mode operation failure counts",
+									cause);
+				}
+			}
 			try {
 				super.doClose();
 			} catch (final Throwable cause) {
@@ -818,7 +851,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			itemInputFileSlicers.clear();
 			for (final var itemOutputFileAggregator : itemOutputFileAggregators) {
 				try {
-					itemOutputFileAggregator.close();
+					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
+						csvAggregator.close(terminalFailureCountsByOpType.getOrDefault(
+										csvAggregator.artifactOpType(), -1L));
+					} else {
+						itemOutputFileAggregator.close();
+					}
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					if (integrityModeEnabled()) {

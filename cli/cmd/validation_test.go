@@ -504,6 +504,7 @@ func newIntegrityValidationCommand(t *testing.T) *cobra.Command {
 	cmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "")
 	cmd.Flags().String("duration", "", "")
 	cmd.Flags().String("part-size", "", "")
+	cmd.Flags().String(flagVersions, scenario.VersionsCurrent, "")
 	cmd.Flags().Int("mpu-concurrent-objects", 0, "")
 	cmd.Flags().Int("mpu-concurrent-parts", 0, "")
 	cmd.Flags().Bool("cleanup", false, "")
@@ -532,6 +533,10 @@ func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
 		{name: "read requires auto results", workload: WorkloadTypeReadVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
 		{name: "write requires auto results", workload: WorkloadTypeWriteVerify, flag: "auto-results", value: "false", wantErr: true, errContains: "require --auto-results=true"},
 		{name: "read accepts items file", workload: WorkloadTypeReadVerify, flag: "items-file", value: "items.csv"},
+		{name: "read accepts all versions", workload: WorkloadTypeReadVerify, flag: flagVersions, value: scenario.VersionsAll},
+		{name: "read rejects unknown versions policy", workload: WorkloadTypeReadVerify, flag: flagVersions, value: "latest", wantErr: true, errContains: "must be"},
+		{name: "write verify rejects versions", workload: WorkloadTypeWriteVerify, flag: flagVersions, value: scenario.VersionsAll, wantErr: true, errContains: "not supported"},
+		{name: "ordinary read rejects versions", workload: WorkloadTypeRead, flag: flagVersions, value: scenario.VersionsAll, wantErr: true, errContains: "not supported"},
 		{name: "write rejects items file", workload: WorkloadTypeWriteVerify, flag: "items-file", value: "items.csv", wantErr: true, errContains: "not supported for write-verify"},
 		{name: "write accepts deferred verification", workload: WorkloadTypeWriteVerify, flag: flagDeferVerification, value: "true"},
 		{name: "read rejects deferred verification", workload: WorkloadTypeReadVerify, flag: flagDeferVerification, value: "true", wantErr: true, errContains: "not supported"},
@@ -552,6 +557,20 @@ func TestValidateIntegrityWorkloadAcceptanceMatrix(t *testing.T) {
 				t.Fatalf("validation error = %q, want containing %q", err, test.errContains)
 			}
 		})
+	}
+}
+
+func TestValidateVersionsRejectsItemsFileDiscoveryBypass(t *testing.T) {
+	cmd := newIntegrityValidationCommand(t)
+	if err := cmd.Flags().Set(flagVersions, scenario.VersionsAll); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("items-file", "items.csv"); err != nil {
+		t.Fatal(err)
+	}
+	err := validateIntegrityWorkloadFlags(cmd, WorkloadTypeReadVerify)
+	if err == nil || !strings.Contains(err.Error(), "bucket/prefix discovery") {
+		t.Fatalf("items-file all-versions validation error = %v", err)
 	}
 }
 

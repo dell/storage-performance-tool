@@ -233,11 +233,12 @@ func TestValidateCompletionPortableAcceptsOneIdentityBoundRecordAndRejectsTraili
 	}
 	digest := sha256.Sum256(manifestData)
 	marker := Completion{
-		Version: 1, Status: "complete", RunID: 17,
+		Version: 2, Status: "complete", RunID: 17,
 		ProducerKind: constants.IntegrityProvenanceEngineStep,
 		ProducerID:   "mt-001-create", Artifact: WrittenName,
 		SourceRecordCount: 1, UniqueRecordCount: 1, SelectedRecordCount: 1,
-		ManifestBytes: int64(len(manifestData)), ManifestSHA256: hex.EncodeToString(digest[:]),
+		ExcludedDeleteMarkerCount: 3, ManifestBytes: int64(len(manifestData)),
+		ManifestSHA256: hex.EncodeToString(digest[:]),
 	}
 	markerData, err := json.Marshal(marker)
 	if err != nil {
@@ -256,6 +257,9 @@ func TestValidateCompletionPortableAcceptsOneIdentityBoundRecordAndRejectsTraili
 	}
 	if validated.SelectedRecordCount != 1 {
 		t.Fatalf("selected record count = %d, want 1", validated.SelectedRecordCount)
+	}
+	if validated.ExcludedDeleteMarkerCount != 3 {
+		t.Fatalf("excluded delete-marker count = %d, want 3", validated.ExcludedDeleteMarkerCount)
 	}
 
 	if err = os.WriteFile(completionPath, append(markerData, []byte("\n{}\n")...), 0o600); err != nil {

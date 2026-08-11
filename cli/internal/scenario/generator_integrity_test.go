@@ -284,6 +284,29 @@ func TestGenerateReadVerifyScenarioDiscoveryAndStagedInput(t *testing.T) {
 		t.Fatalf("discovery READ producer = %#v, want %q", producer, discoveryPlan.Steps[0].ID)
 	}
 
+	if includeVersions := generatedConfigValue(t, discoveryConfigs[0], "load", "op", "list", "include_versions"); includeVersions != false {
+		t.Fatalf("default LIST include_versions = %#v, want false", includeVersions)
+	}
+
+	allVersions, err := GenerateReadVerifyScenario(Params{
+		WorkloadType: WorkloadTypeReadVerify, RunID: 11, Bucket: "b", Prefix: "p/",
+		ObjectCount: 7, Threads: 4, Versions: VersionsAll,
+		BaseTimestamp: "20260730.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allConfigs := parseGeneratedScenarioConfigs(t, allVersions)
+	if includeVersions := generatedConfigValue(t, allConfigs[0], "load", "op", "list", "include_versions"); includeVersions != true {
+		t.Fatalf("all-version LIST include_versions = %#v, want true", includeVersions)
+	}
+	if _, err = GenerateReadVerifyScenario(Params{
+		WorkloadType: WorkloadTypeReadVerify, RunID: 12, Bucket: "b", Threads: 1,
+		ItemsFile: "/spt-input/items/verify-input.csv", Versions: VersionsAll,
+	}); err == nil || !strings.Contains(err.Error(), "cannot be used with an items file") {
+		t.Fatalf("all-version items-file error = %v", err)
+	}
+
 	staged, err := GenerateReadVerifyScenario(Params{
 		WorkloadType: WorkloadTypeReadVerify, RunID: 10, Bucket: "b", Threads: 1,
 		ItemsFile: "/spt-input/items/verify-input.csv", BaseTimestamp: "20260730.120000.000",

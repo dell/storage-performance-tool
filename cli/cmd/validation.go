@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
@@ -190,6 +191,13 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		return !appliedFromEnv
 	}
 	deferVerification, _ := cmd.Flags().GetBool(flagDeferVerification)
+	versions, _ := cmd.Flags().GetString(flagVersions)
+	if versions == "" {
+		versions = scenario.VersionsCurrent
+	}
+	if workloadType != WorkloadTypeReadVerify && changed(flagVersions) {
+		return fmt.Errorf(ErrFlagNotSupported, "--"+flagVersions, workloadType)
+	}
 	if workloadType != WorkloadTypeWriteVerify &&
 		(changed(flagDeferVerification) || deferVerification) {
 		return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeferVerification, workloadType)
@@ -245,6 +253,16 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	}
 	if workloadType != WorkloadTypeReadVerify {
 		return nil
+	}
+	switch versions {
+	case scenario.VersionsCurrent, scenario.VersionsAll:
+	default:
+		return fmt.Errorf("--%s must be %q or %q", flagVersions,
+			scenario.VersionsCurrent, scenario.VersionsAll)
+	}
+	itemsFile, _ := cmd.Flags().GetString("items-file")
+	if itemsFile != "" && changed(flagVersions) {
+		return errors.New("--versions is valid only for read-verify bucket/prefix discovery; omit it with --items-file")
 	}
 	unsupported := []string{
 		"duration", "part-size", "mpu-concurrent-objects", "mpu-concurrent-parts",

@@ -484,6 +484,15 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		List<String> bestPrefixes = java.util.Collections.emptyList();
 		final boolean integrityDiscovery = opOutput instanceof StorageDriver<?, ?> storageDriver
 						&& storageDriver.metadataIntegrityEnabled();
+		final Config listConfig = opConfig.configVal("list");
+		final boolean allVersionIntegrityDiscovery = integrityDiscovery
+						&& listConfig != null
+						&& listConfig.boolVal("include_versions");
+		if (allVersionIntegrityDiscovery) {
+			Loggers.MSG.info(
+							"LIST all-version discovery uses one exact-prefix shard to preserve completeness");
+			return List.of(new ListShard(seedPrefix == null ? "" : seedPrefix, null, null, null));
+		}
 		if (opOutput instanceof ListDiscoveryProbe probe) {
 			for (int i = 0; i < delimiters.length(); i++) {
 				final String d = String.valueOf(delimiters.charAt(i));

@@ -38,6 +38,17 @@ func TestPlanValidRequiresConsistentWorkloadProvenanceAndRoles(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "all-version discovery read",
+			plan: Plan{RunID: 10, Workload: workload.ReadVerify, Kind: PlanKindReadDiscovered, Producer: list,
+				Verifier: verify, Input: InputDiscovered, DiscoveryVersions: DiscoveryVersionsAll},
+			want: true,
+		},
+		{
+			name: "unknown-version discovery read",
+			plan: Plan{RunID: 11, Workload: workload.ReadVerify, Kind: PlanKindReadDiscovered, Producer: list,
+				Verifier: verify, Input: InputDiscovered, DiscoveryVersions: "unknown"},
+		},
+		{
 			name: "external read",
 			plan: Plan{RunID: 3, Workload: workload.ReadVerify, Kind: PlanKindReadExternal,
 				Verifier: verify, Input: InputExternal},

@@ -19,6 +19,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
@@ -66,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -117,6 +119,9 @@ public class S3AwsStorageDriverTest {
 		Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3AsyncClient");
 		clientField.setAccessible(true);
 		clientField.set(driver, s3Client);
+		Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
+		exactClientField.setAccessible(true);
+		exactClientField.set(driver, s3Client);
 	}
 
 	private void setChecksumFields(
@@ -222,6 +227,11 @@ public class S3AwsStorageDriverTest {
 		@SuppressWarnings("unchecked")
 		void readUsesExactManifestVersionAndVerifiesTheCompleteBody() throws Exception {
 			enableIntegrityMetadata(drv);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setS3Client(drv, mockS3Client);
+			final Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
+			exactClientField.setAccessible(true);
+			exactClientField.set(drv, exactVersionS3Client);
 			final byte[] content = "body".getBytes(StandardCharsets.UTF_8);
 			final IntegrityMetadata metadata = metadataFor(content);
 			final GetObjectResponse getResponse = GetObjectResponse.builder()
@@ -229,7 +239,7 @@ public class S3AwsStorageDriverTest {
 							.contentLength((long) content.length)
 							.versionId("returned-version")
 							.build();
-			when(mockS3Client.getObject(
+			when(exactVersionS3Client.getObject(
 							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
 							.thenReturn(CompletableFuture.completedFuture(
 											new ResponseInputStream<>(getResponse, new ByteArrayInputStream(content))));
@@ -244,11 +254,48 @@ public class S3AwsStorageDriverTest {
 			drv.invokeNio((Operation<Item>) (Operation<?>) op);
 
 			final ArgumentCaptor<GetObjectRequest> request = ArgumentCaptor.forClass(GetObjectRequest.class);
-			verify(mockS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			verify(exactVersionS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			verify(mockS3Client, never()).getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class));
 			assertEquals("folder/key~literal", request.getValue().key());
 			assertEquals("requested-version", request.getValue().versionId());
 			assertEquals("returned-version", op.returnedVersionId());
 			assertNotNull(op.integrityVerificationResult());
+			assertTrue(op.integrityVerificationResult().verified());
+			assertEquals(Operation.Status.SUCC, op.status());
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void noVersionReadUsesPrimaryClientWithoutTouchingExactClient() throws Exception {
+			enableIntegrityMetadata(drv);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			final Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
+			exactClientField.setAccessible(true);
+			exactClientField.set(drv, exactVersionS3Client);
+			final byte[] content = "body".getBytes(StandardCharsets.UTF_8);
+			final GetObjectResponse getResponse = GetObjectResponse.builder()
+							.metadata(IntegrityMetadataCodec.logicalMetadata(metadataFor(content)))
+							.contentLength((long) content.length)
+							.build();
+			when(mockS3Client.getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											new ResponseInputStream<>(getResponse, new ByteArrayInputStream(content))));
+
+			final IntegrityManifestDataItem item = new IntegrityManifestDataItem(
+							"bucket", "key", content.length, null);
+			final DataOperationImpl<IntegrityManifestDataItem> op = new DataOperationImpl<>(
+							0, OpType.READ, item, null, "/bucket", TEST_CRED, null, 0);
+			op.startRequest();
+			op.finishRequest();
+
+			drv.invokeNio((Operation<Item>) (Operation<?>) op);
+
+			final ArgumentCaptor<GetObjectRequest> request = ArgumentCaptor.forClass(GetObjectRequest.class);
+			verify(mockS3Client).getObject(request.capture(), any(AsyncResponseTransformer.class));
+			verifyNoInteractions(exactVersionS3Client);
+			assertNull(request.getValue().versionId());
 			assertTrue(op.integrityVerificationResult().verified());
 			assertEquals(Operation.Status.SUCC, op.status());
 		}
@@ -1474,6 +1521,229 @@ public class S3AwsStorageDriverTest {
 
 			verify(op).bytesListed(0L);
 		}
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void listsAllVersionsWithExactIdsMarkersAndDeleteMarkerCount() throws Exception {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("/prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.respDataTimeStart()).thenReturn(1L);
+		ListOptions options = ListOptions.builder()
+						.includeVersions(true)
+						.fetchMetadata(true)
+						.keyMarker("prior-key")
+						.versionIdMarker("prior-version")
+						.maxKeys(1000)
+						.build();
+		when(op.options()).thenReturn(options);
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(
+										ObjectVersion.builder().key("prefix/key").versionId("v2").size(7L).build(),
+										ObjectVersion.builder().key("prefix/key").versionId("null").size(5L).build())
+						.deleteMarkers(
+										DeleteMarkerEntry.builder().key("prefix/key").versionId("marker-v").build())
+						.isTruncated(true)
+						.nextKeyMarker("next-key")
+						.nextVersionIdMarker("next-version")
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+		ArgumentCaptor<ListObjectVersionsRequest> request = ArgumentCaptor.forClass(ListObjectVersionsRequest.class);
+		verify(mockS3Client).listObjectVersions(request.capture());
+		verify(mockS3Client, never()).listObjectsV2(any(ListObjectsV2Request.class));
+		assertEquals("bucket", request.getValue().bucket());
+		assertEquals("prefix/", request.getValue().prefix());
+		assertEquals("prior-key", request.getValue().keyMarker());
+		assertEquals("prior-version", request.getValue().versionIdMarker());
+
+		@SuppressWarnings("rawtypes")
+		ArgumentCaptor<List> objects = ArgumentCaptor.forClass(List.class);
+		verify(op).listedObjects(objects.capture());
+		ListedObject first = (ListedObject) objects.getValue().get(0);
+		ListedObject second = (ListedObject) objects.getValue().get(1);
+		assertEquals("v2", first.versionId());
+		assertEquals("null", second.versionId());
+		verify(op).objectsListed(3);
+		verify(op).deleteMarkersListed(1);
+		verify(op).bytesListed(12L);
+		verify(op).truncated(true);
+		ArgumentCaptor<ListOptions> next = ArgumentCaptor.forClass(ListOptions.class);
+		verify(op).options(next.capture());
+		assertEquals("next-key", next.getValue().keyMarker());
+		assertEquals("next-version", next.getValue().versionIdMarker());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryRejectsMissingExactVersionId() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder().key("key").size(1L).build())
+						.isTruncated(false)
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		verify(op, never()).listedObjects(anyList());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryRejectsTruncatedPageWithoutNextMarkers() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder()
+										.key("prefix/key")
+										.versionId("v1")
+										.size(1L)
+										.build())
+						.isTruncated(true)
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		assertEquals(
+						"Truncated S3 version LIST result is missing its next markers",
+						failure.getCause().getMessage());
+		verify(op, never()).listedObjects(anyList());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryRejectsMissingSizeWithoutPublishingResults() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		ListObjectVersionsResponse response = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder()
+										.key("prefix/key")
+										.versionId("v1")
+										.build())
+						.isTruncated(false)
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(response));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		assertEquals(
+						"S3 LIST entry is missing Size for key \"prefix/key\"",
+						failure.getCause().getMessage());
+		verify(op, never()).listedObjects(anyList());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryCarriesBothMarkersAcrossTwoPages() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.respDataTimeStart()).thenReturn(1L);
+		AtomicReference<ListOptions> options = new AtomicReference<>(
+						ListOptions.builder().includeVersions(true).fetchMetadata(true).build());
+		when(op.options()).thenAnswer(invocation -> options.get());
+		doAnswer(invocation -> {
+			options.set(invocation.getArgument(0));
+			return null;
+		}).when(op).options(any(ListOptions.class));
+		ListObjectVersionsResponse firstPage = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder()
+										.key("prefix/a")
+										.versionId("a-v1")
+										.size(1L)
+										.build())
+						.isTruncated(true)
+						.nextKeyMarker("prefix/a")
+						.nextVersionIdMarker("a-v1")
+						.build();
+		ListObjectVersionsResponse secondPage = ListObjectVersionsResponse.builder()
+						.versions(ObjectVersion.builder()
+										.key("prefix/b")
+										.versionId("b-v1")
+										.size(2L)
+										.build())
+						.isTruncated(false)
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(
+										CompletableFuture.completedFuture(firstPage),
+										CompletableFuture.completedFuture(secondPage));
+
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+		ArgumentCaptor<ListObjectVersionsRequest> requests = ArgumentCaptor.forClass(ListObjectVersionsRequest.class);
+		verify(mockS3Client, times(2)).listObjectVersions(requests.capture());
+		assertNull(requests.getAllValues().get(0).keyMarker());
+		assertNull(requests.getAllValues().get(0).versionIdMarker());
+		assertEquals("prefix/a", requests.getAllValues().get(1).keyMarker());
+		assertEquals("a-v1", requests.getAllValues().get(1).versionIdMarker());
+		verify(op).startAfter("prefix/a");
+		verify(op).startAfter("prefix/b");
+		verify(op, times(2)).listedObjects(anyList());
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void allVersionDiscoveryPropagatesPermissionDeniedWithoutResults() {
+		ListOperation<PathItem> op = mock(ListOperation.class);
+		PathItem item = mock(PathItem.class);
+		when(op.type()).thenReturn(OpType.LIST);
+		when(op.srcPath()).thenReturn("/bucket");
+		when(item.name()).thenReturn("prefix/");
+		when(op.item()).thenReturn(item);
+		when(op.options()).thenReturn(ListOptions.builder().includeVersions(true).build());
+		S3Exception denied = (S3Exception) S3Exception.builder()
+						.statusCode(403)
+						.message("AccessDenied")
+						.build();
+		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
+						.thenReturn(CompletableFuture.failedFuture(denied));
+
+		CompletionException failure = assertThrows(
+						CompletionException.class,
+						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
+		assertSame(denied, failure.getCause());
+		verify(op, never()).listedObjects(anyList());
 	}
 
 	// -----------------------------------------------------------------------
@@ -2797,50 +3067,65 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class ResourceCleanupTest {
 
-		@Test
-		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
-			S3AsyncClient mockClient = mock(S3AsyncClient.class);
-
-			// Mock parent class config requirements
-			Config driverConfig = mock(Config.class);
-			Config limitConfig = mock(Config.class);
+		private Config mockDriverConfig() {
+			final Config driverConfig = mock(Config.class);
+			final Config limitConfig = mock(Config.class);
 			when(limitConfig.intVal("concurrency")).thenReturn(1);
 			when(driverConfig.configVal("limit")).thenReturn(limitConfig);
 			when(driverConfig.intVal("threads")).thenReturn(1);
 
-			Config authConfig = mock(Config.class);
+			final Config authConfig = mock(Config.class);
 			when(authConfig.stringVal("uid")).thenReturn("test-user");
 			when(authConfig.stringVal("secret")).thenReturn("test-secret");
 			when(authConfig.stringVal("token")).thenReturn(null);
 
-			Config config = mock(Config.class);
+			final Config config = mock(Config.class);
 			disableIntegrity(config);
 			when(config.configVal("driver")).thenReturn(driverConfig);
 			when(config.stringVal("namespace")).thenReturn("test-ns");
 			when(config.configVal("auth")).thenReturn(authConfig);
-
-			// Mock CoopStorageDriverBase config requirements
 			when(config.intVal("driver-limit-queue-input")).thenReturn(100);
-
-			// Mock other S3AwsStorageDriver config requirements
 			when(config.configVal("object")).thenThrow(new RuntimeException("no object config"));
 			when(config.configVal("item")).thenThrow(new RuntimeException("no item config"));
 			when(config.configVal("checksum")).thenThrow(new RuntimeException("no checksum config"));
 			when(config.listVal("net.node.addrs")).thenThrow(new RuntimeException("no net config"));
 			when(config.stringVal("storage-net-node-addrs")).thenThrow(new RuntimeException("no net config"));
-
-			// Try to mock crt config, though optional
 			when(config.configVal("crt")).thenThrow(new RuntimeException("no crt config"));
+			return config;
+		}
+
+		@Test
+		void disabledIntegrityDoesNotCreateExactVersionClientOnConstructionOrClose() throws Exception {
+			final S3AsyncClient primaryClient = mock(S3AsyncClient.class);
+			@SuppressWarnings("unchecked")
+			final Supplier<S3AsyncClient> exactVersionClientSupplier = mock(Supplier.class);
+			final S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), mockDriverConfig(),
+							false, 1, primaryClient, exactVersionClientSupplier,
+							100 * 1024L, 8 * 1024 * 1024L);
+
+			driver.close();
+
+			verify(primaryClient).close();
+			verifyNoInteractions(exactVersionClientSupplier);
+		}
+
+		@Test
+		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
+			S3AsyncClient mockClient = mock(S3AsyncClient.class);
+			S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
+			final Config config = mockDriverConfig();
 
 			// Create the driver so it initializes its executors
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
-							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, 100 * 1024L, 8 * 1024 * 1024L);
+							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, exactVersionClient, 100 * 1024L, 8 * 1024 * 1024L);
 
 			// Act: Call the close method on the driver
 			driver.close();
 
 			// Assert: Verify the S3 client was closed
 			verify(mockClient, times(1)).close();
+			verify(exactVersionClient, times(1)).close();
 
 			// Assert: Verify the thread pools were shut down
 			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");

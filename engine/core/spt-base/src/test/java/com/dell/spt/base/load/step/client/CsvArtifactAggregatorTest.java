@@ -6,16 +6,25 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.load.step.service.file.FileManagerService;
+import com.github.akurilov.confuse.Config;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import org.apache.commons.csv.CSVFormat;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -88,6 +97,7 @@ class CsvArtifactAggregatorTest {
 										+ "b,a,2,\r\n"
 										+ "b,a,2,\r\n");
 		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "3\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "4\n");
 
 		new CsvArtifactAggregator(
 						"list-step",
@@ -96,7 +106,7 @@ class CsvArtifactAggregatorTest {
 						manifest.toString(),
 						100,
 						1)
-						.close();
+						.close(0);
 
 		final var records = CSVFormat.RFC4180.parse(Files.newBufferedReader(manifest)).getRecords();
 		assertEquals(2, records.size());
@@ -105,8 +115,74 @@ class CsvArtifactAggregatorTest {
 						manifest, 100, IntegrityInputProvenance.ENGINE_STEP, "list-step");
 		assertEquals(3, completion.sourceRecordCount());
 		assertEquals(2, completion.uniqueRecordCount());
+		assertEquals(4, completion.excludedDeleteMarkerCount());
 		assertEquals(1, completion.selectedRecordCount());
 		assertFalse(Files.exists(tempDir.resolve("verify-input.node-001.csv")));
+	}
+
+	@Test
+	void distributedDiscoverySumsDeleteMarkersAcrossNodes() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "2\n");
+		final String remoteManifest = "/remote/verify-input.csv";
+		final FileManagerService remote = remoteFileManager(remoteManifest, Map.of(
+						remoteManifest, "bucket,key,size,version_id\r\nb,b,2,v2\r\n",
+						remoteManifest + ".emitted.count", "1\n",
+						remoteManifest + ".delete-markers.count", "3\n"));
+
+		new CsvArtifactAggregator(
+						"list-step", List.of(FileManager.INSTANCE, remote),
+						List.of(mock(Config.class), mock(Config.class)),
+						manifest.toString(), 105, 0, com.dell.spt.base.item.op.OpType.LIST).close(0);
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, 105, IntegrityInputProvenance.ENGINE_STEP, "list-step");
+		assertEquals(2, completion.sourceRecordCount());
+		assertEquals(5, completion.excludedDeleteMarkerCount());
+		assertTrue(Files.isRegularFile(CsvArtifactAggregator.nodeSourcePath(manifest, 1)));
+		assertEquals("3", Files.readString(IntegrityManifestCompletion.deleteMarkerCountPath(
+						CsvArtifactAggregator.nodeSourcePath(manifest, 1))).trim());
+	}
+
+	@Test
+	void distributedDiscoveryRejectsStaleNodeDeleteMarkerCount() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(
+						CsvArtifactAggregator.nodeSourcePath(manifest, 0)), "stale\n");
+		final FileManagerService remote = remoteFileManager("/remote/verify-input.csv", Map.of());
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE, remote),
+										List.of(mock(Config.class), mock(Config.class)),
+										manifest.toString(), 106, 0, com.dell.spt.base.item.op.OpType.LIST).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.PUBLICATION, failure.category());
+		assertTrue(failure.getMessage().contains("stale node delete-marker count"));
+	}
+
+	@Test
+	void distributedDiscoveryRejectsMissingEntryNodeDeleteMarkerCount() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		final FileManagerService remote = remoteFileManager("/remote/verify-input.csv", Map.of());
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE, remote),
+										List.of(mock(Config.class), mock(Config.class)),
+										manifest.toString(), 107, 0, com.dell.spt.base.item.op.OpType.LIST).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertTrue(failure.getMessage().contains("entry-node LIST delete-marker count is missing"));
 	}
 
 	@Test
@@ -114,14 +190,55 @@ class CsvArtifactAggregatorTest {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,\r\n");
 		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "2\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
 
 		final var failure = assertThrows(
 						IntegrityTerminalException.class,
 						() -> new CsvArtifactAggregator(
 										"list-step", List.of(FileManager.INSTANCE), List.of(),
-										manifest.toString(), 102, 0, com.dell.spt.base.item.op.OpType.LIST).close());
+										manifest.toString(), 102, 0, com.dell.spt.base.item.op.OpType.LIST).close(0));
 
 		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void discoveryRejectsUnavailableListFailureCountWithoutPublishingCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE), List.of(),
+										manifest.toString(), 109, 0, com.dell.spt.base.item.op.OpType.LIST).close());
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("failure count is unavailable"));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void discoveryRejectsFailedListOperationsWithoutPublishingPartialCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,first-page-object,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		final var aggregator = new CsvArtifactAggregator(
+						"list-step", List.of(FileManager.INSTANCE), List.of(),
+						manifest.toString(), 108, 0, com.dell.spt.base.item.op.OpType.LIST);
+		final var failure = assertThrows(IntegrityTerminalException.class, () -> aggregator.close(1));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("1 failed operation"));
+		assertTrue(Files.isRegularFile(manifest));
+		assertFalse(Files.exists(CsvArtifactAggregator.nodeSourcePath(manifest, 0)));
 		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 
@@ -208,6 +325,26 @@ class CsvArtifactAggregatorTest {
 		assertTrue(thrown.getMessage().contains("noncanonical header"));
 		assertEquals(1, thrown.getSuppressed().length);
 		assertSame(cleanup, thrown.getSuppressed()[0]);
+	}
+
+	private FileManagerService remoteFileManager(
+					final String manifestName, final Map<String, String> contents) throws IOException {
+		final FileManagerService remote = mock(FileManagerService.class);
+		when(remote.newTmpFileName()).thenReturn(manifestName);
+		when(remote.readFromFile(anyString(), anyLong())).thenAnswer(invocation -> {
+			final String fileName = invocation.getArgument(0);
+			final long offset = invocation.getArgument(1);
+			final String content = contents.get(fileName);
+			if (content == null) {
+				throw new IOException("missing remote fixture " + fileName);
+			}
+			final byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+			if (offset >= bytes.length) {
+				return FileManager.EMPTY;
+			}
+			return Arrays.copyOfRange(bytes, Math.toIntExact(offset), bytes.length);
+		});
+		return remote;
 	}
 
 	@Test

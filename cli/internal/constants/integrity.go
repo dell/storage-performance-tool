@@ -59,6 +59,13 @@ const (
 // external `--items-file` selection and publishes the matching completion record.
 const IntegrityCLIStagerProducerID = "spt-cli-items-stager-v1"
 
+// Integrity completion schema versions. Legacy v1 remains accepted for staged and
+// pre-all-version artifacts; engine discovery records use the current v2 schema.
+const (
+	IntegrityCompletionVersionLegacy  = 1
+	IntegrityCompletionVersionCurrent = 2
+)
+
 // Verification process exit codes are stable public automation contracts.
 const (
 	ExitCodeSuccess             = 0

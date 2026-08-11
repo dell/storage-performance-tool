@@ -15,6 +15,7 @@ const (
 	DefaultSptImage                  = constants.DefaultSptImage
 	flagDeferVerification            = "defer-verification"
 	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
+	flagVersions                     = "versions"
 )
 
 // Workload type constants

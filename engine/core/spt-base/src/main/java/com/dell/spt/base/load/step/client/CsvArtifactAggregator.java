@@ -112,13 +112,21 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 
 	@Override
 	public void close() {
+		close(OpType.LIST.equals(artifactOpType) ? -1 : 0);
+	}
+
+	void close(final long failedOperationCount) {
 		try {
-			collectAndPublish();
+			collectAndPublish(failedOperationCount);
 		} catch (final IntegrityTerminalException e) {
 			throw e;
 		} catch (final Exception e) {
 			throw terminal(Category.AGGREGATION, "failed to aggregate " + manifestPath.getFileName(), e);
 		}
+	}
+
+	OpType artifactOpType() {
+		return artifactOpType;
 	}
 
 	private static OpType legacyArtifactOpType(final String itemOutputFile) {
@@ -129,7 +137,22 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		return "written.csv".equals(name) ? OpType.CREATE : OpType.READ;
 	}
 
-	private void collectAndPublish() throws IOException {
+	private void collectAndPublish(final long failedOperationCount) throws IOException {
+		final boolean discovery = OpType.LIST.equals(artifactOpType);
+		if (discovery && failedOperationCount < 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"terminal LIST failure count is unavailable; refusing to publish discovery evidence",
+							null);
+		}
+		if (discovery && failedOperationCount > 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"LIST discovery recorded " + failedOperationCount
+											+ (failedOperationCount == 1 ? " failed operation" : " failed operations")
+											+ "; refusing to publish a partial manifest",
+							null);
+		}
 		final Path parent = manifestPath.toAbsolutePath().getParent();
 		Files.createDirectories(parent);
 		final Path marker = IntegrityManifestCompletion.completionPath(manifestPath);
@@ -137,9 +160,9 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			throw terminal(Category.PUBLICATION, "stale completion record exists: " + marker, null);
 		}
 
-		final boolean discovery = OpType.LIST.equals(artifactOpType);
 		final List<Path> nodeSources = new ArrayList<>(sourceNames.size());
 		final List<Path> emissionCounts = new ArrayList<>(sourceNames.size());
+		final List<Path> deleteMarkerCounts = new ArrayList<>(sourceNames.size());
 		for (int i = 0; i < sourceNames.size(); i++) {
 			final Path nodePath = nodeSourcePath(manifestPath, i);
 			if (Files.exists(nodePath)) {
@@ -171,6 +194,24 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					copyRemoteSource(fileManagers.get(i), remoteCount, nodeCount);
 				}
 				emissionCounts.add(nodeCount);
+				final Path nodeDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(nodePath);
+				if (Files.exists(nodeDeleteMarkerCount)) {
+					throw terminal(Category.PUBLICATION,
+									"stale node delete-marker count exists: " + nodeDeleteMarkerCount, null);
+				}
+				if (i == 0) {
+					final Path sourceDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath);
+					if (!Files.isRegularFile(sourceDeleteMarkerCount)) {
+						throw terminal(Category.AGGREGATION,
+										"entry-node LIST delete-marker count is missing", null);
+					}
+					IntegrityManifestCompletion.atomicMove(sourceDeleteMarkerCount, nodeDeleteMarkerCount);
+				} else {
+					final String remoteDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(
+									Path.of(sourceNames.get(i))).toString();
+					copyRemoteSource(fileManagers.get(i), remoteDeleteMarkerCount, nodeDeleteMarkerCount);
+				}
+				deleteMarkerCounts.add(nodeDeleteMarkerCount);
 			}
 
 		}
@@ -188,10 +229,15 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			throw e;
 		}
 		long emittedCount = counts.source();
+		long excludedDeleteMarkerCount = 0;
 		if (discovery) {
 			emittedCount = 0;
 			for (final Path countPath : emissionCounts) {
 				emittedCount = Math.addExact(emittedCount, readEmissionCount(countPath));
+			}
+			for (final Path countPath : deleteMarkerCounts) {
+				excludedDeleteMarkerCount = Math.addExact(
+								excludedDeleteMarkerCount, readEmissionCount(countPath));
 			}
 			if (emittedCount != counts.source()) {
 				final IntegrityTerminalException failure = terminal(
@@ -210,7 +256,8 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 						loadStepId,
 						counts.source(),
 						counts.unique(),
-						counts.selected());
+						counts.selected(),
+						excludedDeleteMarkerCount);
 		try {
 			completion.publish(manifestPath);
 		} catch (final IOException e) {

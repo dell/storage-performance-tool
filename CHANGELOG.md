@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Historical S3 version verification** — Added `read-verify --versions=current|all`; all-version discovery preserves exact `(bucket,key,version_id)` identities across every `ListObjectVersions` page, excludes and reports delete markers, and records `excluded_delete_marker_count` in completion evidence, the console summary, and `index.json`.
+
+### Changed
+
+- **Integrity completion schema v2** — Engine-produced completion records now use schema v2 to account explicitly for excluded delete markers; strict readers continue to accept legacy v1 records where that count is necessarily zero.
+
+### Fixed
+
+- **Multi-page verification discovery** — Recycled LIST discovery previously omitted intermediate pages and emitted the final page twice, so large `read-verify` prefix selections could verify only the final page. Discovery now publishes every page exactly once.
+- **Failed verification discovery** — A failed LIST page could previously publish a valid-looking partial selection. Engine publication and CLI finalization now reject discovery evidence whenever any LIST operation failed.
+
 ## [5.14.0] - 2026-08-05
 
 ### Added

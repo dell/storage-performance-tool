@@ -17,7 +17,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		CONTENT, VERSION, DELETE_MARKER
 	}
 
-	private record PageEntry(String key, long size, EntryKind kind) {}
+	private record PageEntry(String key, long size, String versionId, EntryKind kind) {}
 
 	private final ListOperation<?> listOp;
 	private final boolean includeVersions;
@@ -32,8 +32,10 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 	private EntryKind currentEntry;
 	private boolean currentKeySeen;
 	private boolean currentSizeSeen;
+	private boolean currentVersionIdSeen;
 	private String currentKey;
 	private long currentSize;
+	private String currentVersionId;
 	private boolean truncationSeen;
 	private boolean truncated;
 	private boolean nextContinuationTokenSeen;
@@ -125,6 +127,17 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 				throw new SAXException("Duplicate Key in S3 LIST entry");
 			}
 			currentKeySeen = true;
+			activeScalar = qName;
+			break;
+		case S3Api.QNAME_VERSION_ID:
+			requireEntryChild(qName, parent);
+			if (!includeVersions || currentEntry == EntryKind.CONTENT) {
+				throw new SAXException("VersionId is invalid in a current-object LIST entry");
+			}
+			if (currentVersionIdSeen) {
+				throw new SAXException("Duplicate VersionId in S3 LIST entry");
+			}
+			currentVersionIdSeen = true;
 			activeScalar = qName;
 			break;
 		case S3Api.QNAME_ITEM_SIZE:
@@ -233,8 +246,10 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		currentEntry = kind;
 		currentKeySeen = false;
 		currentSizeSeen = false;
+		currentVersionIdSeen = false;
 		currentKey = null;
 		currentSize = 0;
+		currentVersionId = null;
 	}
 
 	@Override
@@ -254,6 +269,9 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 			break;
 		case S3Api.QNAME_ITEM_SIZE:
 			currentSize = parseSize(grammarValue());
+			break;
+		case S3Api.QNAME_VERSION_ID:
+			currentVersionId = exactValue();
 			break;
 		case S3Api.QNAME_IS_TRUNCATED:
 			truncated = parseBoolean(grammarValue());
@@ -303,7 +321,11 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		if (currentEntry != EntryKind.DELETE_MARKER && !currentSizeSeen) {
 			throw new SAXException("S3 LIST entry is missing Size for key \"" + currentKey + "\"");
 		}
-		pageEntries.add(new PageEntry(currentKey, currentSize, currentEntry));
+		if (currentEntry != EntryKind.CONTENT
+						&& (!currentVersionIdSeen || currentVersionId == null || currentVersionId.isEmpty())) {
+			throw new SAXException("S3 version LIST entry is missing a nonempty VersionId");
+		}
+		pageEntries.add(new PageEntry(currentKey, currentSize, currentVersionId, currentEntry));
 		currentEntry = null;
 	}
 
@@ -335,6 +357,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 
 	private void commitPage() throws SAXException {
 		final List<ListedObject> listedObjects = new ArrayList<>();
+		int deleteMarkers = 0;
 		String firstKey = null;
 		String lastKey = null;
 		long bytesTotal = 0;
@@ -343,8 +366,10 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 				firstKey = entry.key();
 			}
 			lastKey = entry.key();
-			if (entry.kind() != EntryKind.DELETE_MARKER) {
-				listedObjects.add(new ListedObject(entry.key(), entry.size()));
+			if (entry.kind() == EntryKind.DELETE_MARKER) {
+				deleteMarkers++;
+			} else {
+				listedObjects.add(new ListedObject(entry.key(), entry.size(), entry.versionId()));
 				if (fetchMetadata) {
 					try {
 						bytesTotal = Math.addExact(bytesTotal, entry.size());
@@ -356,6 +381,7 @@ final class ListObjectsXmlHandler extends DefaultHandler {
 		}
 		listOp.objectsListed(pageEntries.size());
 		listOp.listedObjects(List.copyOf(listedObjects));
+		listOp.deleteMarkersListed(deleteMarkers);
 		listOp.bytesListed(fetchMetadata ? bytesTotal : 0);
 		listOp.truncated(truncated);
 		if (firstKey != null) {

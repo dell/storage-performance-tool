@@ -276,6 +276,21 @@ public class LoadGeneratorBuilderImplTest {
 	}
 
 	@Test
+	void allVersionIntegrityDiscoveryAlwaysUsesOneExactPrefixShard() throws Exception {
+		final var result = new ListDiscoveryProbe.DiscoverResult(
+						List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+						false,
+						false);
+
+		final var seeds = integrityListSeeds(result, null, true);
+
+		assertEquals(
+						List.of("campaign/!unicode/"),
+						seeds.stream().map(ListShard::prefix).toList(),
+						"current-object delimiter partitions cannot prove all-version completeness");
+	}
+
+	@Test
 	void integrityDiscoveryDoesNotSwallowUnexpectedProbeFailures() {
 		assertThrows(
 						IllegalStateException.class,
@@ -287,9 +302,17 @@ public class LoadGeneratorBuilderImplTest {
 	private static List<ListShard> integrityListSeeds(
 					final ListDiscoveryProbe.DiscoverResult result, final Throwable failure)
 					throws Exception {
+		return integrityListSeeds(result, failure, false);
+	}
+
+	private static List<ListShard> integrityListSeeds(
+					final ListDiscoveryProbe.DiscoverResult result,
+					final Throwable failure,
+					final boolean includeVersions) throws Exception {
 		final Config opConfig = Mockito.mock(Config.class);
 		final Config listConfig = Mockito.mock(Config.class);
 		Mockito.when(opConfig.configVal("list")).thenReturn(listConfig);
+		Mockito.when(listConfig.boolVal("include_versions")).thenReturn(includeVersions);
 		final StorageDriver driver = Mockito.mock(
 						StorageDriver.class,
 						Mockito.withSettings().extraInterfaces(ListDiscoveryProbe.class));

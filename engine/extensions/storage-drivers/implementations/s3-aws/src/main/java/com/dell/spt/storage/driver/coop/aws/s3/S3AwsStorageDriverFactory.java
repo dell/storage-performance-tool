@@ -14,6 +14,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -193,16 +194,39 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// The CRT manages part size internally based on minimumPartSizeInBytes
 
 		S3AsyncClient s3AsyncClient = crtBuilder.build();
-
-		return new S3AwsStorageDriver<>(
-						stepId,
-						dataInput,
-						storageConfig,
-						verifyFlag,
-						batchSize,
-						s3AsyncClient,
-						smallObjectThresholdBytes,
-						partSizeBytes);
+		final String exactClientRegion = region;
+		final int exactClientMaxConcurrency = maxConcurrency;
+		try {
+			return new S3AwsStorageDriver<>(
+							stepId,
+							dataInput,
+							storageConfig,
+							verifyFlag,
+							batchSize,
+							s3AsyncClient,
+							() -> {
+								// The CRT S3 transfer client may synthesize conditional multipart GETs
+								// from a current-object HEAD. Build the ordinary protocol client only
+								// when an exact version ID is first requested.
+								return S3AsyncClient.builder()
+												.credentialsProvider(StaticCredentialsProvider.create(creds))
+												.region(Region.of(exactClientRegion))
+												.endpointOverride(URI.create(endpoint))
+												.forcePathStyle(pathStyle)
+												.httpClientBuilder(AwsCrtAsyncHttpClient.builder()
+																.maxConcurrency(exactClientMaxConcurrency))
+												.build();
+							},
+							smallObjectThresholdBytes,
+							partSizeBytes);
+		} catch (RuntimeException e) {
+			try {
+				s3AsyncClient.close();
+			} catch (RuntimeException closeFailure) {
+				e.addSuppressed(closeFailure);
+			}
+			throw e;
+		}
 	}
 
 	/**

@@ -36,14 +36,15 @@ type writeVerifyScenarioData struct {
 }
 
 type readVerifyScenarioData struct {
-	Discovery   bool
-	ListStep    string
-	ReadStep    string
-	ListStorage integrityStorageTemplateData
-	ReadStorage integrityStorageTemplateData
-	BucketPath  string
-	Prefix      string
-	ItemsFile   string
+	Discovery       bool
+	ListStep        string
+	ReadStep        string
+	ListStorage     integrityStorageTemplateData
+	ReadStorage     integrityStorageTemplateData
+	BucketPath      string
+	Prefix          string
+	ItemsFile       string
+	IncludeVersions bool
 }
 
 var integrityScenarioTemplates = template.Must(
@@ -121,7 +122,7 @@ Load.config({
   },
   "load": {
     "batch": {"size": 1000},
-    "op": {"type": "list", "list": {"delimiter": "", "fetch_metadata": true, "include_versions": false, "max_keys": 1000}, "limit": {"rate": 0}, "wait": {"finish": true}},
+    "op": {"type": "list", "list": {"delimiter": "", "fetch_metadata": true, "include_versions": {{.IncludeVersions}}, "max_keys": 1000}, "limit": {"rate": 0}, "wait": {"finish": true}},
     "step": {"id": {{jsq .ListStep}}}
   },
   {{template "summary"}}

@@ -62,6 +62,8 @@ import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -89,6 +91,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_MPU_FAILURE = "mpuFailure";
 
 	private final S3AsyncClient s3AsyncClient;
+	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
+	private volatile S3AsyncClient exactVersionS3Client;
 	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
@@ -110,6 +114,53 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient, s3AsyncClient,
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	public S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final S3AsyncClient exactVersionS3Client,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						exactVersionS3Client, null, smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						null, Objects.requireNonNull(exactVersionS3ClientSupplier),
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	private S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final S3AsyncClient exactVersionS3Client,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
 			throw new IllegalConfigurationException(
@@ -117,6 +168,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 											+ "use storage.integrity.mode=metadata for whole-object verification");
 		}
 		this.s3AsyncClient = s3AsyncClient;
+		this.exactVersionS3Client = exactVersionS3Client;
+		this.exactVersionS3ClientSupplier = exactVersionS3ClientSupplier;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
 
@@ -342,7 +395,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 			op.status(originalStatus);
-			LOG.error("{} {} failed: {}", op.type(), op.item().name(), originalStatus);
+			final Throwable failure = e instanceof java.util.concurrent.CompletionException
+							&& e.getCause() != null ? e.getCause() : e;
+			LOG.error(
+							"{} {} requested version {} failed: {}: {}",
+							op.type(), op.item().name(), op.requestedVersionId(),
+							originalStatus, failure);
 			LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			try {
 				op.startResponse();
@@ -782,7 +840,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			reqBuilder.versionId(versionId);
 		}
 
-		try (var response = s3AsyncClient.getObject(
+		final S3AsyncClient readClient = versionId == null || versionId.isEmpty()
+						? s3AsyncClient
+						: exactVersionS3Client();
+		try (var response = readClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream()).join()) {
 			final GetObjectResponse getResponse = response.response();
@@ -825,6 +886,22 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return CompletableFuture.completedFuture(null);
 	}
 
+	private S3AsyncClient exactVersionS3Client() {
+		S3AsyncClient client = exactVersionS3Client;
+		if (client == null) {
+			synchronized (this) {
+				client = exactVersionS3Client;
+				if (client == null) {
+					client = Objects.requireNonNull(
+									exactVersionS3ClientSupplier.get(),
+									"Exact-version S3 client supplier returned null");
+					exactVersionS3Client = client;
+				}
+			}
+		}
+		return client;
+	}
+
 	private CompletableFuture<Void> deleteObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
 
@@ -862,6 +939,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		final var maxKeys = options.maxKeys() > 0 ? Math.min(options.maxKeys(), 1000) : 1000;
+		if (options.includeVersions()) {
+			return listObjectVersions(op, listOp, options, targetBucket, maxKeys);
+		}
 
 		ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
 						.bucket(targetBucket)
@@ -937,6 +1017,109 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							listOp.countBytesDone(listOp.bytesListed());
 							if (listOp.respDataTimeStart() == 0) {
 								LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
+							}
+						});
+	}
+
+	private CompletableFuture<Void> listObjectVersions(
+					final O op,
+					final ListOperation<? extends PathItem> listOp,
+					final ListOptions options,
+					final String targetBucket,
+					final int maxKeys) {
+		final ListObjectVersionsRequest.Builder request = ListObjectVersionsRequest.builder()
+						.bucket(targetBucket)
+						.maxKeys(maxKeys)
+						.overrideConfiguration(b -> b
+										.putExecutionAttribute(LIST_TTFB_OPERATION_ATTRIBUTE, listOp)
+										.addPlugin(LIST_TTFB_SDK_PLUGIN));
+		final String prefix = op.item().name();
+		if (prefix != null && !prefix.isEmpty()) {
+			request.prefix(prefix.startsWith("/") ? prefix.substring(1) : prefix);
+		}
+		if (options.delimiter() != null && !options.delimiter().isEmpty()) {
+			request.delimiter(options.delimiter());
+		}
+		if (options.keyMarker() != null && !options.keyMarker().isEmpty()) {
+			request.keyMarker(options.keyMarker());
+		}
+		if (options.versionIdMarker() != null && !options.versionIdMarker().isEmpty()) {
+			request.versionIdMarker(options.versionIdMarker());
+		}
+
+		return s3AsyncClient.listObjectVersions(request.build())
+						.thenAccept(response -> {
+							final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
+							if (truncated
+											&& (response.nextKeyMarker() == null
+															|| response.nextKeyMarker().isEmpty()
+															|| response.nextVersionIdMarker() == null
+															|| response.nextVersionIdMarker().isEmpty())) {
+								throw new IllegalStateException(
+												"Truncated S3 version LIST result is missing its next markers");
+							}
+							final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
+							long bytesTotal = 0;
+							String firstKey = null;
+							String lastKey = null;
+							for (final ObjectVersion version : response.versions()) {
+								final String key = version.key();
+								final String versionId = version.versionId();
+								if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
+									throw new IllegalStateException(
+													"ListObjectVersions returned a data version without an exact identity");
+								}
+								final Long responseSize = version.size();
+								if (responseSize == null) {
+									throw new IllegalStateException(
+													"S3 LIST entry is missing Size for key \"" + key + "\"");
+								}
+								final long size = Math.max(0L, responseSize);
+								listedObjects.add(new ListedObject(key, size, versionId));
+								if (options.fetchMetadata()) {
+									bytesTotal = Math.addExact(bytesTotal, size);
+								}
+								if (firstKey == null || key.compareTo(firstKey) < 0) {
+									firstKey = key;
+								}
+								if (lastKey == null || key.compareTo(lastKey) > 0) {
+									lastKey = key;
+								}
+							}
+							for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
+								final String key = deleteMarker.key();
+								if (key != null && !key.isEmpty()) {
+									if (firstKey == null || key.compareTo(firstKey) < 0) {
+										firstKey = key;
+									}
+									if (lastKey == null || key.compareTo(lastKey) > 0) {
+										lastKey = key;
+									}
+								}
+							}
+							listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
+							listOp.listedObjects(listedObjects);
+							listOp.deleteMarkersListed(response.deleteMarkers().size());
+							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+							listOp.truncated(truncated);
+							if (firstKey != null) {
+								listOp.pageFirstKey(firstKey);
+							}
+							listOp.continuationToken(response.nextKeyMarker());
+							listOp.options(
+											options.toBuilder()
+															.continuationToken(null)
+															.keyMarker(response.nextKeyMarker())
+															.versionIdMarker(response.nextVersionIdMarker())
+															.build());
+							if (lastKey != null) {
+								listOp.startAfter(lastKey);
+							}
+							listOp.countBytesDone(listOp.bytesListed());
+							if (listOp.respDataTimeStart() == 0) {
+								LOG.debug(
+												"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
+												listOp);
 							}
 						});
 	}
@@ -1395,14 +1578,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	protected void doClose()
 					throws IOException {
 		try {
-			// Close the S3AsyncClient to release native CRT resources
-			// This closes the underlying event loops and connection pools
 			if (s3AsyncClient != null) {
 				s3AsyncClient.close();
 				LOG.info("S3AsyncClient closed successfully");
 			}
 		} catch (Exception e) {
 			LOG.warn("Failed to close S3AsyncClient: {}", e.getMessage());
+		}
+		try {
+			if (exactVersionS3Client != null && exactVersionS3Client != s3AsyncClient) {
+				exactVersionS3Client.close();
+				LOG.info("Exact-version S3AsyncClient closed successfully");
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to close exact-version S3AsyncClient: {}", e.getMessage());
 		}
 
 		try {

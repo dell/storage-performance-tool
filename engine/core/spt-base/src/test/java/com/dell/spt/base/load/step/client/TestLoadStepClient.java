@@ -2,6 +2,8 @@ package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.github.akurilov.confuse.Config;
 
 import java.rmi.RemoteException;
@@ -67,6 +69,10 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 		initCalled = false;
 		copyInstanceCalled = false;
 		copyInstanceCallCount = 0;
+	}
+
+	void addMetricsContextForTest(final MetricsContext<? extends AllMetricsSnapshot> context) {
+		metricsContexts.add(context);
 	}
 
 	// Expose effective config and ctx config count for targeted assertions
