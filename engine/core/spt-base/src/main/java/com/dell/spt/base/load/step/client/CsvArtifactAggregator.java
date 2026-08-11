@@ -112,13 +112,21 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 
 	@Override
 	public void close() {
+		close(OpType.LIST.equals(artifactOpType) ? -1 : 0);
+	}
+
+	void close(final long failedOperationCount) {
 		try {
-			collectAndPublish();
+			collectAndPublish(failedOperationCount);
 		} catch (final IntegrityTerminalException e) {
 			throw e;
 		} catch (final Exception e) {
 			throw terminal(Category.AGGREGATION, "failed to aggregate " + manifestPath.getFileName(), e);
 		}
+	}
+
+	OpType artifactOpType() {
+		return artifactOpType;
 	}
 
 	private static OpType legacyArtifactOpType(final String itemOutputFile) {
@@ -129,7 +137,22 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		return "written.csv".equals(name) ? OpType.CREATE : OpType.READ;
 	}
 
-	private void collectAndPublish() throws IOException {
+	private void collectAndPublish(final long failedOperationCount) throws IOException {
+		final boolean discovery = OpType.LIST.equals(artifactOpType);
+		if (discovery && failedOperationCount < 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"terminal LIST failure count is unavailable; refusing to publish discovery evidence",
+							null);
+		}
+		if (discovery && failedOperationCount > 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"LIST discovery recorded " + failedOperationCount
+											+ (failedOperationCount == 1 ? " failed operation" : " failed operations")
+											+ "; refusing to publish a partial manifest",
+							null);
+		}
 		final Path parent = manifestPath.toAbsolutePath().getParent();
 		Files.createDirectories(parent);
 		final Path marker = IntegrityManifestCompletion.completionPath(manifestPath);
@@ -137,7 +160,6 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			throw terminal(Category.PUBLICATION, "stale completion record exists: " + marker, null);
 		}
 
-		final boolean discovery = OpType.LIST.equals(artifactOpType);
 		final List<Path> nodeSources = new ArrayList<>(sourceNames.size());
 		final List<Path> emissionCounts = new ArrayList<>(sourceNames.size());
 		final List<Path> deleteMarkerCounts = new ArrayList<>(sourceNames.size());

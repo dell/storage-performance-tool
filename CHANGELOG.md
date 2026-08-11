@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Multi-page verification discovery** — Recycled LIST discovery previously omitted intermediate pages and emitted the final page twice, so large `read-verify` prefix selections could verify only the final page. Discovery now publishes every page exactly once.
+- **Failed verification discovery** — A failed LIST page could previously publish a valid-looking partial selection. Engine publication and CLI finalization now reject discovery evidence whenever any LIST operation failed.
 
 ## [5.14.0] - 2026-08-05
 

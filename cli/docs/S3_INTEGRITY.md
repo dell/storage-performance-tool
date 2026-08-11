@@ -121,6 +121,12 @@ spt run read-verify \
   --headless
 ```
 
+All-version discovery intentionally uses one exact-prefix LIST stream so a
+sub-prefix containing only deleted keys cannot be omitted by a current-object
+partition probe. The discovery LIST phase is therefore serialized regardless of
+`--threads`; `--threads` still controls the concurrent exact-version GETs in the
+verification phase.
+
 This mode follows every S3 `ListObjectVersions` page and requires the target's
 list-version permission (`s3:ListBucketVersions` in AWS IAM). A denied version
 listing fails closed without publishing usable discovery completion evidence;

@@ -2,22 +2,31 @@ package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.github.akurilov.confuse.Config;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -38,6 +47,9 @@ class LoadStepClientBaseTest {
 	private List<Extension> extensions;
 	private List<Config> ctxConfigs;
 	private MetricsManager mockMetricsManager;
+
+	@TempDir
+	Path tempDir;
 
 	@BeforeEach
 	void setUp() {
@@ -67,6 +79,76 @@ class LoadStepClientBaseTest {
 						IntegrityTerminalException.class,
 						() -> LoadStepClientBase.requireMatchingRunId(mock(LoadStep.class), 0L));
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void terminalFailureCountsSumEveryContextByOperationType() {
+		final MetricsContext<AllMetricsSnapshot> listA = mock(MetricsContext.class);
+		final MetricsContext<AllMetricsSnapshot> listB = mock(MetricsContext.class);
+		final MetricsContext<AllMetricsSnapshot> read = mock(MetricsContext.class);
+		final AllMetricsSnapshot listASnapshot = mock(AllMetricsSnapshot.class);
+		final AllMetricsSnapshot listBSnapshot = mock(AllMetricsSnapshot.class);
+		final AllMetricsSnapshot readSnapshot = mock(AllMetricsSnapshot.class);
+		final RateMetricSnapshot listAFailures = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot listBFailures = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot readFailures = mock(RateMetricSnapshot.class);
+		when(listA.opType()).thenReturn(OpType.LIST);
+		when(listB.opType()).thenReturn(OpType.LIST);
+		when(read.opType()).thenReturn(OpType.READ);
+		when(listA.lastSnapshot()).thenReturn(listASnapshot);
+		when(listB.lastSnapshot()).thenReturn(listBSnapshot);
+		when(read.lastSnapshot()).thenReturn(readSnapshot);
+		when(listASnapshot.failsSnapshot()).thenReturn(listAFailures);
+		when(listBSnapshot.failsSnapshot()).thenReturn(listBFailures);
+		when(readSnapshot.failsSnapshot()).thenReturn(readFailures);
+		when(listAFailures.count()).thenReturn(1L);
+		when(listBFailures.count()).thenReturn(2L);
+		when(readFailures.count()).thenReturn(4L);
+
+		assertEquals(
+						Map.of(OpType.LIST, 3L, OpType.READ, 4L),
+						LoadStepClientBase.terminalFailureCounts(List.of(listA, listB, read)));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void metadataClientCloseRejectsPartialDiscoveryWhenTerminalListFailed() throws Exception {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "list-step");
+		config.val("run-id", 110L);
+		config.val("storage-driver-type", "s3");
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-integrity-input-provenance", "external");
+		config.val("load-op-type", "list");
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final MetricsContext<AllMetricsSnapshot> listMetrics = mock(MetricsContext.class);
+		final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class);
+		final RateMetricSnapshot failures = mock(RateMetricSnapshot.class);
+		when(listMetrics.opType()).thenReturn(OpType.LIST);
+		when(listMetrics.lastSnapshot()).thenReturn(snapshot);
+		when(snapshot.failsSnapshot()).thenReturn(failures);
+		when(failures.count()).thenReturn(1L);
+		client.addMetricsContextForTest(listMetrics);
+
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,first-page-object,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+		addItemOutputAggregator(client, new CsvArtifactAggregator(
+						"list-step", List.of(com.dell.spt.base.load.step.file.FileManager.INSTANCE), List.of(),
+						manifest.toString(), 110, 0, OpType.LIST));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, client::doClose);
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("1 failed operation"));
+		assertFalse(Files.exists(CsvArtifactAggregator.nodeSourcePath(manifest, 0)));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 
 	@Nested
@@ -886,6 +968,18 @@ class LoadStepClientBaseTest {
 			assertDoesNotThrow(() -> linearClient.doShutdown());
 			assertDoesNotThrow(() -> linearClient.doClose());
 			assertDoesNotThrow(() -> linearClient.doStop());
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void addItemOutputAggregator(
+					final LoadStepClientBase<?> client, final AutoCloseable aggregator) {
+		try {
+			final Field field = LoadStepClientBase.class.getDeclaredField("itemOutputFileAggregators");
+			field.setAccessible(true);
+			((List<AutoCloseable>) field.get(client)).add(aggregator);
+		} catch (final ReflectiveOperationException e) {
+			throw new LinkageError(e.getMessage(), e);
 		}
 	}
 

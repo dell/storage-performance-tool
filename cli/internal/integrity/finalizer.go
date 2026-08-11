@@ -248,6 +248,21 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 		inputSourceCompletionPath = filepath.Join(options.ResultsRoot, producerStep+"."+inputCompletionName)
 		inputPromotionSource = fmt.Sprintf("%s from step %s", inputName, producerStep)
 	}
+	if options.Workload == workload.ReadVerify && options.StagedManifest == "" && !readNotStarted {
+		listCounts, countsErr := readOperationMetrics(options.ResultsRoot, listStep, "LIST")
+		if countsErr != nil {
+			return outcome, countsErr
+		}
+		if listCounts.failure > 0 {
+			failureLabel := "failed operations"
+			if listCounts.failure == 1 {
+				failureLabel = "failed operation"
+			}
+			return outcome, fmt.Errorf(
+				"LIST discovery recorded %d %s; refusing partial verification selection",
+				listCounts.failure, failureLabel)
+		}
+	}
 	if err = promoteCompletionPair(
 		inputSourcePath, inputSourceCompletionPath,
 		inputPath, inputCompletionPath,
