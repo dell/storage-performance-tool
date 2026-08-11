@@ -37,8 +37,12 @@ mv spt-*-linux-amd64 spt
 
 ### Prerequisites
 
-- Docker with a running daemon.
-- An SSH client and key-based access for distributed runs.
+- Docker with a running daemon on every machine that will execute the SPT
+  engine. Local tests require Docker on the CLI host; distributed tests require
+  Docker on every participating entry and worker node. Docker only on the CLI
+  host is not sufficient for a distributed run.
+- An SSH client on the CLI host and key-based SSH access to every remote node
+  used in a distributed run.
 - Credentials for a dedicated test target when running real S3 workloads.
 
 ### Engine image selection
