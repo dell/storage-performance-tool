@@ -441,6 +441,7 @@ assert_artifacts() {
 	local marker_count=$4
 	local corrupt_version=${5:-}
 	local failure_reason=${6:-}
+	local source_multiplier=${7:-1}
 	local index="$result_dir/index.json"
 	local input="$result_dir/verify-input.csv"
 	local completion="$result_dir/verify-input.complete.json"
@@ -451,12 +452,15 @@ assert_artifacts() {
 	local expected_verified="$WORK_DIR/expected-verified.tsv"
 	local actual_verified="$WORK_DIR/actual-verified.tsv"
 	local actual_remaining="$WORK_DIR/actual-remaining.tsv"
-	local source_count selected_count corrupt_count verified_count
+	local source_count raw_source_count selected_count corrupt_count verified_count
 	[[ -f "$index" ]] || die "missing index.json in $result_dir"
 	[[ -f "$input" && -f "$completion" && -f "$verified" && -f "$remaining" ]] ||
 		die "missing canonical integrity artifacts in $result_dir"
 
 	source_count=$(line_count "$oracle")
+	# Every distributed node receives the LIST seed; finalization de-duplicates the overlap.
+	raw_source_count=$((source_count * source_multiplier))
+	marker_count=$((marker_count * source_multiplier))
 	if (( cap > 0 && cap < source_count )); then
 		selected_count=$cap
 	else
@@ -470,7 +474,8 @@ assert_artifacts() {
 	verified_count=$((selected_count - corrupt_count))
 
 	jq -e \
-		--argjson source "$source_count" \
+		--argjson source "$raw_source_count" \
+		--argjson unique "$source_count" \
 		--argjson selected "$selected_count" \
 		--argjson markers "$marker_count" \
 		--argjson corrupt "$corrupt_count" \
@@ -478,7 +483,7 @@ assert_artifacts() {
 		'.integrity.complete == true and
 		 .integrity.selection_counts_valid == true and
 		 .integrity.selection_source_count == $source and
-		 .integrity.selection_unique_count == $source and
+		 .integrity.selection_unique_count == $unique and
 		 .integrity.selection_count == $selected and
 		 .integrity.excluded_delete_marker_count == $markers and
 		 .integrity.verification_attempted_count == $selected and
@@ -519,18 +524,38 @@ assert_artifacts() {
 	manifest_bytes=$(stat -c '%s' "$input")
 	manifest_sha=$(sha256sum "$input" | awk '{print $1}')
 	jq -e \
-		--argjson source "$source_count" \
+		--argjson source "$raw_source_count" \
+		--argjson unique "$source_count" \
 		--argjson selected "$selected_count" \
 		--argjson markers "$marker_count" \
 		--argjson bytes "$manifest_bytes" \
 		--arg sha "$manifest_sha" \
 		'.version == 2 and .status == "complete" and
 		 .source_record_count == $source and
-		 .unique_record_count == $source and
+		 .unique_record_count == $unique and
 		 .selected_record_count == $selected and
 		 .excluded_delete_marker_count == $markers and
 		 .manifest_bytes == $bytes and .manifest_sha256 == $sha' "$completion" >/dev/null ||
 		die "completion evidence assertion failed for $result_dir"
+}
+
+assert_distributed_identity() {
+	local result_dir=$1
+	local expected_host_count=$2
+	local params="$result_dir/spt_run_params.json"
+	[[ -f "$params" ]] || die "missing distributed runtime identity evidence in $result_dir"
+	jq -e --argjson expected "$expected_host_count" '
+		. as $root |
+		.multiHost.enabled == true and
+		.multiHost.hostCount == $expected and
+		.runtimeIdentity.tier == "immutable_image_and_payload" and
+		(.runtimeIdentity.imageId | startswith("sha256:")) and
+		(.runtimeIdentity.payloadSha256 | test("^[0-9a-f]{64}$")) and
+		(.runtimeIdentity.participants | length) == $expected and
+		all(.runtimeIdentity.participants[];
+			.imageId == $root.runtimeIdentity.imageId and
+			.payloadSha256 == $root.runtimeIdentity.payloadSha256)
+	' "$params" >/dev/null || die "distributed runtime identity assertion failed for $result_dir"
 }
 
 record_candidate_identity() {
@@ -573,6 +598,7 @@ run_case() {
 	local min_hosts=${11}
 	local access=${12:-$ACCESS_KEY}
 	local secret=${13:-$SECRET_KEY}
+	local source_multiplier=${14:-1}
 	local expected_exit=0
 	local source_count marker_count label result_dir console_log
 	local -a cmd
@@ -608,6 +634,10 @@ run_case() {
 	if (( source_count == 0 )); then
 		cmd+=(--allow-empty-selection)
 	fi
+	if (( source_multiplier > 1 )); then
+		# Distributed qualification is release evidence, so require the stronger payload tier.
+		cmd+=(--integrity-runtime-identity-tier payload)
+	fi
 
 	echo "Running $case_name with $driver ($versions, source=$source_count, markers=$marker_count)"
 	set +e
@@ -620,7 +650,11 @@ run_case() {
 	fi
 	result_dir=$(find_result_dir "$label")
 	[[ -n "$result_dir" ]] || die "cannot locate results for $case_name/$driver"
-	assert_artifacts "$result_dir" "$oracle" "$cap" "$marker_count" "$corrupt_version" "$failure_reason"
+	assert_artifacts "$result_dir" "$oracle" "$cap" "$marker_count" "$corrupt_version" "$failure_reason" \
+		"$source_multiplier"
+	if (( source_multiplier > 1 )); then
+		assert_distributed_identity "$result_dir" "$source_multiplier"
+	fi
 	echo "  PASS: $result_dir"
 }
 
@@ -716,10 +750,14 @@ run_qualification() {
 	done
 
 	if [[ "$SUITE" == "full" && -n "$DISTRIBUTED_HOSTS" ]]; then
+		local -a distributed_host_list
+		IFS=',' read -r -a distributed_host_list <<< "$DISTRIBUTED_HOSTS"
+		local distributed_host_count=${#distributed_host_list[@]}
 		for driver in "${DRIVER_LIST[@]}"; do
 			run_case "$driver" "paged-distributed" "$BUCKET" "paged/" all \
 				"$ORACLE_DIR/paged-all.data.tsv" 0 "" "" \
-				"$DISTRIBUTED_HOSTS" "$DISTRIBUTED_MIN_HOSTS"
+				"$DISTRIBUTED_HOSTS" "$DISTRIBUTED_MIN_HOSTS" \
+				"$ACCESS_KEY" "$SECRET_KEY" "$distributed_host_count"
 		done
 	elif [[ "$SUITE" == "full" ]]; then
 		echo "SKIP: distributed pagination gate: --distributed-hosts is not configured"
