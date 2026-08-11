@@ -62,6 +62,8 @@ import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -89,7 +91,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_MPU_FAILURE = "mpuFailure";
 
 	private final S3AsyncClient s3AsyncClient;
-	private final S3AsyncClient exactVersionS3Client;
+	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
+	private volatile S3AsyncClient exactVersionS3Client;
 	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
@@ -126,6 +129,38 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						exactVersionS3Client, null, smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						null, Objects.requireNonNull(exactVersionS3ClientSupplier),
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	private S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final S3AsyncClient exactVersionS3Client,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
 		super(stepId, dataInput, config, verifyFlag, batchSize);
 		if (verifyFlag) {
 			throw new IllegalConfigurationException(
@@ -134,6 +169,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		this.s3AsyncClient = s3AsyncClient;
 		this.exactVersionS3Client = exactVersionS3Client;
+		this.exactVersionS3ClientSupplier = exactVersionS3ClientSupplier;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
 
@@ -806,7 +842,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		final S3AsyncClient readClient = versionId == null || versionId.isEmpty()
 						? s3AsyncClient
-						: exactVersionS3Client;
+						: exactVersionS3Client();
 		try (var response = readClient.getObject(
 						reqBuilder.build(),
 						AsyncResponseTransformer.toBlockingInputStream()).join()) {
@@ -848,6 +884,22 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		return CompletableFuture.completedFuture(null);
+	}
+
+	private S3AsyncClient exactVersionS3Client() {
+		S3AsyncClient client = exactVersionS3Client;
+		if (client == null) {
+			synchronized (this) {
+				client = exactVersionS3Client;
+				if (client == null) {
+					client = Objects.requireNonNull(
+									exactVersionS3ClientSupplier.get(),
+									"Exact-version S3 client supplier returned null");
+					exactVersionS3Client = client;
+				}
+			}
+		}
+		return client;
 	}
 
 	private CompletableFuture<Void> deleteObject(final O op) {
@@ -997,9 +1049,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return s3AsyncClient.listObjectVersions(request.build())
 						.thenAccept(response -> {
+							final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
+							if (truncated
+											&& (response.nextKeyMarker() == null
+															|| response.nextKeyMarker().isEmpty()
+															|| response.nextVersionIdMarker() == null
+															|| response.nextVersionIdMarker().isEmpty())) {
+								throw new IllegalStateException(
+												"Truncated S3 version LIST result is missing its next markers");
+							}
 							final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
 							long bytesTotal = 0;
 							String firstKey = null;
+							String lastKey = null;
 							for (final ObjectVersion version : response.versions()) {
 								final String key = version.key();
 								final String versionId = version.versionId();
@@ -1007,23 +1069,39 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 									throw new IllegalStateException(
 													"ListObjectVersions returned a data version without an exact identity");
 								}
-								final long size = Math.max(0L, version.size());
+								final Long responseSize = version.size();
+								if (responseSize == null) {
+									throw new IllegalStateException(
+													"S3 LIST entry is missing Size for key \"" + key + "\"");
+								}
+								final long size = Math.max(0L, responseSize);
 								listedObjects.add(new ListedObject(key, size, versionId));
 								if (options.fetchMetadata()) {
 									bytesTotal = Math.addExact(bytesTotal, size);
 								}
-								if (firstKey == null) {
+								if (firstKey == null || key.compareTo(firstKey) < 0) {
 									firstKey = key;
 								}
+								if (lastKey == null || key.compareTo(lastKey) > 0) {
+									lastKey = key;
+								}
 							}
-							if (firstKey == null && !response.deleteMarkers().isEmpty()) {
-								firstKey = response.deleteMarkers().get(0).key();
+							for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
+								final String key = deleteMarker.key();
+								if (key != null && !key.isEmpty()) {
+									if (firstKey == null || key.compareTo(firstKey) < 0) {
+										firstKey = key;
+									}
+									if (lastKey == null || key.compareTo(lastKey) > 0) {
+										lastKey = key;
+									}
+								}
 							}
 							listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
 							listOp.listedObjects(listedObjects);
 							listOp.deleteMarkersListed(response.deleteMarkers().size());
 							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-							listOp.truncated(Boolean.TRUE.equals(response.isTruncated()));
+							listOp.truncated(truncated);
 							if (firstKey != null) {
 								listOp.pageFirstKey(firstKey);
 							}
@@ -1034,6 +1112,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 															.keyMarker(response.nextKeyMarker())
 															.versionIdMarker(response.nextVersionIdMarker())
 															.build());
+							if (lastKey != null) {
+								listOp.startAfter(lastKey);
+							}
 							listOp.countBytesDone(listOp.bytesListed());
 							if (listOp.respDataTimeStart() == 0) {
 								LOG.debug(

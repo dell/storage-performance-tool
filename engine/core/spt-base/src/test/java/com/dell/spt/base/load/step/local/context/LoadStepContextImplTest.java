@@ -16,6 +16,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.PathItemImpl;
+import com.dell.spt.base.item.io.IntegrityOperationManifestOutput;
 import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
@@ -24,6 +25,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
+import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl;
@@ -43,6 +45,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -60,6 +63,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -75,6 +79,9 @@ import static org.mockito.Mockito.when;
 
 /* Alot of the functionality from ItemInputFactoryTest is used here since need an ItemInputFactory */
 public class LoadStepContextImplTest {
+	@TempDir
+	Path tempDir;
+
 	private static Path TMP_DIR_PATH = null;
 	private LoadGeneratorBuilder generatorBuilder = null;
 	private LoadGenerator generator = null;
@@ -1116,6 +1123,113 @@ public class LoadStepContextImplTest {
 		assertTrue(stepCtx.put((Operation<DataItem>) op));
 
 		assertEquals(100L, trackingCtx.singleTtfb.get());
+	}
+
+	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void metadataListPublishesThreePagesExactlyOnceWithMatchingEmissionCount() throws Exception {
+		final Config listConfig = TestConfigBuilder.config();
+		listConfig.val("item-type", "path");
+		listConfig.val("load-op-type", "list");
+		listConfig.val("load-op-recycle-mode", true);
+		listConfig.val("load-op-recycle-content-update", false);
+
+		final LoadGenerator<Item, Operation<Item>> listGenerator = mock(LoadGenerator.class);
+		final StorageDriver<Item, Operation<Item>> listDriver = mock(StorageDriver.class);
+		when(listDriver.metadataIntegrityEnabled()).thenReturn(true);
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"metadata-list-three-pages",
+						listGenerator,
+						listDriver,
+						buildMetricsCtx("metadata-list-three-pages"),
+						listConfig.configVal("load"),
+						false);
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final IntegrityOperationManifestOutput<Operation<Item>> output = new IntegrityOperationManifestOutput<>(manifest, "/bucket", OpType.LIST);
+		stepCtx.operationsResultsOutput(output);
+		final PathItemImpl seed = new PathItemImpl("prefix/");
+		final ListOperationImpl<PathItemImpl> page = new ListOperationImpl<>(
+						0, OpType.LIST, seed, null);
+		page.status(Operation.Status.SUCC);
+		final Operation<Item> result = (Operation<Item>) (Operation<?>) page;
+
+		page.listedObjects(List.of(new ListedObject("prefix/a", 1, "a-v1")));
+		page.objectsListed(1);
+		page.truncated(true);
+		page.continuationToken("page-2");
+		assertTrue(stepCtx.put(result));
+
+		page.listedObjects(List.of(new ListedObject("prefix/b", 2, "b-v1")));
+		page.objectsListed(1);
+		page.truncated(true);
+		page.continuationToken("page-3");
+		assertTrue(stepCtx.put(result));
+
+		page.listedObjects(List.of(new ListedObject("prefix/c", 3, "c-v1")));
+		page.objectsListed(1);
+		page.truncated(false);
+		page.continuationToken(null);
+		assertTrue(stepCtx.put(result));
+		output.close();
+
+		assertEquals(
+						List.of(
+										"bucket,key,size,version_id",
+										"bucket,prefix/a,1,a-v1",
+										"bucket,prefix/b,2,b-v1",
+										"bucket,prefix/c,3,c-v1"),
+						Files.readAllLines(manifest));
+		assertEquals(
+						"3",
+						Files.readString(com.dell.spt.base.integrity.IntegrityManifestCompletion
+										.emissionCountPath(manifest)).trim());
+		verify(listGenerator, times(2)).recycle(result);
+	}
+
+	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void ordinaryRecycledListRetainsOnlyIntermediatePageAndEmitsFinalPageOnce() throws Exception {
+		final Config listConfig = TestConfigBuilder.config();
+		listConfig.val("item-type", "path");
+		listConfig.val("load-op-type", "list");
+		listConfig.val("load-op-recycle-mode", true);
+		listConfig.val("load-op-recycle-content-update", false);
+
+		final LoadGenerator<Item, Operation<Item>> listGenerator = mock(LoadGenerator.class);
+		final StorageDriver<Item, Operation<Item>> listDriver = mock(StorageDriver.class);
+		when(listDriver.metadataIntegrityEnabled()).thenReturn(false);
+		final Output<Operation<Item>> resultsOutput = mock(Output.class);
+		when(resultsOutput.put(any(Operation.class))).thenReturn(true);
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"ordinary-list-pages",
+						listGenerator,
+						listDriver,
+						buildMetricsCtx("ordinary-list-pages"),
+						listConfig.configVal("load"),
+						false);
+		stepCtx.operationsResultsOutput(resultsOutput);
+		final PathItemImpl seed = new PathItemImpl("prefix/");
+		final ListOperationImpl<PathItemImpl> page = new ListOperationImpl<>(
+						0, OpType.LIST, seed, null);
+		page.status(Operation.Status.SUCC);
+		page.objectsListed(1);
+		page.truncated(true);
+		final Operation<Item> result = (Operation<Item>) (Operation<?>) page;
+
+		assertTrue(stepCtx.put(result));
+		verify(resultsOutput, never()).put(result);
+		final var retainedField = LoadStepContextImpl.class.getDeclaredField(
+						"latestSuccOpResultByItem");
+		retainedField.setAccessible(true);
+		assertEquals(1, ((Map<?, ?>) retainedField.get(stepCtx)).size());
+
+		page.truncated(false);
+		assertTrue(stepCtx.put(result));
+		verify(resultsOutput, times(1)).put(result);
+		assertTrue(((Map<?, ?>) retainedField.get(stepCtx)).isEmpty());
+		verify(listGenerator, times(1)).recycle(result);
 	}
 
 	@Test

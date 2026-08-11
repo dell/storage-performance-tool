@@ -319,17 +319,17 @@ write_oracle() {
 		jq -r --arg bucket "$bucket" --arg prefix "$prefix" \
 			'select(.status == "success" and (.isDeleteMarker // false) == false) |
 			 [$bucket, ($prefix + .key), (.size | tostring), .versionId] | @tsv' \
-			"$raw" | LC_ALL=C sort > "$data"
+			"$raw" | LC_ALL=C sort -t$'\t' -k1,1 -k2,2 -k4,4 > "$data"
 		jq -r --arg bucket "$bucket" --arg prefix "$prefix" \
 			'select(.status == "success" and (.isDeleteMarker // false) == true) |
 			 [$bucket, ($prefix + .key), (.versionId // "")] | @tsv' \
-			"$raw" | LC_ALL=C sort > "$markers"
+			"$raw" | LC_ALL=C sort -t$'\t' -k1,1 -k2,2 -k3,3 > "$markers"
 	else
 		mcq ls --recursive --json "$MC_ALIAS/$bucket/$prefix" > "$raw"
 		jq -r --arg bucket "$bucket" --arg prefix "$prefix" \
 			'select(.status == "success") |
 			 [$bucket, ($prefix + .key), (.size | tostring), ""] | @tsv' \
-			"$raw" | LC_ALL=C sort > "$data"
+			"$raw" | LC_ALL=C sort -t$'\t' -k1,1 -k2,2 -k4,4 > "$data"
 		: > "$markers"
 	fi
 }
@@ -344,8 +344,8 @@ seed_fixtures() {
 	mcq mb --with-versioning "$MC_ALIAS/$BUCKET" >/dev/null
 	mcq version info --json "$MC_ALIAS/$BUCKET" > "$EVIDENCE_DIR/main-bucket-versioning.json"
 
-	put_payload "$BUCKET" "healthy/alpha" "alpha-v1"
-	put_payload "$BUCKET" "healthy/alpha" "alpha-v2"
+	put_payload "$BUCKET" "healthy/alpha" "a"
+	put_payload "$BUCKET" "healthy/alpha" "alpha-version-two-is-longer"
 	put_payload "$BUCKET" "healthy/alpha" "alpha-v3"
 	put_payload "$BUCKET" "healthy/beta" "beta-v1"
 	put_payload "$BUCKET" "healthy/beta" "beta-v2"
@@ -362,6 +362,15 @@ seed_fixtures() {
 	put_payload "$BUCKET" "missing/object" "missing-current-healthy"
 
 	if [[ "$SUITE" == "full" ]]; then
+		echo "Seeding version-completeness partition fixture"
+		local partition_index
+		for ((partition_index = 1; partition_index <= THREADS; partition_index++)); do
+			put_payload "$BUCKET" "partition/live-$partition_index/object" \
+				"partition-live-$partition_index"
+		done
+		put_payload "$BUCKET" "partition/deleted-only/object" "deleted-historical-data"
+		mcq rm --quiet "$MC_ALIAS/$BUCKET/partition/deleted-only/object" >/dev/null
+
 		echo "Seeding $PAGE_VERSIONS data versions for paired-marker pagination"
 		local i
 		for ((i = 1; i <= PAGE_VERSIONS; i++)); do
@@ -392,6 +401,7 @@ seed_fixtures() {
 	write_oracle "$BUCKET" "missing/" "missing-current" current
 	write_oracle "$BUCKET" "missing/" "missing-all" all
 	if [[ "$SUITE" == "full" ]]; then
+		write_oracle "$BUCKET" "partition/" "partition-all" all
 		write_oracle "$BUCKET" "paged/" "paged-all" all
 		write_oracle "$SUSPENDED_BUCKET" "suspended/" "suspended-all" all
 		write_oracle "$UNVERSIONED_BUCKET" "unversioned/" "unversioned-all" all
@@ -404,6 +414,7 @@ seed_fixtures() {
 	echo "  Bucket:   $BUCKET"
 	echo "  Healthy:  $(line_count "$ORACLE_DIR/healthy-all.data.tsv") data versions, $(line_count "$ORACLE_DIR/healthy-all.markers.tsv") markers"
 	if [[ "$SUITE" == "full" ]]; then
+		echo "  Partition: $(line_count "$ORACLE_DIR/partition-all.data.tsv") data versions, $(line_count "$ORACLE_DIR/partition-all.markers.tsv") markers"
 		echo "  Paged:    $(line_count "$ORACLE_DIR/paged-all.data.tsv") data versions, $(line_count "$ORACLE_DIR/paged-all.markers.tsv") markers"
 	fi
 }
@@ -414,7 +425,7 @@ normalize_manifest() {
 	awk -F',' 'NR > 1 {
 		sub(/\r$/, "", $4)
 		print $1 "\t" $2 "\t" $3 "\t" $4
-	}' "$manifest" | LC_ALL=C sort > "$output"
+	}' "$manifest" | LC_ALL=C sort -t$'\t' -k1,1 -k2,2 -k4,4 > "$output"
 }
 
 expected_selection() {
@@ -739,6 +750,8 @@ run_qualification() {
 			"$ORACLE_DIR/missing-all.data.tsv" 0 "$MISSING_VERSION_ID" "metadata_missing" "$HOSTS" "$MIN_HOSTS"
 
 		if [[ "$SUITE" == "full" ]]; then
+			run_case "$driver" "partition-all" "$BUCKET" "partition/" all \
+				"$ORACLE_DIR/partition-all.data.tsv" 0 "" "" "$HOSTS" "$MIN_HOSTS"
 			run_case "$driver" "paged-all" "$BUCKET" "paged/" all \
 				"$ORACLE_DIR/paged-all.data.tsv" 0 "" "" "$HOSTS" "$MIN_HOSTS"
 			run_case "$driver" "suspended-all" "$SUSPENDED_BUCKET" "suspended/" all \

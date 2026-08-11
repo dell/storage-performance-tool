@@ -153,7 +153,7 @@ func stageInputManifestWithOperations(
 		return "", "", "", fmt.Errorf("hash staged manifest: %w", hashErr)
 	}
 	marker := Completion{
-		Version: 1, Status: "complete", RunID: runID,
+		Version: constants.IntegrityCompletionVersionLegacy, Status: "complete", RunID: runID,
 		ProducerKind: constants.IntegrityProvenanceCLIStager, ProducerID: CLIStagerProducerID,
 		Artifact: VerifyInputName, SourceRecordCount: sourceCount,
 		UniqueRecordCount: uniqueCount, SelectedRecordCount: uniqueCount,

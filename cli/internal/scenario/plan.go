@@ -19,12 +19,17 @@ type StepInfo struct {
 
 // StepPlan is an ordered list of steps discovered in a generated scenario.
 type StepPlan struct {
-	Steps []StepInfo
+	Steps                []StepInfo
+	ListIncludesVersions []bool
 }
 
-var stepIDCaptureRe = regexp.MustCompile(`"id"\s*:\s*"([A-Za-z0-9._-]+)-([0-9]{3})-([0-9]{8}\.[0-9]{6}\.[0-9]{3})-([a-z0-9_-]+)"`)
+var (
+	stepIDCaptureRe = regexp.MustCompile(`"id"\s*:\s*"([A-Za-z0-9._-]+)-([0-9]{3})-([0-9]{8}\.[0-9]{6}\.[0-9]{3})-([a-z0-9_-]+)"`)
+	listVersionsRe  = regexp.MustCompile(`"include_versions"\s*:\s*(true|false)`)
+)
 
-// BuildStepPlanFromScenario scans the scenario text and extracts step IDs in order.
+// BuildStepPlanFromScenario scans the scenario text and extracts step IDs in order,
+// along with rendered LIST version settings used by the typed-plan cross-check.
 // It does not attempt to infer relationships beyond what is encoded in the ID.
 func BuildStepPlanFromScenario(scenarioText string) (StepPlan, error) {
 	matches := stepIDCaptureRe.FindAllStringSubmatch(scenarioText, -1)
@@ -47,7 +52,11 @@ func BuildStepPlanFromScenario(scenarioText string) (StepPlan, error) {
 
 	// Preserve natural order by step number.
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].Number < steps[j].Number })
-	return StepPlan{Steps: steps}, nil
+	listIncludesVersions := make([]bool, 0, 1)
+	for _, match := range listVersionsRe.FindAllStringSubmatch(scenarioText, -1) {
+		listIncludesVersions = append(listIncludesVersions, match[1] == "true")
+	}
+	return StepPlan{Steps: steps, ListIncludesVersions: listIncludesVersions}, nil
 }
 
 // BuildVerificationPlan assigns semantic roles to one already-rendered,
@@ -167,6 +176,20 @@ func BuildVerificationPlan(params Params, steps StepPlan) (integrityplan.Plan, e
 			producer, producerErr := one(integrityplan.StepRoleList, true)
 			if producerErr != nil {
 				return integrityplan.Plan{}, producerErr
+			}
+			if len(steps.ListIncludesVersions) != 1 {
+				return integrityplan.Plan{}, fmt.Errorf(
+					"read-verify discovery scenario has %d include_versions settings, want 1",
+					len(steps.ListIncludesVersions))
+			}
+			renderedVersions := integrityplan.DiscoveryVersionsCurrent
+			if steps.ListIncludesVersions[0] {
+				renderedVersions = integrityplan.DiscoveryVersionsAll
+			}
+			if renderedVersions != plan.DiscoveryVersions {
+				return integrityplan.Plan{}, fmt.Errorf(
+					"read-verify discovery scenario versions %q do not match plan versions %q",
+					renderedVersions, plan.DiscoveryVersions)
 			}
 			plan.Kind = integrityplan.PlanKindReadDiscovered
 			plan.Producer = producer

@@ -326,6 +326,32 @@ public class LoadStepContextSplitGateTest {
 	}
 
 	@Test
+	public void allVersionListNeverAttemptsDelimiterSplit() throws Exception {
+		final var metrics = new FakeMetrics(64, 1);
+		final var driver = com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock
+						.<Item, Operation<Item>> create();
+		final LoadStepContextImpl<Item, Operation<Item>> ctx = new LoadStepContextImpl<>(
+						"all-version-split-test",
+						null,
+						driver,
+						metrics,
+						minimalLoadConfig(),
+						false);
+		final ListShard shard = new ListShard("prefix/", null, null, null);
+		final ListOperation<?> listOp = newListOp(
+						"/bucket", "prefix/a", "prefix/z", shard);
+		listOp.options(listOp.options().toBuilder().includeVersions(true).build());
+		final Method method = LoadStepContextImpl.class.getDeclaredMethod(
+						"tryDelimiterSplit", ListShard.class, ListOperation.class);
+		method.setAccessible(true);
+
+		assertEquals(Boolean.FALSE, method.invoke(ctx, shard, listOp));
+		final Field windowsField = LoadStepContextImpl.class.getDeclaredField("splitWindows");
+		windowsField.setAccessible(true);
+		assertTrue(((ConcurrentMap<?, ?>) windowsField.get(ctx)).isEmpty());
+	}
+
+	@Test
 	public void delimiterSplitLogsRecorderFailuresAndContinues() throws Exception {
 		final var metrics = new FakeMetrics(10, 1); // concCurr < concLimit
 		final StorageDriver<Item, Operation<Item>> driverMock = mock(

@@ -133,8 +133,9 @@ count is reported in the completion evidence, console summary, and `index.json`.
 Suspended and unversioned behavior depends on the target's S3 compatibility.
 Some targets return no version entries for an unversioned bucket; others return
 the current object with the literal `null` version ID. SPT preserves a returned
-`null` ID and sends it on the exact-version GET. A genuinely empty result follows
-the usual `--allow-empty-selection` policy.
+`null` ID and sends it on the exact-version GET. A version entry without a
+nonempty version ID is a hard discovery failure, not an empty selection. A
+genuinely empty result follows the usual `--allow-empty-selection` policy.
 
 Version listing is not a snapshot. Use a quiescent, controlled prefix: concurrent
 version creation or deletion during pagination can change the observed set.

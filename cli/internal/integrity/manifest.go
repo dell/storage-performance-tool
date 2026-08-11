@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 const (
@@ -123,7 +125,8 @@ func validateCompletionRecord(
 	producerKind, producerID, artifact string,
 	requireCanonicalManifestName bool,
 ) error {
-	if (marker.Version != 1 && marker.Version != 2) || marker.Status != "complete" {
+	if (marker.Version != constants.IntegrityCompletionVersionLegacy &&
+		marker.Version != constants.IntegrityCompletionVersionCurrent) || marker.Status != "complete" {
 		return fmt.Errorf("completion record has unsupported version/status %d/%q", marker.Version, marker.Status)
 	}
 	if runID <= 0 || marker.RunID != runID {
@@ -142,7 +145,7 @@ func validateCompletionRecord(
 		marker.SourceRecordCount < marker.UniqueRecordCount || marker.UniqueRecordCount < marker.SelectedRecordCount {
 		return fmt.Errorf("completion record counts are inconsistent")
 	}
-	if marker.ExcludedDeleteMarkerCount < 0 || (marker.Version == 1 && marker.ExcludedDeleteMarkerCount != 0) {
+	if marker.ExcludedDeleteMarkerCount < 0 || (marker.Version == constants.IntegrityCompletionVersionLegacy && marker.ExcludedDeleteMarkerCount != 0) {
 		return fmt.Errorf("completion record excluded delete marker count is inconsistent")
 	}
 

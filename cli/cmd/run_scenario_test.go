@@ -524,6 +524,21 @@ func TestBuildScenarioParams(t *testing.T) {
 	}
 }
 
+func TestBuildScenarioParamsIncludesAllVersions(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().String(flagVersions, scenario.VersionsCurrent, "")
+	if err := cmd.Flags().Set(flagVersions, scenario.VersionsAll); err != nil {
+		t.Fatal(err)
+	}
+	params, err := buildScenarioParams(WorkloadTypeReadVerify, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.Versions != scenario.VersionsAll {
+		t.Fatalf("buildScenarioParams versions = %q, want %q", params.Versions, scenario.VersionsAll)
+	}
+}
+
 func TestBuildScenarioParamsIncludesDeferredVerification(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool(flagDeferVerification, false, "")

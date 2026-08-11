@@ -440,7 +440,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						resultCount > 0
 						&& resultCount >= generator.generatedOpCount()
 						&&
-						// no successful op results
+						// Metadata LIST publishes pages immediately and never populates this map,
+						// so this condition is meaningful only for other recycled workloads.
 						latestSuccOpResultByItem.size() == 0;
 	}
 
@@ -551,6 +552,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					// recycled ops should only appear in output.csv only once unless
 					// outputDuplicates flag is specified
 					outputResults(opResult);
+					if (recycleFlag && opResult instanceof ListOperation) {
+						latestSuccOpResultByItem.remove(opResult.item());
+					}
 				} else {
 					// for recycled ops we might want to print them once or every time
 					// Metadata discovery must publish every page before the mutable LIST op is recycled.
@@ -664,6 +668,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						// recycled ops should only appear in output.csv only once unless
 						// outputDuplicates flag is specified
 						outputResults(opResult);
+						if (recycleFlag && opResult instanceof ListOperation) {
+							latestSuccOpResultByItem.remove(opResult.item());
+						}
 					} else {
 						// for recycled ops we might want to print them once or every time
 						// Metadata discovery must publish every page before the mutable LIST op is recycled.
@@ -1365,6 +1372,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	// Returns true if a split has been performed and parent should not be recycled
 	private boolean tryDelimiterSplit(final ListShard shard, final ListOperation<?> listOp) {
+		final ListOptions options = listOp.options();
+		if (options != null && options.includeVersions()) {
+			return false;
+		}
 		// Only consider ENUMERATE shards for splitting
 		final ListShard.Kind kind = shard.kind();
 		if (kind != null && kind != ListShard.Kind.ENUMERATE) {

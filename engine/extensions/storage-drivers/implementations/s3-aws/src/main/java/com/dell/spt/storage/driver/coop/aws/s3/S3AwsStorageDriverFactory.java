@@ -194,19 +194,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// The CRT manages part size internally based on minimumPartSizeInBytes
 
 		S3AsyncClient s3AsyncClient = crtBuilder.build();
-		S3AsyncClient exactVersionS3Client = null;
+		final String exactClientRegion = region;
+		final int exactClientMaxConcurrency = maxConcurrency;
 		try {
-			// The CRT S3 transfer client may synthesize conditional multipart GETs from a
-			// current-object HEAD. Use the ordinary protocol client when a version ID is exact.
-			exactVersionS3Client = S3AsyncClient.builder()
-							.credentialsProvider(StaticCredentialsProvider.create(creds))
-							.region(Region.of(region))
-							.endpointOverride(URI.create(endpoint))
-							.forcePathStyle(pathStyle)
-							.httpClientBuilder(AwsCrtAsyncHttpClient.builder()
-											.maxConcurrency(maxConcurrency))
-							.build();
-
 			return new S3AwsStorageDriver<>(
 							stepId,
 							dataInput,
@@ -214,17 +204,22 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 							verifyFlag,
 							batchSize,
 							s3AsyncClient,
-							exactVersionS3Client,
+							() -> {
+								// The CRT S3 transfer client may synthesize conditional multipart GETs
+								// from a current-object HEAD. Build the ordinary protocol client only
+								// when an exact version ID is first requested.
+								return S3AsyncClient.builder()
+												.credentialsProvider(StaticCredentialsProvider.create(creds))
+												.region(Region.of(exactClientRegion))
+												.endpointOverride(URI.create(endpoint))
+												.forcePathStyle(pathStyle)
+												.httpClientBuilder(AwsCrtAsyncHttpClient.builder()
+																.maxConcurrency(exactClientMaxConcurrency))
+												.build();
+							},
 							smallObjectThresholdBytes,
 							partSizeBytes);
 		} catch (RuntimeException e) {
-			try {
-				if (exactVersionS3Client != null) {
-					exactVersionS3Client.close();
-				}
-			} catch (RuntimeException closeFailure) {
-				e.addSuppressed(closeFailure);
-			}
 			try {
 				s3AsyncClient.close();
 			} catch (RuntimeException closeFailure) {

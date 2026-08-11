@@ -271,11 +271,6 @@ Configuration:
         AppenderRef:
           ref: tablesMetricsFile
         additivity: false
-      - name: com.dell.spt.storage.driver.coop.aws.s3.S3AwsStorageDriver
-        level: INFO
-        AppenderRef:
-          ref: msgFile
-        additivity: false
       - name: com.github.akurilov
         level: WARN
         AppenderRef:

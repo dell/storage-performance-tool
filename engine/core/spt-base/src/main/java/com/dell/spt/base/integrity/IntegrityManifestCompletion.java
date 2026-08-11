@@ -152,6 +152,10 @@ public final class IntegrityManifestCompletion {
 		return manifest.resolveSibling(base + ".complete.json");
 	}
 
+	/**
+	 * Creates completion evidence for non-LIST artifacts, which cannot contain delete markers.
+	 * Discovery callers must use the count-aware overload and report excluded delete markers.
+	 */
 	public static IntegrityManifestCompletion create(
 					final Path manifest,
 					final long runId,

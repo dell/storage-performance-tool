@@ -5,6 +5,7 @@ Copyright © 2026 Dell Technologies
 package scenario
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
@@ -17,6 +18,7 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 		wantKind     integrityplan.PlanKind
 		wantInput    integrityplan.InputProvenance
 		wantRole     integrityplan.StepRole
+		wantVersions integrityplan.DiscoveryVersions
 		wantVerifier bool
 		wantCleanup  bool
 	}{
@@ -25,21 +27,31 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 			params: Params{WorkloadType: WorkloadTypeWriteVerify, RunID: 101,
 				Bucket: "b", ObjectSize: "10MiB", ObjectCount: 1, Threads: 1,
 				PartSize: "5MiB", Cleanup: true, BaseTimestamp: "20260802.120000.000"},
-			wantKind: integrityplan.PlanKindWriteRead, wantInput: integrityplan.InputWritten, wantRole: integrityplan.StepRoleCreate, wantVerifier: true,
+			wantKind: integrityplan.PlanKindWriteRead, wantInput: integrityplan.InputWritten, wantRole: integrityplan.StepRoleCreate,
+			wantVersions: integrityplan.DiscoveryVersionsCurrent, wantVerifier: true,
 			wantCleanup: true,
 		},
 		{
 			name: "read verify discovery",
 			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 102,
+				Bucket: "b", ObjectCount: 1, Threads: 1, BaseTimestamp: "20260802.120000.000"},
+			wantKind: integrityplan.PlanKindReadDiscovered, wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList,
+			wantVersions: integrityplan.DiscoveryVersionsCurrent, wantVerifier: true,
+		},
+		{
+			name: "read verify discovery all versions",
+			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 105,
 				Bucket: "b", ObjectCount: 1, Threads: 1, Versions: VersionsAll, BaseTimestamp: "20260802.120000.000"},
-			wantKind: integrityplan.PlanKindReadDiscovered, wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList, wantVerifier: true,
+			wantKind: integrityplan.PlanKindReadDiscovered, wantInput: integrityplan.InputDiscovered, wantRole: integrityplan.StepRoleList,
+			wantVersions: integrityplan.DiscoveryVersionsAll, wantVerifier: true,
 		},
 		{
 			name: "read verify external",
 			params: Params{WorkloadType: WorkloadTypeReadVerify, RunID: 103,
 				Bucket: "b", Threads: 1, ItemsFile: "/spt-input/items.csv",
 				AllowEmptySelection: true, BaseTimestamp: "20260802.120000.000"},
-			wantKind: integrityplan.PlanKindReadExternal, wantInput: integrityplan.InputExternal, wantVerifier: true,
+			wantKind: integrityplan.PlanKindReadExternal, wantInput: integrityplan.InputExternal,
+			wantVersions: integrityplan.DiscoveryVersionsCurrent, wantVerifier: true,
 		},
 		{
 			name: "deferred write verify",
@@ -47,7 +59,7 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 				Bucket: "b", ObjectSize: "1MiB", ObjectCount: 1, Threads: 1,
 				DeferVerification: true, BaseTimestamp: "20260802.120000.000"},
 			wantKind: integrityplan.PlanKindWriteSeed, wantInput: integrityplan.InputWritten,
-			wantRole: integrityplan.StepRoleCreate,
+			wantRole: integrityplan.StepRoleCreate, wantVersions: integrityplan.DiscoveryVersionsCurrent,
 		},
 	}
 	for _, test := range tests {
@@ -69,10 +81,10 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 				(plan.Cleanup != nil) != test.wantCleanup {
 				t.Fatalf("typed plan = %+v", plan)
 			}
+			if plan.DiscoveryVersions != test.wantVersions {
+				t.Fatalf("typed plan versions = %q, want %q", plan.DiscoveryVersions, test.wantVersions)
+			}
 			if test.wantRole == "" {
-				if test.params.Versions == VersionsAll && plan.DiscoveryVersions != integrityplan.DiscoveryVersionsAll {
-					t.Fatalf("typed plan versions = %q, want all", plan.DiscoveryVersions)
-				}
 				if plan.Producer != nil {
 					t.Fatalf("external plan producer = %+v, want nil", plan.Producer)
 				}
@@ -80,6 +92,27 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 				t.Fatalf("producer = %+v, want role %s", plan.Producer, test.wantRole)
 			}
 		})
+	}
+}
+
+func TestBuildVerificationPlanRejectsRenderedVersionDrift(t *testing.T) {
+	params := Params{WorkloadType: WorkloadTypeReadVerify, RunID: 106,
+		Bucket: "b", ObjectCount: 1, Threads: 1, Versions: VersionsAll,
+		BaseTimestamp: "20260802.120000.000"}
+	rendered, err := GenerateScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := strings.Replace(rendered, `"include_versions": true`, `"include_versions": false`, 1)
+	if drifted == rendered {
+		t.Fatal("generated scenario is missing the all-version LIST setting")
+	}
+	steps, err := BuildStepPlanFromScenario(drifted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildVerificationPlan(params, steps); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("rendered version drift error = %v, want mismatch", err)
 	}
 }
 

@@ -99,7 +99,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
-| `--object-count` | `-n` | `0` | Fixed number of objects to process |
+| `--object-count` | `-n` | `0` | Fixed number of objects to process. With `read-verify --versions=all`, caps canonical version identities rather than distinct keys |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--prefix-shards` | | `-1` | Prefix directories for generated object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
