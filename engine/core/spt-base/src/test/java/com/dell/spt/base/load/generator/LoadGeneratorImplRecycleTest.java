@@ -17,6 +17,7 @@ import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -143,6 +144,68 @@ class LoadGeneratorImplRecycleTest {
 			assertSame(ops.get(i), output.received.get(i));
 		}
 		assertEquals(BATCH_SIZE, generator.generatedOpCount());
+	}
+
+	@Test
+	void initialManifestCirculatesCompletelyBeforeAnyRecycledOperation() throws Exception {
+		final int itemCount = 10;
+		final List<DataItem> sourceItems = new ArrayList<>();
+		for (int i = 0; i < itemCount; i++) {
+			sourceItems.add(new DataItemImpl("manifest-" + i, 0, 1024));
+		}
+		final AtomicInteger nextItem = new AtomicInteger();
+		doAnswer(invocation -> {
+			@SuppressWarnings("unchecked")
+			final List<DataItem> buffer = invocation.getArgument(0);
+			final int limit = invocation.getArgument(1);
+			final int from = nextItem.get();
+			if (from >= sourceItems.size()) {
+				throw new EOFException("end of manifest");
+			}
+			final int to = Math.min(from + limit, sourceItems.size());
+			buffer.addAll(sourceItems.subList(from, to));
+			nextItem.set(to);
+			return to - from;
+		}).when(itemInput).get(anyList(), anyInt());
+		doAnswer(invocation -> {
+			@SuppressWarnings("unchecked")
+			final List<DataItem> items = invocation.getArgument(0);
+			@SuppressWarnings("unchecked")
+			final List<DataOperation<DataItem>> operations = invocation.getArgument(1);
+			for (final DataItem item : items) {
+				operations.add(newOp(item.name()));
+			}
+			return null;
+		}).when(opsBuilder).buildOps(anyList(), anyList());
+
+		final LoadGeneratorImpl<DataItem, DataOperation<DataItem>> circulatingGenerator = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(), output, BATCH_SIZE,
+						0, 1000, true, false);
+		try {
+			for (int batch = 0; batch < 3; batch++) {
+				final int from = output.received.size();
+				circulatingGenerator.doWork();
+				final int to = output.received.size();
+				for (int i = from; i < to; i++) {
+					circulatingGenerator.recycle(output.received.get(i));
+				}
+			}
+			assertEquals(itemCount, output.received.size());
+			assertEquals(
+							sourceItems.stream().map(DataItem::name).toList(),
+							output.received.stream().map(op -> op.item().name()).toList());
+
+			circulatingGenerator.doWork();
+			assertTrue(circulatingGenerator.isItemInputFinished());
+			circulatingGenerator.doWork();
+			assertEquals(itemCount + BATCH_SIZE, output.received.size());
+			assertEquals(
+							List.of("manifest-0", "manifest-1", "manifest-2", "manifest-3"),
+							output.received.subList(itemCount, itemCount + BATCH_SIZE)
+											.stream().map(op -> op.item().name()).toList());
+		} finally {
+			circulatingGenerator.close();
+		}
 	}
 
 	/**

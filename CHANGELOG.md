@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recycled read working-set coverage** — Route completed operations back through the shared generator so low-concurrency duration reads circulate through the complete input manifest before repeating objects.
+
 ## [5.14.1] - 2026-08-11
 
 ### Added
