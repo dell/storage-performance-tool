@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.14.2] - 2026-08-13
+
 ### Changed
 
 - **Recycled read dispatch** — Disabled the low-concurrency fast-recycle bypass introduced in v5.7.0 because directly resubmitting the same in-flight operations could restrict a duration-based read to a working set equal to concurrency. Completed operations now return through shared generator circulation, trading some low-concurrency dispatch efficiency for complete manifest coverage.
