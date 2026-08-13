@@ -197,12 +197,22 @@ class LoadGeneratorImplRecycleTest {
 
 			circulatingGenerator.doWork();
 			assertTrue(circulatingGenerator.isItemInputFinished());
-			circulatingGenerator.doWork();
-			assertEquals(itemCount + BATCH_SIZE, output.received.size());
-			assertEquals(
-							List.of("manifest-0", "manifest-1", "manifest-2", "manifest-3"),
-							output.received.subList(itemCount, itemCount + BATCH_SIZE)
-											.stream().map(op -> op.item().name()).toList());
+			final List<String> expectedNames = sourceItems.stream().map(DataItem::name).toList();
+			for (int cycle = 0; cycle < 2; cycle++) {
+				final int from = output.received.size();
+				for (int batch = 0; batch < 3; batch++) {
+					circulatingGenerator.doWork();
+				}
+				final int to = output.received.size();
+				assertEquals(itemCount, to - from);
+				assertEquals(
+								expectedNames,
+								output.received.subList(from, to)
+												.stream().map(op -> op.item().name()).toList());
+				for (int i = from; i < to; i++) {
+					circulatingGenerator.recycle(output.received.get(i));
+				}
+			}
 		} finally {
 			circulatingGenerator.close();
 		}

@@ -134,8 +134,10 @@ public class LoadStepContextImplTest {
 		Assertions.assertTrue(stepCtx.isDone());
 	}
 
-	@Test
-	public void recycleWorkloadUsesSharedGeneratorCirculation() {
+	@org.junit.jupiter.params.ParameterizedTest
+	@org.junit.jupiter.params.provider.ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+	})
+	public void recycleWorkloadUsesSharedGeneratorCirculation(final int concurrency) {
 		testConfig.val("load-op-retry", false);
 		testConfig.val("load-op-recycle-mode", true);
 
@@ -143,7 +145,7 @@ public class LoadStepContextImplTest {
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
 		@SuppressWarnings("unchecked")
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
-		when(driverMock.concurrencyLimit()).thenReturn(4);
+		when(driverMock.concurrencyLimit()).thenReturn(concurrency);
 
 		new LoadStepContextImpl<>(
 						"recycle-through-generator", generatorMock, driverMock, null,
