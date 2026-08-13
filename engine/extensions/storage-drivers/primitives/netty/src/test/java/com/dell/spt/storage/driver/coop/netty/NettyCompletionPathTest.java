@@ -31,8 +31,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Characterization tests for {@link NettyStorageDriverBase#complete(io.netty.channel.Channel,
- * Operation)}. These capture the current completion path behavior as a safety net before
- * introducing fast-recycle dispatch.
+ * Operation)}. These capture the normal completion path and guard against deprecated
+ * fast-recycle hooks bypassing it.
  */
 @SuppressWarnings("unchecked")
 class NettyCompletionPathTest {
@@ -282,49 +282,11 @@ class NettyCompletionPathTest {
 		channel.close();
 	}
 
-	// ---------- Fast-recycle path tests ----------
-
-	private void enableFastRecycle(int threshold) throws Exception {
-		final var threshField = CoopStorageDriverBase.class.getDeclaredField("fastRecycleConcurrencyThreshold");
-		threshField.setAccessible(true);
-		threshField.set(driver, threshold);
-		when(driver.isStarted()).thenReturn(true);
-	}
-
 	@Test
-	void fastRecycle_setsDriverRecycledFlagOnOp() throws Exception {
-		enableFastRecycle(4);
-		// Use higher concurrency so we have room
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1); // 1 active op (under threshold=4)
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var channel = newChannelWithReleasedFlag();
-		final Operation<Item> op = mock(Operation.class);
-		final Operation<Item> resultCopy = mock(Operation.class);
-		when(op.status()).thenReturn(Operation.Status.SUCC);
-		when(op.result()).thenReturn(resultCopy);
-
-		// Mock connPool.lease() to return a new channel for re-submit
-		final var resubmitChannel = newResubmitChannel();
-		when(connPool.lease()).thenReturn(resubmitChannel);
-
-		driver.complete(channel, op);
-
-		// The op should have driverRecycled set to true before result() is called
-		verify(op).driverRecycled(true);
-		channel.close();
-		resubmitChannel.close();
-	}
-
-	@Test
-	void fastRecycle_keepsPermitAndReleasesChannel() throws Exception {
-		enableFastRecycle(4);
+	@SuppressWarnings("deprecation")
+	void deprecatedFastRecycleHookCannotBypassNormalCompletion() throws Exception {
+		// Compatibility calls from an extension must remain inert.
+		driver.enableFastRecycle(4);
 		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
 		limitField.setAccessible(true);
 		limitField.set(driver, 4);
@@ -339,136 +301,10 @@ class NettyCompletionPathTest {
 		when(op.status()).thenReturn(Operation.Status.SUCC);
 		when(op.result()).thenReturn(mock(Operation.class));
 
-		// Mock connPool.lease() for re-submit
-		final var resubmitChannel = newResubmitChannel();
-		when(connPool.lease()).thenReturn(resubmitChannel);
-
 		driver.complete(channel, op);
 
-		// Channel should be released to the pool
-		verify(connPool).release(channel);
-		// Permit should NOT be released — it's held for the re-submitted op.
-		// Before complete: 3 available (4 total - 1 acquired).
-		// After fast-recycle: still 3 available (permit retained for new submit).
-		assertEquals(3, sem.availablePermits(),
-						"permit should be retained for the re-submitted op");
-		channel.close();
-		resubmitChannel.close();
-	}
-
-	@Test
-	void fastRecycle_resetsOpForResubmit() throws Exception {
-		enableFastRecycle(4);
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1);
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var channel = newChannelWithReleasedFlag();
-		final Operation<Item> op = mock(Operation.class);
-		when(op.status()).thenReturn(Operation.Status.SUCC);
-		when(op.result()).thenReturn(mock(Operation.class));
-
-		final var resubmitChannel = newResubmitChannel();
-		when(connPool.lease()).thenReturn(resubmitChannel);
-
-		driver.complete(channel, op);
-
-		// prepare() calls op.reset() internally — verify reset was called
-		verify(op).reset();
-		// Also verify the op was re-submitted (startRequest called on the re-prepared op)
-		verify(op, atLeast(1)).startRequest();
-		channel.close();
-		resubmitChannel.close();
-	}
-
-	@Test
-	void fastRecycleClearsReleasedChannelAndRebindsOperationToResubmissionChannel() throws Exception {
-		enableFastRecycle(4);
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1);
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var releasedChannel = newChannelWithReleasedFlag();
-		final Operation<Item> op = mock(Operation.class);
-		when(op.status()).thenReturn(Operation.Status.SUCC);
-		when(op.result()).thenReturn(mock(Operation.class));
-		releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
-
-		final var resubmitChannel = newResubmitChannel();
-		when(connPool.lease()).thenReturn(resubmitChannel);
-		doAnswer(inv -> {
-			assertNull(releasedChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
-			return null;
-		}).when(connPool).release(releasedChannel);
-
-		driver.complete(releasedChannel, op);
-
-		assertSame(op, resubmitChannel.attr(NettyStorageDriver.ATTR_KEY_OPERATION).get());
-		releasedChannel.close();
-		resubmitChannel.close();
-	}
-
-	@Test
-	void fastRecycle_fallsBackToNormalPathWhenNotEligible() throws Exception {
-		// Fast-recycle enabled but op failed — should use normal path
-		enableFastRecycle(4);
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1);
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var channel = newChannelWithReleasedFlag();
-		final Operation<Item> op = mock(Operation.class);
-		when(op.status()).thenReturn(Operation.Status.FAIL_IO);
-		when(op.result()).thenReturn(mock(Operation.class));
-
-		driver.complete(channel, op);
-
-		// Normal path: permit released, no driverRecycled flag set
-		verify(op, never()).driverRecycled(anyBoolean());
-		assertEquals(4, sem.availablePermits(), "permit should be released in normal path");
-		channel.close();
-	}
-
-	@Test
-	void fastRecycle_releasesPermitOnLeaseFailure() throws Exception {
-		enableFastRecycle(4);
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1);
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var channel = newChannelWithReleasedFlag();
-		final Operation<Item> op = mock(Operation.class);
-		when(op.status()).thenReturn(Operation.Status.SUCC);
-		when(op.result()).thenReturn(mock(Operation.class));
-
-		// connPool.lease() throws — simulating no connections available
-		when(connPool.lease()).thenThrow(new java.net.ConnectException("no connections"));
-
-		driver.complete(channel, op);
-
-		// After lease failure, permit should be released
-		assertEquals(4, sem.availablePermits(),
-						"permit should be released after fast-recycle lease failure");
+		verify(connPool, never()).lease();
+		assertEquals(4, sem.availablePermits(), "deprecated hook must not retain the completion permit");
 		channel.close();
 	}
 
@@ -572,50 +408,6 @@ class NettyCompletionPathTest {
 						"all 3 permits should be released (no leak), returning to full capacity");
 		assertEquals(3, driver.completedOpCount(),
 						"all 3 ops should be counted as completed");
-	}
-
-	// ---------- Fast-recycle driverRecycled flag on result copy ----------
-
-	@Test
-	void fastRecycle_resultCopyCarriesDriverRecycledFlag() throws Exception {
-		enableFastRecycle(4);
-		final var limitField = StorageDriverBase.class.getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
-		final var sem = new Semaphore(4, true);
-		sem.acquire(1);
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		semField.set(driver, sem);
-
-		final var channel = newChannelWithReleasedFlag();
-
-		// Use a real OperationImpl so driverRecycled flag is actually stored
-		final var item = new ItemImpl("recycle-flag-obj");
-		final OperationImpl<ItemImpl> realOp = new OperationImpl<>(
-						0, OpType.CREATE, item, null, "/bucket", null);
-		realOp.startRequest();
-		realOp.finishRequest();
-		realOp.startResponse();
-		realOp.status(Operation.Status.SUCC);
-
-		// Capture the result copy to verify the flag
-		final List<Operation<?>> capturedResults = new ArrayList<>();
-		when(opResultOut.put(any(Operation.class))).thenAnswer(inv -> {
-			capturedResults.add(inv.getArgument(0));
-			return true;
-		});
-
-		final var resubmitChannel = newResubmitChannel();
-		when(connPool.lease()).thenReturn(resubmitChannel);
-
-		driver.complete(channel, (Operation<Item>) (Operation<?>) realOp);
-
-		assertEquals(1, capturedResults.size(), "one result should be captured");
-		assertTrue(capturedResults.get(0).driverRecycled(),
-						"result copy must carry driverRecycled=true from fast-recycle path");
-		channel.close();
-		resubmitChannel.close();
 	}
 
 	// ---------- Channel release ordering ----------

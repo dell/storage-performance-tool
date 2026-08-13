@@ -111,14 +111,23 @@ public interface Operation<I extends Item> {
 	void resetTiming();
 
 	/**
-	 * Returns {@code true} if the storage driver has already recycled this operation
-	 * via the fast-recycle path (re-submitted directly without going through the
-	 * LoadGenerator recycle queue).  When set, {@code LoadStepContextImpl} must
-	 * skip calling {@code generator.recycle()} to avoid double-recycling.
+	 * Legacy compatibility accessor for the removed direct fast-recycle path.
+	 *
+	 * @deprecated always returns {@code false}
 	 */
-	boolean driverRecycled();
+	@Deprecated
+	default boolean driverRecycled() {
+		return false;
+	}
 
-	void driverRecycled(boolean flag);
+	/**
+	 * Legacy compatibility mutator for the removed direct fast-recycle path.
+	 *
+	 * @param flag ignored
+	 * @deprecated always a no-op
+	 */
+	@Deprecated
+	default void driverRecycled(final boolean flag) {}
 
 	/**
 	 * Number of times this operation has been retried after a failure via {@code
@@ -136,7 +145,7 @@ public interface Operation<I extends Item> {
 
 	/**
 	 * Reset the whole-operation retry counter, e.g. after a terminal success, so a
-	 * recycled/fast-recycled operation starts its next logical attempt with a clean budget
+	 * recycled operation starts its next logical attempt with a clean budget
 	 * instead of accumulating retry counts across unrelated cycles.
 	 */
 	default void resetOpRetryCount() {}

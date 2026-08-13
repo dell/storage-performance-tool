@@ -76,12 +76,11 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	}
 
 	/**
-	 * Enable idle-task quiescing for fast-recycle workloads. When enabled, the
-	 * generator parks its task thread (instead of spin-waiting/yielding) when the recycle
-	 * queue is empty, because the driver is handling recycling inline.  The
-	 * {@link #recycle} method will unpark the task immediately if an op falls back
-	 * to the normal path.
+	 * Legacy compatibility hook for the removed direct fast-recycle path.
+	 *
+	 * @deprecated always a no-op; completed operations must return through {@link #recycle}
 	 */
+	@Deprecated
 	default void enableFastRecycleQuiesce() {}
 
 	/**

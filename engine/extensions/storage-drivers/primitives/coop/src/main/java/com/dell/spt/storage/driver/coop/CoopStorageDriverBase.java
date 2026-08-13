@@ -53,8 +53,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
 	private volatile boolean mpuSchedulingInitialized = false;
+	/**
+	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
+	 *             have no effect
+	 */
+	@Deprecated
 	protected volatile int fastRecycleConcurrencyThreshold = 0;
-	private volatile boolean fastRecycleQuiesceActive = false;
+	private volatile boolean fastRecycleWarningLogged;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -482,55 +487,46 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
-	@Override
-	public void enableFastRecycle(final int concurrencyThreshold) {
-		this.fastRecycleConcurrencyThreshold = concurrencyThreshold;
-		Loggers.MSG.info("{}: fast-recycle enabled, concurrency threshold = {}", toString(), concurrencyThreshold);
-	}
-
-	/**
-	 * Returns {@code true} when fast-recycle has been enabled on this driver.
-	 * Used by the dispatch task to extend its idle wait when the driver is
-	 * cycling ops inline and no new work is expected via the queues.
-	 */
+	/** @deprecated always returns {@code false}; direct fast recycle was removed */
+	@Deprecated
 	protected boolean isFastRecycleEnabled() {
-		return fastRecycleConcurrencyThreshold > 0;
+		return false;
+	}
+
+	/** @deprecated always returns {@code false}; direct fast-recycle quiescing was removed */
+	@Deprecated
+	protected boolean isFastRecycleQuiesceActive() {
+		return false;
+	}
+
+	/**
+	 * @param op ignored
+	 * @deprecated always returns {@code false}; completed operations use shared circulation
+	 */
+	@Deprecated
+	protected boolean isFastRecycleEligible(final O op) {
+		return false;
 	}
 
 	@Override
+	@Deprecated
+	public void enableFastRecycle(final int concurrencyThreshold) {
+		warnFastRecycleDisabled();
+	}
+
+	@Override
+	@Deprecated
 	public void enableFastRecycleQuiesce() {
-		this.fastRecycleQuiesceActive = true;
-		Loggers.MSG.info("{}: fast-recycle quiesce active (dispatch task will extend idle wait)", toString());
+		warnFastRecycleDisabled();
 	}
 
-	/**
-	 * Returns {@code true} when quiesce mode is active — i.e. the configured
-	 * concurrency is low enough that fast-recycle handles most operations and
-	 * the dispatch/generator VTs may park on long waits.
-	 */
-	protected boolean isFastRecycleQuiesceActive() {
-		return fastRecycleQuiesceActive;
-	}
-
-	/**
-	 * Check whether the given completed operation is eligible for the fast-recycle
-	 * short-circuit.  Returns {@code true} only when:
-	 * <ul>
-	 *   <li>fast-recycle has been enabled (threshold &gt; 0)</li>
-	 *   <li>the current active-op count is &le; the threshold</li>
-	 *   <li>the op finished successfully</li>
-	 *   <li>the op is a simple (non-composite, non-partial) operation</li>
-	 *   <li>the driver is still running</li>
-	 * </ul>
-	 */
-	protected boolean isFastRecycleEligible(final O op) {
-		final int threshold = fastRecycleConcurrencyThreshold;
-		return threshold > 0
-						&& activeOpCount() <= threshold
-						&& op.status() == Operation.Status.SUCC
-						&& !(op instanceof CompositeOperation)
-						&& !(op instanceof PartialOperation)
-						&& isStarted();
+	private synchronized void warnFastRecycleDisabled() {
+		if (!fastRecycleWarningLogged) {
+			fastRecycleWarningLogged = true;
+			Loggers.MSG.warn(
+							"{}: deprecated fast-recycle request ignored; completed operations use shared generator circulation",
+							toString());
+		}
 	}
 
 	@Override

@@ -32,7 +32,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -71,9 +70,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final boolean shuffleFlag;
 	private final Random rnd;
 	private final String name;
-	private volatile boolean fastRecycleQuiesce = false;
-	private volatile boolean generatorParked = false;
-	private volatile Thread generatorThread;
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
@@ -144,7 +140,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	protected void doInit() {
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
-		generatorThread = Thread.currentThread();
 	}
 
 	@Override
@@ -194,20 +189,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							pendingOpCount += n;
 							recycledOpCounter.add(n);
 						} else {
-							// No recycled ops available right now.
-							if (fastRecycleQuiesce) {
-								// Fast-recycle is handling ops inline in the driver;
-								// park this task thread until recycle() unparks us or the
-								// timeout expires. 10ms keeps it idle
-								// while still bounding wake-up latency for fallback ops.
-								generatorParked = true;
-								LockSupport.parkNanos(10_000_000);
-								generatorParked = false;
-							} else {
-								// Yield the task thread so in-flight ops can complete
-								// without a timed parking syscall.
-								yieldThread();
-							}
+							// Yield so in-flight operations can complete and return through
+							// recycleQueue without imposing a timed parking syscall.
+							yieldThread();
 						}
 					}
 				} else {
@@ -453,21 +437,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			recycleQueueFullState = true;
 			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
 		}
-		// Wake the generator task if it's actually parked in the quiesce state.
-		// Checking generatorParked avoids spurious unpark() calls when the
-		// generator is running (e.g. at higher concurrency where fast-recycle
-		// doesn't handle all ops).
-		if (fastRecycleQuiesce && generatorParked) {
-			LockSupport.unpark(generatorThread);
-		}
 	}
 
 	@Override
 	public final void retry(final O op) {
 		retryQueue.add(op);
-		if (fastRecycleQuiesce && generatorParked) {
-			LockSupport.unpark(generatorThread);
-		}
 	}
 
 	/**
@@ -561,12 +535,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			drained.add(op);
 		}
 		return drained;
-	}
-
-	@Override
-	public void enableFastRecycleQuiesce() {
-		fastRecycleQuiesce = true;
-		Loggers.MSG.info("{}: fast-recycle quiesce enabled (generator task will park when idle)", name);
 	}
 
 	private boolean isFinished() {

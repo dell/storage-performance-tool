@@ -351,8 +351,7 @@ class OperationDispatchTaskTest {
 	@Test
 	void untimedAwaitWakesOnSignal() throws Exception {
 		// The dispatch task uses untimed await() — verify it still wakes
-		// promptly when signaled, regardless of fast-recycle quiesce state.
-		when(driverMock.isFastRecycleQuiesceActive()).thenReturn(true);
+		// promptly when signaled.
 
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);

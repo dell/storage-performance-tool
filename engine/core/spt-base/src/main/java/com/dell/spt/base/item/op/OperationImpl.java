@@ -25,6 +25,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile long reqTimeDone;
 	protected volatile long respTimeStart;
 	protected volatile long respTimeDone;
+	/**
+	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
+	 *             have no effect
+	 */
+	@Deprecated
 	protected volatile boolean driverRecycled;
 	protected volatile int opRetryCount;
 	protected volatile String requestedVersionId;
@@ -95,7 +100,6 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.reqTimeDone = other.reqTimeDone;
 		this.respTimeStart = other.respTimeStart;
 		this.respTimeDone = other.respTimeDone;
-		this.driverRecycled = other.driverRecycled;
 		// Deliberately propagated (not reset in reset() below): this must survive across
 		// the reset()+redispatch cycle a retried operation goes through, or the retry
 		// counter added for load-op-retry could never reach its limit.
@@ -127,17 +131,6 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		returnedVersionId = null;
 		responseRequestId = null;
 		integrityVerificationResult = null;
-		driverRecycled = false;
-	}
-
-	@Override
-	public final boolean driverRecycled() {
-		return driverRecycled;
-	}
-
-	@Override
-	public final void driverRecycled(final boolean flag) {
-		this.driverRecycled = flag;
 	}
 
 	@Override
