@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests that {@link OperationImpl#result()} produces a truly independent copy
- * whose timing, status, and flag fields survive mutation of the original.
+ * whose timing and status fields survive mutation of the original.
  * These guarantees are critical because the completion path calls
  * {@code op.result()} to snapshot metrics, then the original op may be
  * recycled/reset/re-submitted.
@@ -67,33 +67,9 @@ class OperationResultCopyTest {
 	}
 
 	@Test
-	void resultCopy_preservesDriverRecycledFlag() {
-		final var op = newTimedOp();
-		op.driverRecycled(true);
-		op.finishResponse();
-
-		final var copy = op.result();
-
-		assertTrue(copy.driverRecycled(),
-						"driverRecycled flag must be preserved in the copy");
-	}
-
-	@Test
-	void resultCopy_driverRecycledDefaultsFalse() {
-		final var op = newTimedOp();
-		op.finishResponse();
-
-		final var copy = op.result();
-
-		assertFalse(copy.driverRecycled(),
-						"driverRecycled should default to false in the copy");
-	}
-
-	@Test
 	void resetAfterResultCopy_doesNotAffectCopy() {
 		final var op = newTimedOp();
 		op.finishResponse();
-		op.driverRecycled(true);
 
 		final long origDuration = op.duration();
 		final long origReqTimeStart = op.reqTimeStart();
@@ -108,16 +84,12 @@ class OperationResultCopyTest {
 						"copy duration must survive original reset");
 		assertEquals(origReqTimeStart, copy.reqTimeStart(),
 						"copy reqTimeStart must survive original reset");
-		assertTrue(copy.driverRecycled(),
-						"copy driverRecycled must survive original reset");
 
 		// Verify original was actually reset
 		assertEquals(Operation.Status.PENDING, op.status(),
 						"original should be PENDING after reset");
 		assertEquals(0, op.reqTimeStart(),
 						"original timing should be zeroed after reset");
-		assertFalse(op.driverRecycled(),
-						"original driverRecycled should be false after reset");
 	}
 
 	@Test
@@ -226,8 +198,8 @@ class OperationResultCopyTest {
 
 	@Test
 	void resetOpRetryCount_zeroesTheCounter() {
-		// Finding: without an explicit reset hook, a recycled (read-loop or Netty
-		// fast-recycle) operation that failed and retried once before eventually succeeding
+		// Finding: without an explicit reset hook, a recycled read-loop operation that failed
+		// and retried once before eventually succeeding
 		// would keep an elevated opRetryCount forever across every future successful cycle,
 		// eventually exhausting its retry budget from unrelated, non-consecutive failures.
 		final var op = newTimedOp();

@@ -683,48 +683,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			channel.close();
 		}
 
-		// Fast-recycle path: keep the concurrency permit, release the channel,
-		// report metrics, then directly prepare + re-submit the original op.
-		// This avoids the VirtualThread scheduling overhead of the normal
-		// LoadGenerator recycleQueue → OperationDispatchTask path.
-		if (channel != null && isFastRecycleEligible(op)) {
-			if (!channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
-				connPool.release(channel);
-			}
-			// isFastRecycleEligible() requires status == SUCC, so this is always a
-			// successful completion: clear load-op-retry's counter on the *original* op
-			// here too, same as LoadStepContextImpl.put() does for the result copy it
-			// sees - handleCompleted() below only hands that copy a snapshot, it never
-			// touches this live object, which is what actually gets reused below.
-			op.resetOpRetryCount();
-			// Mark BEFORE handleCompleted so the result copy carries the flag
-			op.driverRecycled(true);
-			handleCompleted(op);
-			// Prepare and re-submit directly (we still hold the concurrency permit)
-			prepare(op);
-			try {
-				final Channel conn = leaseActiveConnection();
-				conn.attr(ATTR_KEY_OPERATION).set(op);
-				op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
-				op.startRequest();
-				sendRequest(conn, op);
-			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Fast-recycle: failed to lease connection");
-				op.status(Operation.Status.FAIL_IO);
-				concurrencyThrottle.release();
-				handleCompleted(op);
-			} catch (final Throwable thrown) {
-				throwUncheckedIfInterrupted(thrown);
-				LogUtil.exception(Level.WARN, thrown, "Fast-recycle: failed to re-submit");
-				op.status(Operation.Status.FAIL_UNKNOWN);
-				concurrencyThrottle.release();
-				handleCompleted(op);
-			}
-			return;
-		}
-
-		// Normal path: release permit + channel, then let the LoadGenerator
-		// recycle queue handle re-dispatch.
+		// Release the permit and channel before reporting completion. Recycled
+		// operations return through the shared LoadGenerator queue for redispatch.
 		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);

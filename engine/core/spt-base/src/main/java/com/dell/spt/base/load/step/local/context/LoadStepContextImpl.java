@@ -503,9 +503,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final Status status = opResult.status();
 		if (Status.SUCC.equals(status)) {
 			// A terminal success ends this operation's current retry episode - clear the
-			// counter now so a recycled/fast-recycled reuse of this object (read-recycle
-			// mode, or Netty's fast-recycle short-circuit) starts its next attempt with a
-			// clean budget instead of accumulating retry counts across unrelated cycles.
+			// counter now so a recycled reuse of this object (read-recycle mode) starts its
+			// next attempt with a clean budget instead of accumulating retry counts across
+			// unrelated cycles.
 			opResult.resetOpRetryCount();
 			final long reqDuration = opResult.duration();
 			final long respLatency = opResult.latency();
@@ -553,12 +553,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						// TODO: possible change: remove dataItem.offset() to improve perf and increase variability
 						dataItem.offset(dataItem.offset() + rand.get().nextLong());
 					}
-					// Skip generator.recycle() when the driver already re-submitted the
-					// original op via the fast-recycle path — calling recycle here would
-					// create a duplicate in-flight operation.
-					if (!opResult.driverRecycled()) {
-						generator.recycle(opResult);
-					}
+					generator.recycle(opResult);
 				}
 
 				// each recycled op's lat and dur should be written to file each time
@@ -675,9 +670,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								listShardMetricsRecorder.onRequeue(shardRef);
 							}
 						}
-						if (!opResult.driverRecycled()) {
-							generator.recycle(opResult);
-						}
+						generator.recycle(opResult);
 					}
 
 					// each recycled op's lat and dur should be written to file each time

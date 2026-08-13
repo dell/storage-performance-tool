@@ -66,7 +66,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doNothing;
@@ -132,28 +131,6 @@ public class LoadStepContextImplTest {
 		assertDoesNotThrow(() -> stepCtx.doClose());
 		assertDoesNotThrow(() -> stepCtx.doStop());
 		Assertions.assertTrue(stepCtx.isDone());
-	}
-
-	@org.junit.jupiter.params.ParameterizedTest
-	@org.junit.jupiter.params.provider.ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10
-	})
-	public void recycleWorkloadUsesSharedGeneratorCirculation(final int concurrency) {
-		testConfig.val("load-op-retry", false);
-		testConfig.val("load-op-recycle-mode", true);
-
-		@SuppressWarnings("unchecked")
-		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
-		@SuppressWarnings("unchecked")
-		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
-		when(driverMock.concurrencyLimit()).thenReturn(concurrency);
-
-		new LoadStepContextImpl<>(
-						"recycle-through-generator", generatorMock, driverMock, null,
-						testConfig.configVal("load"), false);
-
-		verify(driverMock, never()).enableFastRecycle(anyInt());
-		verify(driverMock, never()).enableFastRecycleQuiesce();
-		verify(generatorMock, never()).enableFastRecycleQuiesce();
 	}
 
 	@Test
