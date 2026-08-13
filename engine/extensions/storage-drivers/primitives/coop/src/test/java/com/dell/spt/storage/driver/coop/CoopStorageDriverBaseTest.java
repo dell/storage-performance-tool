@@ -425,6 +425,45 @@ class CoopStorageDriverBaseTest {
 		assertTrue(driver.isIdle(), "should be idle after release");
 	}
 
+	@Test
+	@SuppressWarnings("deprecation")
+	void deprecatedFastRecycleHooksWarnOnlyOncePerDriver() throws Exception {
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var appender = new CapturingAppender();
+		appender.start();
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var logger = loggerCtx.getLogger(Loggers.MSG.getName());
+		final var originalLevel = logger.getLevel();
+
+		try (final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"deprecated-fast-recycle",
+						dataInput,
+						storageConfigForMultipartLimits(0, 0),
+						false,
+						16)) {
+			logger.addAppender(appender);
+			logger.setLevel(Level.WARN);
+
+			driver.enableFastRecycle(4);
+			driver.enableFastRecycle(8);
+			driver.enableFastRecycleQuiesce();
+			awaitCapturedEvents(appender, 1, 2000);
+
+			final var warningMessages = appender.events().stream()
+							.filter(e -> Level.WARN.equals(e.getLevel()))
+							.map(e -> e.getMessage().getFormattedMessage())
+							.filter(msg -> msg.contains("deprecated fast-recycle request ignored"))
+							.toList();
+			assertEquals(1, warningMessages.size(), "deprecated hooks should warn once per driver");
+			assertTrue(warningMessages.get(0).contains("shared generator circulation"));
+		} finally {
+			logger.removeAppender(appender);
+			logger.setLevel(originalLevel);
+			appender.stop();
+		}
+	}
+
 	// ---------- Simple-op completion path ----------
 
 	@Test

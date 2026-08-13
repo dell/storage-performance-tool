@@ -25,7 +25,10 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile long reqTimeDone;
 	protected volatile long respTimeStart;
 	protected volatile long respTimeDone;
-	/** @deprecated inert compatibility field for subclasses compiled against the removed fast-recycle path */
+	/**
+	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
+	 *             have no effect
+	 */
 	@Deprecated
 	protected volatile boolean driverRecycled;
 	protected volatile int opRetryCount;

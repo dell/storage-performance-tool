@@ -1,6 +1,8 @@
 package com.dell.spt.base.load.step.local.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
@@ -40,6 +42,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -63,6 +66,65 @@ class RecycleCirculationIntegrationTest {
 	@ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10
 	})
 	void completeManifestCirculatesBeforeAnyRepeat(final int concurrency) throws Exception {
+		try (final var fixture = newFixture(concurrency)) {
+			fixture.start();
+			final var driver = fixture.driver();
+			assertTrue(
+							driver.awaitCompletions(COMPLETION_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+							"timed out after " + driver.completedOpCount() + " completions at T" + concurrency);
+
+			assertCirculationInvariant(driver, concurrency);
+			assertFalse(
+							driver.legacyDirectRecycleEnabled(),
+							"the production step context must not activate the legacy direct-recycle model");
+		}
+	}
+
+	@Test
+	void legacyDirectRecycleNegativeControlBreaksCirculationInvariant() throws Exception {
+		final int concurrency = 4;
+		try (final var fixture = newFixture(concurrency)) {
+			final var driver = fixture.driver();
+			driver.enableLegacyDirectRecycleForNegativeControl();
+			assertTrue(driver.legacyDirectRecycleEnabled(), "negative control must activate the legacy model");
+			fixture.start();
+			assertTrue(
+							driver.awaitCompletions(COMPLETION_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+							"negative control timed out after " + driver.completedOpCount() + " completions");
+
+			final AssertionError failure = assertThrows(
+							AssertionError.class, () -> assertCirculationInvariant(driver, concurrency));
+			assertTrue(
+							failure.getMessage().contains("repeated before the complete manifest"),
+							"negative control must fail the first-circulation assertion: " + failure.getMessage());
+		}
+	}
+
+	private static void assertCirculationInvariant(
+					final CirculationCanaryDriver driver, final int concurrency) {
+		final List<String> observed = driver.observedItemNames();
+		assertEquals(COMPLETION_COUNT, observed.size());
+		assertEquals(
+						MANIFEST_ITEM_COUNT,
+						new HashSet<>(observed.subList(0, MANIFEST_ITEM_COUNT)).size(),
+						"an item repeated before the complete manifest entered circulation at T" + concurrency);
+
+		final Set<String> expectedNames = ManifestItemInput.expectedNames(MANIFEST_ITEM_COUNT);
+		assertEquals(expectedNames, new HashSet<>(observed), "the driver saw an unexpected or missing item");
+		final Map<String, Integer> counts = new HashMap<>();
+		observed.forEach(name -> counts.merge(name, 1, Integer::sum));
+		final int minCount = counts.values().stream().mapToInt(Integer::intValue).min().orElseThrow();
+		final int maxCount = counts.values().stream().mapToInt(Integer::intValue).max().orElseThrow();
+		assertTrue(
+						maxCount - minCount <= concurrency,
+						"circulation imbalance exceeds the in-flight boundary at T" + concurrency + ": " + counts);
+
+		assertEquals(COMPLETION_COUNT, driver.scheduledOpCount());
+		assertEquals(COMPLETION_COUNT, driver.completedOpCount());
+		assertEquals(0, driver.activeOpCount(), "all bounded concurrency permits must be released");
+	}
+
+	private static CirculationFixture newFixture(final int concurrency) throws IOException {
 		final Config config = TestConfigBuilder.config();
 		config.val("item-type", "data");
 		config.val("item-data-ranges-concat", null);
@@ -96,38 +158,7 @@ class RecycleCirculationIntegrationTest {
 						metrics,
 						config.configVal("load"),
 						false);
-
-		stepContext.start();
-		try {
-			assertTrue(
-							driver.awaitCompletions(COMPLETION_TIMEOUT_SECONDS, TimeUnit.SECONDS),
-							"timed out after " + driver.completedOpCount() + " completions at T" + concurrency);
-
-			final List<String> observed = driver.observedItemNames();
-			assertEquals(COMPLETION_COUNT, observed.size());
-			assertEquals(
-							MANIFEST_ITEM_COUNT,
-							new HashSet<>(observed.subList(0, MANIFEST_ITEM_COUNT)).size(),
-							"an item repeated before the complete manifest entered circulation at T" + concurrency);
-
-			final Set<String> expectedNames = ManifestItemInput.expectedNames(MANIFEST_ITEM_COUNT);
-			assertEquals(expectedNames, new HashSet<>(observed), "the driver saw an unexpected or missing item");
-			final Map<String, Integer> counts = new HashMap<>();
-			observed.forEach(name -> counts.merge(name, 1, Integer::sum));
-			final int minCount = counts.values().stream().mapToInt(Integer::intValue).min().orElseThrow();
-			final int maxCount = counts.values().stream().mapToInt(Integer::intValue).max().orElseThrow();
-			assertTrue(
-							maxCount - minCount <= concurrency,
-							"circulation imbalance exceeds the in-flight boundary at T" + concurrency + ": " + counts);
-
-			assertEquals(COMPLETION_COUNT, driver.scheduledOpCount());
-			assertEquals(COMPLETION_COUNT, driver.completedOpCount());
-			assertEquals(0, driver.activeOpCount(), "all bounded concurrency permits must be released");
-		} finally {
-			stepContext.stop();
-			stepContext.shutdown();
-			stepContext.close();
-		}
+		return new CirculationFixture(driver, metrics, stepContext);
 	}
 
 	private static MetricsContext<AllMetricsSnapshot> buildMetrics(final int concurrency) {
@@ -144,6 +175,35 @@ class RecycleCirculationIntegrationTest {
 						.build();
 		metrics.start();
 		return metrics;
+	}
+
+	private static final class CirculationFixture implements AutoCloseable {
+		private final CirculationCanaryDriver driver;
+		private final MetricsContext<AllMetricsSnapshot> metrics;
+		private final LoadStepContextImpl<DataItem, Operation<DataItem>> stepContext;
+
+		CirculationFixture(
+						final CirculationCanaryDriver driver,
+						final MetricsContext<AllMetricsSnapshot> metrics,
+						final LoadStepContextImpl<DataItem, Operation<DataItem>> stepContext) {
+			this.driver = driver;
+			this.metrics = metrics;
+			this.stepContext = stepContext;
+		}
+
+		CirculationCanaryDriver driver() {
+			return driver;
+		}
+
+		void start() {
+			stepContext.start();
+		}
+
+		@Override
+		public void close() throws IOException {
+			stepContext.close();
+			metrics.close();
+		}
 	}
 
 	private static final class ManifestItemInput implements Input<DataItem> {
@@ -266,6 +326,8 @@ class RecycleCirculationIntegrationTest {
 		}
 
 		private void recordDispatch(final Operation<DataItem> op) {
+			// Operation.buildItemPath() prefixes pathless data-item names with "/"; compare the
+			// storage object-key form used by the source manifest.
 			final String itemName = op.item().name();
 			observedNames.add(itemName.startsWith("/") ? itemName.substring(1) : itemName);
 		}
@@ -367,6 +429,14 @@ class RecycleCirculationIntegrationTest {
 		@Override
 		public void enableFastRecycle(final int concurrencyThreshold) {
 			legacyDirectRecycle = concurrencyThreshold > 0;
+		}
+
+		void enableLegacyDirectRecycleForNegativeControl() {
+			legacyDirectRecycle = true;
+		}
+
+		boolean legacyDirectRecycleEnabled() {
+			return legacyDirectRecycle;
 		}
 
 		boolean awaitCompletions(final long timeout, final TimeUnit unit) throws InterruptedException {

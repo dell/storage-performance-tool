@@ -537,10 +537,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return drained;
 	}
 
-	@Override
-	@Deprecated
-	public void enableFastRecycleQuiesce() {}
-
 	private boolean isFinished() {
 		// Never actually finish while a load-op-retry redispatch is still waiting to be
 		// drained - otherwise stop() below would tear this generator down before

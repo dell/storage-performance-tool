@@ -53,9 +53,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
 	private volatile boolean mpuSchedulingInitialized = false;
-	/** @deprecated inert compatibility field for subclasses compiled against the removed fast-recycle path */
+	/**
+	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
+	 *             have no effect
+	 */
 	@Deprecated
 	protected volatile int fastRecycleConcurrencyThreshold = 0;
+	private volatile boolean fastRecycleWarningLogged;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -506,11 +510,24 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	@Override
 	@Deprecated
-	public void enableFastRecycle(final int concurrencyThreshold) {}
+	public void enableFastRecycle(final int concurrencyThreshold) {
+		warnFastRecycleDisabled();
+	}
 
 	@Override
 	@Deprecated
-	public void enableFastRecycleQuiesce() {}
+	public void enableFastRecycleQuiesce() {
+		warnFastRecycleDisabled();
+	}
+
+	private synchronized void warnFastRecycleDisabled() {
+		if (!fastRecycleWarningLogged) {
+			fastRecycleWarningLogged = true;
+			Loggers.MSG.warn(
+							"{}: deprecated fast-recycle request ignored; completed operations use shared generator circulation",
+							toString());
+		}
+	}
 
 	@Override
 	protected void doShutdown() {
