@@ -1490,6 +1490,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			// pendingSubTasksCount to N so allSubOperationsDone() returns false.
 			compositeReadOp.subOperations();
 			if (compositeReadOp.allSubOperationsDone()) {
+				if (!beginDispatch(op)) {
+					return false;
+				}
 				// Finalization pass: all range-GETs completed. Mark the parent SUCC and
 				// propagate to the metrics/output pipeline. Duration will be measured
 				// from the initial startRequest() to this finishResponse().
@@ -1503,6 +1506,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			// dispatch in handleCompleted().
 			op.reset();
 			if (concurrencyThrottle.tryAcquire()) {
+				if (!beginDispatch(op)) {
+					concurrencyThrottle.release();
+					return false;
+				}
 				op.startRequest();
 				op.finishRequest();
 				concurrencyThrottle.release();

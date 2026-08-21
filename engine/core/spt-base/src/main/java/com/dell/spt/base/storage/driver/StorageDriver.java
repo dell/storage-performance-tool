@@ -13,6 +13,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.concurrent.AsyncRunnable;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
@@ -84,6 +85,19 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	long completedOpCount();
 
 	boolean isIdle();
+
+	/** Returns the operation lifecycle used by the driver and load step. */
+	default OperationLifecycleTracker<O> operationLifecycle() {
+		return OperationLifecycleTracker.disabled();
+	}
+
+	/** Closes admission without terminating requests which already reached dispatch. */
+	default void closeAdmission() {}
+
+	/** Recovers operations retained before actual dispatch. */
+	default List<O> recoverQueuedOperations() {
+		return List.of();
+	}
 
 	void adjustIoBuffers(final long avgTransferSize, final OpType opType);
 

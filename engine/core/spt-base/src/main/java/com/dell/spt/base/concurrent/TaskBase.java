@@ -97,8 +97,8 @@ public abstract class TaskBase implements Task, Runnable {
 	 * thread so the doInit/doWork loop runs again. Throws if the task is still running.
 	 */
 	public void restart() {
-		if (isStarted()) {
-			throw new IllegalStateException("Task is still running");
+		if (isStarted() || (started && stopLatch.getCount() > 0)) {
+			throw new IllegalStateException("Task thread has not terminated");
 		}
 		started = false;
 		stopped = false;
@@ -111,6 +111,9 @@ public abstract class TaskBase implements Task, Runnable {
 	 * Wait for the task to finish after stop() has been called.
 	 */
 	public boolean awaitStop(final long timeout, final TimeUnit unit) throws InterruptedException {
+		if (!started) {
+			return true;
+		}
 		return stopLatch.await(timeout, unit);
 	}
 

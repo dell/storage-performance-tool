@@ -1,7 +1,9 @@
 package com.dell.spt.base.load.generator;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
@@ -14,6 +16,7 @@ import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.OperationsBuilderAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
@@ -25,12 +28,17 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
@@ -43,6 +51,26 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				implements LoadGenerator<I, O> {
 
 	private static final String CLS_NAME = LoadGeneratorImpl.class.getSimpleName();
+
+	private static final class IdentityKey<T> {
+		private final T value;
+		private final int hashCode;
+
+		private IdentityKey(final T value) {
+			this.value = value;
+			this.hashCode = System.identityHashCode(value);
+		}
+
+		@Override
+		public boolean equals(final Object obj) {
+			return obj instanceof IdentityKey<?> other && value == other.value;
+		}
+
+		@Override
+		public int hashCode() {
+			return hashCode;
+		}
+	}
 
 	private volatile boolean recycleQueueFullState = false;
 	private volatile boolean itemInputFinishFlag = false;
@@ -79,6 +107,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
+	private final AtomicBoolean admissionOpen = new AtomicBoolean(true);
+	private final Lock admissionLock = new ReentrantLock();
+	private final Set<IdentityKey<O>> bufferedOperations = ConcurrentHashMap.newKeySet();
+	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	private final Lock tempBufferLock = new ReentrantLock();
 	private List<I> items;
 
@@ -207,7 +239,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 		drainRetryQueue();
 
-		final var opBuff = threadLocalOpBuff.get();
+		final var opBuff = operationBuffer();
 		var pendingOpCount = opBuff.size();
 		var n = batchSize - pendingOpCount;
 
@@ -304,7 +336,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 			}
 
-			if (outputOpCounter.sum() < countLimit) {
+			if (admissionOpen.get() && outputOpCounter.sum() < countLimit) {
 
 				if (pendingOpCount > 0) {
 
@@ -324,12 +356,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 					// try to output
 					var outputProgress = false;
-					if (permittedCount > 0) {
+					if (permittedCount > 0 && isAdmissionOpen()) {
 						if (permittedCount == 1) { // single mode branch
 							try {
 								final var op = opBuff.get(0);
 								if (opOutput.put(op)) {
 									outputOpCounter.increment();
+									bufferedOperations.remove(identityKey(op));
 									if (pendingOpCount == 1) {
 										opBuff.clear();
 									} else {
@@ -355,6 +388,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								final var writtenCount = opOutput.put(opBuff, 0, permittedCount);
 								assertOutputRange("Operation output", writtenCount, permittedCount, opBuff.size());
 								outputOpCounter.add(writtenCount);
+								for (var i = 0; i < writtenCount; i++) {
+									bufferedOperations.remove(identityKey(opBuff.get(i)));
+								}
 								if (writtenCount > 0) {
 									outputProgress = true;
 								}
@@ -455,6 +491,19 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return items;
 	}
 
+	private CircularBuffer<O> operationBuffer() {
+		return threadLocalOpBuff.get();
+	}
+
+	private boolean isAdmissionOpen() {
+		admissionLock.lock();
+		try {
+			return admissionOpen.get();
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
 	@SuppressWarnings("ThreadPriorityCheck") // intentional cooperative scheduler hint
 	private static void yieldThread() {
 		Thread.yield();
@@ -508,10 +557,28 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 												+ availableOperationSlots
 												+ " buffer slots available");
 			}
-			opBuff.addAll(assemblyBuffer);
+			var bufferedCount = 0;
+			admissionLock.lock();
+			try {
+				if (admissionOpen.get()) {
+					opBuff.addAll(assemblyBuffer);
+					for (final O op : assemblyBuffer) {
+						operationLifecycle.generatorBuffered(op);
+						bufferedOperations.add(identityKey(op));
+					}
+					bufferedCount = emittedOperationCount;
+				} else {
+					for (final O op : assemblyBuffer) {
+						operationLifecycle.generatorBuffered(op);
+						operationLifecycle.unattempted(op);
+					}
+				}
+			} finally {
+				admissionLock.unlock();
+			}
 			consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
 			builtTasksCounter.add(emittedOperationCount);
-			return emittedOperationCount;
+			return bufferedCount;
 		} catch (final IllegalArgumentException e) {
 			if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
 				outputFinishFlag = true;
@@ -546,17 +613,103 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final void recycle(final O op) {
-		recycleQueue.add(op);
-		final var size = recycleQueueSize.incrementAndGet();
-		if (!recycleQueueFullState && size > recycleQueueCapacity) {
-			recycleQueueFullState = true;
-			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
+		admissionLock.lock();
+		try {
+			if (!admissionOpen.get()) {
+				operationLifecycle.unattempted(op);
+				return;
+			}
+			operationLifecycle.generatorBuffered(op);
+			bufferedOperations.add(identityKey(op));
+			recycleQueue.add(op);
+			final var size = recycleQueueSize.incrementAndGet();
+			if (!recycleQueueFullState && size > recycleQueueCapacity) {
+				recycleQueueFullState = true;
+				Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
+			}
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
 	@Override
 	public final void retry(final O op) {
-		retryQueue.add(op);
+		admissionLock.lock();
+		try {
+			if (!admissionOpen.get()) {
+				operationLifecycle.unattempted(op);
+				return;
+			}
+			operationLifecycle.generatorBuffered(op);
+			bufferedOperations.add(identityKey(op));
+			retryQueue.add(op);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
+		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
+	}
+
+	@Override
+	public final void openAdmission() {
+		admissionLock.lock();
+		try {
+			admissionOpen.set(true);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void closeAdmission() {
+		admissionLock.lock();
+		try {
+			admissionOpen.set(false);
+		} finally {
+			admissionLock.unlock();
+		}
+		final boolean taskWasRunning = isStarted();
+		final boolean taskWasAlreadyStopped = isStopped();
+		stop();
+		if (taskWasRunning || taskWasAlreadyStopped) {
+			try {
+				await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	@Override
+	public final List<O> recoverBufferedOperations() {
+		admissionLock.lock();
+		try {
+			final var recovered = new LinkedHashMap<IdentityKey<O>, O>();
+			for (final var operationKey : bufferedOperations) {
+				recovered.put(operationKey, operationKey.value);
+			}
+			bufferedOperations.clear();
+			O op;
+			while ((op = retryQueue.poll()) != null) {
+				recovered.put(identityKey(op), op);
+			}
+			while ((op = recycleQueue.poll()) != null) {
+				recovered.put(identityKey(op), op);
+			}
+			recycleQueueSize.set(0);
+			final var unattempted = new ArrayList<O>(recovered.size());
+			for (final O buffered : recovered.values()) {
+				if (operationLifecycle.unattempted(buffered)) {
+					unattempted.add(buffered);
+				}
+			}
+			return List.copyOf(unattempted);
+		} finally {
+			admissionLock.unlock();
+		}
 	}
 
 	/**
@@ -576,31 +729,44 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	 */
 	private void drainRetryQueue() {
 		var remaining = retryQueue.size();
-		O retryOp;
-		while (remaining-- > 0 && (retryOp = retryQueue.poll()) != null) {
-			var permitted = 1;
-			for (final Object throttle : throttles) {
-				if (throttle instanceof Throttle) {
-					permitted = ((Throttle) throttle).tryAcquire(permitted);
-				} else if (throttle instanceof IndexThrottle) {
-					permitted = ((IndexThrottle) throttle).tryAcquire(originIndex, permitted);
-				} else {
-					throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
-				}
-			}
-			if (permitted <= 0) {
-				// Throttled - preserve it for a later iteration rather than dropping it or
-				// busy-spinning retrying the same op immediately.
-				retryQueue.add(retryOp);
-				break;
-			}
+		while (remaining-- > 0) {
+			O retryOp = null;
+			admissionLock.lock();
 			try {
-				if (!opOutput.put(retryOp)) {
-					// Driver backpressure - preserve it for the next iteration rather than
-					// dropping it, same as the normal dispatch path does for its own buffer.
-					retryQueue.add(retryOp);
+				if (!admissionOpen.get()) {
 					break;
 				}
+				retryOp = retryQueue.poll();
+				if (retryOp == null) {
+					break;
+				}
+			} finally {
+				admissionLock.unlock();
+			}
+			try {
+				var permitted = 1;
+				for (final Object throttle : throttles) {
+					if (throttle instanceof Throttle) {
+						permitted = ((Throttle) throttle).tryAcquire(permitted);
+					} else if (throttle instanceof IndexThrottle) {
+						permitted = ((IndexThrottle) throttle).tryAcquire(originIndex, permitted);
+					} else {
+						throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
+					}
+				}
+				if (permitted <= 0) {
+					// Throttled - preserve it for a later iteration rather than dropping it or
+					// busy-spinning retrying the same op immediately.
+					requeueRetry(retryOp);
+					break;
+				}
+				if (!isAdmissionOpen() || !opOutput.put(retryOp)) {
+					// Driver backpressure - preserve it for the next iteration rather than
+					// dropping it, same as the normal dispatch path does for its own buffer.
+					requeueRetry(retryOp);
+					break;
+				}
+				bufferedOperations.remove(identityKey(retryOp));
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				final var terminal = IntegrityTerminalException.find(e);
@@ -617,10 +783,26 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					break;
 				} else {
 					LogUtil.exception(Level.ERROR, e, "{}: retry redispatch failure, will retry next iteration", name);
-					retryQueue.add(retryOp);
+					if (retryOp != null) {
+						requeueRetry(retryOp);
+					}
 					break;
 				}
 			}
+		}
+	}
+
+	private void requeueRetry(final O retryOp) {
+		admissionLock.lock();
+		try {
+			if (admissionOpen.get()) {
+				retryQueue.add(retryOp);
+			} else {
+				operationLifecycle.unattempted(retryOp);
+				bufferedOperations.remove(identityKey(retryOp));
+			}
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
@@ -690,8 +872,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	protected final void doClose() {
-		recycleQueue.clear();
-		retryQueue.clear();
+		closeAdmission();
+		recoverBufferedOperations();
 		// the item input may be instantiated by the load generator builder which has no reference to it
 		// so the load
 		// generator builder should close it
@@ -712,5 +894,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final String toString() {
 		return name;
+	}
+
+	private static <T> IdentityKey<T> identityKey(final T value) {
+		return new IdentityKey<>(value);
 	}
 }

@@ -180,7 +180,7 @@ class TaskBaseTest {
 	}
 
 	@Test
-	void stopBeforeStartIsSafe() {
+	void stopBeforeStartIsSafe() throws Exception {
 		try (final var executor = new VirtualThreadExecutor()) {
 			final var task = new TaskBase(executor) {
 				@Override
@@ -191,6 +191,44 @@ class TaskBaseTest {
 			// stop before start should not throw
 			assertDoesNotThrow(task::stop);
 			assertTrue(task.isStopped());
+			assertTrue(task.awaitStop(10, TimeUnit.MILLISECONDS));
+		}
+	}
+
+	@Test
+	void restartRejectsOverlapUntilPriorTaskThreadTerminates() throws Exception {
+		final var entered = new CountDownLatch(1);
+		final var stopping = new CountDownLatch(1);
+		final var allowTermination = new CountDownLatch(1);
+		try (final var executor = new VirtualThreadExecutor()) {
+			final var task = new TaskBase(executor) {
+				@Override
+				protected void doWork() throws Exception {
+					entered.countDown();
+					Thread.sleep(60_000);
+				}
+
+				@Override
+				protected void doStop() {
+					stopping.countDown();
+					try {
+						allowTermination.await();
+					} catch (final InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+			};
+			task.start();
+			assertTrue(entered.await(5, TimeUnit.SECONDS));
+			task.stop();
+			assertTrue(stopping.await(5, TimeUnit.SECONDS));
+			assertThrows(IllegalStateException.class, task::restart);
+
+			allowTermination.countDown();
+			assertTrue(task.awaitStop(5, TimeUnit.SECONDS));
+			assertDoesNotThrow(task::restart);
+			task.stop();
+			assertTrue(task.awaitStop(5, TimeUnit.SECONDS));
 		}
 	}
 }

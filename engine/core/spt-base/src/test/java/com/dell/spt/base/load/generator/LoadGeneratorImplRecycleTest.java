@@ -17,6 +17,8 @@ import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.OperationsBuilderImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -434,6 +436,90 @@ class LoadGeneratorImplRecycleTest {
 		assertTrue(generator.isNothingToRecycle());
 		assertEquals(3, generator.generatedOpCount());
 		assertEquals(3, output.received.size());
+	}
+
+	@Test
+	void closingAdmissionRecoversGeneratorBufferedWorkAsUnattempted() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		generator.operationLifecycle(tracker);
+		generator.doWork();
+		final var buffered = newOp("buffered-at-stop");
+		generator.recycle(buffered);
+
+		generator.closeAdmission();
+		final var recovered = generator.recoverBufferedOperations();
+
+		assertEquals(List.of(buffered), recovered);
+		assertEquals(OperationLifecycleState.UNATTEMPTED, buffered.lifecycle().state());
+		assertEquals(1, tracker.snapshot().unattempted());
+		assertTrue(generator.recoverBufferedOperations().isEmpty(), "recovery must be idempotent");
+
+		final var lateRecycle = newOp("late-recycle");
+		final var lateRetry = newOp("late-retry");
+		generator.recycle(lateRecycle);
+		generator.retry(lateRetry);
+		assertTrue(generator.recoverBufferedOperations().isEmpty(),
+						"closed admission must reject late circulation without retaining work");
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lateRecycle.lifecycle().state());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lateRetry.lifecycle().state());
+		assertEquals(3, tracker.snapshot().unattempted());
+	}
+
+	@Test
+	void mutableOperationHashCannotLeaveAHandedOffGeneratorGhost() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		generator.operationLifecycle(tracker);
+		generator.doWork();
+		final var handedOff = newOp("mutable-generator-identity");
+		generator.recycle(handedOff);
+		handedOff.item().offset(23);
+
+		generator.doWork();
+		assertSame(handedOff, output.received.get(0));
+		assertTrue(tracker.driverQueued(handedOff), "the downstream driver now owns this identity");
+
+		generator.closeAdmission();
+		assertTrue(generator.recoverBufferedOperations().isEmpty(),
+						"generator recovery must not rediscover an identity already handed to the driver");
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, handedOff.lifecycle().state());
+	}
+
+	@Test
+	void admissionClosureReconcilesCirculationOnBothSidesOfTheBoundary() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		generator.operationLifecycle(tracker);
+		final var operations = new ArrayList<DataOperation<DataItem>>();
+		for (var i = 0; i < 128; i++) {
+			operations.add(newOp("closure-race-" + i));
+		}
+		final var admitted = new CountDownLatch(1);
+		final var continueAfterClosure = new CountDownLatch(1);
+		final var producer = Thread.ofVirtual().start(() -> {
+			for (var i = 0; i < operations.size(); i++) {
+				generator.recycle(operations.get(i));
+				if (i == 31) {
+					admitted.countDown();
+					try {
+						continueAfterClosure.await();
+					} catch (final InterruptedException e) {
+						Thread.currentThread().interrupt();
+						return;
+					}
+				}
+			}
+		});
+
+		assertTrue(admitted.await(5, TimeUnit.SECONDS));
+		generator.closeAdmission();
+		generator.recoverBufferedOperations();
+		continueAfterClosure.countDown();
+		producer.join(TimeUnit.SECONDS.toMillis(5));
+		generator.recoverBufferedOperations();
+
+		assertFalse(producer.isAlive());
+		assertEquals(128, tracker.snapshot().unattempted());
+		assertTrue(operations.stream()
+						.allMatch(op -> op.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
 	}
 
 	@Test
