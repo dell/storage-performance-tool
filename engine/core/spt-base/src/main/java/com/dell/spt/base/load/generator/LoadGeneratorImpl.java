@@ -9,7 +9,9 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationAssembler;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.OperationsBuilderAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
@@ -48,7 +50,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private volatile boolean outputFinishFlag = false;
 
 	private final Input<I> itemInput;
-	private final OperationsBuilder<I, O> opsBuilder;
+	private final OperationAssembler<I, O> opAssembler;
 	private final int originIndex;
 	private final Object[] throttles;
 	private final Output<O> opOutput;
@@ -71,6 +73,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Random rnd;
 	private final String name;
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
+	private final ThreadLocal<List<O>> threadLocalAssemblyBuff;
+	private final LongAdder consumedItemsCounter = new LongAdder();
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
@@ -90,6 +94,24 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final boolean recycleFlag,
 					final boolean shuffleFlag) {
 		this(itemInput, opsBuilder, throttles, opOutput, batchSize, countLimit, recycleQueueSize, recycleFlag, shuffleFlag, false);
+	}
+
+	/**
+	 * Creates a generator using a cardinality-neutral operation assembler.
+	 *
+	 * @param opAssembler assembler that owns its retained operation-building resources
+	 */
+	public LoadGeneratorImpl(
+					final Input<I> itemInput,
+					final OperationAssembler<I, O> opAssembler,
+					final List<Object> throttles,
+					final Output<O> opOutput,
+					final int batchSize,
+					final long countLimit,
+					final int recycleQueueSize,
+					final boolean recycleFlag,
+					final boolean shuffleFlag) {
+		this(itemInput, opAssembler, throttles, opOutput, batchSize, countLimit, recycleQueueSize, recycleFlag, shuffleFlag, false);
 	}
 
 	/**
@@ -114,10 +136,42 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final boolean recycleFlag,
 					final boolean shuffleFlag,
 					final boolean retryFlag) {
+		this(
+						itemInput,
+						new OperationsBuilderAssembler<>(opsBuilder),
+						throttles,
+						opOutput,
+						batchSize,
+						countLimit,
+						recycleQueueSize,
+						recycleFlag,
+						shuffleFlag,
+						retryFlag);
+	}
+
+	/**
+	 * Creates a generator using a cardinality-neutral operation assembler.
+	 *
+	 * @param opAssembler assembler that owns its retained operation-building resources
+	 * @param retryFlag whether {@code load-op-retry} is enabled; see the compatibility
+	 *                  constructor for its lifecycle semantics
+	 */
+	@SuppressWarnings("unchecked")
+	public LoadGeneratorImpl(
+					final Input<I> itemInput,
+					final OperationAssembler<I, O> opAssembler,
+					final List<Object> throttles,
+					final Output<O> opOutput,
+					final int batchSize,
+					final long countLimit,
+					final int recycleQueueSize,
+					final boolean recycleFlag,
+					final boolean shuffleFlag,
+					final boolean retryFlag) {
 		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		this.itemInput = itemInput;
-		this.opsBuilder = opsBuilder;
-		this.originIndex = opsBuilder.originIndex();
+		this.opAssembler = opAssembler;
+		this.originIndex = opAssembler.originIndex();
 		this.throttles = throttles.toArray(new Object[]{});
 		this.opOutput = opOutput;
 		this.batchSize = batchSize;
@@ -128,12 +182,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		this.retryFlag = retryFlag;
 		this.shuffleFlag = shuffleFlag;
 		this.rnd = shuffleFlag ? new Random() : null;
-		final var ioStr = opsBuilder.opType().toString();
+		final var ioStr = opAssembler.opType().toString();
 		name = Character.toUpperCase(ioStr.charAt(0))
 						+ ioStr.substring(1).toLowerCase(Locale.ROOT)
 						+ (countLimit > 0 && countLimit < Long.MAX_VALUE ? Long.toString(countLimit) : "")
 						+ itemInput.toString();
 		threadLocalOpBuff = ThreadLocal.withInitial(() -> new CircularArrayBuffer<>(batchSize));
+		threadLocalAssemblyBuff = ThreadLocal.withInitial(() -> new ArrayList<>(batchSize));
 		this.items = new ArrayList<>(batchSize); // prepare the items buffer
 	}
 
@@ -253,23 +308,24 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 				if (pendingOpCount > 0) {
 
-					n = pendingOpCount;
+					var permittedCount = pendingOpCount;
 
 					// acquire the permit for all the throttles
 					for (final Object throttle : throttles) {
 						if (throttle instanceof Throttle) {
-							n = ((Throttle) throttle).tryAcquire(n);
+							permittedCount = ((Throttle) throttle).tryAcquire(permittedCount);
 						} else if (throttle instanceof IndexThrottle) {
-							n = ((IndexThrottle) throttle).tryAcquire(originIndex, n);
+							permittedCount = ((IndexThrottle) throttle).tryAcquire(originIndex, permittedCount);
 						} else {
 							throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
 						}
 					}
+					assertOutputRange("Throttle permit", permittedCount, pendingOpCount, opBuff.size());
 
 					// try to output
 					var outputProgress = false;
-					if (n > 0) {
-						if (n == 1) { // single mode branch
+					if (permittedCount > 0) {
+						if (permittedCount == 1) { // single mode branch
 							try {
 								final var op = opBuff.get(0);
 								if (opOutput.put(op)) {
@@ -296,13 +352,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						} else { // batch mode branch
 							try {
-								n = opOutput.put(opBuff, 0, n);
-								outputOpCounter.add(n);
-								if (n > 0) {
+								final var writtenCount = opOutput.put(opBuff, 0, permittedCount);
+								assertOutputRange("Operation output", writtenCount, permittedCount, opBuff.size());
+								outputOpCounter.add(writtenCount);
+								if (writtenCount > 0) {
 									outputProgress = true;
 								}
-								if (n < pendingOpCount) {
-									opBuff.removeFirst(n);
+								if (writtenCount < pendingOpCount) {
+									opBuff.removeFirst(writtenCount);
 								} else {
 									opBuff.clear();
 								}
@@ -403,20 +460,73 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		Thread.yield();
 	}
 
+	private void assertOutputRange(
+					final String source, final int count, final int requestedCount, final int bufferSize) {
+		if (count < 0 || count > requestedCount || count > bufferSize) {
+			throw contractFailure(
+							source
+											+ " count "
+											+ count
+											+ " is outside [0, "
+											+ requestedCount
+											+ "] for an operation buffer of size "
+											+ bufferSize);
+		}
+	}
+
 	// build new tasks for the corresponding items
 	private long buildOps(final List<I> items, final CircularBuffer<O> opBuff, final int n)
 					throws IOException {
 		if (shuffleFlag) {
 			Collections.shuffle(items, rnd);
 		}
+		final var assemblyBuffer = threadLocalAssemblyBuff.get();
 		try {
-			opsBuilder.buildOps(items, opBuff);
-			builtTasksCounter.add(n);
-			return n;
+			assemblyBuffer.clear();
+			final var assemblyResult = opAssembler.assemble(items, assemblyBuffer);
+			if (assemblyResult.consumedIdentityCount() != n) {
+				throw contractFailure(
+								"Operation assembler consumed "
+												+ assemblyResult.consumedIdentityCount()
+												+ " identities from an input batch of "
+												+ n);
+			}
+			final var emittedOperationCount = assemblyResult.emittedOperationCount();
+			if (emittedOperationCount != assemblyBuffer.size()) {
+				throw contractFailure(
+								"Operation assembler reported "
+												+ emittedOperationCount
+												+ " emitted operations but appended "
+												+ assemblyBuffer.size());
+			}
+			final var availableOperationSlots = batchSize - opBuff.size();
+			if (emittedOperationCount > availableOperationSlots) {
+				throw contractFailure(
+								"Operation assembler emitted "
+												+ emittedOperationCount
+												+ " operations with only "
+												+ availableOperationSlots
+												+ " buffer slots available");
+			}
+			opBuff.addAll(assemblyBuffer);
+			consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
+			builtTasksCounter.add(emittedOperationCount);
+			return emittedOperationCount;
 		} catch (final IllegalArgumentException e) {
+			if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
+				outputFinishFlag = true;
+				throw e;
+			}
 			LogUtil.exception(Level.ERROR, e, "Failed to generate the load operation");
+		} finally {
+			assemblyBuffer.clear();
 		}
 		return 0;
+	}
+
+	private AssertionError contractFailure(final String message) {
+		outputFinishFlag = true;
+		return new AssertionError(message);
 	}
 
 	@Override
@@ -427,6 +537,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final long generatedOpCount() {
 		return builtTasksCounter.sum() + recycledOpCounter.sum();
+	}
+
+	@Override
+	public final long consumedItemCount() {
+		return consumedItemsCounter.sum();
 	}
 
 	@Override
@@ -590,9 +705,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				inputLock.unlock();
 			}
 		}
-		// ops builder is instantiated by the load generator builder which forgets it so the load
-		// generator should close it
-		opsBuilder.close();
+		// The assembler owns the operation-building resources supplied to the generator.
+		opAssembler.close();
 	}
 
 	@Override

@@ -117,7 +117,20 @@ which does nothing actually and useful only for demo/testing purposes. See the s
 Any Spt scenario may be written using any JSR-223 compliant scripting language. Javascript support is available
 out-of-the-box.
 
+### 2.3.4. Operation Assembly
+
+The load generator separates input-item cardinality from logical-operation cardinality. An
+`OperationAssembler` appends logical operations to a caller-owned reusable buffer and reports both the number of input
+identities it consumed and the number of operations it emitted. Generated-operation counts, pending counts, count
+limits, throttle permits, output ranges, and completion checks all use emitted operations.
+`LoadGenerator.consumedItemCount()` exposes the separate consumed-identity count.
+
+Existing extensions do not need to change their `OperationsBuilder` implementations. The compatible
+`OperationsBuilderAssembler` preserves the historical one-item/one-operation behavior, including input order,
+operation type, origin index, naming, throttle indexing, close behavior, and ownership of builder resources. A custom
+assembler accepts every identity in the supplied input batch, must not emit more operations than the generator's
+available operation-buffer slots, and owns any resources it retains until `close()`.
+
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.
-
