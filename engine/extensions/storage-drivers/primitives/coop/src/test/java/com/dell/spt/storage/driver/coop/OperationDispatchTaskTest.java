@@ -6,8 +6,13 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.concurrent.PlatformThreadExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -21,6 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
 
 @SuppressWarnings("unchecked")
 class OperationDispatchTaskTest {
@@ -100,6 +106,111 @@ class OperationDispatchTaskTest {
 	void singleOpDispatched() throws Exception {
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+
+		inOpQueue.add(op);
+		task.doWork();
+
+		verify(driverMock).submit(op);
+	}
+
+	@Test
+	void successfulLegacySubmitMarksActualDispatchWithoutNewExtensionHook() throws Exception {
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("legacy-submit", 0, 1), null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.successfulSubmitStartsTransport(op)).thenReturn(true);
+		assertTrue(lifecycle.driverQueued(op));
+		when(driverMock.submit(op)).thenReturn(true);
+
+		inOpQueue.add(op);
+		task.doWork();
+
+		assertEquals(1, lifecycle.inFlightCount());
+		assertEquals(1, lifecycle.snapshot().dispatched());
+	}
+
+	@Test
+	void successfulSubmitDoesNotDispatchNextLegacyCirculation() throws Exception {
+		final Operation<Item> legacy = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.successfulSubmitStartsTransport(legacy)).thenReturn(true);
+		assertTrue(lifecycle.driverQueued(legacy));
+		when(driverMock.submit(legacy)).thenAnswer(invocation -> {
+			assertTrue(lifecycle.dispatched(legacy));
+			assertTrue(lifecycle.completionStarted(legacy));
+			assertTrue(lifecycle.terminal(legacy));
+			assertTrue(lifecycle.generatorBuffered(legacy));
+			assertTrue(lifecycle.driverQueued(legacy));
+			return true;
+		});
+
+		inOpQueue.add(legacy);
+		task.doWork();
+
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, lifecycle.stateOf(legacy),
+						"a late fallback from the prior submit must not dispatch the next circulation");
+		assertEquals(1, lifecycle.snapshot().dispatched());
+		assertEquals(1, lifecycle.snapshot().terminal());
+		assertEquals(0, lifecycle.inFlightCount());
+	}
+
+	@Test
+	void successfulCompositeExpansionMayRetainUndispatchedParentOwnership() throws Exception {
+		final Operation<Item> parent = new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("expanded-parent", 0, 1), null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		assertTrue(lifecycle.driverQueued(parent));
+		when(driverMock.submit(parent)).thenReturn(true);
+		when(driverMock.successfulSubmitStartsTransport(parent)).thenReturn(false);
+
+		inOpQueue.add(parent);
+		task.doWork();
+
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, lifecycle.stateOf(parent));
+		assertEquals(0, lifecycle.snapshot().dispatched());
+		assertEquals(0, lifecycle.inFlightCount());
+	}
+
+	@Test
+	void compatibilityTerminalStateIsRemovedUsingTrackerSidecar() throws Exception {
+		final Operation<Item> legacy = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		final Operation<Item> next = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("next", 0, 1), null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		assertTrue(lifecycle.driverQueued(legacy));
+		when(driverMock.submit(legacy)).thenAnswer(invocation -> {
+			assertTrue(lifecycle.dispatched(legacy));
+			assertTrue(lifecycle.completionStarted(legacy));
+			assertTrue(lifecycle.terminal(legacy));
+			return false;
+		});
+		when(driverMock.submit(next)).thenReturn(true);
+
+		inOpQueue.add(legacy);
+		task.doWork();
+		inOpQueue.add(next);
+		task.doWork();
+
+		verify(driverMock).submit(next);
+		verify(driverMock, never()).submit(anyList(), anyInt(), anyInt());
+	}
+
+	@Test
+	void terminalResultIsNotRetainedWhenSubmitReportsNoQueueProgress() throws Exception {
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("terminal", 0, 1), null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		assertTrue(lifecycle.driverQueued(op));
+		when(driverMock.submit(op)).thenAnswer(invocation -> {
+			assertTrue(lifecycle.dispatched(op));
+			assertTrue(lifecycle.completionStarted(op));
+			assertTrue(lifecycle.terminal(op));
+			return false;
+		});
 
 		inOpQueue.add(op);
 		task.doWork();
@@ -332,8 +443,10 @@ class OperationDispatchTaskTest {
 			dispatchLock.unlock();
 		}
 
-		// First attempt fails (backpressure). Signal again to simulate completion callback.
-		Thread.sleep(20);
+		// Wait until the first attempt has entered backpressure before signaling the completion.
+		// Otherwise a busy suite may deliver this signal before the dispatcher starts awaiting it.
+		verify(driverMock, timeout(1000)).submit(any(Operation.class));
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(true);
 		dispatchLock.lock();
 		try {
 			dispatchReady.signal();

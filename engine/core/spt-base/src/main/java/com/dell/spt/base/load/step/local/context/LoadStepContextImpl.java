@@ -2,6 +2,8 @@ package com.dell.spt.base.load.step.local.context;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Constants.LIFECYCLE_POLL_INTERVAL_MILLIS;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.SHUTDOWN;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.STARTED;
@@ -27,6 +29,8 @@ import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.OperationTraceCsvBatchLogMessage;
@@ -56,6 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BooleanSupplier;
 import java.util.SplittableRandom;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
@@ -115,15 +120,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	// pendingRetries) but haven't yet finished deciding retry() vs markOpFailed(). See
 	// awaitRetryTasksSettled()'s javadoc for the shutdown-ordering race this closes.
 	private final AtomicInteger activeRetryTasks = new AtomicInteger();
-	// Set as the very first thing doShutdown() does, before anything else (including
-	// cancelPendingRetries()): an authoritative, immediately-visible "the step has begun
-	// shutting down" signal that a scheduled retry task checks before calling generator.
-	// retry() - so it terminal-fails instead of enqueueing into a generator that's about
-	// to be stopped, possibly before that generator gets a chance to drain the enqueue
-	// (awaitRetryTasksSettled() only proves the task's own body finished, not that the
-	// generator's work loop got to run again afterward - see its own javadoc).
+	// Set before admission closes so a scheduled retry cannot enter generator circulation
+	// behind the recovery snapshot.
 	private final AtomicBoolean stepShuttingDown = new AtomicBoolean(false);
 	private final AtomicBoolean retryTrackingWarningLogged = new AtomicBoolean(false);
+	private final AtomicBoolean operationAdmissionClosed = new AtomicBoolean(false);
+	private final AtomicBoolean operationDrainComplete = new AtomicBoolean(false);
+	private final AtomicBoolean startedOnce = new AtomicBoolean(false);
+	private final OperationLifecycleTracker<O> operationLifecycle;
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -221,6 +225,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.generator = generator;
 		this.driver = driver;
 		this.driver.operationResultOutput(this);
+		final var driverLifecycle = driver.operationLifecycle();
+		this.operationLifecycle = driverLifecycle == null
+						? OperationLifecycleTracker.disabled()
+						: driverLifecycle;
+		if (this.generator != null) {
+			this.generator.operationLifecycle(this.operationLifecycle);
+		}
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
 		this.tracePersistFlag = tracePersistFlag;
@@ -937,27 +948,18 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Waits (briefly, boundedly) for any load-op-retry task that's already past
-	 * cancellation (i.e. had already removed itself from {@link #pendingRetries} - and so
-	 * committed to either failing the operation or calling {@link LoadGenerator#retry} -
-	 * before {@link #cancelPendingRetries()} could intercept it) to actually finish. Called
-	 * from {@link #doShutdown()}, before it explicitly stops the generator.
-	 *
-	 * <p>This alone is still not sufficient to guarantee nothing is abandoned: it only
-	 * proves the task's own body - up to and including a {@link LoadGenerator#retry} call
-	 * actually <em>returning</em> - has finished, not that the generator's own work loop
-	 * has since had a chance to run again and drain what that call just enqueued.
-	 * {@link #awaitRetryQueueDrained()}, called right after this, closes that remaining
-	 * window.
+	 * Waits briefly for a retry task which claimed its operation before cancellation to
+	 * observe the closed admission gate and choose its terminal or unattempted outcome.
 	 */
 	private void awaitRetryTasksSettled() {
 		// These tasks run near-instantaneously once started (a single generator.isStopped()
 		// check plus either markOpFailed() or an enqueue) - this closes a narrow scheduling
 		// race, it is not a real drain wait, so a short bound is enough.
-		final long deadline = System.currentTimeMillis() + 1000L;
+		final long deadline = System.currentTimeMillis()
+						+ TimeUnit.SECONDS.toMillis(TASK_STOP_WAIT_SECONDS);
 		while (activeRetryTasks.get() > 0 && System.currentTimeMillis() < deadline) {
 			try {
-				Thread.sleep(1);
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
@@ -972,45 +974,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Waits (briefly, boundedly) for {@link LoadGenerator#isNothingPendingRetry} to become
-	 * true. Called from {@link #doShutdown()}, after {@link #cancelPendingRetries()} and
-	 * {@link #awaitRetryTasksSettled()} (in that order: by the time this runs, nothing new
-	 * can still be enqueued - every not-yet-started retry has been cancelled, and every
-	 * already-started one has finished calling either {@code markOpFailed} or {@link
-	 * LoadGenerator#retry}), but immediately before the generator is actually stopped.
-	 *
-	 * <p>{@link LoadGenerator#retry} only enqueues - it does not wait for the generator's
-	 * own work loop to hand the operation off to the storage driver. Stopping the
-	 * generator while an already-enqueued retry is still sitting there would abandon it
-	 * forever (it isn't in the recycle queue or anywhere else anything would ever look for
-	 * it again). Once this returns true, though, the operation has been handed to {@code
-	 * opOutput.put()} and is the storage driver's concern from here - exactly like any
-	 * other in-flight operation at the moment a step stops, which {@link #doStop}'s own
-	 * {@code waitOpFinishBeforeStop} logic (a separate, pre-existing concern) already
-	 * covers if configured to.
-	 *
-	 * <p>If the bounded wait times out (the generator is stuck, output is backpressured, a
-	 * throttle keeps denying permits, or the driver simply cannot accept the redispatch),
-	 * waiting longer isn't guaranteed to be productive, but simply giving up and stopping
-	 * the generator anyway would silently strand whatever is still queued - {@link
-	 * #doClose} eventually clears that queue with no terminal outcome ever recorded for it
-	 * (neither retried, nor redispatch attempted, nor counted as failed). So on timeout,
-	 * this drains whatever remains via {@link LoadGenerator#drainPendingRetries} and
-	 * terminal-fails each directly instead, preserving the "exactly one terminal outcome
-	 * per operation" invariant the rest of the retry machinery maintains.
+	 * Compatibility fallback for custom generators whose admission/recovery methods do not
+	 * expose their legacy retry queue. The built-in generator is already empty after
+	 * admission closure and recovery; legacy implementations retain the former bounded
+	 * drain and terminal-failure behavior rather than silently dropping retry work.
 	 */
 	private void awaitRetryQueueDrained() {
-		// The generator's work loop drains its retry queue on every doWork() iteration
-		// (LoadGeneratorImpl#drainRetryQueue), which run continuously and fast - this is
-		// not a real drain-to-completion wait (nothing here waits for the driver to finish
-		// processing it), just long enough for that loop to actually pick it up. A
-		// generator that's already stopped itself for some unrelated reason (e.g. output
-		// EOF) while something was still enqueued will never drain it either, so this is
-		// bounded rather than indefinite.
-		final long deadline = System.currentTimeMillis() + 1000L;
+		final long deadline = System.currentTimeMillis()
+						+ TimeUnit.SECONDS.toMillis(TASK_STOP_WAIT_SECONDS);
 		while (!generator.isNothingPendingRetry() && System.currentTimeMillis() < deadline) {
 			try {
-				Thread.sleep(1);
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
@@ -1047,6 +1021,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected void doStart() throws IllegalStateException {
+		if (!startedOnce.compareAndSet(false, true)) {
+			throw new IllegalStateException(
+							id + ": load-step context instances cannot be restarted; create a new context");
+		}
+		stepShuttingDown.set(false);
+		operationAdmissionClosed.set(false);
+		operationDrainComplete.set(false);
+		operationLifecycle.reset();
+		generator.openAdmission();
 		try {
 			driver.start();
 		} catch (final RemoteException e) {
@@ -1121,38 +1104,100 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
+	public final OperationLifecycleSnapshot<O> operationLifecycle() {
+		return operationLifecycle.snapshot();
+	}
+
+	/**
+	 * Closes both admission gates before recovering queued work, then waits only for operations
+	 * which crossed the actual driver-dispatch boundary. The shared per-operation state makes
+	 * recovery, timeout, and late completion mutually exclusive outcomes.
+	 */
+	private void closeOperationAdmissionAndRecover() {
+		if (!operationAdmissionClosed.compareAndSet(false, true)) {
+			return;
+		}
+		try {
+			// Close the downstream gate first. A generator handoff which already started
+			// may be blocked in an extension's Output implementation; closing the driver's
+			// atomic gate first prevents that handoff from crossing dispatch while allowing
+			// generator admission closure and recovery to remain bounded.
+			driver.closeAdmission();
+		} finally {
+			try {
+				generator.closeAdmission();
+			} finally {
+				// Compatibility backstop for generators whose closeAdmission() predates the
+				// default implementation or is supplied by a mocking/proxy framework.
+				generator.stop();
+				markUnattempted(generator.recoverBufferedOperations());
+				markUnattempted(driver.recoverQueuedOperations());
+			}
+		}
+	}
+
+	private void drainDispatchedOperations() {
+		if (!operationDrainComplete.compareAndSet(false, true)) {
+			return;
+		}
+		final long startedAt = System.nanoTime();
+		try {
+			if (operationLifecycle.isEnabled()) {
+				try {
+					if (waitOpFinishBeforeStop) {
+						awaitOutstanding(() -> operationLifecycle.inFlightCount() > 0, startedAt);
+					}
+				} finally {
+					operationLifecycle.resolveOutstandingAsUnresolved();
+				}
+			} else if (waitOpFinishBeforeStop) {
+				// Third-party drivers which do not expose lifecycle information retain the
+				// historical active-concurrency wait behavior.
+				awaitOutstanding(() -> activeOpCount() != 0, startedAt);
+			}
+		} finally {
+			final var snapshot = operationLifecycle.snapshot();
+			Loggers.MSG.debug(
+							"{}: lifecycle stop complete after {} ms: unattempted={}, terminal={}, unresolved={}",
+							id,
+							TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt),
+							snapshot.unattempted(),
+							snapshot.terminal(),
+							snapshot.unresolved());
+		}
+	}
+
+	private void awaitOutstanding(final BooleanSupplier outstanding, final long startedAt) {
+		final long waitNanos = TimeUnit.SECONDS.toNanos(Math.max(0, waitOpFinishLimit));
+		final long deadline = startedAt + waitNanos;
+		while (outstanding.getAsBoolean() && System.nanoTime() < deadline) {
+			try {
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	private void markUnattempted(final List<O> recovered) {
+		if (recovered == null || recovered.isEmpty()) {
+			return;
+		}
+		for (final O op : recovered) {
+			operationLifecycle.unattempted(op);
+		}
+	}
+
+	@Override
 	protected final void doShutdown() {
-		// Set before anything else runs here (including cancelPendingRetries()): the
-		// earliest, most authoritative signal available that a scheduled retry task can
-		// check to terminal-fail instead of calling generator.retry() - see that flag's
-		// own field comment and scheduleRetry()'s javadoc. Cheaper and more direct than
-		// relying solely on generator.isStopped(), which only becomes true a few lines
-		// below and doesn't by itself prove the generator will get to drain a
-		// just-enqueued retry (see awaitRetryTasksSettled()'s javadoc).
+		// Close both admission gates before retry settlement or recovery can admit more
+		// work. Only operations already past actual driver dispatch remain drain-eligible.
 		stepShuttingDown.set(true);
-		// Order matters, and all three of these must run *before* generator.stop() below,
-		// not in doStop(): the public stop() lifecycle is stop() -> shutdown() (->
-		// doShutdown(), which is what stops the generator) -> doStop(), i.e. doShutdown()
-		// runs first. A retry task that fires right around here can already have removed
-		// itself from pendingRetries and be about to call generator.retry() -
-		// cancelPendingRetries() alone (a doStop()-only fix in an earlier version of this
-		// code) runs too late to catch that: it would find nothing left to cancel, and the
-		// generator would already be stopped by the time doStop() got a chance to look,
-		// silently abandoning the redispatch in LoadGeneratorImpl's retryQueue forever.
-		// Doing this here, before generator.stop(), ensures any such in-flight task is
-		// either intercepted before it starts (cancelPendingRetries()), or given the
-		// chance to finish calling generator.retry() (awaitRetryTasksSettled()), or - since
-		// that alone only proves the *call* returned, not that the generator's own work
-		// loop has since drained what it just enqueued - given the chance to actually do
-		// that draining too (awaitRetryQueueDrained()).
+		closeOperationAdmissionAndRecover();
 		cancelPendingRetries();
 		awaitRetryTasksSettled();
 		awaitRetryQueueDrained();
-		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
-						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			generator.stop();
-			Loggers.MSG.debug("{}: load generator \"{}\" stopped", id, generator.toString());
-		}
+		drainDispatchedOperations();
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
@@ -1164,28 +1209,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
-		// Defensive backstop, not the primary fix: doShutdown() above already does this
-		// before generator.stop(), which is the ordering that actually matters for the
-		// public stop() lifecycle (stop() -> shutdown() -> doStop(), so doShutdown() runs
-		// *first*). Kept here too in case something calls doStop() directly without a
-		// preceding doShutdown() (as some unit tests do, exercising doStop()'s own
-		// behavior in isolation) - harmless to call twice, since both are no-ops once
-		// pendingRetries/activeRetryTasks/the generator's retry queue are already empty.
+		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
+		closeOperationAdmissionAndRecover();
 		cancelPendingRetries();
 		awaitRetryTasksSettled();
 		awaitRetryQueueDrained();
-		if (waitOpFinishBeforeStop) {
-			var i = 0;
-			var sleep = 1000;
-			for (; ((activeOpCount() != 0) && !Thread.currentThread().isInterrupted()) && ((i * sleep) / 1000D < waitOpFinishLimit); i++) {
-				try {
-					Thread.sleep(sleep);
-				} catch (InterruptedException e) {
-					Loggers.MSG.debug("couldn't put context thread {} to sleep or was interrupted", this);
-				}
-			}
-			Loggers.MSG.info("{}: waited {}s for ops to finish (active count = {})", id, i, activeOpCount());
-		}
+		drainDispatchedOperations();
 
 		driver.stop();
 

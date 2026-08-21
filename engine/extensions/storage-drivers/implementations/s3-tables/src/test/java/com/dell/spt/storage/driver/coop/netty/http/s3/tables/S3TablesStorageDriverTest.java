@@ -277,6 +277,10 @@ public class S3TablesStorageDriverTest {
 
 		assertEquals(true, submitted, "submit should return true for provision opMode");
 		assertEquals(Operation.Status.SUCC, op.status(), "op status should be SUCC after submit");
+		assertEquals(
+						com.dell.spt.base.load.lifecycle.OperationLifecycleState.TERMINAL,
+						op.lifecycle().state(),
+						"synchronous control-plane work must cross dispatch before completing");
 	}
 
 	@Test

@@ -7,13 +7,16 @@ import com.dell.spt.base.integrity.IntegrityMetadata;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.storage.Credential;
 
 /** Created by kurila on 11.07.16. */
 public interface Operation<I extends Item> {
 
+	/** Offset used to express monotonic timestamps in epoch-relative microseconds. */
 	long START_OFFSET_MICROS = currentTimeMillis() * 1000 - nanoTime() / 1000;
 
+	/** Path separator used by operation path builders. */
 	String SLASH = "/";
 
 	int originIndex();
@@ -105,6 +108,25 @@ public interface Operation<I extends Item> {
 	}
 
 	Operation<I> result();
+
+	/**
+	 * Returns the lossless dispatch lifecycle shared with result snapshots.
+	 *
+	 * <p>The compatibility default leaves third-party operation implementations untracked.
+	 */
+	default OperationLifecycle lifecycle() {
+		return OperationLifecycle.untracked();
+	}
+
+	/**
+	 * Starts a new logical dispatch circulation after a retained terminal or recovered
+	 * unattempted result is recycled. Implementations with tracked lifecycle state should return
+	 * a fresh lifecycle while leaving snapshots of the preceding circulation attached to the old
+	 * instance.
+	 */
+	default OperationLifecycle startNextLifecycle() {
+		return lifecycle();
+	}
 
 	void reset();
 

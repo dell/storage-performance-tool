@@ -1,6 +1,7 @@
 package com.dell.spt.base.storage.driver;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -24,6 +25,14 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 class StorageDriverBaseIntegrityTest {
+
+	@Test
+	void directLegacySubclassRetainsDisabledLifecycleCompatibility() throws Exception {
+		final var driver = driver(TestConfigBuilder.config());
+
+		assertFalse(driver.operationLifecycle().isEnabled(),
+						"only lifecycle-instrumented driver bases may replace the active-count drain");
+	}
 
 	@Test
 	void disabledModeDoesNotAllocateOrTraverseIntegrityState() throws Exception {

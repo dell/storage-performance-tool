@@ -4,10 +4,27 @@ import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import java.util.List;
 
 /** Created on 11.07.16. */
 public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Task, AutoCloseable {
+
+	/** Installs the lifecycle shared with the storage driver. */
+	default void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {}
+
+	/** Opens operation admission before a start or restart. */
+	default void openAdmission() {}
+
+	/** Atomically closes admission before shutdown recovery begins. */
+	default void closeAdmission() {
+		stop();
+	}
+
+	/** Returns operations retained by generator buffers without dispatching them. */
+	default List<O> recoverBufferedOperations() {
+		return List.of();
+	}
 
 	/** Returns true when the item input has been fully consumed. */
 	boolean isItemInputFinished();

@@ -9,6 +9,8 @@ import com.dell.spt.base.item.ItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
@@ -477,6 +479,35 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
+	void connectionLeaseFailureCompletesOneTerminalAttemptInsteadOfRemainingRetryable() throws Exception {
+		final var sem = new Semaphore(1, true);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+		when(driver.isStarted()).thenReturn(true);
+
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
+		lifecycleField.setAccessible(true);
+		lifecycleField.set(driver, lifecycle);
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.CREATE, new ItemImpl("lease-failure"), null, "/bucket", null);
+		assertTrue(lifecycle.driverQueued(op));
+		when(connPool.lease()).thenThrow(new java.net.ConnectException("no connections"));
+
+		assertFalse(driver.submit(op));
+
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		assertEquals(OperationLifecycleState.TERMINAL, op.lifecycle().state(),
+						"the dispatcher must be able to remove the failed operation instead of hot-retrying it");
+		assertEquals(1, lifecycle.snapshot().dispatched());
+		assertEquals(1, lifecycle.snapshot().terminal());
+		assertEquals(0, lifecycle.snapshot().inFlight());
+		assertEquals(1, sem.availablePermits());
+		verify(connPool, times(1)).lease();
+	}
+
+	@Test
 	void batchSubmit_releasesExcessPermits() throws Exception {
 		// When drainPermits() grabs more permits than needed, excess are returned.
 		final var sem = new Semaphore(8, true);
@@ -556,11 +587,10 @@ class NettyCompletionPathTest {
 
 		final int submitted = driver.submit(ops, 0, 3);
 
-		// drainPermits=8, excess returned=5 (8-3), permits=3
-		// First op: lease throws, conn==null → explicit release (1)
-		// complete(null, op) → handleCompleted only (no channel release)
-		// Catch: releases permits-n-1 = 2
-		// Total returned: 5 (excess) + 1 (explicit) + 2 (remaining) = 8
+		// The failed lease is one terminal attempted operation, so the dispatcher removes it
+		// instead of retrying it. Its permit is returned explicitly and the other two drained
+		// permits are unused and returned below the loop.
+		assertEquals(1, submitted);
 		assertEquals(8, sem.availablePermits(),
 						"all permits must be returned after connection failure");
 	}

@@ -35,6 +35,8 @@ import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.LoadGeneratorImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -57,6 +59,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -70,7 +73,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -79,6 +81,7 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.inOrder;
 
 /* Alot of the functionality from ItemInputFactoryTest is used here since need an ItemInputFactory */
 public class LoadStepContextImplTest {
@@ -134,6 +137,94 @@ public class LoadStepContextImplTest {
 		assertDoesNotThrow(() -> stepCtx.doClose());
 		assertDoesNotThrow(() -> stepCtx.doStop());
 		Assertions.assertTrue(stepCtx.isDone());
+	}
+
+	@Test
+	public void shutdownClosesAdmissionBeforeRecoveringAndMarksOnlyDispatchedWorkUnresolved()
+					throws Exception {
+		testConfig.val("load-op-retry", false);
+		testConfig.val("load-op-wait-finish", true);
+		testConfig.val("load-op-wait-limit", 0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		when(generator.isNothingPendingRetry()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
+		final var lifecycle = new OperationLifecycleTracker<Operation<DataItem>>();
+		when(driver.operationLifecycle()).thenReturn(lifecycle);
+		doNothing().when(driver).operationResultOutput(any());
+		final var generatorBuffered = baseDataOp("generator-buffered", 1);
+		final var driverQueued = baseDataOp("driver-queued", 1);
+		final var dispatched = baseDataOp("dispatched", 1);
+		lifecycle.generatorBuffered(generatorBuffered);
+		lifecycle.generatorBuffered(driverQueued);
+		lifecycle.driverQueued(driverQueued);
+		lifecycle.generatorBuffered(dispatched);
+		lifecycle.driverQueued(dispatched);
+		lifecycle.dispatched(dispatched);
+		when(generator.recoverBufferedOperations()).thenReturn(List.of(generatorBuffered));
+		when(driver.recoverQueuedOperations()).thenReturn(List.of(driverQueued));
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		final var context = new LoadStepContextImpl<>(
+						"lossless-stop", generator, driver, metrics, testConfig.configVal("load"), false);
+
+		context.doShutdown();
+
+		final var ordered = inOrder(generator, driver);
+		ordered.verify(driver).closeAdmission();
+		ordered.verify(generator).closeAdmission();
+		ordered.verify(generator).recoverBufferedOperations();
+		ordered.verify(driver).recoverQueuedOperations();
+		ordered.verify(driver).shutdown();
+		final var snapshot = context.operationLifecycle();
+		assertEquals(2, snapshot.unattempted());
+		assertEquals(1, snapshot.unresolved());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, generatorBuffered.lifecycle().state());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, driverQueued.lifecycle().state());
+		assertEquals(OperationLifecycleState.UNRESOLVED, dispatched.lifecycle().state());
+	}
+
+	@Test
+	public void shutdownDrainsActualDispatchWithinConfiguredBound() throws Exception {
+		testConfig.val("load-op-retry", false);
+		testConfig.val("load-op-wait-finish", true);
+		testConfig.val("load-op-wait-limit", 1);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		when(generator.isNothingPendingRetry()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
+		final var lifecycle = new OperationLifecycleTracker<Operation<DataItem>>();
+		when(driver.operationLifecycle()).thenReturn(lifecycle);
+		doNothing().when(driver).operationResultOutput(any());
+		final var dispatched = baseDataOp("drained", 1);
+		lifecycle.generatorBuffered(dispatched);
+		lifecycle.driverQueued(dispatched);
+		lifecycle.dispatched(dispatched);
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		final var context = new LoadStepContextImpl<>(
+						"bounded-drain", generator, driver, metrics, testConfig.configVal("load"), false);
+		final var completion = Thread.ofVirtual().start(() -> {
+			try {
+				Thread.sleep(50);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			lifecycle.completionStarted(dispatched);
+			lifecycle.terminal(dispatched);
+		});
+
+		final long started = System.nanoTime();
+		context.doShutdown();
+		final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+		completion.join();
+
+		assertTrue(elapsedMillis < 1000, "drain should finish when the dispatched request completes");
+		assertEquals(1, context.operationLifecycle().terminal());
+		assertEquals(0, context.operationLifecycle().unresolved());
+		assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
 	}
 
 	@Test
@@ -792,15 +883,10 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
-	public void publicStopWaitsForInFlightRetryTaskBeforeStoppingGenerator() throws Exception {
-		// Reviewer-requested test forcing the exact ordering race: the public stop()
-		// lifecycle is stop() -> shutdown() (which is what actually stops the generator,
-		// via doShutdown()) -> doStop(), i.e. doShutdown() runs *before* doStop(). A retry
-		// task that has already removed itself from pendingRetries (committed to calling
-		// generator.retry()) right as stop() is invoked must not be able to enqueue into a
-		// generator that doShutdown() then immediately stops out from under it -
-		// awaitRetryTasksSettled(), called from doShutdown() *before* generator.stop(),
-		// must actually block until that task finishes.
+	public void publicStopClosesAdmissionBeforeWaitingForInFlightRetryTask() throws Exception {
+		// Force the exact ordering race: a retry task has already passed its shutdown check
+		// and is paused immediately before retry(). Stop must close both admission gates
+		// immediately, then may wait for this already-running task to settle.
 		//
 		// Necessary but not sufficient on its own: this only proves generator.retry() gets
 		// *called* before stop() proceeds - it does not prove the (here, mocked, so
@@ -852,17 +938,15 @@ public class LoadStepContextImplTest {
 						taskReachedIsStoppedCheck.await(5, java.util.concurrent.TimeUnit.SECONDS),
 						"retry task should have started and reached its isStopped() check by now");
 
-		// Call the *public* stop() on its own thread: it must block in
-		// awaitRetryTasksSettled() (called from doShutdown(), before generator.stop())
-		// until the in-flight task above finishes, so the generator must not be stopped
-		// while that's still pending.
+		// Call public stop() on its own thread. It blocks on the claimed retry task, but the
+		// admission boundary must already be closed during that wait.
 		final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
 		stopperThread.start();
-		verify(mockGenerator, after(200).never()).stop();
+		verify(mockGenerator, timeout(1_000)).closeAdmission();
+		verify(mockStorageDriver, timeout(1_000)).closeAdmission();
 
-		// Release the task: it proceeds to call generator.retry() (generator not stopped
-		// yet, from its point of view), then stop() must complete and finally stop the
-		// generator - in that order.
+		// Release the task: the mock still records the already-committed retry() call. A real
+		// generator rejects it atomically as unattempted, covered by the generator gate test.
 		releaseTask.countDown();
 		stopperThread.join(5_000);
 		assertFalse(stopperThread.isAlive(), "public stop() should have completed");
@@ -1027,6 +1111,28 @@ public class LoadStepContextImplTest {
 						false);
 		final IllegalStateException thrown = Assertions.assertThrows(IllegalStateException.class, ctx::doStart);
 		Assertions.assertTrue(thrown.getCause() instanceof RemoteException);
+	}
+
+	@Test
+	public void stoppedContextRejectsSameInstanceRestartInsteadOfStartingWithoutItsGenerator() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		final MetricsContext metrics = buildMetricsCtx("singleRunContext");
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-single-run", generatorMock, driverMock, metrics,
+						testConfig.configVal("load"), false);
+
+		ctx.start();
+		ctx.stop();
+		final var failure = assertThrows(IllegalStateException.class, ctx::start);
+
+		assertTrue(failure.getMessage().contains("cannot be restarted"));
+		assertTrue(ctx.isStopped(), "a rejected restart must preserve the stopped state");
+		verify(generatorMock, times(1)).start();
+		verify(driverMock, times(1)).start();
 	}
 
 	@Test
@@ -2010,6 +2116,7 @@ public class LoadStepContextImplTest {
 					implements StorageDriver<DataItem, Operation<DataItem>> {
 		private final java.util.concurrent.CountDownLatch releaseFirstDispatch;
 		private final AtomicInteger totalPutCalls = new AtomicInteger();
+		private final OperationLifecycleTracker<Operation<DataItem>> operationLifecycle = new OperationLifecycleTracker<>();
 		private volatile Output<Operation<DataItem>> opResultOut;
 
 		BlockingFirstDispatchDriver(final java.util.concurrent.CountDownLatch releaseFirstDispatch) {
@@ -2019,12 +2126,15 @@ public class LoadStepContextImplTest {
 		@Override
 		@SuppressWarnings("unchecked")
 		public boolean put(final Operation<DataItem> op) {
+			operationLifecycle.driverQueued(op);
+			operationLifecycle.dispatched(op);
 			final int callNumber = totalPutCalls.incrementAndGet();
 			if (callNumber == 1) {
 				try {
 					releaseFirstDispatch.await(10, java.util.concurrent.TimeUnit.SECONDS);
 				} catch (final InterruptedException e) {
 					Thread.currentThread().interrupt();
+					operationLifecycle.unresolved(op);
 					return false;
 				}
 			}
@@ -2036,11 +2146,22 @@ public class LoadStepContextImplTest {
 				final DataOperation<DataItem> dataOp = (DataOperation<DataItem>) op;
 				try {
 					dataOp.countBytesDone(dataOp.item().size());
-				} catch (final IOException ignored) {}
+				} catch (final IOException ignored) {
+					// The test double has no backing data source to fail this size update.
+				}
 			}
 			op.status(Operation.Status.SUCC);
 			op.finishResponse();
-			return opResultOut.put(op.result());
+			if (!operationLifecycle.completionStarted(op)) {
+				return false;
+			}
+			final boolean retained = opResultOut.put(op.result());
+			if (retained) {
+				operationLifecycle.terminal(op);
+			} else {
+				operationLifecycle.unresolved(op);
+			}
+			return retained;
 		}
 
 		@Override
@@ -2100,6 +2221,11 @@ public class LoadStepContextImplTest {
 		}
 
 		@Override
+		public OperationLifecycleTracker<Operation<DataItem>> operationLifecycle() {
+			return operationLifecycle;
+		}
+
+		@Override
 		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
 
 		int totalPutCalls() {
@@ -2108,18 +2234,11 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
-	public void shutdownDuringRetryDrainDoesNotStrandTheOperation() throws Exception {
-		// Reviewer-requested regression, real generator: awaitRetryTasksSettled() alone
-		// only proves a retry-scheduling task's own body - up to and including a
-		// LoadGenerator#retry call actually *returning* - has finished; it does not prove
-		// the generator's own work loop has since had a chance to run again and drain what
-		// that call just enqueued (LoadGenerator#retry only enqueues). This deterministically
-		// creates that exact window with a *real* LoadGeneratorImpl: the driver's first
-		// dispatch blocks, provably holding the generator's own thread inside a single
-		// doWork() call and unable to loop back to drain anything, while this test injects
-		// directly into the generator's retry queue and starts public stop() concurrently -
-		// proving stop() waits for the drain (awaitRetryQueueDrained()) rather than
-		// abandoning the operation in LoadGeneratorImpl's retryQueue forever.
+	public void shutdownRecoversRetryQueuedBehindBlockedDispatchWithoutWaiting() throws Exception {
+		// A blocked Output implementation must not hold the generator's admission lock.
+		// Stop closes admission first, interrupts that already-started handoff, and recovers
+		// retry work still owned by the generator as unattempted instead of waiting for the
+		// work loop to redispatch it.
 		testConfig.val("load-op-retry", true);
 		testConfig.val("load-op-retryLimit", 3);
 		testConfig.val("load-op-recycle-mode", false);
@@ -2165,24 +2284,17 @@ public class LoadStepContextImplTest {
 			realGenerator.retry(injectedRetry);
 			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry should be sitting in the generator's retry queue");
 
-			// Start the public stop() lifecycle concurrently. With the fix, it must block
-			// in awaitRetryQueueDrained() rather than stopping the generator out from under
-			// the still-undrained retry queue.
+			// Stop must complete even though the first handoff has not been released.
 			final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
 			stopperThread.start();
-			Thread.sleep(200);
-			assertTrue(stopperThread.isAlive(), "stop() must still be waiting for the retry queue to drain");
-			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry must still be undrained (the generator's thread is still stuck)");
-
-			// Release the blocked first dispatch: the generator's thread can now return
-			// from doWork(), loop back, and drain the injected retry on its next iteration.
-			releaseFirstDispatch.countDown();
-
 			stopperThread.join(5_000);
-			assertFalse(stopperThread.isAlive(), "stop() should have completed once the retry queue drained");
+			assertFalse(stopperThread.isAlive(), "stop() should close admission without waiting for redispatch");
+			assertTrue(realGenerator.isNothingPendingRetry(), "the recovered retry queue must be empty");
 			assertEquals(
-							2, blockingDriver.totalPutCalls(),
-							"the injected retry must have actually reached the driver, not been stranded in retryQueue");
+							1, blockingDriver.totalPutCalls(),
+							"the generator-buffered retry must not cross the closed driver gate");
+			assertEquals(OperationLifecycleState.UNATTEMPTED, injectedRetry.lifecycle().state());
+			assertEquals(1, stepCtx.operationLifecycle().unattempted());
 		} finally {
 			releaseFirstDispatch.countDown(); // in case an assertion failed before this ran
 			stepCtx.stop();
@@ -2192,17 +2304,10 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
-	public void retryQueueDrainTimeoutTerminalFailsStrandedRetriesInsteadOfAbandoningThem() throws Exception {
-		// Reviewer-requested regression, real generator: awaitRetryQueueDrained()'s wait
-		// (above) is bounded, not indefinite - if the generator genuinely never gets to
-		// drain (stuck, backpressured output, a throttle permanently denying permits, or
-		// (as simulated here) the driver simply never accepting the redispatch), giving up
-		// and stopping the generator anyway would silently strand the still-queued
-		// operation forever: LoadGeneratorImpl#doClose() unconditionally clears
-		// retryQueue, with no terminal outcome ever recorded - neither retried, nor
-		// redispatch attempted, nor counted as failed. This never releases the blocked
-		// first dispatch at all, forcing the drain wait to genuinely time out, and proves
-		// the timeout path drains and terminal-fails the stranded operation instead.
+	public void blockedDispatchShutdownIsBoundedAndDoesNotConvertRecoveryToFailure() throws Exception {
+		// Generator-buffered retry work has not crossed actual dispatch. Even when another
+		// handoff is blocked, shutdown recovers it promptly as unattempted and does not turn
+		// it into an ordinary operational failure.
 		testConfig.val("load-op-retry", true);
 		testConfig.val("load-op-retryLimit", 3);
 		testConfig.val("load-op-recycle-mode", false);
@@ -2247,11 +2352,8 @@ public class LoadStepContextImplTest {
 			realGenerator.retry(injectedRetry);
 			assertFalse(realGenerator.isNothingPendingRetry(), "the injected retry should be sitting in the generator's retry queue");
 
-			// Start the public stop() lifecycle concurrently. The generator can never
-			// drain the injected retry (its thread is permanently stuck in the blocked
-			// first dispatch), so awaitRetryQueueDrained()'s bounded wait must time out -
-			// but stop() must still complete boundedly rather than hanging forever, and
-			// the stranded retry must end up terminal-failed rather than silently dropped.
+			// Start the public stop() lifecycle concurrently without releasing the first
+			// handoff. Closing admission and recovering the retry remains bounded.
 			final long stopStartedAt = System.currentTimeMillis();
 			final Thread stopperThread = new Thread(stepCtx::stop, "stopper");
 			stopperThread.start();
@@ -2260,8 +2362,8 @@ public class LoadStepContextImplTest {
 			final long stopDurationMillis = System.currentTimeMillis() - stopStartedAt;
 			assertFalse(stopperThread.isAlive(), "stop() must complete boundedly even though the retry queue can never drain");
 			assertTrue(
-							stopDurationMillis < 10_000,
-							"stop() took " + stopDurationMillis + "ms - should be bounded by the ~1s drain timeout, not hang");
+							stopDurationMillis < 5_000,
+							"stop() took " + stopDurationMillis + "ms - admission closure must remain bounded");
 
 			// The injected retry must never have reached the driver: only the original
 			// (permanently blocked) dispatch counts.
@@ -2272,13 +2374,14 @@ public class LoadStepContextImplTest {
 			// there for doClose() to silently discard.
 			assertTrue(realGenerator.isNothingPendingRetry(), "the retry queue must be empty (drained) before close(), not just abandoned");
 
-			// And it must have been given a definite terminal outcome: exactly one
-			// failure recorded, not zero (lost) and not left permanently uncounted.
+			assertEquals(OperationLifecycleState.UNATTEMPTED, injectedRetry.lifecycle().state());
+
+			// Recovery is lifecycle accounting, not an operational request failure.
 			metrics.refreshLastSnapshot(true);
 			final AllMetricsSnapshot snapshot = metrics.lastSnapshot();
 			assertEquals(
-							1, snapshot.failsSnapshot().count(),
-							"the stranded retry must be recorded as exactly one terminal failure");
+							0, snapshot.failsSnapshot().count(),
+							"unattempted recovery must not be converted into an ordinary failure");
 		} finally {
 			releaseFirstDispatch.countDown();
 			stepCtx.stop();

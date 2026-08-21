@@ -9,8 +9,13 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycle;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
@@ -18,6 +23,9 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -25,9 +33,11 @@ import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
@@ -148,6 +158,636 @@ class CoopStorageDriverBaseTest {
 			Thread.sleep(10);
 		}
 		assertTrue(condition.getAsBoolean(), failureMessage);
+	}
+
+	@Test
+	void dispatcherCannotObserveInputBeforeDriverQueueOwnershipIsPublished() throws Exception {
+		final var lifecycleClaimEntered = new CountDownLatch(1);
+		final var releaseLifecycleClaim = new CountDownLatch(1);
+		final var submitEntered = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"atomic-queue-publication-step", dataInput, storageConfig, false, 1) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				submitEntered.countDown();
+				return super.submit(op);
+			}
+		};
+		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
+		when(resultOutput.put(any(Operation.class))).thenReturn(true);
+		driver.operationResultOutput(resultOutput);
+		final Operation<DataItem> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("atomic-queue-publication", 0, 1),
+						null, "/bucket", null) {
+			@Override
+			public synchronized OperationLifecycle startNextLifecycle() {
+				lifecycleClaimEntered.countDown();
+				try {
+					releaseLifecycleClaim.await();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+				return super.startNextLifecycle();
+			}
+		};
+		final var putResult = new AtomicReference<Boolean>();
+		final var asyncFailure = new AtomicReference<Throwable>();
+		final var dispatchTaskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		dispatchTaskField.setAccessible(true);
+		final var dispatchTask = (OperationDispatchTask<DataItem, Operation<DataItem>>) dispatchTaskField.get(driver);
+
+		try {
+			driver.start();
+			dispatchTask.stop();
+			assertTrue(dispatchTask.await(2, TimeUnit.SECONDS));
+			final var producer = Thread.ofVirtual().start(() -> {
+				try {
+					putResult.set(driver.put(op));
+				} catch (final Throwable t) {
+					asyncFailure.compareAndSet(null, t);
+				}
+			});
+			assertTrue(lifecycleClaimEntered.await(2, TimeUnit.SECONDS));
+			final var dispatcher = Thread.ofVirtual().start(() -> {
+				try {
+					dispatchTask.doWork();
+				} catch (final Throwable t) {
+					asyncFailure.compareAndSet(null, t);
+				}
+			});
+
+			assertFalse(submitEntered.await(200, TimeUnit.MILLISECONDS),
+							"dispatch must not observe an input before its lifecycle ownership");
+			releaseLifecycleClaim.countDown();
+			producer.join();
+			dispatcher.join();
+			assertNull(asyncFailure.get());
+			assertEquals(Boolean.TRUE, putResult.get());
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+			awaitCondition(
+							() -> op.lifecycle().state() == OperationLifecycleState.TERMINAL,
+							"the published operation should complete exactly once", 2000);
+			assertEquals(0, driver.operationLifecycle().snapshot().driverQueued());
+			assertEquals(0, driver.operationLifecycle().snapshot().inFlight());
+			assertEquals(1, driver.operationLifecycle().snapshot().terminal());
+		} finally {
+			releaseLifecycleClaim.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void queueClosureRecoversUndispatchedWorkAndRejectsNewAdmission() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"queue-close-step", dataInput, storageConfig, false, 4) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				return false;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				return 0;
+			}
+
+			@Override
+			protected int submit(final List<Operation<DataItem>> ops) {
+				return 0;
+			}
+		};
+		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
+		when(resultOutput.put(any(Operation.class))).thenReturn(true);
+		driver.operationResultOutput(resultOutput);
+		final Operation<DataItem> queued = new DataOperationImpl<>(
+						0,
+						OpType.DELETE,
+						new DataItemImpl("queued", 0, 1),
+						null,
+						"/bucket",
+						null,
+						List.of(),
+						0);
+
+		try {
+			driver.start();
+			assertTrue(driver.put(queued));
+			awaitCondition(
+							() -> driver.operationLifecycle().snapshot().driverQueued() == 1,
+							"operation should remain queued while dispatch capacity is exhausted",
+							2000);
+
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertEquals(List.of(queued), recovered);
+			assertEquals(OperationLifecycleState.UNATTEMPTED, queued.lifecycle().state());
+			assertEquals(0, driver.operationLifecycle().snapshot().dispatched());
+			assertEquals(1, driver.operationLifecycle().snapshot().unattempted());
+			assertThrows(java.io.EOFException.class, () -> driver.put(new DataOperationImpl<>(
+							0,
+							OpType.DELETE,
+							new DataItemImpl("late", 0, 1),
+							null,
+							"/bucket",
+							null,
+							List.of(),
+							0)));
+			assertTrue(driver.recoverQueuedOperations().isEmpty(), "queue recovery must be idempotent");
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void queueRecoveryPreservesDistinctValueEqualCompatibilityOperations() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"identity-recovery-step", dataInput, storageConfig, false, 4) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				return false;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				return 0;
+			}
+		};
+		final var first = new ValueEqualLegacyOperation("value-equal-first", 31, 9).operation();
+		final var second = new ValueEqualLegacyOperation("value-equal-second", 31, 9).operation();
+		assertTrue(first.equals(second));
+
+		try {
+			driver.start();
+			assertEquals(2, driver.put(List.of(first, second)));
+			awaitCondition(
+							() -> driver.operationLifecycle().snapshot().driverQueued() == 2,
+							"both compatibility identities should remain driver-queued", 2000);
+
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertEquals(2, recovered.size());
+			assertTrue(recovered.stream().anyMatch(op -> op == first));
+			assertTrue(recovered.stream().anyMatch(op -> op == second));
+			assertEquals(2, driver.operationLifecycle().snapshot().unattempted());
+			assertEquals(0, driver.operationLifecycle().snapshot().driverQueued());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void submitOutlivingDispatcherStopWaitIsUnresolvedRatherThanFalselyUnattempted() throws Exception {
+		final var submitEntered = new CountDownLatch(1);
+		final var releaseSubmit = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"blocked-submit-step", dataInput, storageConfig, false, 1) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				submitEntered.countDown();
+				while (releaseSubmit.getCount() > 0) {
+					try {
+						releaseSubmit.await();
+					} catch (final InterruptedException ignored) {
+						// Deliberately model an extension which does not honor task interruption.
+					}
+				}
+				return true;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				return submit(ops.get(from)) ? 1 : 0;
+			}
+		};
+		final Operation<DataItem> queued = new DataOperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("blocked", 0, 1), null, "/bucket",
+						null, List.of(), 0);
+		try {
+			driver.start();
+			assertTrue(driver.put(queued));
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+
+			final long startedAt = System.nanoTime();
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+			assertTrue(elapsedMillis < 2500, "recovery must retain its one-second task-stop bound");
+			assertTrue(recovered.isEmpty(), "an indeterminate submit must not be reported as unattempted");
+			assertEquals(OperationLifecycleState.UNRESOLVED, queued.lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().snapshot().unresolved());
+			releaseSubmit.countDown();
+			awaitCondition(
+							() -> driver.operationLifecycle().snapshot().unresolved() == 1,
+							"a late successful submit return must not change the bounded outcome", 2000);
+			assertEquals(0, driver.operationLifecycle().snapshot().dispatched());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+		} finally {
+			releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void legacyBatchCompletionDoesNotMakeHungSubmittingMembersUnattempted() throws Exception {
+		final var submitEntered = new CountDownLatch(1);
+		final var releaseSubmit = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 3);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"blocked-legacy-batch-step", dataInput, storageConfig, false, 3) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				return false;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				assertTrue(handleCompleted(ops.get(from)));
+				submitEntered.countDown();
+				while (releaseSubmit.getCount() > 0) {
+					try {
+						releaseSubmit.await();
+					} catch (final InterruptedException ignored) {
+						// Model a legacy batch blocked after completing one request and starting another.
+					}
+				}
+				return to - from;
+			}
+		};
+		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
+		when(resultOutput.put(any(Operation.class))).thenReturn(true);
+		driver.operationResultOutput(resultOutput);
+		final List<Operation<DataItem>> ops = List.of(
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("legacy-batch-first", 0, 1), null,
+										"/bucket", null, List.of(), 0),
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("legacy-batch-second", 0, 1), null,
+										"/bucket", null, List.of(), 0),
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("legacy-batch-third", 0, 1), null,
+										"/bucket", null, List.of(), 0));
+		try {
+			driver.start();
+			assertEquals(ops.size(), driver.put(ops));
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertTrue(recovered.isEmpty(),
+							"a pre-hook batch cannot prove which remaining submissions started transport");
+			assertEquals(OperationLifecycleState.TERMINAL, ops.get(0).lifecycle().state());
+			assertEquals(OperationLifecycleState.UNRESOLVED, ops.get(1).lifecycle().state());
+			assertEquals(OperationLifecycleState.UNRESOLVED, ops.get(2).lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(2, driver.operationLifecycle().snapshot().unresolved());
+			assertEquals(0, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void legacyBatchRecoveryDoesNotResolveARecycledNextCirculation() throws Exception {
+		final var submitEntered = new CountDownLatch(1);
+		final var releaseSubmit = new CountDownLatch(1);
+		final var recycled = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 2);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"recycled-legacy-batch-step", dataInput, storageConfig, false, 2) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				return false;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				assertTrue(handleCompleted(ops.get(from)));
+				submitEntered.countDown();
+				while (releaseSubmit.getCount() > 0) {
+					try {
+						releaseSubmit.await();
+					} catch (final InterruptedException ignored) {
+						// Keep the original batch active while its first identity is recycled.
+					}
+				}
+				return to - from;
+			}
+		};
+		final Operation<DataItem> first = mock(Operation.class, CALLS_REAL_METHODS);
+		final Operation<DataItem> second = mock(Operation.class, CALLS_REAL_METHODS);
+		when(first.result()).thenReturn(first);
+		final Output<Operation<DataItem>> recyclingOutput = mock(Output.class);
+		when(recyclingOutput.put(first)).thenAnswer(invocation -> {
+			assertTrue(driver.operationLifecycle().generatorBuffered(first));
+			assertTrue(driver.put(first));
+			recycled.countDown();
+			return true;
+		});
+		driver.operationResultOutput(recyclingOutput);
+
+		try {
+			driver.start();
+			assertEquals(2, driver.put(List.of(first, second)));
+			assertTrue(recycled.await(2, TimeUnit.SECONDS));
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertEquals(1, recovered.size());
+			assertSame(first, recovered.get(0),
+							"the recycled circulation remains recoverable independently of the hung batch");
+			assertEquals(OperationLifecycleState.UNATTEMPTED,
+							driver.operationLifecycle().stateOf(first));
+			assertEquals(OperationLifecycleState.UNRESOLVED,
+							driver.operationLifecycle().stateOf(second));
+			assertEquals(1, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(1, driver.operationLifecycle().snapshot().unattempted());
+			assertEquals(1, driver.operationLifecycle().snapshot().unresolved());
+		} finally {
+			releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void explicitBatchDispatchRecoversMembersStillQueuedBehindAHungFirstAttempt() throws Exception {
+		final var submitEntered = new CountDownLatch(1);
+		final var releaseSubmit = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 3);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"blocked-explicit-batch-step", dataInput, storageConfig, false, 3) {
+			@Override
+			protected boolean submit(final Operation<DataItem> op) {
+				// Retain an early/spuriously drained first member until the dispatcher can
+				// fill its batch buffer from the other already-admitted operations.
+				return false;
+			}
+
+			@Override
+			protected int submit(
+							final List<Operation<DataItem>> ops, final int from, final int to) {
+				if (!beginDispatch(ops.get(from))) {
+					return 0;
+				}
+				submitEntered.countDown();
+				while (releaseSubmit.getCount() > 0) {
+					try {
+						releaseSubmit.await();
+					} catch (final InterruptedException ignored) {
+						// Model a connection lease which has not returned to submit yet.
+					}
+				}
+				return 1;
+			}
+		};
+		final List<Operation<DataItem>> ops = List.of(
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("batch-first", 0, 1), null,
+										"/bucket", null, List.of(), 0),
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("batch-second", 0, 1), null,
+										"/bucket", null, List.of(), 0),
+						new DataOperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("batch-third", 0, 1), null,
+										"/bucket", null, List.of(), 0));
+		try {
+			driver.start();
+			assertEquals(ops.size(), driver.put(ops));
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+
+			driver.closeAdmission();
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertEquals(2, recovered.size());
+			assertTrue(recovered.containsAll(List.of(ops.get(1), ops.get(2))),
+							"only the first batch member crossed the explicit dispatch boundary");
+			assertEquals(OperationLifecycleState.DISPATCHED, ops.get(0).lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, ops.get(1).lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, ops.get(2).lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().resolveOutstandingAsUnresolved());
+			assertEquals(OperationLifecycleState.UNRESOLVED, ops.get(0).lifecycle().state());
+		} finally {
+			releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void blockedResultOutputRemainsInFlightUntilDeadlineWins() throws Exception {
+		final var outputEntered = new CountDownLatch(1);
+		final var releaseOutput = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"blocked-result-step", dataInput, storageConfig, false, 1);
+		driver.operationResultOutput(new Output<>() {
+			@Override
+			public boolean put(final Operation<DataItem> item) {
+				outputEntered.countDown();
+				try {
+					releaseOutput.await();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return false;
+				}
+				return true;
+			}
+
+			@Override
+			public int put(final List<Operation<DataItem>> buffer, final int from, final int to) {
+				return to - from;
+			}
+
+			@Override
+			public int put(final List<Operation<DataItem>> buffer) {
+				return buffer.size();
+			}
+
+			@Override
+			public com.github.akurilov.commons.io.Input<Operation<DataItem>> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		});
+		final Operation<DataItem> op = new DataOperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("result", 0, 1), null, "/bucket",
+						null, List.of(), 0);
+		final var accepted = new AtomicReference<Boolean>();
+		try {
+			driver.start();
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+			assertTrue(driver.operationLifecycle().dispatched(op));
+			final var completion = Thread.ofVirtual().start(() -> accepted.set(driver.handleCompleted(op)));
+			assertTrue(outputEntered.await(2, TimeUnit.SECONDS));
+
+			assertEquals(OperationLifecycleState.COMPLETING, op.lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().inFlightCount());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(1, driver.operationLifecycle().resolveOutstandingAsUnresolved(),
+							"the deadline must resolve a completion whose output has not accepted the result");
+
+			releaseOutput.countDown();
+			completion.join();
+			assertEquals(Boolean.FALSE, accepted.get());
+			assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+			assertEquals(0, driver.operationLifecycle().snapshot().inFlight());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(1, driver.operationLifecycle().snapshot().unresolved());
+		} finally {
+			releaseOutput.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void rejectedResultOutputRemainsUnresolvedWithoutRetainedBacklog() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"rejected-result-step", dataInput, storageConfig, false, 1);
+		driver.operationResultOutput(mock(Output.class));
+		final Operation<DataItem> op = new DataOperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("rejected", 0, 1), null, "/bucket",
+						null, List.of(), 0);
+		try {
+			driver.start();
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+			assertTrue(driver.operationLifecycle().dispatched(op));
+
+			assertFalse(driver.handleCompleted(op));
+
+			assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(1, driver.operationLifecycle().snapshot().unresolved());
+			assertEquals(0, driver.operationLifecycle().inFlightCount());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void compatibilityResultMayRecycleSameInstanceDuringSynchronousOutput() throws Exception {
+		final var driver = newRetryTestDriver();
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
+		lifecycleField.setAccessible(true);
+		lifecycleField.set(driver, lifecycle);
+		final Operation<Item> legacy = mock(Operation.class, CALLS_REAL_METHODS);
+		when(legacy.status()).thenReturn(Operation.Status.SUCC);
+		when(legacy.result()).thenReturn(legacy);
+		assertTrue(lifecycle.driverQueued(legacy));
+		assertTrue(lifecycle.dispatched(legacy));
+		final Output<Operation<Item>> recyclingOutput = mock(Output.class);
+		when(recyclingOutput.put(legacy)).thenAnswer(invocation -> {
+			assertTrue(lifecycle.generatorBuffered(legacy));
+			assertTrue(lifecycle.driverQueued(legacy));
+			return true;
+		});
+		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
+		outField.setAccessible(true);
+		outField.set(driver, recyclingOutput);
+
+		assertTrue(driver.handleCompleted(legacy));
+
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, lifecycle.stateOf(legacy));
+		assertEquals(1, lifecycle.snapshot().terminal());
+		assertEquals(0, lifecycle.snapshot().inFlight());
+	}
+
+	@Test
+	void lateOutputReturnAfterDeadlineAndResetDoesNotMutateNewRunCounters() throws Exception {
+		final var outputEntered = new CountDownLatch(1);
+		final var releaseOutput = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"late-rejected-result-step", dataInput, storageConfig, false, 1);
+		driver.operationResultOutput(new Output<>() {
+			@Override
+			public boolean put(final Operation<DataItem> item) {
+				outputEntered.countDown();
+				try {
+					releaseOutput.await();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+				return false;
+			}
+
+			@Override
+			public int put(final List<Operation<DataItem>> buffer, final int from, final int to) {
+				return 0;
+			}
+
+			@Override
+			public int put(final List<Operation<DataItem>> buffer) {
+				return 0;
+			}
+
+			@Override
+			public com.github.akurilov.commons.io.Input<Operation<DataItem>> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		});
+		final Operation<DataItem> op = new DataOperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("late-rejected", 0, 1), null, "/bucket",
+						null, List.of(), 0);
+		try {
+			driver.start();
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+			assertTrue(driver.operationLifecycle().dispatched(op));
+			final var completion = Thread.ofVirtual().start(() -> driver.handleCompleted(op));
+			assertTrue(outputEntered.await(2, TimeUnit.SECONDS));
+
+			assertEquals(1, driver.operationLifecycle().resolveOutstandingAsUnresolved());
+			driver.operationLifecycle().reset();
+			releaseOutput.countDown();
+			completion.join();
+
+			assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(0, driver.operationLifecycle().snapshot().unresolved());
+		} finally {
+			releaseOutput.countDown();
+			driver.close();
+		}
 	}
 
 	@Test
@@ -579,6 +1219,205 @@ class CoopStorageDriverBaseTest {
 		final var field = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
 		field.setAccessible(true);
 		return (BlockingQueue<Operation<Item>>) field.get(driver);
+	}
+
+	@Test
+	void extensionChildEnqueueRegistersRecoverableDriverOwnership() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"child-enqueue-step", dataInput, storageConfig, false, 4);
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("child", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.enqueueChildOperation(child, child, "extension child"));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state());
+			assertTrue(childQueueOf(driver).contains(child));
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void legacyProtectedChildQueueIsClaimedBeforeDispatchAndRemainsRecoverable() throws Exception {
+		final var submitEntered = new CountDownLatch(1);
+		final var stateAtSubmit = new AtomicReference<OperationLifecycleState>();
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final class LegacyChildQueueDriver
+						extends CoopStorageDriverMock<Item, Operation<Item>> {
+			private LegacyChildQueueDriver() throws Exception {
+				super("legacy-child-queue-step", dataInput, storageConfig, false, 4);
+			}
+
+			private boolean legacyEnqueue(final Operation<Item> op) {
+				return childOpQueue.offer(op);
+			}
+
+			@Override
+			protected boolean submit(final Operation<Item> op) {
+				stateAtSubmit.compareAndSet(null, operationLifecycle().stateOf(op));
+				submitEntered.countDown();
+				return false;
+			}
+		}
+		final var driver = new LegacyChildQueueDriver();
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("legacy-child", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.legacyEnqueue(child));
+			driver.start();
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, stateAtSubmit.get(),
+							"legacy protected-queue work must gain registry ownership before submit");
+
+			driver.closeAdmission();
+			assertEquals(List.of(child), driver.recoverQueuedOperations());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, child.lifecycle().state());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void deferredChildEnqueueOwnsLifecycleBeforeAsyncScheduling() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"deferred-child-step", dataInput, storageConfig, false, 4);
+		final var queue = new ArrayBlockingQueue<Operation<Item>>(1);
+		final var childQueueField = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
+		childQueueField.setAccessible(true);
+		childQueueField.set(driver, queue);
+		queue.add(new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("filler", 0, 1), null, "/bucket", null));
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("deferred-child", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.enqueueChildOperation(child, child, "deferred extension child"));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state(),
+							"async scheduling must never be the only owner of child work");
+
+			driver.closeAdmission();
+			awaitCondition(
+							() -> child.lifecycle().state() == OperationLifecycleState.UNATTEMPTED,
+							"admission closure should recover the deferred child", 2000);
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void deferredChildEnqueueTimeoutProducesUnattemptedOutcome() throws Exception {
+		final String property = CoopStorageDriverBase.CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY;
+		final String previous = System.getProperty(property);
+		System.setProperty(property, "20");
+		final var driver = newRetryTestDriver(1);
+		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
+		lifecycleField.setAccessible(true);
+		lifecycleField.set(driver, new OperationLifecycleTracker<Operation<Item>>());
+		final var queue = childQueueOf(driver);
+		queue.add(mock(Operation.class));
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("timed-out-child", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.enqueueChildOperation(child, child, "timed out child"));
+			awaitCondition(
+							() -> child.lifecycle().state() == OperationLifecycleState.UNATTEMPTED,
+							"enqueue timeout should retain an unattempted child identity", 2000);
+		} finally {
+			if (previous == null) {
+				System.clearProperty(property);
+			} else {
+				System.setProperty(property, previous);
+			}
+		}
+	}
+
+	@Test
+	void bulkChildExpansionAfterAdmissionClosureRecoversEveryIdentity() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"bulk-child-close-step", dataInput, storageConfig, false, 4);
+		final List<Operation<Item>> children = List.of(
+						new OperationImpl<>(
+										0, OpType.CREATE, new DataItemImpl("child-1", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.CREATE, new DataItemImpl("child-2", 0, 1), null, "/bucket", null));
+		try {
+			driver.closeAdmission();
+
+			assertFalse(driver.enqueueChildOperations(children, children.get(0), "bulk children"));
+			assertTrue(children.stream()
+							.allMatch(child -> child.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
+			assertEquals(2, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void closedAdmissionRecoversCompositeParentCreatedAfterItsPriorTerminalPhase() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"late-composite-close-step", dataInput, storageConfig, false, 4);
+		final var parent = newCompositeParent("late-composite", 2048, 1024);
+		final Operation<Item> parentOp = (Operation<Item>) (Operation<?>) parent;
+		final List<Operation<Item>> children = (List<Operation<Item>>) (List<?>) parent.subOperations();
+		try {
+			assertTrue(driver.operationLifecycle().driverQueued(parentOp));
+			assertTrue(driver.operationLifecycle().dispatched(parentOp));
+			assertTrue(driver.operationLifecycle().completionStarted(parentOp));
+			assertTrue(driver.operationLifecycle().terminal(parentOp),
+							"the transport phase may finish before the composite callback expands children");
+			driver.closeAdmission();
+
+			assertFalse(driver.enqueueChildOperations(children, parentOp, "late composite children"));
+
+			assertEquals(OperationLifecycleState.UNATTEMPTED, parent.lifecycle().state(),
+							"closed admission must reconcile the fresh composite phase after the recovery scan");
+			assertTrue(children.stream()
+							.allMatch(child -> child.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
+			assertEquals(3, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void compositeExpansionClaimsParentAndEverySiblingBeforeExecutorRejection() throws Exception {
+		final var driver = newRetryTestDriver(1);
+		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
+		lifecycleField.setAccessible(true);
+		lifecycleField.set(driver, new OperationLifecycleTracker<Operation<Item>>());
+		doThrow(new RejectedExecutionException("test rejection"))
+						.when(driver).executeChildEnqueue(any(Runnable.class));
+
+		final var parent = newCompositeParent("rejected-expansion", 3072, 1024);
+		parent.subOperations();
+		parent.status(Operation.Status.SUCC);
+		assertTrue(driver.operationLifecycle().driverQueued((Operation<Item>) (Operation<?>) parent));
+		assertTrue(driver.operationLifecycle().dispatched((Operation<Item>) (Operation<?>) parent));
+
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) parent),
+						"terminal result publication remains accepted even when child scheduling fails");
+
+		final var children = parent.subOperations();
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, parent.lifecycle().state(),
+						"the parent must own the incomplete composite phase");
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, children.get(0).lifecycle().state());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, children.get(1).lifecycle().state());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, children.get(2).lifecycle().state(),
+						"later siblings must be claimed before the first scheduling failure");
+		assertEquals(2, driver.operationLifecycle().snapshot().unattempted());
 	}
 
 	@Test
@@ -1049,5 +1888,46 @@ class CoopStorageDriverBaseTest {
 		assertTrue(waiterDone.await(5, TimeUnit.SECONDS), "waiter should complete after permit release signal");
 		assertTrue(awakened[0], "permit release should signal the dispatch condition");
 		assertEquals(1, mpuThrottle.availablePermits(), "permit release should return one permit");
+	}
+
+	private static final class ValueEqualLegacyOperation implements InvocationHandler {
+		private final int equalityGroup;
+		private final int hashCodeValue;
+		private final DataOperationImpl<DataItem> delegate;
+		private final Operation<DataItem> operation;
+
+		@SuppressWarnings("unchecked")
+		private ValueEqualLegacyOperation(
+						final String name, final int hashCodeValue, final int equalityGroup) {
+			this.hashCodeValue = hashCodeValue;
+			this.equalityGroup = equalityGroup;
+			this.delegate = new DataOperationImpl<>(
+							0, OpType.DELETE, new DataItemImpl(name, 0, 1), null, "/bucket", null,
+							List.of(), 0);
+			this.operation = (Operation<DataItem>) Proxy.newProxyInstance(
+							Operation.class.getClassLoader(), new Class<?>[]{Operation.class
+							}, this);
+		}
+
+		private Operation<DataItem> operation() {
+			return operation;
+		}
+
+		@Override
+		public Object invoke(final Object proxy, final Method method, final Object[] args)
+						throws Throwable {
+			return switch (method.getName()) {
+			case "lifecycle", "startNextLifecycle" -> OperationLifecycle.untracked();
+			case "hashCode" -> hashCodeValue;
+			case "equals" -> args != null
+							&& args.length == 1
+							&& args[0] != null
+							&& Proxy.isProxyClass(args[0].getClass())
+							&& Proxy.getInvocationHandler(args[0]) instanceof ValueEqualLegacyOperation other
+							&& equalityGroup == other.equalityGroup;
+			case "toString" -> "legacy-operation-" + equalityGroup;
+			default -> method.invoke(delegate, args);
+			};
+		}
 	}
 }
