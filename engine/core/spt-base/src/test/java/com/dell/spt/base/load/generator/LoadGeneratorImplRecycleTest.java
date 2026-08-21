@@ -10,9 +10,14 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.io.StorageItemInput;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationAssembler;
+import com.dell.spt.base.item.op.OperationAssemblyResult;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.OperationsBuilderImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
@@ -143,6 +148,223 @@ class LoadGeneratorImplRecycleTest {
 			assertSame(ops.get(i), output.received.get(i));
 		}
 		assertEquals(BATCH_SIZE, generator.generatedOpCount());
+	}
+
+	@Test
+	void fullInputReadCanEmitOneRequestOperation() throws Exception {
+		final var originIndex = 7;
+		final var inputItems = List.<DataItem> of(
+						new DataItemImpl("item-0", 0, 1024),
+						new DataItemImpl("item-1", 0, 1024),
+						new DataItemImpl("item-2", 0, 1024),
+						new DataItemImpl("item-3", 0, 1024));
+		final var fullInput = fixedBatchInput("FullInput", inputItems);
+
+		final var assemblerCloseCount = new AtomicInteger();
+		final var assembler = new OperationAssembler<DataItem, DataOperation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return originIndex;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.DELETE;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items, final List<DataOperation<DataItem>> operations) {
+				assertEquals(inputItems, items);
+				operations.add(new DataOperationImpl<>(
+								originIndex, OpType.DELETE, items.get(0), "/bucket", null, null, List.of(), 0));
+				return new OperationAssemblyResult(items.size(), operations.size());
+			}
+
+			@Override
+			public void close() {
+				assemblerCloseCount.incrementAndGet();
+			}
+		};
+		final var throttleIndexes = new ArrayList<Integer>();
+		final var throttlePermits = new ArrayList<Integer>();
+		final var throttle = new com.github.akurilov.commons.concurrent.throttle.IndexThrottle() {
+			@Override
+			public boolean tryAcquire(final int index) {
+				return true;
+			}
+
+			@Override
+			public int tryAcquire(final int index, final int n) {
+				throttleIndexes.add(index);
+				throttlePermits.add(n);
+				return n;
+			}
+		};
+		final var assembledOutput = new CollectingOutput<DataOperation<DataItem>>();
+		final var assembledGenerator = new LoadGeneratorImpl<>(
+						fullInput,
+						assembler,
+						List.of(throttle),
+						assembledOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						false,
+						false);
+
+		try {
+			assembledGenerator.start();
+			assertTrue(assembledGenerator.await(5, TimeUnit.SECONDS), "generator should complete");
+			assertEquals(inputItems.size(), assembledGenerator.consumedItemCount());
+			assertEquals(1, assembledGenerator.generatedOpCount());
+			assertEquals(List.of(originIndex), throttleIndexes);
+			assertEquals(List.of(1), throttlePermits);
+			assertEquals(1, assembledOutput.received.size());
+			assertEquals(OpType.DELETE, assembledOutput.received.get(0).type());
+			assertEquals(originIndex, assembledOutput.received.get(0).originIndex());
+		} finally {
+			assembledGenerator.close();
+		}
+		assertEquals(1, assemblerCloseCount.get());
+		verify(fullInput).close();
+	}
+
+	@Test
+	void assembledOutputRangesStayWithinBufferAcrossPartialWritesAndBackpressure() throws Exception {
+		final var inputItems = List.<DataItem> of(
+						new DataItemImpl("item-0", 0, 1024),
+						new DataItemImpl("item-1", 0, 1024),
+						new DataItemImpl("item-2", 0, 1024),
+						new DataItemImpl("item-3", 0, 1024));
+		final var fullInput = fixedBatchInput("FullInput", inputItems);
+		final var assembler = new OperationAssembler<DataItem, DataOperation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.DELETE;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items, final List<DataOperation<DataItem>> operations) {
+				operations.addAll(items.subList(0, 3).stream().<DataOperation<DataItem>> map(item -> new DataOperationImpl<>(
+								0, OpType.DELETE, item, "/bucket", null, null, List.of(), 0)).toList());
+				return new OperationAssemblyResult(items.size(), operations.size());
+			}
+
+			@Override
+			public void close() {}
+		};
+		final var partialOutput = new PartialCollectingOutput<DataOperation<DataItem>>();
+		final var assembledGenerator = new LoadGeneratorImpl<>(
+						fullInput, assembler, List.of(), partialOutput, BATCH_SIZE, 0, 1000, false, false);
+		try {
+			assembledGenerator.doWork();
+			assembledGenerator.doWork();
+			assembledGenerator.doWork();
+
+			assertEquals(List.of(3, 2, 2), partialOutput.requestedCounts);
+			assertEquals(List.of(3, 2, 2), partialOutput.bufferSizes);
+			assertEquals(
+							List.of("item-0", "item-1", "item-2"),
+							partialOutput.received.stream().map(op -> op.item().name()).toList());
+			assertEquals(3, assembledGenerator.generatedOpCount());
+			assertEquals(4, assembledGenerator.consumedItemCount());
+		} finally {
+			assembledGenerator.close();
+		}
+	}
+
+	@Test
+	void assemblyResultRejectsNegativeCardinalities() {
+		assertThrows(IllegalArgumentException.class, () -> new OperationAssemblyResult(-1, 0));
+		assertThrows(IllegalArgumentException.class, () -> new OperationAssemblyResult(0, -1));
+	}
+
+	@Test
+	void consumedIdentityMismatchStopsAfterOneAssemblyAttempt() throws Exception {
+		assertAssemblyContractRejected(BATCH_SIZE - 1, 0, 0);
+	}
+
+	@Test
+	void emittedOperationMismatchStopsAfterOneAssemblyAttempt() throws Exception {
+		assertAssemblyContractRejected(BATCH_SIZE, 1, 0);
+	}
+
+	@Test
+	void operationBufferCapacityOverflowStopsAfterOneAssemblyAttempt() throws Exception {
+		assertAssemblyContractRejected(BATCH_SIZE, BATCH_SIZE + 1, BATCH_SIZE + 1);
+	}
+
+	@Test
+	void legacyBuilderConstructorPreservesSingleItemBehaviorAndResourceOwnership() throws Exception {
+		final var originIndex = 11;
+		final var inputItems = List.<DataItem> of(
+						new DataItemImpl("first", 0, 1024),
+						new DataItemImpl("second", 0, 1024));
+		final var legacyInput = fixedBatchInput("LegacyInput", inputItems);
+		final var outputPaths = (Input<String>) mock(Input.class);
+		when(outputPaths.get()).thenReturn("bucket-a", "bucket-b");
+		final var credentials = (Input<Credential>) mock(Input.class);
+		final var firstCredential = Credential.getInstance("first-uid", "first-secret");
+		final var secondCredential = Credential.getInstance("second-uid", "second-secret");
+		when(credentials.get()).thenReturn(firstCredential, secondCredential);
+		final var legacyBuilder = new OperationsBuilderImpl<DataItem, Operation<DataItem>>(originIndex);
+		legacyBuilder
+						.opType(OpType.UPDATE)
+						.inputPath("/source")
+						.outputPathInput(outputPaths)
+						.credentialInput(credentials);
+		final var throttleIndexes = new ArrayList<Integer>();
+		final var throttle = new com.github.akurilov.commons.concurrent.throttle.IndexThrottle() {
+			@Override
+			public boolean tryAcquire(final int index) {
+				return true;
+			}
+
+			@Override
+			public int tryAcquire(final int index, final int n) {
+				throttleIndexes.add(index);
+				return n;
+			}
+		};
+		final var legacyOutput = new CollectingOutput<Operation<DataItem>>();
+		final var legacyGenerator = new LoadGeneratorImpl<>(
+						legacyInput,
+						legacyBuilder,
+						List.of(throttle),
+						legacyOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						false,
+						false);
+
+		try {
+			assertEquals("UpdateLegacyInput", legacyGenerator.toString());
+			legacyGenerator.start();
+			assertTrue(legacyGenerator.await(5, TimeUnit.SECONDS), "legacy generator should complete");
+			assertEquals(2, legacyGenerator.generatedOpCount());
+			assertEquals(2, legacyGenerator.consumedItemCount());
+			assertEquals(List.of(originIndex), throttleIndexes);
+			assertEquals(List.of("first", "second"), legacyOutput.received.stream().map(op -> op.item().name()).toList());
+			assertEquals(List.of(OpType.UPDATE, OpType.UPDATE), legacyOutput.received.stream().map(Operation::type).toList());
+			assertEquals(List.of(originIndex, originIndex), legacyOutput.received.stream().map(Operation::originIndex).toList());
+			assertEquals(List.of("bucket-a", "bucket-b"), legacyOutput.received.stream().map(Operation::dstPath).toList());
+			assertEquals(
+							List.of(firstCredential, secondCredential),
+							legacyOutput.received.stream().map(Operation::credential).toList());
+		} finally {
+			legacyGenerator.close();
+		}
+		verify(legacyInput).close();
+		verify(outputPaths).close();
+		verify(credentials).close();
 	}
 
 	/**
@@ -316,6 +538,81 @@ class LoadGeneratorImplRecycleTest {
 
 	// --- helpers ---
 
+	private static <I> Input<I> fixedBatchInput(final String name, final List<I> items) throws Exception {
+		final var input = (Input<I>) mock(Input.class);
+		when(input.toString()).thenReturn(name);
+		final var inputReads = new AtomicInteger();
+		doAnswer(invocation -> {
+			final var buffer = invocation.<List<I>> getArgument(0);
+			if (inputReads.getAndIncrement() == 0) {
+				buffer.addAll(items);
+				return items.size();
+			}
+			com.github.akurilov.commons.lang.Exceptions.throwUnchecked(new java.io.EOFException());
+			return 0;
+		}).when(input).get(anyList(), anyInt());
+		return input;
+	}
+
+	private static void assertAssemblyContractRejected(
+					final int consumedIdentityCount,
+					final int reportedOperationCount,
+					final int appendedOperationCount)
+					throws Exception {
+		final var inputItems = List.<DataItem> of(
+						new DataItemImpl("item-0", 0, 1024),
+						new DataItemImpl("item-1", 0, 1024),
+						new DataItemImpl("item-2", 0, 1024),
+						new DataItemImpl("item-3", 0, 1024));
+		final var input = fixedBatchInput("InvalidAssemblyInput", inputItems);
+		final var assemblyCalls = new AtomicInteger();
+		final var assembler = new OperationAssembler<DataItem, DataOperation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.DELETE;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items, final List<DataOperation<DataItem>> operations) {
+				assemblyCalls.incrementAndGet();
+				for (var i = 0; i < appendedOperationCount; i++) {
+					operations.add(new DataOperationImpl<>(
+									0,
+									OpType.DELETE,
+									items.get(i % items.size()),
+									"/bucket",
+									null,
+									null,
+									List.of(),
+									0));
+				}
+				return new OperationAssemblyResult(consumedIdentityCount, reportedOperationCount);
+			}
+
+			@Override
+			public void close() {}
+		};
+		final var invalidOutput = new CollectingOutput<DataOperation<DataItem>>();
+		final var invalidGenerator = new LoadGeneratorImpl<>(
+						input, assembler, List.of(), invalidOutput, BATCH_SIZE, 0, 1000, false, false);
+		try {
+			invalidGenerator.start();
+			assertTrue(invalidGenerator.await(5, TimeUnit.SECONDS), "invalid assembler should stop the generator");
+			assertEquals(1, assemblyCalls.get());
+			assertEquals(0, invalidGenerator.generatedOpCount());
+			assertEquals(0, invalidGenerator.consumedItemCount());
+			assertTrue(invalidOutput.received.isEmpty());
+		} finally {
+			invalidGenerator.close();
+		}
+	}
+
 	private DataOperation<DataItem> newOp(final String name) {
 		final DataItem item = new DataItemImpl(name, 0, 1024);
 		return new DataOperationImpl<>(0, OpType.READ, item, "/bucket", null, null, List.of(), 0);
@@ -401,6 +698,26 @@ class LoadGeneratorImplRecycleTest {
 
 		@Override
 		public void close() {}
+	}
+
+	private static final class PartialCollectingOutput<O> extends CollectingOutput<O> {
+		private final List<Integer> requestedCounts = new ArrayList<>();
+		private final List<Integer> bufferSizes = new ArrayList<>();
+		private int callCount;
+
+		@Override
+		public int put(final List<O> buffer, final int from, final int to) {
+			requestedCounts.add(to - from);
+			bufferSizes.add(buffer.size());
+			if (callCount++ == 1) {
+				return 0;
+			}
+			final var accepted = callCount == 1 ? 1 : to - from;
+			for (var i = from; i < from + accepted; i++) {
+				received.add(buffer.get(i));
+			}
+			return accepted;
+		}
 	}
 
 	/** Thread-safe collecting output with a latch for concurrent tests. */

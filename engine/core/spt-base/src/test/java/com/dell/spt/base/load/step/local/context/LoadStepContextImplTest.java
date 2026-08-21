@@ -21,6 +21,8 @@ import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationAssembler;
+import com.dell.spt.base.item.op.OperationAssemblyResult;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -32,6 +34,7 @@ import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
+import com.dell.spt.base.load.generator.LoadGeneratorImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -2383,6 +2386,70 @@ public class LoadStepContextImplTest {
 			}
 		}
 		assertTrue(stepCtx.isDone(), failureMessage);
+	}
+
+	@Test
+	public void oneAssembledOperationCompletesAfterOneTerminalResult() throws Exception {
+		testConfig.val("load-op-type", "delete");
+		testConfig.val("load-op-retry", false);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+		final var consumedIdentityCount = 4;
+		final var fullInput = new FixedCountItemInput(consumedIdentityCount);
+		final var assembler = new OperationAssembler<DataItem, Operation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.DELETE;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items, final List<Operation<DataItem>> operations) {
+				final var request = new DataOperationImpl<DataItem>(
+								0, OpType.DELETE, items.get(0), "/bucket", null, null, List.of(), 0);
+				operations.add(request);
+				return new OperationAssemblyResult(items.size(), operations.size());
+			}
+
+			@Override
+			public void close() {}
+		};
+		final var cardinalityDriver = DummyStorageDriverMock.<DataItem, Operation<DataItem>> create();
+		final var cardinalityGenerator = new LoadGeneratorImpl<>(
+						fullInput,
+						assembler,
+						List.of(),
+						cardinalityDriver,
+						consumedIdentityCount,
+						0,
+						1000,
+						false,
+						false);
+		final var metrics = buildMetricsCtx("cardinality-neutral-completion");
+		final var stepCtx = new LoadStepContextImpl<>(
+						"cardinality-neutral-completion-step",
+						cardinalityGenerator,
+						cardinalityDriver,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		try {
+			runUntilDoneOrTimeout(stepCtx, "one emitted request should complete after one terminal result");
+			metrics.refreshLastSnapshot(true);
+			assertEquals(consumedIdentityCount, cardinalityGenerator.consumedItemCount());
+			assertEquals(1, cardinalityGenerator.generatedOpCount());
+			assertEquals(1, cardinalityDriver.completedOpCount());
+			assertEquals(1, metrics.lastSnapshot().successSnapshot().count());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
 	}
 
 	@Test

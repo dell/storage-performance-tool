@@ -16,6 +16,16 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	long generatedOpCount();
 
 	/**
+	 * Returns the number of input identities consumed while generating fresh operations.
+	 *
+	 * <p>The compatibility default preserves the historical one-item/one-operation contract
+	 * for third-party generator implementations.
+	 */
+	default long consumedItemCount() {
+		return generatedOpCount();
+	}
+
+	/**
 	 * Enqueues the task for further recycling.
 	 *
 	 * @param op the task to recycle
