@@ -20,7 +20,7 @@ All AWS SDK v2 dependencies are now included for comprehensive S3 feature suppor
 2. **probeCommonPrefixes()** - Discovers common prefixes (directory-like structure)
 3. **putObject()** - Uploads objects with metadata support
 4. **getObject()** - Downloads objects as InputStream
-5. **deleteObject()** - Deletes individual objects
+5. **deleteObject()** - Deletes current keys or requested exact versions individually
 6. **objectExists()** - Checks if an object exists using HEAD request
 7. **close()** - Properly closes S3Client resources
 8. **getBucketName()** - Returns configured bucket name
@@ -43,7 +43,7 @@ All AWS SDK v2 dependencies are now included for comprehensive S3 feature suppor
 ### ✅ Advanced Utility Methods (Fully Implemented)
 1. **copyObject()** - Copies objects within S3 with metadata support
 2. **getObjectMetadata()** - Retrieves object metadata without downloading content
-3. **deleteObjects()** - Bulk delete multiple objects in single request
+3. **Standalone DELETE adapter** - Uses one non-quiet AWS SDK `DeleteObjects` request for 2 through 1,000 same-bucket targets, with complete key/version reconciliation. This is an engine adapter, not a public `deleteObjects()` utility method.
 
 ## Feature Parity with S3 REST Driver
 
@@ -55,16 +55,16 @@ All AWS SDK v2 dependencies are now included for comprehensive S3 feature suppor
 | Object Tagging | ✅ | ✅ | Complete |
 | Versioning | ✅ | ✅ | Complete |
 | Copy Operations | ✅ | ✅ | Complete |
-| Bulk Operations | ✅ | ✅ | Complete |
+| Standalone DELETE | ✅ | ✅ | Single-object and reconciled same-bucket batch requests |
 | Metadata Operations | ✅ | ✅ | Complete |
 | Checksum Validation | ✅ | ✅ | Complete (CRC32, CRC32C, SHA1, SHA256; MD5 N/A for AWS SDK flexible checksums) |
 
 ## Key Implementation Details
 
 ### Error Handling
-- All methods throw `IOException` for consistency with REST driver
-- Proper exception wrapping and error messages
-- NoSuchKeyException handling for missing objects
+- Asynchronous SDK and transport failures are classified into the engine's neutral operation statuses.
+- Batched response identities are reconciled conservatively; missing, duplicate, malformed, or unexpected identities fail the complete logical request.
+- High-frequency standalone request failures are logged at DEBUG without object credentials.
 
 ### AWS SDK v2 Features
 - Builder pattern for all requests
@@ -76,14 +76,17 @@ All AWS SDK v2 dependencies are now included for comprehensive S3 feature suppor
 1. **Credentials-based**: `S3StorageDriver(accessKey, secretKey, region, bucketName, endpointOverride)`
 2. **Client-based**: `S3StorageDriver(s3Client, bucketName)`
 
-## Alignment Achievement
+## Standalone DELETE Alignment
 
-The S3-AWS driver now provides **100% feature parity** with the S3 REST implementation:
-- ✅ All method signatures match
-- ✅ All core operations fully implemented
-- ✅ All advanced operations fully implemented
-- ✅ Proper error handling and exception management
-- ✅ Comprehensive documentation
+The S3-AWS driver explicitly supports the engine's standalone request model:
+- one target uses one SDK `DeleteObject` call;
+- 2 through 1,000 targets use one non-quiet SDK `DeleteObjects` call;
+- current-key and exact-version identities are preserved;
+- full, partial, failed, and malformed responses reach the shared reconciler;
+- legacy cleanup and mixed DELETE operations retain their single-object path.
+
+The feature inventory above is descriptive and is not a claim that every REST-driver utility has
+an identical public S3-AWS method signature.
 
 ## Benefits Over REST Implementation
 
@@ -103,5 +106,5 @@ The S3-AWS driver now provides **100% feature parity** with the S3 REST implemen
 5. Add support for additional S3 features (lifecycle, CORS, etc.)
 
 ---
-**Last Updated:** March 26, 2026
-**Status:** ✅ Complete - All methods fully implemented
+**Last Updated:** August 22, 2026
+**Status:** Standalone current-key and exact-version DELETE adapter implemented and tested
