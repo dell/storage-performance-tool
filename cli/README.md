@@ -411,7 +411,8 @@ Executes a benchmark test with the specified workload type.
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` (skips seed/discovery)
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and the internal explicit-manifest DELETE slice (skips seed/discovery)
+- `--delete-batch-size`: Internal explicit-manifest DELETE request size, from 1 through 1000 (default 100). Multi-bucket manifests require 1
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
@@ -428,6 +429,15 @@ Executes a benchmark test with the specified workload type.
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
+
+The public `delete` command remains gated while qualification continues. Its internal
+explicit-manifest slice requires the exact CSV header `bucket,key,size,version_id`, performs strict
+CSV validation and identity conflict checks before orchestration, de-duplicates identical rows,
+and rejects an empty selection. An optional `--bucket` value asserts every source row; omitting it
+allows multiple buckets when `--delete-batch-size=1`. `--object-count` caps objects only after the
+manifest is globally canonicalized, and SPT records source/unique/selected counts and the staged
+SHA-256. Canonical selection order is deterministic but can differ from another tool's input order.
+This finite slice rejects `--duration`, `--prefix`, and `--cleanup`; failed staging is removed.
 
 Multi-endpoint options:
 - `--endpoints`: Comma-separated list (or repeat the flag) to target multiple S3 endpoints.

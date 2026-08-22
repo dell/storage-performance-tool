@@ -51,7 +51,12 @@ func ValidateS3Flags(cmd *cobra.Command, workloadType string) error {
 	}
 
 	// Tables workload uses --table-bucket instead of --bucket
-	if workloadType != WorkloadTypeTables {
+	itemsFile := ""
+	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
+		itemsFile, _ = cmd.Flags().GetString("items-file")
+	}
+	if workloadType != WorkloadTypeTables &&
+		(workloadType != WorkloadTypeDelete || strings.TrimSpace(itemsFile) == "") {
 		bucket, _ := cmd.Flags().GetString("bucket")
 		if bucket == "" {
 			return fmt.Errorf(ErrMissingBucket, workloadType)
@@ -327,6 +332,10 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	if err := validateDeleteManifestFlags(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
 
 	if err := validateReadShuffleFlags(cmd, workloadType); err != nil {
 		cmd.SilenceUsage = false
@@ -358,6 +367,44 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	return nil
+}
+
+func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error {
+	batchFlag := cmd.Flags().Lookup(flagDeleteBatchSize)
+	if workloadType != WorkloadTypeDelete {
+		if batchFlag != nil && batchFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteBatchSize, workloadType)
+		}
+		return nil
+	}
+	batchSize := scenario.DefaultDeleteBatchSize
+	if batchFlag != nil {
+		batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
+	}
+	if batchSize < scenario.MinDeleteBatchSize || batchSize > scenario.MaxDeleteBatchSize {
+		return fmt.Errorf("--%s must be between %d and %d", flagDeleteBatchSize,
+			scenario.MinDeleteBatchSize, scenario.MaxDeleteBatchSize)
+	}
+	itemsFile := ""
+	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
+		itemsFile, _ = cmd.Flags().GetString("items-file")
+	}
+	if strings.TrimSpace(itemsFile) == "" {
+		return nil
+	}
+	duration, _ := cmd.Flags().GetString("duration")
+	if strings.TrimSpace(duration) != "" {
+		return errors.New("DELETE explicit-manifest finite count mode does not yet support --duration")
+	}
+	prefix, _ := cmd.Flags().GetString("prefix")
+	if strings.TrimSpace(prefix) != "" {
+		return errors.New("DELETE --items-file cannot be combined with --prefix")
+	}
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
+	if cleanup {
+		return errors.New("DELETE --items-file cannot be used with --cleanup because SPT did not create those objects")
+	}
 	return nil
 }
 

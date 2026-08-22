@@ -16,6 +16,7 @@ const (
 	flagDeferVerification            = "defer-verification"
 	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
 	flagVersions                     = "versions"
+	flagDeleteBatchSize              = "delete-batch-size"
 )
 
 // Workload type constants

@@ -8,10 +8,23 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.config.BundledDefaultsProvider;
+import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.ConstantValueInputImpl;
+import com.dell.spt.base.control.run.RunImpl;
+import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationsBuilderImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -19,18 +32,25 @@ import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import javax.script.ScriptEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Real-driver canary backed only by a deterministic loopback S3 protocol endpoint. */
 final class S3DeleteRequestIntegrationTest {
@@ -107,6 +127,129 @@ final class S3DeleteRequestIntegrationTest {
 			assertTrue(result.reqTimeDone() >= result.reqTimeStart());
 			assertTrue(result.respTimeStart() >= result.reqTimeDone());
 			assertTrue(result.duration() > 0);
+		}
+	}
+
+	@Test
+	void canonicalManifestFlowsThroughAssemblerAndRealNettyDelete(@TempDir final Path tempDir)
+					throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\n"
+										+ "bucket,alpha,9,\n"
+										+ "bucket,\"comma,key\",7,version-comma\n",
+						StandardCharsets.UTF_8);
+		multiDeleteResponse = "<DeleteResult>"
+						+ "<Deleted><Key>alpha</Key></Deleted>"
+						+ "<Deleted><Key>comma,key</Key><VersionId>version-comma</VersionId></Deleted>"
+						+ "</DeleteResult>";
+
+		final var builder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(0);
+		builder.opType(OpType.DELETE).credentialInput(new ConstantValueInputImpl<>(
+						S3DeleteRequestTestFixture.CREDENTIAL));
+		final var assembler = new DeleteRequestAssembler(builder, 2);
+		final var items = new ArrayList<IntegrityManifestDataItem>();
+		final var operations = new ArrayList<DeleteRequestOperation>();
+		try (final var input = new IntegrityManifestItemInput(manifest);
+						final var driver = newDriver()) {
+			assertEquals(2, input.get(items, 2));
+			assertEquals(1, assembler.assemble(items, operations).emittedOperationCount());
+			assertEquals(1, operations.size());
+
+			final DeleteRequestOperation result = execute(driver, operations.get(0));
+			awaitCompletionAccounting(driver);
+
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
+			assertEquals(2, result.deleteResult().acceptedObjectCount());
+			assertEquals(0, result.deleteResult().failedObjectCount());
+			assertEquals("alpha", result.deleteRequest().targets().get(0).key());
+			assertEquals("comma,key", result.deleteRequest().targets().get(1).key());
+			assertEquals("version-comma", result.deleteRequest().targets().get(1).versionId());
+			assertEquals(1, driver.scheduledOpCount());
+			assertEquals(1, driver.completedOpCount());
+			assertEquals(1, requests.stream().filter(request -> "POST".equals(request.method())).count());
+		}
+	}
+
+	@Test
+	void cliContractRunsThroughConfiguredEngineStepAndRealNettyDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final Path manifest = copyContractResource(tempDir, "verify-input.csv");
+		copyContractResource(tempDir, "verify-input.complete.json");
+		final String scenario = contractScenarioText().replace(
+						"/spt-input/items/verify-input.csv", manifest.toString());
+		multiDeleteResponse = "<DeleteResult>"
+						+ "<Deleted><Key>alpha</Key></Deleted>"
+						+ "<Deleted><Key>comma,key</Key><VersionId>version-comma</VersionId></Deleted>"
+						+ "</DeleteResult>";
+
+		final Config driverConfig = S3StorageDriverTest.baseConfig(
+						false, 4, false, null, "127.0.0.1");
+		final Config defaults = new BundledDefaultsProvider().config("-", driverConfig.schema());
+		final Config config = ConfigUtil.merge("-", List.of(defaults, driverConfig));
+		config.val("run-id", 777L);
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		config.val("output-color", false);
+
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		assertTrue(extensions.stream().anyMatch(extension -> "Load".equals(extension.id())));
+		assertTrue(extensions.stream().anyMatch(extension -> "s3".equals(extension.id())));
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			metrics.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			new RunImpl("CLI DELETE contract canary", scenario, engine, 777L).run();
+
+			final var terminal = metrics.getTerminalSteps().stream()
+							.filter(entry -> !entry.distributed)
+							.filter(entry -> "mt-001-20260822.120000.000-delete".equals(entry.stepId))
+							.findFirst()
+							.orElseThrow();
+			assertEquals(OpType.DELETE, terminal.opType);
+			assertEquals(1, terminal.successCount);
+			assertEquals(0, terminal.failedCount);
+			assertEquals(777, terminal.runId);
+		}
+
+		final List<CapturedRequest> deletes = requests.stream()
+						.filter(request -> "POST".equals(request.method()) && "delete".equals(request.rawQuery()))
+						.toList();
+		assertEquals(1, deletes.size(), "configured standalone batch must own one terminal request");
+		final String body = deletes.get(0).body();
+		assertEquals(2, body.split("<Object>", -1).length - 1);
+		assertTrue(body.contains("<Key>alpha</Key>"));
+		assertTrue(body.contains("<Key>comma,key</Key>"));
+		assertTrue(body.contains("<VersionId>version-comma</VersionId>"));
+	}
+
+	private static Path copyContractResource(final Path tempDir, final String name)
+					throws IOException {
+		final Path target = tempDir.resolve(name);
+		Files.write(target, contractResourceBytes(name));
+		return target;
+	}
+
+	private static String contractResourceText(final String name) throws IOException {
+		return new String(contractResourceBytes(name), StandardCharsets.UTF_8);
+	}
+
+	private static String contractScenarioText() throws IOException {
+		return new String(
+						Base64.getDecoder().decode(contractResourceText("scenario.b64").strip()),
+						StandardCharsets.UTF_8);
+	}
+
+	private static byte[] contractResourceBytes(final String name) throws IOException {
+		try (final InputStream input = S3DeleteRequestIntegrationTest.class.getResourceAsStream(
+						"/delete-cli-contract/" + name)) {
+			assertNotNull(input, "missing DELETE CLI contract resource " + name);
+			return input.readAllBytes();
 		}
 	}
 

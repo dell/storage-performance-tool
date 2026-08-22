@@ -34,6 +34,14 @@ type Params struct {
 	ReadShuffleBatchSize  int    // Read-phase batch size override used when ReadShuffle is enabled
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
+	// Standalone DELETE workload. The public workload remains registry-gated until qualification.
+	DeleteBatchSize        int
+	SelectionSourceCount   int
+	SelectionUniqueCount   int
+	SelectionSelectedCount int
+	SelectionSHA256        string
+	SelectionOrder         string
+
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts  []FileMount
 	ItemStagingDirs []string

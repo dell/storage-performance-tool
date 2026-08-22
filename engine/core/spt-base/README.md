@@ -156,6 +156,14 @@ with the protocol classification. Generic success/failure metrics remain request
 `deleteObjectLifecycle()` separately reports selected, attempted, accepted, failed, unattempted, unresolved, and
 protocol-failed object identities together with the terminal reconciliation invariant.
 
+CLI-staged explicit DELETE uses a strict `bucket,key,size,version_id` manifest and a matching
+completion record. The CLI sorts and de-duplicates the complete source before applying its global
+object cap, so engine `load.op.limit.count` is intentionally unset: request batching must not change
+the selected object cardinality. File inputs are assigned to worker slices by one persistent
+round-robin cursor across input reads, preserving exactly-one ownership even when engine read-batch
+boundaries do not align with the number of slices. Multi-bucket inputs therefore require batch size
+one, while same-bucket inputs may use the configured batch size.
+
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.

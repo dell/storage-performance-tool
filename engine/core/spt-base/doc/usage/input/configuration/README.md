@@ -144,6 +144,15 @@ validate every row while calculating that finite count before the step starts, s
 cannot silently truncate the frozen selection. These checks run in both the generator builder and the
 load-step context so override-injected configuration cannot bypass them.
 
+For CLI-staged explicit DELETE, the source header is exactly
+`bucket,key,size,version_id`. The CLI validates the entire source, enforces any bucket assertion,
+sorts and de-duplicates canonical identities, then applies the global object-count cap and publishes
+source/unique/selected counts plus a SHA-256 completion record. It does not set
+`load-op-limit-count`, because that setting counts logical requests and would make selection depend
+on DELETE batch size. Multi-bucket manifests use `load-op-delete-batchSize=1`; same-bucket manifests
+may batch. Worker file slicing uses one persistent round-robin cursor across input read batches so
+each selected identity has exactly one worker owner.
+
 One standalone `DeleteRequestOperation` is one request metric and owns its entire immutable target
 list. Its compatibility `item()` accessor is only the first target and must not be used for batch
 execution or output. A completed snapshot preserves the request and its ordered per-target

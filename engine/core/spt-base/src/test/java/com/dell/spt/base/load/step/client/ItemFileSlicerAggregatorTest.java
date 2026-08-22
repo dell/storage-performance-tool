@@ -4,6 +4,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.item.io.CsvItemInput;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.file.FileManagerImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
@@ -11,7 +12,10 @@ import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -75,6 +79,92 @@ class ItemFileSlicerAggregatorTest {
 		for (Config cfg : configSlices) {
 			String f = cfg.stringVal("item-input-file");
 			assertFalse(Files.exists(Path.of(f)), "Slice file should be deleted on close");
+		}
+	}
+
+	@Test
+	@DisplayName("ItemInputFileSlicer carries round-robin ownership across input batches")
+	void itemInputFileSlicerCarriesRoundRobinAcrossInputBatches() throws Exception {
+		final List<FileManager> fileMgrs = List.of(
+						mock(FileManager.class), mock(FileManager.class), mock(FileManager.class));
+		final List<ByteArrayOutputStream> captured = List.of(
+						new ByteArrayOutputStream(), new ByteArrayOutputStream(), new ByteArrayOutputStream());
+		for (int i = 0; i < fileMgrs.size(); i++) {
+			final FileManager fileMgr = fileMgrs.get(i);
+			final ByteArrayOutputStream bytes = captured.get(i);
+			when(fileMgr.newTmpFileName()).thenReturn("slice-" + i);
+			doAnswer(invocation -> {
+				bytes.write(invocation.<byte[]> getArgument(1));
+				return null;
+			}).when(fileMgr).writeToFile(anyString(), any(byte[].class));
+		}
+		final Config baseCfg = TestConfigBuilder.config();
+		final List<Config> configSlices = List.of(
+						new BasicConfig(baseCfg), new BasicConfig(baseCfg), new BasicConfig(baseCfg));
+		final String data = String.join("\n", List.of("a", "b", "c", "d", "e", "f", "g", "h")) + "\n";
+		final CsvItemInput<Item> itemInput = new CsvItemInput<>(
+						new ByteArrayInputStream(data.getBytes(StandardCharsets.UTF_8)), new ItemFactoryImpl<>());
+
+		try (final var ignored = new ItemInputFileSlicer(
+						"persistent-round-robin", fileMgrs, configSlices, itemInput, 2)) {
+			assertEquals(List.of("a", "d", "g"), deserializeNames(captured.get(0)));
+			assertEquals(List.of("b", "e", "h"), deserializeNames(captured.get(1)));
+			assertEquals(List.of("c", "f"), deserializeNames(captured.get(2)));
+		}
+	}
+
+	private static List<String> deserializeNames(final ByteArrayOutputStream bytes) throws Exception {
+		final List<String> names = new ArrayList<>();
+		try (final var input = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+			while (true) {
+				try {
+					names.add(((Item) input.readUnshared()).name());
+				} catch (final EOFException ignored) {
+					return names;
+				}
+			}
+		}
+	}
+
+	@Test
+	void strictSlicerKeepsCanonicalManifestFormatAndExactCounts() throws Exception {
+		final Path source = Files.createTempFile("spt-delete-manifest-", ".csv");
+		filesToCleanup.add(source);
+		Files.writeString(
+						source,
+						"bucket,key,size,version_id\n"
+										+ "bucket,alpha,9,\n"
+										+ "bucket,\"comma,key\",7,version-comma\n"
+										+ "bucket,gamma,5,\n"
+										+ "bucket,omega,3,version-omega\n",
+						StandardCharsets.UTF_8);
+		final List<FileManager> fileMgrs = List.of(mock(FileManager.class), mock(FileManager.class));
+		final List<ByteArrayOutputStream> captured = List.of(
+						new ByteArrayOutputStream(), new ByteArrayOutputStream());
+		for (int i = 0; i < fileMgrs.size(); i++) {
+			final FileManager fileMgr = fileMgrs.get(i);
+			final ByteArrayOutputStream bytes = captured.get(i);
+			when(fileMgr.newTmpFileName()).thenReturn("canonical-slice-" + i);
+			doAnswer(invocation -> {
+				bytes.write(invocation.<byte[]> getArgument(1));
+				return null;
+			}).when(fileMgr).writeToFile(anyString(), any(byte[].class));
+		}
+		final Config baseCfg = TestConfigBuilder.config();
+		final List<Config> configSlices = List.of(new BasicConfig(baseCfg), new BasicConfig(baseCfg));
+
+		try (final var input = new IntegrityManifestItemInput(source);
+						final var ignored = new ItemInputFileSlicer(
+										"canonical-delete-slicer", fileMgrs, configSlices, input, 2, true)) {
+			assertEquals("canonical-slice-0.csv", configSlices.get(0).stringVal("item-input-file"));
+			assertEquals("canonical-slice-1.csv", configSlices.get(1).stringVal("item-input-file"));
+			assertEquals(
+							"bucket,key,size,version_id\nbucket,alpha,9,\nbucket,gamma,5,\n",
+							captured.get(0).toString(StandardCharsets.UTF_8));
+			assertEquals(
+							"bucket,key,size,version_id\nbucket,\"comma,key\",7,version-comma\n"
+											+ "bucket,omega,3,version-omega\n",
+							captured.get(1).toString(StandardCharsets.UTF_8));
 		}
 	}
 
