@@ -99,7 +99,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
-| `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In explicit-manifest DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests |
+| `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
 | `--prefix-shards` | | `-1` | Prefix directories for generated object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
@@ -107,8 +107,10 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
-| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` and internal explicit-manifest DELETE. Omit it for owned seeded DELETE |
+| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` and internal explicit-manifest DELETE. Omit it for owned seeded DELETE; mutually exclusive with `--delete-existing` |
 | `--delete-batch-size` | | `100` | Internal standalone DELETE canonical identities per logical request (`1` through `1000`); multi-bucket manifests require `1` |
+| `--delete-existing` | | `false` | Destructive internal DELETE opt-in: discover and freeze current keys under the exact `--bucket` and explicitly supplied `--prefix` before timing |
+| `--allow-empty-prefix` | | `false` | Second destructive opt-in required with `--delete-existing --prefix=''` to select an entire bucket; a prompt cannot replace it |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
 | `--versions` | | `current` | `read-verify` bucket/prefix discovery only. `current` uses ordinary object listing; `all` uses `ListObjectVersions`, preserves exact version IDs, and excludes delete markers. Omit with `--items-file` |
@@ -131,7 +133,7 @@ selection behavior, and exit codes `0`, `1`, and `20`.
 
 #### Finite-count DELETE contract (internal, not public)
 
-The still-planned public `delete` command currently has two internal finite-count
+The still-planned public `delete` command currently has three internal finite-count
 slices. With no external source-selection flag, seeded mode is selected. It writes
 only beneath `spt-delete-<run-id>/`, or `<prefix-root>/spt-delete-<run-id>/` when
 `--prefix` is supplied. The prefix is therefore a seed namespace root and never an
@@ -175,6 +177,35 @@ single-object requests. Explicit-manifest mode rejects `--duration`, `--prefix`,
 validation or staging attempt stops before container/remote orchestration, and the private staging
 directory is removed. The public registry remains gated until the remaining DELETE safety and
 qualification tickets are complete.
+
+Existing-prefix mode is selected only by `--delete-existing` and is mutually exclusive with
+`--items-file`. Its internal qualification command shape is deliberately explicit:
+
+```bash
+spt run delete --endpoints https://s3.example.com \
+  --access-key "$S3_ACCESS_KEY" --secret-key "$S3_SECRET_KEY" \
+  --bucket exact-bucket --prefix exact/root/ --delete-existing --object-count 1000
+```
+
+`--bucket` and an explicitly supplied `--prefix` are mandatory. The prefix must be nonempty by
+default. Intentional whole-bucket deletion requires all three destructive scope tokens:
+`--delete-existing --prefix='' --allow-empty-prefix`; SPT never replaces either opt-in with an
+interactive confirmation. A destructive prefix beginning with `/` is rejected because the S3
+drivers remove that separator before LIST. A prefix without `--delete-existing` remains only the
+seeded namespace root described above and does not activate discovery.
+
+The first engine step performs completeness-preserving current-version LIST, freezes canonical
+current-key identities, then applies `--object-count` globally (`0` selects all). It commits
+source/unique/selected counts, a SHA-256 selection hash, and LIST-step provenance before the second
+step can start. Empty discovery and any delimiter shard or response identity outside the immutable
+requested prefix are fatal; incomplete node artifacts are removed, and `--allow-empty-selection`
+cannot permit DELETE I/O. Distributed discovery proves one immutable engine identity across every
+worker before startup. LIST
+has separate setup metrics and its duration is excluded from DELETE request latency, duration, and
+throughput. Existing-prefix mode rejects
+`--versions=all`, delete-marker selection, `--duration`, and `--cleanup`. Keep the exact namespace
+quiescent for the entire run: a concurrent writer can replace a frozen current-key identity before
+the timed DELETE reaches it. The public workload registry remains gated.
 
 All-version discovery requires the target's list-version permission
 (`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never

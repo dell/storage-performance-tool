@@ -286,6 +286,26 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 		},
 		{
+			name: "Existing-prefix delete reports destructive current-key scope",
+			params: scenario.ScenarioParams{
+				WorkloadType:    WorkloadTypeDelete,
+				Bucket:          "existing",
+				Prefix:          "guarded/root/",
+				DeleteExisting:  true,
+				Threads:         2,
+				DeleteBatchSize: 2,
+				SelectionOrder:  scenario.SelectionOrderCanonical,
+			},
+			expected: []string{
+				"Object Size: (not applicable)",
+				"DELETE Source: existing current-key prefix",
+				"DELETE Scope: bucket=existing prefix=guarded/root/",
+				"DANGER: deletes the frozen current-key selection from an existing namespace.",
+				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
+				"Discovery Phase: setup only; excluded from DELETE request timing.",
+			},
+		},
+		{
 			name: "Write with part-size shows multipart info",
 			params: scenario.ScenarioParams{
 				WorkloadType: "write",

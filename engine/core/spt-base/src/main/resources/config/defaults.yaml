@@ -164,6 +164,7 @@ storage:
       requireExactCount: false
     selection:
       maxCount: 0
+      requireNonEmpty: false
   namespace: null
   net:
     node:

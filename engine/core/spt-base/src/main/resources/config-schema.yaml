@@ -151,6 +151,7 @@ storage:
       requireExactCount: boolean
     selection:
       maxCount: long
+      requireNonEmpty: boolean
   namespace: string
   net:
     node:

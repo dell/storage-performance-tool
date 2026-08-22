@@ -13,6 +13,7 @@ const (
 	IntegrityInputProvenancePath   = "storage.integrity.input.provenance"
 	IntegrityInputProducerIDPath   = "storage.integrity.input.expectedProducerId"
 	IntegritySelectionMaxCountPath = "storage.integrity.selection.maxCount"
+	IntegritySelectionNonEmptyPath = "storage.integrity.selection.requireNonEmpty"
 )
 
 // RequiredIntegritySchemaPaths is the exact set an engine must declare before the CLI will submit
@@ -24,6 +25,18 @@ var RequiredIntegritySchemaPaths = []string{
 	IntegrityInputProvenancePath,
 	IntegrityInputProducerIDPath,
 	IntegritySelectionMaxCountPath,
+}
+
+// RequiredExistingPrefixDeleteSchemaPaths is the exact engine capability set needed to discover a
+// guarded existing-prefix selection and consume its frozen manifest. It is intentionally separate
+// from RequiredIntegritySchemaPaths so older verification-capable engines remain compatible.
+var RequiredExistingPrefixDeleteSchemaPaths = []string{
+	IntegrityModePath,
+	IntegrityAlgorithmPath,
+	IntegrityInputProvenancePath,
+	IntegrityInputProducerIDPath,
+	IntegritySelectionMaxCountPath,
+	IntegritySelectionNonEmptyPath,
 }
 
 // Integrity mode values.

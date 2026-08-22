@@ -207,6 +207,41 @@ class CsvArtifactAggregatorTest {
 	}
 
 	@Test
+	void guardedDiscoveryRejectsEmptySelectionBeforePublishingCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("guarded-empty.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"existing-prefix-list", List.of(FileManager.INSTANCE), List.of(),
+										manifest.toString(), 110, 0, OpType.LIST, false, true).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("zero object identities"));
+		assertDiscoveryNodeArtifactsAbsent(manifest, 1);
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void ordinaryDiscoveryRetainsDefaultEmptySelectionBehavior() throws Exception {
+		final Path manifest = tempDir.resolve("ordinary-empty.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		new CsvArtifactAggregator(
+						"ordinary-list", List.of(FileManager.INSTANCE), List.of(),
+						manifest.toString(), 111, 0, OpType.LIST).close(0);
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, 111, IntegrityInputProvenance.ENGINE_STEP, "ordinary-list");
+		assertEquals(0, completion.selectedRecordCount());
+	}
+
+	@Test
 	void distributedDiscoverySumsDeleteMarkersAcrossNodes() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
@@ -230,6 +265,33 @@ class CsvArtifactAggregatorTest {
 		assertTrue(Files.isRegularFile(CsvArtifactAggregator.nodeSourcePath(manifest, 1)));
 		assertEquals("3", Files.readString(IntegrityManifestCompletion.deleteMarkerCountPath(
 						CsvArtifactAggregator.nodeSourcePath(manifest, 1))).trim());
+	}
+
+	@Test
+	void distributedCollectionFailureRemovesPartialNodeArtifacts() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+		final String remoteManifest = "/remote/verify-input.csv";
+		final FileManagerService remote = remoteFileManager(remoteManifest, Map.of(
+						remoteManifest, "bucket,key,size,version_id\r\nb,b,2,v2\r\n"));
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE, remote),
+										List.of(mock(Config.class), mock(Config.class)),
+										manifest.toString(), 112, 0, OpType.LIST).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		for (int i = 0; i < 2; i++) {
+			final Path nodeSource = CsvArtifactAggregator.nodeSourcePath(manifest, i);
+			assertFalse(Files.exists(nodeSource));
+			assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(nodeSource)));
+			assertFalse(Files.exists(IntegrityManifestCompletion.deleteMarkerCountPath(nodeSource)));
+		}
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 
 	@Test
@@ -285,7 +347,18 @@ class CsvArtifactAggregatorTest {
 										manifest.toString(), 102, 0, com.dell.spt.base.item.op.OpType.LIST).close(0));
 
 		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertDiscoveryNodeArtifactsAbsent(manifest, 1);
 		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	private static void assertDiscoveryNodeArtifactsAbsent(
+					final Path manifest, final int nodeCount) {
+		for (int i = 0; i < nodeCount; i++) {
+			final Path nodeSource = CsvArtifactAggregator.nodeSourcePath(manifest, i);
+			assertFalse(Files.exists(nodeSource));
+			assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(nodeSource)));
+			assertFalse(Files.exists(IntegrityManifestCompletion.deleteMarkerCountPath(nodeSource)));
+		}
 	}
 
 	@Test

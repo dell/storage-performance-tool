@@ -150,6 +150,12 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	if selectionOrder != SelectionOrderCanonical {
 		return "", fmt.Errorf("delete selection order must be %q", SelectionOrderCanonical)
 	}
+	if params.DeleteExisting && strings.TrimSpace(params.ItemsFile) != "" {
+		return "", fmt.Errorf("delete existing-prefix and explicit-manifest sources are mutually exclusive")
+	}
+	if params.DeleteExisting {
+		return generateExistingPrefixDeleteScenario(params, selectionOrder)
+	}
 	if strings.TrimSpace(params.ItemsFile) == "" {
 		return generateSeededDeleteScenario(params, selectionOrder)
 	}
@@ -164,6 +170,64 @@ func GenerateDeleteScenario(params Params) (string, error) {
 			},
 		},
 		ItemsFile:      params.ItemsFile,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+	})
+}
+
+func generateExistingPrefixDeleteScenario(params Params, selectionOrder string) (string, error) {
+	if strings.TrimSpace(params.Duration) != "" {
+		return "", fmt.Errorf("delete existing-prefix finite count mode does not yet support duration")
+	}
+	if params.Cleanup {
+		return "", fmt.Errorf("delete existing-prefix mode cannot use cleanup because SPT did not create the selected objects")
+	}
+	bucket := strings.TrimSpace(params.Bucket)
+	if bucket == "" {
+		return "", fmt.Errorf("delete existing-prefix mode requires a bucket")
+	}
+	if params.Prefix == "" && !params.AllowEmptyPrefix {
+		return "", fmt.Errorf("delete existing-prefix mode requires a nonempty prefix unless allow-empty-prefix is explicitly enabled")
+	}
+	if strings.HasPrefix(params.Prefix, "/") {
+		return "", fmt.Errorf("delete existing-prefix prefix must not start with '/' because S3 LIST removes that slash")
+	}
+	versions := params.Versions
+	if versions == "" {
+		versions = VersionsCurrent
+	}
+	if versions != VersionsCurrent {
+		return "", fmt.Errorf("delete existing-prefix mode supports current-key discovery only")
+	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("delete object count must be non-negative")
+	}
+
+	ts := resolveTimestamp(params)
+	listStep := formatStepID(1, ts, stepOpList)
+	driver := resolveStorageDriverType(params.S3Driver)
+	selectionMaxCount := params.ObjectCount
+	return executeIntegrityScenario("delete-existing", deleteExistingScenarioData{
+		ListStep:   listStep,
+		DeleteStep: formatStepID(2, ts, stepOpDelete),
+		ListStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:      constants.IntegrityProvenanceNone,
+				MaxCount:        &selectionMaxCount,
+				RequireNonEmpty: true,
+			},
+		},
+		DeleteStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceEngineStep,
+				ExpectedProducerID: listStep,
+			},
+		},
+		BucketPath:     "/" + strings.TrimPrefix(bucket, "/"),
+		Prefix:         params.Prefix,
+		ListBatchSize:  defaultListBatchSize,
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
 	})

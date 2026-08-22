@@ -105,6 +105,7 @@ const (
 	stepOpRead   = "read"
 	stepOpSeed   = "seed"
 	stepOpDelete = "delete"
+	stepOpList   = "list"
 	stepOpMixed  = "mixed"
 )
 

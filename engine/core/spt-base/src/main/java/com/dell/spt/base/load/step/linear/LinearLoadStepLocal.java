@@ -129,6 +129,10 @@ public class LinearLoadStepLocal
 					}
 					final LoadGenerator generator = generatorBuilder.build();
 					final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
+					final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
+					final String immutableListRootPrefix = metadataMode && OpType.LIST.equals(opType)
+									? itemConfig.configVal("naming").stringVal("prefix")
+									: null;
 					final LoadStepContext stepCtx = new LoadStepContextImpl<>(
 									testStepId,
 									generator,
@@ -136,7 +140,8 @@ public class LinearLoadStepLocal
 									metricsContexts.get(0),
 									loadConfig,
 									outputConfig.boolVal("metrics-trace-persist"),
-									shardMetrics);
+									shardMetrics,
+									immutableListRootPrefix);
 					stepContexts.add(stepCtx);
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");
@@ -145,14 +150,17 @@ public class LinearLoadStepLocal
 						if (Files.exists(itemOutputPath)) {
 							Loggers.ERR.warn("Items output file \"{}\" already exists", itemOutputPath);
 						}
-						final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
 						try {
 							final Output itemOutput;
 							if (metadataMode) {
 								final String bucketPath = OpType.CREATE.equals(opType)
 												? itemConfig.configVal("output").stringVal("path")
 												: itemConfig.configVal("input").stringVal("path");
-								itemOutput = new IntegrityOperationManifestOutput<>(itemOutputPath, bucketPath, opType);
+								final String requestedListPrefix = OpType.LIST.equals(opType)
+												? itemConfig.configVal("naming").stringVal("prefix")
+												: null;
+								itemOutput = new IntegrityOperationManifestOutput<>(
+												itemOutputPath, bucketPath, opType, requestedListPrefix);
 							} else {
 								itemOutput = new ItemInfoFileOutput<>(itemOutputPath);
 							}

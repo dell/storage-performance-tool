@@ -2087,7 +2087,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 	}
 	runtimeImage := image
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		evidence, identityErr := m.multiHost.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
 		if identityErr != nil {
 			return identityErr
@@ -2134,11 +2134,13 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := host.APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+	}
+	if scenario.RequiresIntegrityCapability(params) {
+		if err := host.APIClient.VerifyScenarioIntegrityCapabilityContext(ctx, image, params); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2216,11 +2218,13 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+	}
+	if scenario.RequiresIntegrityCapability(params) {
+		if err := m.multiHost.hosts[0].APIClient.VerifyScenarioIntegrityCapabilityContext(ctx, image, params); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2896,7 +2900,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 		return fmt.Errorf("scenario content is empty")
 	}
 	runtimeImage := image
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		evidence, identityErr := o.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
 		if identityErr != nil {
 			return identityErr

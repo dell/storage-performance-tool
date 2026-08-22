@@ -516,6 +516,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				final String d = String.valueOf(delimiters.charAt(i));
 				try {
 					final var result = probe.probeCommonPrefixes(bucketPath, seedPrefix == null ? "" : seedPrefix, d, 1000);
+					if (integrityDiscovery) {
+						requireCommonPrefixesWithinRoot(result.commonPrefixes(), seedPrefix);
+					}
 					final int count = result.commonPrefixes().size();
 					final boolean completePartition = !result.hasContents() && !result.truncated();
 					if ((!integrityDiscovery || completePartition) && count > bestCount) {
@@ -552,6 +555,26 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 							effectiveCfg.radix());
 		}
 		return seeds;
+	}
+
+	private static void requireCommonPrefixesWithinRoot(
+					final List<String> prefixes, final String seedPrefix)
+					throws IllegalConfigurationException {
+		final String requestedPrefix = canonicalListPrefix(seedPrefix);
+		for (final String prefix : prefixes) {
+			if (prefix == null || prefix.isEmpty() || !prefix.startsWith(requestedPrefix)) {
+				throw new IllegalConfigurationException(
+								"LIST delimiter response prefix is outside requested prefix \""
+												+ requestedPrefix + "\": " + prefix);
+			}
+		}
+	}
+
+	private static String canonicalListPrefix(final String prefix) {
+		if (prefix == null || prefix.isEmpty() || "/".equals(prefix)) {
+			return "";
+		}
+		return prefix.startsWith("/") ? prefix.substring(1) : prefix;
 	}
 
 	private static long estimateTransferSize(

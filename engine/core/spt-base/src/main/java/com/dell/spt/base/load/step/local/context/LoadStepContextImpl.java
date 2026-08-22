@@ -97,6 +97,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean outputDuplicates;
 	private final boolean updateContents;
 	private final ListShardMetricsRecorder listShardMetricsRecorder;
+	private final String immutableListRootPrefix;
 	// delimiter-first runtime split state (per-shard prefix)
 	private final java.util.concurrent.ConcurrentMap<String, Window> splitWindows = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -211,7 +212,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder) {
 		this(
-						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, shardMetricsRecorder);
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, shardMetricsRecorder, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix) {
+		this(
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix);
 	}
 
 	/**
@@ -229,6 +244,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final Config loadConfig,
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix) {
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
@@ -244,6 +274,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.metricsCtxByOpType = metricsCtxByOpType;
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
+		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);
 		final Config opConfig = loadConfig.configVal("op");
 		final Config itemConfig = loadConfig.configVal("item");
 		final Config recycleConfig = opConfig.configVal("recycle");
@@ -1493,6 +1524,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (options != null && options.includeVersions()) {
 			return false;
 		}
+		// Integrity discovery is a destructive-operation safety boundary. Keep its verified
+		// startup partition immutable instead of issuing blocking adaptive probes from this
+		// completion callback or accepting a later server-provided namespace partition.
+		if (immutableListRootPrefix != null) {
+			return false;
+		}
 		// Only consider ENUMERATE shards for splitting
 		final ListShard.Kind kind = shard.kind();
 		if (kind != null && kind != ListShard.Kind.ENUMERATE) {
@@ -1527,7 +1564,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			splitWindows.remove(prefix);
 			return false;
 		}
-
 		// Idle/backlog gate: only attempt a split probe when we appear to need more work.
 		// Heuristic: if current concurrency is at the configured limit, workers are saturated;
 		// skip probing to avoid stealing cycles from productive listing.
@@ -1641,6 +1677,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		splitWindows.remove(prefix);
 		return true;
+	}
+
+	private static String canonicalListPrefix(final String prefix) {
+		if (prefix == null) {
+			return null;
+		}
+		if (prefix.isEmpty() || "/".equals(prefix)) {
+			return "";
+		}
+		return prefix.startsWith("/") ? prefix.substring(1) : prefix;
 	}
 
 	private static String longestCommonPrefix(final String a, final String b) {
