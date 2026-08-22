@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
@@ -1235,6 +1236,102 @@ class CoopStorageDriverBaseTest {
 			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state());
 			assertTrue(childQueueOf(driver).contains(child));
 		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void absoluteDispatchDeadlineClosesTheLockedTransportBoundaryWithoutTheGuardThread()
+					throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final class DispatchProbeDriver extends CoopStorageDriverMock<Item, Operation<Item>> {
+			private DispatchProbeDriver() throws Exception {
+				super("deadline-dispatch-step", dataInput, storageConfig, false, 1);
+			}
+
+			private boolean crossTransportBoundary(final Operation<Item> op) {
+				return beginDispatch(op);
+			}
+		}
+		final var driver = new DispatchProbeDriver();
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("post-deadline", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+			driver.operationLifecycle().enforceDispatchDeadline(System.nanoTime() - 1);
+
+			assertFalse(driver.crossTransportBoundary(op));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED,
+							driver.operationLifecycle().stateOf(op));
+			assertEquals(0, driver.operationLifecycle().snapshot().dispatched());
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void prepareCrossingTheAbsoluteDeadlineNeverEntersTheDriverQueue() throws Exception {
+		final var prepareEntered = new CountDownLatch(1);
+		final var releasePrepare = new CountDownLatch(1);
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"deadline-queue-step", dataInput, storageConfig, false, 1) {
+			@Override
+			protected boolean prepare(final Operation<Item> op) {
+				prepareEntered.countDown();
+				try {
+					if (!releasePrepare.await(2, TimeUnit.SECONDS)) {
+						throw new AssertionError("timed out waiting to cross the queue deadline");
+					}
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+				return super.prepare(op);
+			}
+		};
+		final var dispatchTaskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		dispatchTaskField.setAccessible(true);
+		final var dispatchTask = (OperationDispatchTask<Item, Operation<Item>>) dispatchTaskField.get(driver);
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("post-deadline-queue", 0, 1),
+						null, "/bucket", null);
+		final var accepted = new AtomicReference<Boolean>();
+		final var failure = new AtomicReference<Throwable>();
+
+		try {
+			driver.start();
+			dispatchTask.stop();
+			assertTrue(dispatchTask.await(2, TimeUnit.SECONDS));
+			assertTrue(driver.operationLifecycle().generatorBuffered(op));
+			final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100);
+			driver.operationLifecycle().enforceDispatchDeadline(deadlineNanos);
+			final var worker = Thread.ofPlatform().start(() -> {
+				try {
+					accepted.set(driver.put(op));
+				} catch (final Throwable thrown) {
+					failure.set(thrown);
+				}
+			});
+			assertTrue(prepareEntered.await(1, TimeUnit.SECONDS));
+			while (!DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+				Thread.onSpinWait();
+			}
+			releasePrepare.countDown();
+			worker.join(TimeUnit.SECONDS.toMillis(2));
+
+			assertFalse(worker.isAlive());
+			assertNull(failure.get());
+			assertEquals(Boolean.FALSE, accepted.get());
+			assertEquals(0, driver.scheduledOpCount());
+			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED,
+							driver.operationLifecycle().stateOf(op));
+		} finally {
+			releasePrepare.countDown();
 			driver.close();
 		}
 	}

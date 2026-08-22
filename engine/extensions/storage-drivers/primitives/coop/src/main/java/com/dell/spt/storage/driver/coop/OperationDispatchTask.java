@@ -260,7 +260,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		if (tracker == null) {
 			return;
 		}
-		for (var i = firstDrainedIndex; i < buff.size(); i++) {
+		for (var i = buff.size() - 1; i >= firstDrainedIndex; i--) {
 			final O op = buff.get(i);
 			final var state = tracker.stateOf(op);
 			if (state == OperationLifecycleState.NEW
@@ -268,7 +268,10 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				// Existing extensions may still write the protected child queue directly.
 				// Claim their compatibility ownership before the task-local buffer is the
 				// only place retaining the identity.
-				tracker.driverQueued(op);
+				if (!tracker.driverQueued(op)) {
+					tracker.unattempted(op);
+					buff.remove(i);
+				}
 			}
 		}
 	}
@@ -312,7 +315,10 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		for (var i = 0; i < submittedCount; i++) {
 			final var op = buff.get(i);
 			if (storageDriver.successfulSubmitStartsTransport(op)) {
-				tracker.dispatched(dispatchTokens.get(i));
+				final var token = dispatchTokens.get(i);
+				if (!tracker.dispatched(token)) {
+					tracker.unresolvedSubmission(token);
+				}
 			}
 		}
 	}

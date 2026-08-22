@@ -1,12 +1,14 @@
 package com.dell.spt.base.item.op.deletion;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.TimeUtil;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.TransferConvertBuffer;
 import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.commons.reflection.TypeUtil;
 import java.util.NoSuchElementException;
 
 /** Parsed fail-closed engine settings for the standalone DELETE request spine. */
@@ -14,30 +16,59 @@ public final class StandaloneDeleteConfig {
 	private static final String DELETE_CONFIG_PATH = "op-delete";
 	private static final String STANDALONE_KEY = "standalone";
 	private static final String BATCH_SIZE_KEY = "batchSize";
+	private static final String DURATION_KEY = "duration";
 	private static final String OUTPUT_FILE_KEY = "output-file";
 
 	private final boolean enabled;
 	private final int batchSize;
+	private final boolean durationMode;
 
-	private StandaloneDeleteConfig(final boolean enabled, final int batchSize) {
+	private StandaloneDeleteConfig(
+					final boolean enabled, final int batchSize, final boolean durationMode) {
 		this.enabled = enabled;
 		this.batchSize = batchSize;
+		this.durationMode = durationMode;
 	}
 
 	/** Parses the optional standalone DELETE node, preserving disabled compatibility if absent. */
 	public static StandaloneDeleteConfig from(final Config loadConfig) {
 		if (loadConfig == null) {
-			return new StandaloneDeleteConfig(false, 0);
+			return new StandaloneDeleteConfig(false, 0, false);
 		}
 		try {
 			final var deleteConfig = loadConfig.configVal(DELETE_CONFIG_PATH);
 			if (deleteConfig == null || !deleteConfig.boolVal(STANDALONE_KEY)) {
-				return new StandaloneDeleteConfig(false, 0);
+				return new StandaloneDeleteConfig(false, 0, false);
 			}
-			return new StandaloneDeleteConfig(true, deleteConfig.intVal(BATCH_SIZE_KEY));
+			boolean durationMode = false;
+			try {
+				durationMode = deleteConfig.boolVal(DURATION_KEY);
+			} catch (final NoSuchElementException ignored) {
+				// Compatibility with extension-supplied schemas created before duration mode.
+			}
+			final Object rawDuration = loadConfig.configVal("step-limit").val("time");
+			final long durationSeconds = rawDuration instanceof String
+							? TimeUtil.getTimeInSeconds((String) rawDuration)
+							: TypeUtil.typeConvert(rawDuration, long.class);
+			if (durationMode) {
+				if (durationSeconds <= 0) {
+					throw new IllegalConfigurationException(
+									"Standalone DELETE duration mode requires a positive load-step-limit-time");
+				}
+				if (loadConfig.configVal("op-limit").longVal("count") > 0) {
+					throw new IllegalConfigurationException(
+									"Standalone DELETE duration mode cannot use load-op-limit-count");
+				}
+			} else if (durationSeconds > 0) {
+				throw new IllegalConfigurationException(
+								"Standalone DELETE with a positive load-step-limit-time requires "
+												+ "load-op-delete-duration=true");
+			}
+			return new StandaloneDeleteConfig(
+							true, deleteConfig.intVal(BATCH_SIZE_KEY), durationMode);
 		} catch (final NoSuchElementException e) {
 			// Compatibility with extension-supplied schemas created before this optional node.
-			return new StandaloneDeleteConfig(false, 0);
+			return new StandaloneDeleteConfig(false, 0, false);
 		}
 	}
 
@@ -49,6 +80,11 @@ public final class StandaloneDeleteConfig {
 	/** Returns the validated target count requested per logical DELETE operation. */
 	public int batchSize() {
 		return batchSize;
+	}
+
+	/** Returns whether natural finite-input completion before the step deadline is invalid. */
+	public boolean durationMode() {
+		return durationMode;
 	}
 
 	/** Validates operation-type, item-type, recycle, retry, and cardinality settings. */

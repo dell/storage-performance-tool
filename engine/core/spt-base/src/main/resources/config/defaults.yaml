@@ -61,6 +61,7 @@ load:
     delete:
       standalone: false
       batchSize: 100
+      duration: false
     list:
       delimiter: null
       fetch_metadata: false

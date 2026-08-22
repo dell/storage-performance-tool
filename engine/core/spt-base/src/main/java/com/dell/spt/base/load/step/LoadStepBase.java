@@ -16,6 +16,7 @@ import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -27,12 +28,22 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runnable {
+	private static final long DURATION_STOP_PHASE_MIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(2);
+	private static final int DURATION_RUN_CLOSE_ATTEMPT_LIMIT = 3;
 
 	protected final Config config;
 	protected final List<Extension> extensions;
@@ -42,6 +53,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
 	private final boolean integrityModeEnabled;
+	private final boolean standaloneDeleteDurationMode;
+	private final Map<String, RetainedDurationPhase<?>> retainedDurationPhases = new HashMap<>();
 	private volatile long startTimeSec = -1;
 
 	protected LoadStepBase(
@@ -62,6 +75,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 							"invalid storage.integrity configuration",
 							e);
 		}
+		this.standaloneDeleteDurationMode = StandaloneDeleteConfig.from(
+						this.config.configVal("load")).durationMode();
 		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
@@ -108,7 +123,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		try {
 			start();
 			try {
-				await(timeLimitSec.get(), TimeUnit.SECONDS);
+				final boolean completedBeforeDeadline = await(timeLimitSec.get(), TimeUnit.SECONDS);
+				if (standaloneDeleteDurationMode && completedBeforeDeadline) {
+					terminalCause = standaloneDeleteEarlyExhaustionFailure();
+				}
 			} catch (final RuntimeException e) {
 				if (IntegrityTerminalException.find(e) != null || integrityModeEnabled) {
 					terminalCause = terminalFailure(
@@ -134,11 +152,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
 			}
 		} finally {
-			try {
-				close();
-			} catch (final Throwable closeCause) {
+			final Throwable closeCause = closeAfterRun();
+			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
-				if (integrityModeEnabled) {
+				if (IntegrityTerminalException.find(closeCause) != null || integrityModeEnabled) {
 					final var cleanupFailure = terminalFailure(
 									IntegrityTerminalException.Category.CLEANUP,
 									"metadata-mode step cleanup failed",
@@ -158,6 +175,44 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			throw terminalCause;
 		}
 	}
+
+	private Throwable closeAfterRun() {
+		final int attemptLimit = standaloneDeleteDurationMode
+						? DURATION_RUN_CLOSE_ATTEMPT_LIMIT
+						: 1;
+		Throwable firstFailure = null;
+		for (var attempt = 0; attempt < attemptLimit; attempt++) {
+			try {
+				close();
+				return null;
+			} catch (final Throwable closeCause) {
+				throwUncheckedIfInterrupted(closeCause);
+				if (firstFailure == null) {
+					firstFailure = closeCause;
+				} else if (closeCause != firstFailure) {
+					firstFailure.addSuppressed(closeCause);
+				}
+			}
+		}
+		if (standaloneDeleteDurationMode) {
+			// A normal run has no caller left to perform another explicit close. Cancel any
+			// still-owned lifecycle resources after the bounded retries so they cannot leak.
+			try {
+				cancelDurationRunCleanupResourcesAfterExhaustion();
+			} catch (final Throwable cleanupCause) {
+				throwUncheckedIfInterrupted(cleanupCause);
+				if (cleanupCause != firstFailure) {
+					firstFailure.addSuppressed(cleanupCause);
+				}
+			} finally {
+				closeRetainedDurationPhases();
+			}
+		}
+		return firstFailure;
+	}
+
+	/** Cancels subclass-owned duration resources after the bounded run cleanup is exhausted. */
+	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {}
 
 	@Override
 	protected void doStart() throws IllegalStateException {
@@ -244,7 +299,25 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	@Override
 	protected void doClose() throws IOException {
+		try {
+			closeMetricsContexts();
+		} finally {
+			closeRetainedDurationPhases();
+		}
+	}
+
+	protected final void closeMetricsContexts() {
 		metricsContexts.forEach(MetricsContext::close);
+	}
+
+	/** Cancels phase calls only after terminal cleanup succeeds, preserving sticky retry ownership. */
+	protected final void closeRetainedDurationPhases() {
+		final List<RetainedDurationPhase<?>> retainedPhases;
+		synchronized (this) {
+			retainedPhases = List.copyOf(retainedDurationPhases.values());
+			retainedDurationPhases.clear();
+		}
+		retainedPhases.forEach(RetainedDurationPhase::close);
 	}
 
 	private void seedIntegrityArtifactHeaders() {
@@ -278,6 +351,184 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		return integrityModeEnabled;
 	}
 
+	protected final boolean standaloneDeleteDurationMode() {
+		return standaloneDeleteDurationMode;
+	}
+
+	@FunctionalInterface
+	protected interface DurationPhaseAction<T> {
+		void execute(T handle) throws Exception;
+	}
+
+	protected record DurationPhaseAttempt(
+					List<Throwable> failures, boolean interrupted, boolean completedAll) {
+		public DurationPhaseAttempt {}
+
+		public boolean succeeded() {
+			return completedAll && failures.isEmpty() && !interrupted;
+		}
+	}
+
+	/**
+	 * Offers a duration-stop phase to every frozen handle without multiplying blocked calls on retry.
+	 * Completed failures may be retried by the next explicit cleanup attempt; incomplete calls remain
+	 * owned by this step and are only observed again. Retried calls for the same phase are serialized,
+	 * while a distinct deadline-close phase may proceed when an earlier start call is stuck.
+	 */
+	protected final <T> DurationPhaseAttempt invokeRetainedDurationPhase(
+					final String phaseKey,
+					final List<T> handles,
+					final DurationPhaseAction<T> action,
+					final long deadlineNanos,
+					final String threadNamePrefix) {
+		final RetainedDurationPhase<T> phase;
+		synchronized (this) {
+			@SuppressWarnings("unchecked")
+			final RetainedDurationPhase<T> retained = (RetainedDurationPhase<T>) retainedDurationPhases.get(phaseKey);
+			if (retained == null) {
+				phase = new RetainedDurationPhase<>(handles, threadNamePrefix);
+				retainedDurationPhases.put(phaseKey, phase);
+			} else {
+				retained.requireSameHandles(handles);
+				phase = retained;
+			}
+		}
+		final DurationPhaseAttempt attempt = phase.attempt(action, deadlineNanos);
+		if (attempt.succeeded()) {
+			final boolean removed;
+			synchronized (this) {
+				removed = retainedDurationPhases.remove(phaseKey, phase);
+			}
+			if (removed) {
+				phase.close();
+			}
+		}
+		return attempt;
+	}
+
+	private static final class RetainedDurationPhase<T> implements AutoCloseable {
+		private final List<T> handles;
+		private final boolean[] completed;
+		private final List<Future<Integer>> inFlight;
+		private final Map<Future<Integer>, Integer> handleIndexes = new HashMap<>();
+		private final ExecutorService executor;
+		private final ExecutorCompletionService<Integer> completions;
+
+		private RetainedDurationPhase(final List<T> handles, final String threadNamePrefix) {
+			this.handles = List.copyOf(handles);
+			completed = new boolean[handles.size()];
+			inFlight = new ArrayList<>(handles.size());
+			for (int i = 0; i < handles.size(); i++) {
+				inFlight.add(null);
+			}
+			// Lifecycle hooks may enter synchronized extension/RMI code and pin a virtual-thread
+			// carrier indefinitely. One daemon platform thread per frozen handle preserves fair
+			// delivery while keeping the retained phase bound at O(handle count).
+			executor = Executors.newThreadPerTaskExecutor(
+							Thread.ofPlatform().daemon().name(threadNamePrefix, 0).factory());
+			completions = new ExecutorCompletionService<>(executor);
+		}
+
+		private void requireSameHandles(final List<T> candidates) {
+			if (handles.size() != candidates.size()) {
+				throw new IllegalStateException("duration phase handle set changed during cleanup retry");
+			}
+			for (int i = 0; i < handles.size(); i++) {
+				if (handles.get(i) != candidates.get(i)) {
+					throw new IllegalStateException("duration phase handle identity changed during cleanup retry");
+				}
+			}
+		}
+
+		private synchronized DurationPhaseAttempt attempt(
+						final DurationPhaseAction<T> action, final long deadlineNanos) {
+			for (int i = 0; i < handles.size(); i++) {
+				if (completed[i] || inFlight.get(i) != null) {
+					continue;
+				}
+				final int handleIndex = i;
+				final Future<Integer> future = completions.submit(() -> {
+					action.execute(handles.get(handleIndex));
+					return handleIndex;
+				});
+				inFlight.set(i, future);
+				handleIndexes.put(future, i);
+			}
+
+			final List<Throwable> failures = new ArrayList<>();
+			boolean interrupted = false;
+			while (hasInFlight()) {
+				final Future<Integer> future;
+				try {
+					final long remainingNanos = DurationTime.remainingNanos(
+									deadlineNanos, System.nanoTime());
+					if (remainingNanos == 0) {
+						failures.add(new TimeoutException("duration stop phase exceeded its deadline"));
+						break;
+					}
+					future = completions.poll(remainingNanos, TimeUnit.NANOSECONDS);
+					if (future == null) {
+						failures.add(new TimeoutException("duration stop phase exceeded its deadline"));
+						break;
+					}
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					failures.add(e);
+					break;
+				}
+				final Integer handleIndex = handleIndexes.remove(future);
+				if (handleIndex == null) {
+					continue;
+				}
+				inFlight.set(handleIndex, null);
+				try {
+					future.get();
+					completed[handleIndex] = true;
+				} catch (final ExecutionException e) {
+					failures.add(e.getCause());
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					failures.add(e);
+					break;
+				}
+			}
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+			return new DurationPhaseAttempt(
+							List.copyOf(failures), interrupted, allCompleted());
+		}
+
+		private boolean hasInFlight() {
+			return inFlight.stream().anyMatch(future -> future != null);
+		}
+
+		private boolean allCompleted() {
+			for (final boolean handleCompleted : completed) {
+				if (!handleCompleted) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		@Override
+		public synchronized void close() {
+			inFlight.stream()
+							.filter(future -> future != null)
+							.forEach(future -> future.cancel(true));
+			executor.shutdownNow();
+		}
+	}
+
+	protected final IntegrityTerminalException standaloneDeleteEarlyExhaustionFailure() {
+		return terminalFailure(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE inventory slice exhausted before the requested duration; "
+										+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
+						null);
+	}
+
 	protected final IntegrityTerminalException terminalFailure(
 					final IntegrityTerminalException.Category category,
 					final String message,
@@ -286,6 +537,44 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		return existing == null
 						? new IntegrityTerminalException(category, loadStepId(), message, cause)
 						: existing.withStepId(loadStepId());
+	}
+
+	protected final IntegrityTerminalException appendTerminalFailure(
+					final IntegrityTerminalException current,
+					final IntegrityTerminalException.Category category,
+					final String message,
+					final Throwable cause) {
+		final var failure = terminalFailure(category, message, cause);
+		if (current == null) {
+			return failure;
+		}
+		if (failure != current) {
+			current.addSuppressed(failure);
+		}
+		return current;
+	}
+
+	/**
+	 * Bounds one lifecycle RPC/context phase independently from the request-drain budget.
+	 * A two-second floor lets a zero-drain configuration close and recover admission while
+	 * retaining room for the generator's one-second cooperative task-stop wait.
+	 */
+	protected final long durationStopPhaseDeadlineNanos() {
+		final long configuredNanos = TimeUnit.SECONDS.toNanos(
+						Math.max(0, config.intVal("load-op-wait-limit")));
+		return durationDeadlineNanos(
+						Math.max(DURATION_STOP_PHASE_MIN_TIMEOUT_NANOS, configuredNanos));
+	}
+
+	/** Returns a monotonic deadline using signed-difference-safe nanoTime arithmetic. */
+	protected static long durationDeadlineNanos(final long budgetNanos) {
+		return durationDeadlineNanos(System.nanoTime(), budgetNanos);
+	}
+
+	/** Returns a deadline relative to an existing monotonic boundary. */
+	protected static long durationDeadlineNanos(
+					final long boundaryNanos, final long budgetNanos) {
+		return DurationTime.deadlineAfter(boundaryNanos, budgetNanos);
 	}
 
 	private static String safeStepId(final Config config) {

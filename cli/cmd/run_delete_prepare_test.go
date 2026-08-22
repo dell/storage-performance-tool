@@ -136,6 +136,19 @@ func TestDeleteSeedConcurrencyWarningIsBoundedAndReportsFullWaves(t *testing.T) 
 	}
 }
 
+func TestDeleteDurationSeedConcurrencyWarningUsesSeedInventory(t *testing.T) {
+	var output bytes.Buffer
+	writeDeleteSeedConcurrencyWarning(&output, scenario.Params{
+		WorkloadType: WorkloadTypeDelete,
+		Duration:     "1m", SeedCount: 50, Threads: 2, DeleteBatchSize: 100,
+	})
+	got := output.String()
+	if !strings.Contains(got, "seeded DELETE inventory (50 objects)") ||
+		!strings.Contains(got, "maximum full request waves: 0") {
+		t.Fatalf("duration seed concurrency warning = %q", got)
+	}
+}
+
 func TestDeleteExistingSafetyWarningNamesExactScopeAndUntimedDiscovery(t *testing.T) {
 	var output bytes.Buffer
 	writeDeleteExistingSafetyWarning(&output, scenario.Params{

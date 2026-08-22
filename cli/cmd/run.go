@@ -1925,7 +1925,7 @@ func init() {
 	runCmd.Flags().Int("mpu-concurrent-parts", 0, "Max concurrent parts in flight per multipart object (0 = unlimited)")
 
 	// Test Behavior Options
-	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
+	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks and duration-based standalone DELETE (default: 2500)")
 	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
@@ -2532,6 +2532,14 @@ func formatScenarioParams(params scenario.Params) string {
 		}
 		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
 	}
+	if params.WorkloadType == WorkloadTypeDelete && params.Duration != "" &&
+		!params.DeleteExisting && strings.TrimSpace(params.ItemsFile) == "" {
+		seedCount := params.SeedCount
+		if seedCount <= 0 {
+			seedCount = scenario.DefaultDeleteObjectCount
+		}
+		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
+	}
 
 	// Always show cleanup status
 	if params.Cleanup {
@@ -2590,19 +2598,26 @@ func formatScenarioParams(params scenario.Params) string {
 
 func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {
 	if output == nil || params.WorkloadType != WorkloadTypeDelete ||
-		params.DeleteExisting || strings.TrimSpace(params.ItemsFile) != "" || strings.TrimSpace(params.Duration) != "" ||
-		params.ObjectCount <= 0 || params.Threads <= 0 || params.DeleteBatchSize <= 0 {
+		params.DeleteExisting || strings.TrimSpace(params.ItemsFile) != "" ||
+		params.Threads <= 0 || params.DeleteBatchSize <= 0 {
+		return
+	}
+	inventoryCount := params.ObjectCount
+	if strings.TrimSpace(params.Duration) != "" {
+		inventoryCount = params.SeedCount
+	}
+	if inventoryCount <= 0 {
 		return
 	}
 	capacity := int64(params.Threads) * int64(params.DeleteBatchSize)
-	if int64(params.ObjectCount) >= capacity {
+	if int64(inventoryCount) >= capacity {
 		return
 	}
-	fullWaves := int64(params.ObjectCount) / capacity
+	fullWaves := int64(inventoryCount) / capacity
 	_, _ = fmt.Fprintf(
 		output,
 		"Warning: seeded DELETE inventory (%d objects) is smaller than --threads * --delete-batch-size (%d * %d = %d); maximum full request waves: %d. The run continues without automatic inventory calibration.\n",
-		params.ObjectCount, params.Threads, params.DeleteBatchSize, capacity, fullWaves,
+		inventoryCount, params.Threads, params.DeleteBatchSize, capacity, fullWaves,
 	)
 }
 

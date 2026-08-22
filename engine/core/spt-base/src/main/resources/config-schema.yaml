@@ -68,6 +68,7 @@ load:
     delete:
       standalone: boolean
       batchSize: int
+      duration: boolean
     list:
       delimiter: string
       fetch_metadata: boolean

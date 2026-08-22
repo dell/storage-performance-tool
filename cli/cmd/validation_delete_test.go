@@ -20,6 +20,8 @@ type deleteValidationCase struct {
 	deleteExisting   bool
 	allowEmptyPrefix bool
 	cleanup          bool
+	seedObjects      int
+	autoTerminate    int
 	wantDetail       string
 }
 
@@ -68,15 +70,17 @@ func TestValidateDeleteManifestFlags(t *testing.T) {
 			deleteExisting: true, cleanup: true, batchSize: 1, wantDetail: "cannot be used with --cleanup",
 		},
 		{
-			name: "existing duration deferred", bucket: "existing", prefix: "team/root/", prefixSet: true,
-			deleteExisting: true, duration: "1m", batchSize: 1, wantDetail: "finite count mode",
+			name: "existing duration", bucket: "existing", prefix: "team/root/", prefixSet: true,
+			deleteExisting: true, duration: "1m", batchSize: 1,
 		},
-		{name: "seeded duration deferred", bucket: "owned", batchSize: 100, duration: "1m", wantDetail: "seeded finite count mode"},
+		{name: "seeded duration", bucket: "owned", batchSize: 100, duration: "1m", seedObjects: 2500},
+		{name: "seeded duration requires inventory", bucket: "owned", batchSize: 100, duration: "1m", seedObjects: -1, wantDetail: "--seed-objects"},
+		{name: "standalone delete rejects stable auto termination", bucket: "owned", batchSize: 100, autoTerminate: 5, wantDetail: "--auto-terminate-seconds"},
 		{name: "optional bucket assertion omitted", itemsFile: "delete.csv", batchSize: 1},
 		{name: "optional bucket assertion present", itemsFile: "delete.csv", bucket: "expected", batchSize: 100},
 		{name: "batch low", itemsFile: "delete.csv", batchSize: 0, wantDetail: "between 1 and 1000"},
 		{name: "batch high", itemsFile: "delete.csv", batchSize: 1001, wantDetail: "between 1 and 1000"},
-		{name: "duration deferred", itemsFile: "delete.csv", batchSize: 1, duration: "1m", wantDetail: "finite count mode"},
+		{name: "manifest duration", itemsFile: "delete.csv", batchSize: 1, duration: "1m"},
 		{name: "prefix conflicts with manifest", itemsFile: "delete.csv", batchSize: 1, prefix: "unsafe/", wantDetail: "cannot be combined with --prefix"},
 		{name: "cleanup rejects external ownership", itemsFile: "delete.csv", batchSize: 1, cleanup: true, wantDetail: "cannot be used with --cleanup"},
 	}
@@ -170,6 +174,12 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	_ = cmd.Flags().Set(flagDeleteBatchSize, strconv.Itoa(test.batchSize))
 	cmd.Flags().Int("object-count", 0, "")
 	cmd.Flags().String("duration", test.duration, "")
+	seedObjects := test.seedObjects
+	if seedObjects == 0 {
+		seedObjects = scenario.DefaultDeleteObjectCount
+	}
+	cmd.Flags().Int("seed-objects", seedObjects, "")
+	cmd.Flags().Int("auto-terminate-seconds", test.autoTerminate, "")
 	cmd.Flags().Bool("cleanup", test.cleanup, "")
 	cmd.Flags().Int("auth-version", 4, "")
 	cmd.Flags().String("part-size", "", "")

@@ -4,6 +4,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -64,10 +65,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.rmi.RemoteException;
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.AfterAll;
@@ -78,6 +81,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -142,6 +146,97 @@ public class LoadStepContextImplTest {
 		assertDoesNotThrow(() -> stepCtx.doClose());
 		assertDoesNotThrow(() -> stepCtx.doStop());
 		Assertions.assertTrue(stepCtx.isDone());
+	}
+
+	@Test
+	void durationContextHoldsSchedulingUntilTheCommonIntervalIsArmed() throws Exception {
+		testConfig.val("load-op-type", "delete");
+		testConfig.val("load-op-delete-standalone", true);
+		testConfig.val("load-op-delete-duration", true);
+		testConfig.val("load-step-limit-time", "1s");
+		testConfig.val("load-op-retry", false);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		when(driverMock.supportsStandaloneDeleteRequests()).thenReturn(true);
+		when(driverMock.operationLifecycle()).thenReturn(new OperationLifecycleTracker<>());
+		doNothing().when(driverMock).operationResultOutput(any());
+		final MetricsContext metrics = buildMetricsCtx("duration-start-barrier");
+		final var context = new LoadStepContextImpl<>(
+						"duration-start-barrier",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+
+		try {
+			context.start();
+			verify(driverMock).start();
+			verify(generatorMock).holdAdmission();
+			verify(generatorMock, never()).start();
+			assertEquals(0, context.deletePhaseTiming().scheduledNanos());
+
+			final long intervalStartNanos = System.nanoTime();
+			final long intervalDeadlineNanos = intervalStartNanos + TimeUnit.MILLISECONDS.toNanos(20);
+			context.startDurationInterval(intervalStartNanos, intervalDeadlineNanos);
+
+			verify(generatorMock).openAdmissionUntil(intervalDeadlineNanos);
+			verify(generatorMock).start();
+			Thread.sleep(60);
+			context.closeOperationAdmissionForStepStop();
+			assertTrue(context.deletePhaseTiming().scheduledNanos() >= TimeUnit.MILLISECONDS.toNanos(10));
+			assertTrue(
+							context.deletePhaseTiming().scheduledNanos() < TimeUnit.MILLISECONDS.toNanos(40),
+							"late admission closure was incorrectly reported as scheduled workload time");
+		} finally {
+			context.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void durationContextNeverReopensAdmissionAfterItsAbsoluteDeadline() throws Exception {
+		testConfig.val("load-op-type", "delete");
+		testConfig.val("load-op-delete-standalone", true);
+		testConfig.val("load-op-delete-duration", true);
+		testConfig.val("load-step-limit-time", "1s");
+		testConfig.val("load-op-retry", false);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		when(driverMock.supportsStandaloneDeleteRequests()).thenReturn(true);
+		when(driverMock.operationLifecycle()).thenReturn(new OperationLifecycleTracker<>());
+		doNothing().when(driverMock).operationResultOutput(any());
+		final MetricsContext metrics = buildMetricsCtx("duration-expired-start");
+		final var context = new LoadStepContextImpl<>(
+						"duration-expired-start",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+
+		try {
+			context.start();
+			final long deadlineNanos = System.nanoTime();
+			final long startNanos = deadlineNanos - TimeUnit.MILLISECONDS.toNanos(1);
+
+			final var failure = assertThrows(
+							IllegalStateException.class,
+							() -> context.startDurationInterval(startNanos, deadlineNanos));
+
+			assertTrue(failure.getMessage().contains("deadline"));
+			verify(generatorMock, never()).openAdmissionUntil(anyLong());
+			verify(generatorMock, never()).start();
+		} finally {
+			context.close();
+			metrics.close();
+		}
 	}
 
 	@Test
@@ -1162,6 +1257,151 @@ public class LoadStepContextImplTest {
 						testConfig.configVal("load"),
 						false);
 		assertDoesNotThrow(ctx::doShutdown);
+	}
+
+	@Test
+	public void queuedRecoveryAttemptsBothSourcesAndRetriesOnlyTheFailedSource() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = new OperationLifecycleTracker<>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		final MetricsContext metrics = buildMetricsCtx("independentQueuedRecovery");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-independent-recovery",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final Operation<DataItem> generatorBuffered = new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("generator-buffered", 0, 1),
+						null, "bucket", null, List.of(), 0);
+		final Operation<DataItem> driverQueued = new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("driver-queued", 0, 1),
+						null, "bucket", null, List.of(), 0);
+		lifecycle.generatorBuffered(generatorBuffered);
+		lifecycle.generatorBuffered(driverQueued);
+		lifecycle.driverQueued(driverQueued);
+		when(generatorMock.recoverBufferedOperations())
+						.thenThrow(new IllegalStateException("generator recovery failed"))
+						.thenReturn(List.of(generatorBuffered));
+		when(driverMock.recoverQueuedOperations()).thenReturn(List.of(driverQueued));
+
+		final var failure = assertThrows(
+						IllegalStateException.class, ctx::recoverQueuedOperationsForStepStop);
+		assertTrue(failure.getMessage().contains("generator recovery failed"));
+		verify(driverMock).recoverQueuedOperations();
+		assertEquals(OperationLifecycleState.UNATTEMPTED, driverQueued.lifecycle().state());
+
+		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
+		verify(generatorMock, times(2)).recoverBufferedOperations();
+		verify(driverMock, times(1)).recoverQueuedOperations();
+		assertEquals(OperationLifecycleState.UNATTEMPTED, generatorBuffered.lifecycle().state());
+	}
+
+	@Test
+	public void queuedRecoveryRetainsDrainedBatchWhenLedgerUpdateFails() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = mock(OperationLifecycleTracker.class);
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		final MetricsContext metrics = buildMetricsCtx("retainedQueuedRecovery");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-retained-recovery",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final Operation<DataItem> generatorBuffered = baseDataOp("generator-buffered", 1);
+		final Operation<DataItem> driverQueued = baseDataOp("driver-queued", 1);
+		when(generatorMock.recoverBufferedOperations())
+						.thenReturn(List.of(generatorBuffered), List.of());
+		when(driverMock.recoverQueuedOperations()).thenReturn(List.of(driverQueued));
+		when(lifecycle.unattempted(generatorBuffered))
+						.thenThrow(new IllegalStateException("generator ledger update failed"))
+						.thenReturn(true);
+		when(lifecycle.unattempted(driverQueued)).thenReturn(true);
+
+		final var failure = assertThrows(
+						IllegalStateException.class, ctx::recoverQueuedOperationsForStepStop);
+		assertTrue(failure.getMessage().contains("generator ledger update failed"));
+		verify(driverMock).recoverQueuedOperations();
+		verify(lifecycle).unattempted(driverQueued);
+
+		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
+		verify(generatorMock, times(1)).recoverBufferedOperations();
+		verify(driverMock, times(1)).recoverQueuedOperations();
+		verify(lifecycle, times(2)).unattempted(generatorBuffered);
+		verify(lifecycle, times(1)).unattempted(driverQueued);
+	}
+
+	@Test
+	public void queuedRecoveryCannotCrossAdmissionCloseStillInProgress() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		when(driverMock.operationLifecycle()).thenReturn(new OperationLifecycleTracker<>());
+		final CountDownLatch driverCloseEntered = new CountDownLatch(1);
+		final CountDownLatch releaseDriverClose = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			driverCloseEntered.countDown();
+			while (true) {
+				try {
+					releaseDriverClose.await();
+					return null;
+				} catch (final InterruptedException ignored) {
+					// Model an extension which does not cooperate with cancellation.
+				}
+			}
+		}).when(driverMock).closeAdmission();
+		final MetricsContext metrics = buildMetricsCtx("admissionCloseBarrier");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> ctx = new LoadStepContextImpl<>(
+						"ctx-admission-close-barrier",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+		final AtomicReference<Throwable> recoveryFailure = new AtomicReference<>();
+		final Thread closeThread = Thread.ofPlatform().start(() -> {
+			try {
+				ctx.closeOperationAdmissionForStepStop();
+			} catch (final Throwable failure) {
+				closeFailure.set(failure);
+			}
+		});
+		final Thread recoveryThread = Thread.ofPlatform().start(() -> {
+			try {
+				assertTrue(driverCloseEntered.await(1, TimeUnit.SECONDS));
+				ctx.recoverQueuedOperationsForStepStop();
+			} catch (final Throwable failure) {
+				recoveryFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(driverCloseEntered.await(1, TimeUnit.SECONDS));
+			Thread.sleep(100);
+			verify(generatorMock, never()).recoverBufferedOperations();
+			verify(driverMock, never()).recoverQueuedOperations();
+		} finally {
+			releaseDriverClose.countDown();
+			closeThread.join(TimeUnit.SECONDS.toMillis(2));
+			recoveryThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+		assertFalse(closeThread.isAlive());
+		assertFalse(recoveryThread.isAlive());
+		assertNull(closeFailure.get());
+		assertNull(recoveryFailure.get());
 	}
 
 	@Test
