@@ -25,6 +25,10 @@ import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.OpType;
@@ -128,6 +132,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean operationDrainComplete = new AtomicBoolean(false);
 	private final AtomicBoolean startedOnce = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
+	private final boolean standaloneDeleteEnabled;
+	private final LongAdder deleteAcceptedObjects = new LongAdder();
+	private final LongAdder deleteFailedObjects = new LongAdder();
+	private final LongAdder deleteProtocolFailedObjects = new LongAdder();
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -249,6 +257,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.updateContents = recycleConfig.boolVal("content-update");
 		this.retryFlag = opConfig.boolVal("retry");
 		this.retryLimit = opConfig.intVal("retryLimit");
+		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
+		this.standaloneDeleteEnabled = standaloneDelete.enabled();
+		standaloneDelete.validateSettings(opType, itemType, this.recycleFlag, this.retryFlag);
+		if (standaloneDelete.enabled() && !operationLifecycle.isEnabled()) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE requires a driver with operation lifecycle accounting");
+		}
+		if (standaloneDelete.enabled() && tracePersistFlag) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use generic single-item operation tracing");
+		}
+		if (standaloneDelete.enabled() && !driver.supportsStandaloneDeleteRequests()) {
+			throw new IllegalConfigurationException(
+							"Configured storage driver does not support standalone DELETE requests");
+		}
 		if (this.retryFlag) {
 			if (this.retryLimit < 0) {
 				throw new IllegalConfigurationException(
@@ -287,6 +310,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.waitOpFinishBeforeStop = opConfig.boolVal("wait-finish");
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
+		if (standaloneDelete.enabled()) {
+			operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
+		}
 		if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
 			this.metricsCtx.metadata().put(
 							com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
@@ -486,11 +512,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public final void operationsResultsOutput(final Output<O> opsResultsOutput) {
+		if (standaloneDeleteEnabled && opsResultsOutput != null) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use ordinary successful-item output");
+		}
 		this.opsResultsOutput = opsResultsOutput;
 	}
 
 	@Override
 	public final void operationsMetricsOutput(final Output<O> opsMetricsOutput) {
+		if (standaloneDeleteEnabled && opsMetricsOutput != null) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use generic single-item timing output");
+		}
 		this.opsMetricsOutput = opsMetricsOutput;
 	}
 
@@ -502,6 +536,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final boolean put(final O opResult) {
 		ThreadContext.put(KEY_STEP_ID, id);
+		if (standaloneDeleteEnabled) {
+			return acceptStandaloneDeleteResult(opResult);
+		}
 		// I/O trace logging
 		if (tracePersistFlag) {
 			Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(opResult));
@@ -605,6 +642,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final int put(final List<O> opResults, final int from, final int to) {
 		ThreadContext.put(KEY_STEP_ID, id);
+		if (standaloneDeleteEnabled) {
+			for (var i = from; i < to; i++) {
+				acceptStandaloneDeleteResult(opResults.get(i));
+			}
+			return to - from;
+		}
 		// I/O trace logging
 		if (tracePersistFlag) {
 			Loggers.OP_TRACES.info(new OperationTraceCsvBatchLogMessage<>(opResults, from, to));
@@ -628,14 +671,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			reqDuration = opResult.duration();
 			respLatency = opResult.latency();
 			timeToFirstByte = timeToFirstByte(opResult);
+			countBytesDone = 0;
+			listOpResult = null;
 			if (opResult instanceof DataOperation) {
 				countBytesDone = ((DataOperation) opResult).countBytesDone();
-				listOpResult = null;
 			} else if (opResult instanceof ListOperation) {
 				listOpResult = (ListOperation<?>) opResult;
 				countBytesDone = listOpResult.bytesListed();
 			} else if (opResult instanceof PathOperation) {
-				listOpResult = null;
 				countBytesDone = ((PathOperation) opResult).countBytesDone();
 			}
 			final boolean recycleEligible;
@@ -1106,6 +1149,77 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final OperationLifecycleSnapshot<O> operationLifecycle() {
 		return operationLifecycle.snapshot();
+	}
+
+	@Override
+	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
+		if (!standaloneDeleteEnabled) {
+			return DeleteObjectLifecycleSnapshot.empty();
+		}
+		final var operationSnapshot = operationLifecycle.snapshot();
+		final var selected = Math.addExact(
+						generator.consumedItemCount(), generator.aggregateUnattemptedItemCount());
+		final var accepted = deleteAcceptedObjects.sum();
+		final var failed = deleteFailedObjects.sum();
+		final var unattempted = Math.addExact(
+						deleteTargetCount(operationSnapshot.unattemptedOperations()),
+						generator.aggregateUnattemptedItemCount());
+		final var unresolved = deleteTargetCount(operationSnapshot.unresolvedOperations());
+		final var attempted = accepted + failed + unresolved;
+		final var reconciled = selected == accepted + failed + unattempted + unresolved
+						&& attempted == accepted + failed + unresolved;
+		return new DeleteObjectLifecycleSnapshot(
+						selected,
+						attempted,
+						accepted,
+						failed,
+						unattempted,
+						unresolved,
+						deleteProtocolFailedObjects.sum(),
+						reconciled);
+	}
+
+	private boolean acceptStandaloneDeleteResult(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE result output received a non-DELETE-request operation");
+		}
+		return true;
+	}
+
+	private void recordStandaloneDeleteTerminal(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation deleteOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE terminal lifecycle received a non-DELETE-request operation");
+		}
+		if (deleteOperation.deleteResult() == null) {
+			deleteOperation.completeDelete(null);
+		}
+		final var result = deleteOperation.deleteResult();
+		deleteAcceptedObjects.add(result.acceptedObjectCount());
+		deleteFailedObjects.add(result.failedObjectCount());
+		if (result.failureClassification() == DeleteFailureClassification.PROTOCOL) {
+			deleteProtocolFailedObjects.add(result.failedObjectCount());
+		}
+		final var metrics = resolveMetrics(operation.type());
+		if (Status.SUCC.equals(result.operationStatus())) {
+			metrics.markSucc(
+							0,
+							operation.duration(),
+							operation.latency(),
+							timeToFirstByte(operation));
+		} else {
+			metrics.markFail();
+		}
+		counterResults.increment();
+	}
+
+	private static long deleteTargetCount(final List<? extends Operation<?>> operations) {
+		return operations.stream()
+						.filter(DeleteRequestOperation.class::isInstance)
+						.map(DeleteRequestOperation.class::cast)
+						.mapToLong(operation -> operation.deleteRequest().targets().size())
+						.sum();
 	}
 
 	/**

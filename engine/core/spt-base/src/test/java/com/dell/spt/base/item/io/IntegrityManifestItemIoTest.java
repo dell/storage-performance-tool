@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,14 +64,31 @@ class IntegrityManifestItemIoTest {
 	}
 
 	@Test
-	void rejectsMalformedRowsAndNegativeSizes() throws Exception {
+	void readerReportsExactRemainingCountWithoutConsumingRows() throws Exception {
+		final Path manifest = tempDir.resolve("counted.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\nb,a,1,\r\nb,b,2,\r\n",
+						StandardCharsets.UTF_8);
+		try (final var input = new IntegrityManifestItemInput(manifest)) {
+			assertEquals(2, input.remainingItemCount());
+			input.get();
+			assertEquals(1, input.remainingItemCount());
+			input.reset();
+			assertEquals(2, input.remainingItemCount());
+			assertEquals(1, input.skip(1));
+			assertEquals(1, input.remainingItemCount());
+		}
+	}
+
+	@Test
+	void validatesEveryManifestRowBeforeExposingItsFrozenCount() throws Exception {
 		final Path manifest = tempDir.resolve("bad.csv");
 		Files.writeString(
 						manifest,
-						"bucket,key,size,version_id\r\nbucket,key,-1,\r\n",
+						"bucket,key,size,version_id\r\nbucket,valid,1,\r\nbucket,key,-1,\r\n",
 						StandardCharsets.UTF_8);
-		try (final var input = new IntegrityManifestItemInput(manifest)) {
-			assertThrows(IllegalArgumentException.class, input::get);
-		}
+
+		assertThrows(IOException.class, () -> new IntegrityManifestItemInput(manifest));
 	}
 }

@@ -65,6 +65,9 @@ load:
     retryLimit: int
     shuffle: boolean
     type: string
+    delete:
+      standalone: boolean
+      batchSize: int
     list:
       delimiter: string
       fetch_metadata: boolean

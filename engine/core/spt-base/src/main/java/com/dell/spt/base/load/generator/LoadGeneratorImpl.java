@@ -8,12 +8,16 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationAssembler;
+import com.dell.spt.base.item.op.OperationAssemblyResult;
+import com.dell.spt.base.item.op.OperationAssemblyStopReason;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.OperationsBuilderAssembler;
+import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -31,6 +35,7 @@ import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
@@ -103,12 +108,16 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
 	private final ThreadLocal<List<O>> threadLocalAssemblyBuff;
 	private final LongAdder consumedItemsCounter = new LongAdder();
+	private final LongAdder aggregateUnattemptedItemsCounter = new LongAdder();
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
 	private final AtomicBoolean admissionOpen = new AtomicBoolean(true);
+	private final AtomicBoolean assemblerFinished = new AtomicBoolean(false);
+	private final Lock assemblyLock = new ReentrantLock();
 	private final Lock admissionLock = new ReentrantLock();
+	private final long standaloneDeleteInputIdentityCount;
 	private final Set<IdentityKey<O>> bufferedOperations = ConcurrentHashMap.newKeySet();
 	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	private final Lock tempBufferLock = new ReentrantLock();
@@ -203,6 +212,19 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		this.itemInput = itemInput;
 		this.opAssembler = opAssembler;
+		if (opAssembler instanceof DeleteRequestAssembler) {
+			if (!(itemInput instanceof RemainingItemCountInput<?> countInput)) {
+				throw new IllegalArgumentException(
+								"Standalone DELETE requires an input with an exact remaining-item count");
+			}
+			this.standaloneDeleteInputIdentityCount = countInput.remainingItemCount();
+			if (standaloneDeleteInputIdentityCount < 0) {
+				throw new IllegalArgumentException(
+								"Standalone DELETE input reported a negative remaining-item count");
+			}
+		} else {
+			this.standaloneDeleteInputIdentityCount = -1;
+		}
 		this.originIndex = opAssembler.originIndex();
 		this.throttles = throttles.toArray(new Object[]{});
 		this.opOutput = opOutput;
@@ -305,6 +327,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 							if (items == null) {
 								itemInputFinishFlag = true;
+								pendingOpCount += finishAssemblerNormally(opBuff);
 								Loggers.MSG.debug(
 												"End of items input \"{}\", generated op count: {}",
 												itemInput.toString(),
@@ -318,6 +341,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 										pendingOpCount = (int) (pendingOpCount + newlyBuilt);
 									} else {
 										itemInputFinishFlag = true;
+										pendingOpCount += finishAssemblerNormally(opBuff);
 									}
 								} catch (final ConcurrentModificationException cme) {
 									Loggers.MSG.debug(
@@ -485,6 +509,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				throw new IntegrityTerminalException(
 								IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 			}
+			if (opAssembler instanceof DeleteRequestAssembler) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.INPUT,
+								"Standalone DELETE input failed before its frozen selection was consumed",
+								e);
+			}
 			LogUtil.exception(Level.WARN, e, "Failed to read the next load-generator items");
 			return null;
 		}
@@ -529,71 +559,189 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		if (shuffleFlag) {
 			Collections.shuffle(items, rnd);
 		}
-		final var assemblyBuffer = threadLocalAssemblyBuff.get();
+		assemblyLock.lock();
 		try {
-			assemblyBuffer.clear();
-			final var assemblyResult = opAssembler.assemble(items, assemblyBuffer);
-			if (assemblyResult.consumedIdentityCount() != n) {
-				throw contractFailure(
-								"Operation assembler consumed "
-												+ assemblyResult.consumedIdentityCount()
-												+ " identities from an input batch of "
-												+ n);
+			if (!admissionOpen.get() || assemblerFinished.get()) {
+				return 0;
 			}
-			final var emittedOperationCount = assemblyResult.emittedOperationCount();
-			if (emittedOperationCount != assemblyBuffer.size()) {
-				throw contractFailure(
-								"Operation assembler reported "
-												+ emittedOperationCount
-												+ " emitted operations but appended "
-												+ assemblyBuffer.size());
-			}
-			final var availableOperationSlots = batchSize - opBuff.size();
-			if (emittedOperationCount > availableOperationSlots) {
-				throw contractFailure(
-								"Operation assembler emitted "
-												+ emittedOperationCount
-												+ " operations with only "
-												+ availableOperationSlots
-												+ " buffer slots available");
-			}
-			var bufferedCount = 0;
-			admissionLock.lock();
+			final var assemblyBuffer = threadLocalAssemblyBuff.get();
 			try {
-				if (admissionOpen.get()) {
-					opBuff.addAll(assemblyBuffer);
-					for (final O op : assemblyBuffer) {
-						operationLifecycle.generatorBuffered(op);
-						bufferedOperations.add(identityKey(op));
-					}
-					bufferedCount = emittedOperationCount;
-				} else {
-					for (final O op : assemblyBuffer) {
-						operationLifecycle.generatorBuffered(op);
-						operationLifecycle.unattempted(op);
-					}
+				assemblyBuffer.clear();
+				final var assemblyResult = opAssembler.assemble(items, assemblyBuffer);
+				if (assemblyResult.consumedIdentityCount() != n) {
+					throw contractFailure(
+									"Operation assembler consumed "
+													+ assemblyResult.consumedIdentityCount()
+													+ " identities from an input batch of "
+													+ n);
 				}
-			} finally {
-				admissionLock.unlock();
-			}
-			consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
-			builtTasksCounter.add(emittedOperationCount);
-			return bufferedCount;
-		} catch (final IllegalArgumentException e) {
-			if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
-				outputFinishFlag = true;
+				final var emittedOperationCount = assemblyResult.emittedOperationCount();
+				if (emittedOperationCount != assemblyBuffer.size()) {
+					throw contractFailure(
+									"Operation assembler reported "
+													+ emittedOperationCount
+													+ " emitted operations but appended "
+													+ assemblyBuffer.size());
+				}
+				final var availableOperationSlots = batchSize - opBuff.size();
+				if (emittedOperationCount > availableOperationSlots) {
+					throw contractFailure(
+									"Operation assembler emitted "
+													+ emittedOperationCount
+													+ " operations with only "
+													+ availableOperationSlots
+													+ " buffer slots available");
+				}
+				var bufferedCount = 0;
+				admissionLock.lock();
+				try {
+					if (admissionOpen.get()) {
+						opBuff.addAll(assemblyBuffer);
+						for (final O op : assemblyBuffer) {
+							operationLifecycle.generatorBuffered(op);
+							bufferedOperations.add(identityKey(op));
+						}
+						bufferedCount = emittedOperationCount;
+					} else {
+						for (final O op : assemblyBuffer) {
+							operationLifecycle.generatorBuffered(op);
+							operationLifecycle.unattempted(op);
+						}
+					}
+				} finally {
+					admissionLock.unlock();
+				}
+				consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
+				builtTasksCounter.add(emittedOperationCount);
+				return bufferedCount;
+			} catch (final RuntimeException e) {
+				if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
+					throw abortAssembly(e, n);
+				}
+				if (e instanceof IllegalArgumentException) {
+					LogUtil.exception(Level.ERROR, e, "Failed to generate the load operation");
+				} else {
+					throw e;
+				}
+			} catch (final IOException e) {
+				if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
+					throw abortAssembly(e, n);
+				}
 				throw e;
+			} finally {
+				assemblyBuffer.clear();
 			}
-			LogUtil.exception(Level.ERROR, e, "Failed to generate the load operation");
+			return 0;
 		} finally {
-			assemblyBuffer.clear();
+			assemblyLock.unlock();
 		}
-		return 0;
+	}
+
+	private IntegrityTerminalException abortAssembly(
+					final Exception assemblyFailure, final int failedInputIdentityCount) {
+		outputFinishFlag = true;
+		final int unrecoverableIdentityCount = opAssembler instanceof DeleteRequestAssembler deleteAssembler
+						? deleteAssembler.unrecoverableIdentityCount()
+						: 0;
+		consumedItemsCounter.add(failedInputIdentityCount - unrecoverableIdentityCount);
+		if (assemblerFinished.compareAndSet(false, true)) {
+			final var assemblyBuffer = new ArrayList<O>(1);
+			try {
+				finishAssembler(OperationAssemblyStopReason.ABORTED, assemblyBuffer);
+				for (final var operation : assemblyBuffer) {
+					operationLifecycle.generatorBuffered(operation);
+					operationLifecycle.unattempted(operation);
+				}
+			} catch (final IOException abortFailure) {
+				assemblyFailure.addSuppressed(abortFailure);
+			} finally {
+				aggregateUnattemptedItemsCounter.add(unrecoverableIdentityCount);
+			}
+		}
+		return new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Operation assembly failed after recovering retained work",
+						assemblyFailure);
 	}
 
 	private AssertionError contractFailure(final String message) {
 		outputFinishFlag = true;
 		return new AssertionError(message);
+	}
+
+	private int finishAssemblerNormally(final CircularBuffer<O> opBuff) throws IOException {
+		assemblyLock.lock();
+		try {
+			if (!assemblerFinished.compareAndSet(false, true)) {
+				return 0;
+			}
+			final var assemblyBuffer = threadLocalAssemblyBuff.get();
+			assemblyBuffer.clear();
+			try {
+				final var result = finishAssembler(
+								OperationAssemblyStopReason.NORMAL_COMPLETION, assemblyBuffer);
+				final var availableOperationSlots = batchSize - opBuff.size();
+				if (result.emittedOperationCount() > availableOperationSlots) {
+					throw contractFailure(
+									"Operation assembler finished with "
+													+ result.emittedOperationCount()
+													+ " operations but only "
+													+ availableOperationSlots
+													+ " buffer slots are available");
+				}
+				opBuff.addAll(assemblyBuffer);
+				for (final O op : assemblyBuffer) {
+					operationLifecycle.generatorBuffered(op);
+					bufferedOperations.add(identityKey(op));
+				}
+				return result.emittedOperationCount();
+			} finally {
+				assemblyBuffer.clear();
+			}
+		} finally {
+			assemblyLock.unlock();
+		}
+	}
+
+	private void finishAssemblerForRecovery(final Map<IdentityKey<O>, O> recovered) {
+		if (!assemblerFinished.compareAndSet(false, true)) {
+			return;
+		}
+		final var assemblyBuffer = new ArrayList<O>(1);
+		try {
+			finishAssembler(OperationAssemblyStopReason.ADMISSION_CLOSED, assemblyBuffer);
+			for (final O op : assemblyBuffer) {
+				operationLifecycle.generatorBuffered(op);
+				recovered.put(identityKey(op), op);
+			}
+		} catch (final IOException e) {
+			throw new IllegalStateException("Failed to recover retained operation-assembler work", e);
+		}
+	}
+
+	private OperationAssemblyResult finishAssembler(
+					final OperationAssemblyStopReason reason, final List<O> assemblyBuffer)
+					throws IOException {
+		final var result = opAssembler.finish(reason, assemblyBuffer);
+		validateFinishedAssembly(result, assemblyBuffer);
+		builtTasksCounter.add(result.emittedOperationCount());
+		return result;
+	}
+
+	private void validateFinishedAssembly(
+					final OperationAssemblyResult result, final List<O> assemblyBuffer) {
+		if (result.consumedIdentityCount() != 0) {
+			throw contractFailure(
+							"Operation assembler consumed identities while finishing: "
+											+ result.consumedIdentityCount());
+		}
+		if (result.emittedOperationCount() != assemblyBuffer.size()) {
+			throw contractFailure(
+							"Operation assembler reported "
+											+ result.emittedOperationCount()
+											+ " finished operations but appended "
+											+ assemblyBuffer.size());
+		}
 	}
 
 	@Override
@@ -609,6 +757,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final long consumedItemCount() {
 		return consumedItemsCounter.sum();
+	}
+
+	@Override
+	public final long aggregateUnattemptedItemCount() {
+		return aggregateUnattemptedItemsCounter.sum();
 	}
 
 	@Override
@@ -676,7 +829,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		stop();
 		if (taskWasRunning || taskWasAlreadyStopped) {
 			try {
-				await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
+				if (!await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+					Loggers.ERR.warn(
+									"{}: generator task did not stop within {} second(s); recovering without waiting for its input read",
+									name,
+									TASK_STOP_WAIT_SECONDS);
+				}
 			} catch (final InterruptedException e) {
 				throwUnchecked(e);
 			}
@@ -685,31 +843,56 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final List<O> recoverBufferedOperations() {
-		admissionLock.lock();
+		assemblyLock.lock();
 		try {
-			final var recovered = new LinkedHashMap<IdentityKey<O>, O>();
-			for (final var operationKey : bufferedOperations) {
-				recovered.put(operationKey, operationKey.value);
-			}
-			bufferedOperations.clear();
-			O op;
-			while ((op = retryQueue.poll()) != null) {
-				recovered.put(identityKey(op), op);
-			}
-			while ((op = recycleQueue.poll()) != null) {
-				recovered.put(identityKey(op), op);
-			}
-			recycleQueueSize.set(0);
-			final var unattempted = new ArrayList<O>(recovered.size());
-			for (final O buffered : recovered.values()) {
-				if (operationLifecycle.unattempted(buffered)) {
-					unattempted.add(buffered);
+			admissionLock.lock();
+			try {
+				final var recovered = new LinkedHashMap<IdentityKey<O>, O>();
+				recoverUnconsumedStandaloneDeleteItems();
+				finishAssemblerForRecovery(recovered);
+				for (final var operationKey : bufferedOperations) {
+					recovered.put(operationKey, operationKey.value);
 				}
+				bufferedOperations.clear();
+				O op;
+				while ((op = retryQueue.poll()) != null) {
+					recovered.put(identityKey(op), op);
+				}
+				while ((op = recycleQueue.poll()) != null) {
+					recovered.put(identityKey(op), op);
+				}
+				recycleQueueSize.set(0);
+				final var unattempted = new ArrayList<O>(recovered.size());
+				for (final O buffered : recovered.values()) {
+					if (operationLifecycle.unattempted(buffered)) {
+						unattempted.add(buffered);
+					}
+				}
+				return List.copyOf(unattempted);
+			} finally {
+				admissionLock.unlock();
 			}
-			return List.copyOf(unattempted);
 		} finally {
-			admissionLock.unlock();
+			assemblyLock.unlock();
 		}
+	}
+
+	private void recoverUnconsumedStandaloneDeleteItems() {
+		if (!(opAssembler instanceof DeleteRequestAssembler) || itemInputFinishFlag) {
+			return;
+		}
+		final long unreadIdentityCount = Math.subtractExact(
+						Math.subtractExact(
+										standaloneDeleteInputIdentityCount, consumedItemsCounter.sum()),
+						aggregateUnattemptedItemsCounter.sum());
+		if (unreadIdentityCount < 0) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE consumed more identities than its frozen input count",
+							null);
+		}
+		aggregateUnattemptedItemsCounter.add(unreadIdentityCount);
+		itemInputFinishFlag = true;
 	}
 
 	/**

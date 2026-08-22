@@ -123,13 +123,38 @@ The load generator separates input-item cardinality from logical-operation cardi
 `OperationAssembler` appends logical operations to a caller-owned reusable buffer and reports both the number of input
 identities it consumed and the number of operations it emitted. Generated-operation counts, pending counts, count
 limits, throttle permits, output ranges, and completion checks all use emitted operations.
-`LoadGenerator.consumedItemCount()` exposes the separate consumed-identity count.
+`LoadGenerator.consumedItemCount()` exposes the separate consumed-identity count. Bounded
+standalone-DELETE cancellation keeps an unread manifest suffix out of that consumed count and reports
+it through `aggregateUnattemptedItemCount()`; object-level `selected` is the exact sum of both.
 
 Existing extensions do not need to change their `OperationsBuilder` implementations. The compatible
 `OperationsBuilderAssembler` preserves the historical one-item/one-operation behavior, including input order,
 operation type, origin index, naming, throttle indexing, close behavior, and ownership of builder resources. A custom
 assembler accepts every identity in the supplied input batch, must not emit more operations than the generator's
 available operation-buffer slots, and owns any resources it retains until `close()`.
+
+#### 2.3.4.1. Standalone DELETE request contract
+
+The internal standalone DELETE spine is explicitly enabled by `load.op.delete.standalone`; the shipped default is
+off so cleanup steps, read-workload cleanup, and mixed-workload DELETE keep their existing single-item
+`DataOperation` behavior. A capable storage driver must opt in through
+`StorageDriver.supportsStandaloneDeleteRequests()` before the step can initialize.
+
+A `DeleteRequestOperation` represents one logical API request and owns an immutable ordered list of 1 through 1,000
+canonical targets. Every target has the same bucket and effective credential and snapshots its key, size, and optional
+requested version. The inherited `item()` method projects only the first target for extension compatibility; request
+execution, completion, accounting, and reconciliation must use `deleteRequest().targets()`. The request is deliberately
+not a data-transfer operation, so it always contributes zero transferred bytes. Its completed `result()` snapshot
+retains both the complete immutable request and the ordered `DeleteRequestResult`.
+
+`DeleteRequestAssembler` streams across engine input reads, retains at most one partial batch, and emits same-bucket,
+same-credential requests. Normal input exhaustion flushes its one tail request. Closing admission recovers a retained
+tail as one unattempted logical request rather than dispatching it. `DeleteRequestReconciler` matches neutral transport
+responses by key plus requested version, restores request order, and distinguishes operational target failures from
+protocol defects. Missing, duplicate, malformed, or unexpected response identities conservatively fail every target
+with the protocol classification. Generic success/failure metrics remain request-based, while
+`deleteObjectLifecycle()` separately reports selected, attempted, accepted, failed, unattempted, unresolved, and
+protocol-failed object identities together with the terminal reconciliation invariant.
 
 # 3. Bundles and Extenstions
 

@@ -106,6 +106,11 @@ public class OperationsBuilderImpl<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	public Credential nextCredential(final I item) throws IOException {
+		return getNextCredential(getNextOutputPath());
+	}
+
+	@Override
 	@SuppressWarnings("unchecked")
 	public void buildOps(final List<I> items, final List<O> buff) throws IOException {
 		String outputPath;

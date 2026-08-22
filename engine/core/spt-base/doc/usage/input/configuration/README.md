@@ -52,6 +52,8 @@ reference.
 | load-op-limit-rate                             | Float >= 0 | 0                   | The maximum number of the load operations to execute per second (throughput limit). 0 means no rate limit.
 | load-op-limit-recycle                          | Integer >= 1 | 1000000           | The load operations and results queues size limit
 | load-op-output-duplicates                      | Flag | false                     | Specifies whether to add duplicates to output items list when in recycle mode or only print them once. No duplicates by default |
+| load-op-delete-standalone                      | Flag | false                     | Internal engine capability gate for first-class standalone DELETE requests. It requires `load-op-type=delete`, `item-type=data`, a finite input with an exact unread-identity count, a driver that explicitly supports standalone DELETE requests, and a terminal topology. The public CLI enables this only after its safety gates are satisfied. |
+| load-op-delete-batchSize                       | Integer 1..1000 | 100              | Number of canonical object identities in each standalone DELETE logical request. The assembler carries one partial batch across input reads and emits one tail at normal exhaustion. This setting does not alter legacy cleanup or mixed-workload DELETE. |
 | load-op-recycle-mode                           | Flag | false                     | Specifies whether to recycle the successfully finished operations multiple times or not
 | load-op-recycle-contents-update                | Flag | false                     | Specifies whether to update the contents of the recycled object. Note: usually you just want to have a new object. This is rarely used. E.g. s3 versioning.
 | load-op-retry                                  | Flag | false                     | Specifies whether to retry the failed operations or not. **Note:** For multipart uploads, individual part retries (up to 3 per part) happen automatically regardless of this flag. This flag controls whole-operation-level retry. A retried operation is redispatched after a full-jitter exponential backoff (200ms base, 1s cap) rather than immediately. Only transient failures are retried (`FAIL_IO`, `FAIL_TIMEOUT`, `FAIL_UNKNOWN`, `RESP_FAIL_UNKNOWN`, `RESP_FAIL_SVC`) — permanent failures (auth, not-found, client request errors, corruption, out-of-space) are counted as failed immediately regardless of the retry limit. Not supported by every load generator (e.g. mixed-mode workloads); enabling it against one that doesn't support requeueing raises a configuration error at step start rather than silently dropping failures. |
@@ -131,6 +133,44 @@ the lifecycle contract retain the historical active-concurrency drain; only base
 every ownership edge activate lifecycle-only draining. A load-step context is single-run:
 create a new context for another run instead of restarting a stopped context with exhausted
 generator state.
+
+### Standalone DELETE engine topology
+
+Standalone DELETE is a terminal engine step. Initialization rejects recycle mode, SPT operation
+retries, unsupported or lifecycle-disabled storage drivers, inputs which cannot report their exact
+unread identity count without consuming it, a `TransferConvertBuffer` single-item pipeline,
+ordinary successful-item output, and generic single-item timing output. Canonical manifest inputs
+validate every row while calculating that finite count before the step starts, so a malformed suffix
+cannot silently truncate the frozen selection. These checks run in both the generator builder and the
+load-step context so override-injected configuration cannot bypass them.
+
+One standalone `DeleteRequestOperation` is one request metric and owns its entire immutable target
+list. Its compatibility `item()` accessor is only the first target and must not be used for batch
+execution or output. A completed snapshot preserves the request and its ordered per-target
+reconciliation. Full reconciliation records one generic request success; partial reconciliation,
+transport failure, and protocol failure each record one generic request failure. DELETE is not a
+data-transfer operation and records zero bytes. Object outcomes use the separate standalone DELETE
+lifecycle snapshot, whose terminal identities are:
+
+```text
+selected = accepted + failed + unattempted + unresolved
+attempted = accepted + failed + unresolved
+```
+
+On cancellation, the generator classifies the exact unread count as aggregate unattempted work in
+constant memory without reading the frozen manifest suffix, waiting indefinitely for an
+interrupt-ignoring input read, or retaining one recovery operation per identity. Buffered requests
+still retain their canonical targets for concrete recovery. If an assembler call fails, abort
+recovery includes its prior tail and every valid identity in the entire bounded input batch,
+including identities after an invalid entry; invalid entries remain aggregate unattempted work and
+no tentative request escapes the failed transaction. Request and object outcome counters commit
+under the same terminal-vs-unresolved lifecycle decision, so a completion which loses to the
+bounded drain cannot publish success or failure metrics for unresolved targets.
+
+The reconciler keys each response by object key plus requested version. Missing, duplicate,
+malformed, or unexpected identities are protocol defects: the request fails closed and every target
+is reported failed under the separate protocol classification. A service/transport failure likewise
+produces one operational failure for every request target.
 
 #### 1.2. Specific Types
 

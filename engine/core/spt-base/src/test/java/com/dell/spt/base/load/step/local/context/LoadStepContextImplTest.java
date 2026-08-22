@@ -12,6 +12,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
@@ -25,6 +26,9 @@ import com.dell.spt.base.item.op.OperationAssembler;
 import com.dell.spt.base.item.op.OperationAssemblyResult;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -44,6 +48,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
+import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -1184,6 +1189,40 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void batchResultDoesNotCarryDataBytesIntoFollowingStandaloneDelete() throws Exception {
+		testConfig.val("load-op-recycle-mode", false);
+		final TrackingMetricsContext trackingCtx = new TrackingMetricsContext(buildMetricsCtx("delete-batch-zero-bytes"));
+		final LoadStepContextImpl<Item, Operation<Item>> stepCtx = new LoadStepContextImpl<>(
+						"delete-batch-zero-bytes",
+						(LoadGenerator<Item, Operation<Item>>) generator,
+						(DummyStorageDriverMock<Item, Operation<Item>>) (DummyStorageDriverMock) mockDriver,
+						trackingCtx,
+						testConfig.configVal("load"),
+						false);
+
+		final DataOperation<DataItem> dataResult = newSuccDataOp("positive-byte-result", 73);
+		final var target = new DeleteTarget(
+						new IntegrityManifestDataItem("bucket", "delete-target", 41, "version-1"));
+		final var deleteResult = new DeleteRequestOperationImpl(
+						0, new DeleteRequest("bucket", Credential.NONE, List.of(target)));
+		deleteResult.completeDelete(
+						com.dell.spt.base.item.op.deletion.DeleteTransportResult.success(List.of(target)));
+
+		assertEquals(
+						2,
+						stepCtx.put(
+										List.of(
+														(Operation<Item>) (Operation<?>) dataResult,
+														(Operation<Item>) (Operation<?>) deleteResult),
+										0,
+										2));
+		assertEquals(73L, trackingCtx.byteCount.get());
+		assertEquals(2L, trackingCtx.successCount.get());
+	}
+
+	@Test
 	public void markListSuccessRecordsTimeToFirstByte() throws Exception {
 		testConfig.val("load-op-recycle-mode", false);
 		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("listTtfb");
@@ -1599,11 +1638,15 @@ public class LoadStepContextImplTest {
 
 		@Override
 		public void markSucc(final long bytes, final long duration, final long latency) {
+			successCount.incrementAndGet();
+			byteCount.addAndGet(bytes);
 			delegate.markSucc(bytes, duration, latency);
 		}
 
 		@Override
 		public void markSucc(final long bytes, final long duration, final long latency, final long ttfb) {
+			successCount.incrementAndGet();
+			byteCount.addAndGet(bytes);
 			singleTtfb.set(ttfb);
 			delegate.markSucc(bytes, duration, latency, ttfb);
 		}

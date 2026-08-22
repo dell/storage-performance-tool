@@ -43,6 +43,16 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	}
 
 	/**
+	 * Returns input identities classified as unattempted in aggregate, without materializing one
+	 * recovery operation per unread identity.
+	 *
+	 * <p>The compatibility default preserves generators which recover only concrete operations.
+	 */
+	default long aggregateUnattemptedItemCount() {
+		return 0;
+	}
+
+	/**
 	 * Enqueues the task for further recycling.
 	 *
 	 * @param op the task to recycle
