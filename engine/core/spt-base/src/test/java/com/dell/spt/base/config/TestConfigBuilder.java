@@ -267,6 +267,7 @@ public class TestConfigBuilder {
 		integrity.put("input", integrityInput);
 		Map<String, Object> integritySelection = new HashMap<>();
 		integritySelection.put("maxCount", 0L);
+		integritySelection.put("requireNonEmpty", false);
 		integrity.put("selection", integritySelection);
 		storage.put("integrity", integrity);
 

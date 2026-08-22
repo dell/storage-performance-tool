@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class IntegrityConfigParserTest {
@@ -128,12 +129,62 @@ class IntegrityConfigParserTest {
 						() -> IntegrityConfig.validateLoadStep(disabled));
 	}
 
+	@Test
+	void nonemptySelectionPolicyIsExplicitAndListOnly() {
+		final var defaults = TestConfigBuilder.config();
+		assertFalse(IntegrityConfig.requiresNonEmptySelection(defaults.configVal("storage")));
+
+		final var list = metadataStep("list");
+		list.val("storage-integrity-selection-requireNonEmpty", true);
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(list));
+		list.val("item-output-file", "verify-input.csv");
+		list.val("item-input-file", "");
+		list.val("load-op-limit-count", 0L);
+		list.val("load-step-limit-time", 0L);
+		list.val("load-step-limit-size", 0L);
+		IntegrityConfig.validateLoadStep(list);
+		assertTrue(IntegrityConfig.requiresNonEmptySelection(list.configVal("storage")));
+
+		record UnsafeDiscoveryInput(String path, Object value) {}
+		for (final var unsafeDiscoveryInput : List.of(
+				new UnsafeDiscoveryInput("item-input-file", "/engine-visible/narrow.csv"),
+				new UnsafeDiscoveryInput("load-op-limit-count", 1L),
+				new UnsafeDiscoveryInput("load-step-limit-time", "1s"),
+				new UnsafeDiscoveryInput("load-step-limit-size", 1L))) {
+			final var unsafeList = guardedListStep();
+			unsafeList.val(unsafeDiscoveryInput.path(), unsafeDiscoveryInput.value());
+			assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(unsafeList),
+						unsafeDiscoveryInput.path());
+		}
+
+		final var read = metadataStep("read");
+		read.val("storage-integrity-selection-requireNonEmpty", true);
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(read));
+
+		final var disabled = TestConfigBuilder.config();
+		disabled.val("storage-integrity-selection-requireNonEmpty", true);
+		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(disabled));
+	}
+
 	private static com.github.akurilov.confuse.Config metadataStep(final String opType) {
 		final var config = TestConfigBuilder.config();
 		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		config.val("storage-integrity-input-provenance", "external");
 		config.val("load-op-type", opType);
+		return config;
+	}
+
+	private static com.github.akurilov.confuse.Config guardedListStep() {
+		final var config = metadataStep("list");
+		config.val("storage-integrity-selection-requireNonEmpty", true);
+		config.val("item-output-file", "verify-input.csv");
+		config.val("item-input-file", "");
+		config.val("load-op-limit-count", 0L);
+		config.val("load-step-limit-time", 0L);
+		config.val("load-step-limit-size", 0L);
 		return config;
 	}
 }

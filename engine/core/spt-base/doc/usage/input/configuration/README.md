@@ -167,6 +167,20 @@ publishing its completion record. The timed standalone DELETE phase then sets
 file. `load.op.limit.count` is intentionally absent from the DELETE phase because its unit would be
 logical requests after batching, not selected object identities.
 
+For guarded existing-prefix finite DELETE, a metadata-mode LIST step writes the complete current-key
+inventory and sets `storage.integrity.selection.maxCount` for the canonical global cap plus
+`storage.integrity.selection.requireNonEmpty=true`. The latter is valid only for metadata LIST and
+defaults to false so ordinary discovery retains its existing empty-result behavior. When enabled,
+aggregation refuses a zero selected count and removes staging before publishing completion; the
+following DELETE step therefore cannot start or mutate storage. A successful LIST completion records
+source, unique, and selected counts, the selection SHA-256, and LIST-step provenance. Metadata LIST
+also rejects any delimiter-derived shard or response key outside its immutable root prefix and
+removes incomplete per-node artifacts. The DELETE step consumes that committed manifest with
+`engine_step` provenance. LIST and DELETE remain separate steps,
+so discovery is setup and does not enter DELETE request timing. Only current-key LIST is used; version
+and delete-marker discovery are outside this mode. The namespace must remain quiescent because a
+concurrent writer can replace a frozen current-key identity before DELETE.
+
 One standalone `DeleteRequestOperation` is one request metric and owns its entire immutable target
 list. Its compatibility `item()` accessor is only the first target and must not be used for batch
 execution or output. A completed snapshot preserves the request and its ordered per-target
@@ -283,6 +297,7 @@ disabled by default:
 | `storage.integrity.input.provenance` | `none` | `none`, `engine_step`, `cli_stager`, or `external`; metadata READ/DELETE must choose a non-`none` source |
 | `storage.integrity.input.expectedProducerId` | empty | Exact producing step ID, or the CLI stager ID, when that provenance requires completion evidence |
 | `storage.integrity.selection.maxCount` | `0` | Deterministic maximum after LIST discovery; `0` selects all discovered records |
+| `storage.integrity.selection.requireNonEmpty` | `false` | Metadata LIST only. Fail before completion publication when the canonical selected inventory is empty; guarded existing-prefix DELETE enables it |
 
 `engine_step` requires the matching manifest completion JSON from the named
 CREATE or LIST step. `cli_stager` requires producer ID

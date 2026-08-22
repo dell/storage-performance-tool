@@ -311,6 +311,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (itemOutputFile != null && !itemOutputFile.isEmpty()) {
 			if (integrityConfig.enabled()) {
 				final boolean requireExactOutputCount = IntegrityConfig.requiresExactOutputCount(storageConfig);
+				final boolean requireNonEmptySelection = IntegrityConfig.requiresNonEmptySelection(storageConfig);
 				final long recordLimit;
 				if (OpType.LIST.equals(opType)) {
 					recordLimit = storageConfig.configVal("integrity").configVal("selection").longVal("maxCount");
@@ -322,7 +323,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				itemOutputFileAggregators.add(
 								new CsvArtifactAggregator(
 												loadStepId(), fileMgrs, configSlices, itemOutputFile, config.longVal("run-id"), recordLimit,
-												opType, requireExactOutputCount));
+												opType, requireExactOutputCount, requireNonEmptySelection));
 			} else {
 				itemOutputFileAggregators.add(
 								new ItemOutputFileAggregator(loadStepId(), fileMgrs, configSlices, itemOutputFile));

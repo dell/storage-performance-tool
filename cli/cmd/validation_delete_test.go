@@ -10,20 +10,67 @@ import (
 )
 
 type deleteValidationCase struct {
-	name       string
-	itemsFile  string
-	bucket     string
-	batchSize  int
-	duration   string
-	prefix     string
-	cleanup    bool
-	wantDetail string
+	name             string
+	itemsFile        string
+	bucket           string
+	batchSize        int
+	duration         string
+	prefix           string
+	prefixSet        bool
+	deleteExisting   bool
+	allowEmptyPrefix bool
+	cleanup          bool
+	wantDetail       string
 }
 
 func TestValidateDeleteManifestFlags(t *testing.T) {
 	tests := []deleteValidationCase{
 		{name: "seeded default", bucket: "owned", batchSize: 100},
 		{name: "seeded prefix remains owned", bucket: "owned", prefix: "team/root/", batchSize: 100},
+		{
+			name: "guarded existing prefix", bucket: "existing", prefix: "team/root/", prefixSet: true,
+			deleteExisting: true, batchSize: 100,
+		},
+		{
+			name: "existing prefix requires exact bucket", prefix: "team/root/", prefixSet: true,
+			deleteExisting: true, batchSize: 100, wantDetail: "--bucket",
+		},
+		{
+			name: "whole bucket double opt in", bucket: "existing", prefixSet: true,
+			deleteExisting: true, allowEmptyPrefix: true, batchSize: 100,
+		},
+		{
+			name: "existing prefix requires explicit prefix flag", bucket: "existing",
+			deleteExisting: true, batchSize: 100, wantDetail: "requires an explicit --prefix",
+		},
+		{
+			name: "empty prefix requires second opt in", bucket: "existing", prefixSet: true,
+			deleteExisting: true, batchSize: 100, wantDetail: "--allow-empty-prefix",
+		},
+		{
+			name: "slash prefix cannot alias whole bucket", bucket: "existing", prefix: "/", prefixSet: true,
+			deleteExisting: true, batchSize: 100, wantDetail: "must not start with '/'",
+		},
+		{
+			name: "leading slash cannot change exact prefix", bucket: "existing", prefix: "/team/root/", prefixSet: true,
+			deleteExisting: true, allowEmptyPrefix: true, batchSize: 100, wantDetail: "must not start with '/'",
+		},
+		{
+			name: "empty prefix override requires destructive mode", bucket: "owned",
+			allowEmptyPrefix: true, batchSize: 100, wantDetail: "requires --delete-existing",
+		},
+		{
+			name: "manifest conflicts with existing source", itemsFile: "delete.csv", bucket: "existing",
+			deleteExisting: true, batchSize: 1, wantDetail: "mutually exclusive",
+		},
+		{
+			name: "existing source rejects cleanup", bucket: "existing", prefix: "team/root/", prefixSet: true,
+			deleteExisting: true, cleanup: true, batchSize: 1, wantDetail: "cannot be used with --cleanup",
+		},
+		{
+			name: "existing duration deferred", bucket: "existing", prefix: "team/root/", prefixSet: true,
+			deleteExisting: true, duration: "1m", batchSize: 1, wantDetail: "finite count mode",
+		},
 		{name: "seeded duration deferred", bucket: "owned", batchSize: 100, duration: "1m", wantDetail: "seeded finite count mode"},
 		{name: "optional bucket assertion omitted", itemsFile: "delete.csv", batchSize: 1},
 		{name: "optional bucket assertion present", itemsFile: "delete.csv", bucket: "expected", batchSize: 100},
@@ -58,6 +105,45 @@ func TestDeleteBatchSizeFlagIsDeleteOnly(t *testing.T) {
 	}
 }
 
+func TestDeleteExistingSourceFlagsAreDeleteOnly(t *testing.T) {
+	for _, flag := range []string{flagDeleteExisting, flagAllowEmptyPrefix} {
+		cmd := deleteValidationCommand(deleteValidationCase{bucket: "b", batchSize: 2})
+		if err := cmd.Flags().Set(flag, "true"); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidateRunCommand(cmd, []string{WorkloadTypeRead})
+		if err == nil || !strings.Contains(err.Error(), "not supported for read") {
+			t.Fatalf("ValidateRunCommand() for --%s error = %v", flag, err)
+		}
+	}
+}
+
+func TestDeleteExistingRejectsAllVersionAndEmptySelectionOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		flag       string
+		value      string
+		wantDetail string
+	}{
+		{name: "all versions", flag: flagVersions, value: scenario.VersionsAll, wantDetail: "not supported for delete"},
+		{name: "empty selection", flag: "allow-empty-selection", value: "true", wantDetail: "not supported for delete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := deleteValidationCommand(deleteValidationCase{
+				bucket: "existing", prefix: "guarded/", prefixSet: true,
+				deleteExisting: true, batchSize: 1,
+			})
+			if err := cmd.Flags().Set(test.flag, test.value); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateRunCommand(cmd, []string{WorkloadTypeDelete})
+			if err == nil || !strings.Contains(err.Error(), test.wantDetail) {
+				t.Fatalf("ValidateRunCommand() error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
+}
+
 func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("endpoint", "http://s3.example.com", "")
@@ -67,7 +153,20 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().String("bucket", test.bucket, "")
 	cmd.Flags().String("items-file", test.itemsFile, "")
 	cmd.Flags().String("prefix", test.prefix, "")
+	if test.prefixSet {
+		_ = cmd.Flags().Set("prefix", test.prefix)
+	}
+	cmd.Flags().Bool("delete-existing", false, "")
+	cmd.Flags().Bool("allow-empty-prefix", false, "")
+	if test.deleteExisting {
+		_ = cmd.Flags().Set("delete-existing", "true")
+	}
+	if test.allowEmptyPrefix {
+		_ = cmd.Flags().Set("allow-empty-prefix", "true")
+	}
 	cmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "")
+	cmd.Flags().String(flagVersions, scenario.VersionsCurrent, "")
+	cmd.Flags().Bool("allow-empty-selection", false, "")
 	_ = cmd.Flags().Set(flagDeleteBatchSize, strconv.Itoa(test.batchSize))
 	cmd.Flags().Int("object-count", 0, "")
 	cmd.Flags().String("duration", test.duration, "")

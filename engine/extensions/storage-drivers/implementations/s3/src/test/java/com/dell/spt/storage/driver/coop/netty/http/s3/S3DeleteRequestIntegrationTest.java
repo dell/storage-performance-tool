@@ -5,6 +5,8 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.S3DeleteRequestTest
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
@@ -15,6 +17,9 @@ import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.control.run.RunImpl;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.integrity.IntegrityInputProvenance;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -47,12 +52,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.script.ScriptEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 /** Real-driver canary backed only by a deterministic loopback S3 protocol endpoint. */
@@ -64,6 +71,8 @@ final class S3DeleteRequestIntegrationTest {
 	private final ExecutorService executor = Executors.newSingleThreadExecutor();
 	private HttpServer server;
 	private volatile String multiDeleteResponse;
+	private volatile String listResponse;
+	private volatile Function<CapturedRequest, String> listResponseFactory;
 	private volatile int multiDeleteStatus = 200;
 	private final AtomicInteger putResponseCount = new AtomicInteger();
 
@@ -326,6 +335,324 @@ final class S3DeleteRequestIntegrationTest {
 		assertEquals(1, delete.body().split("<VersionId>returned-version</VersionId>", -1).length - 1);
 	}
 
+	@Test
+	void guardedExistingPrefixDiscoveryFreezesCappedCurrentKeysBeforeTimedDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 901;
+		final String scenarioId = tempDir.getFileName().toString();
+		final String listStep = scenarioId + "-list";
+		final String deleteStep = scenarioId + "-delete";
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		listResponse = "<ListBucketResult>"
+						+ "<Contents><Key>guarded/zulu</Key><Size>7</Size></Contents>"
+						+ "<Contents><Key>guarded/alpha</Key><Size>9</Size></Contents>"
+						+ "<Contents><Key>guarded/bravo</Key><Size>8</Size></Contents>"
+						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+		final String scenario = existingPrefixScenario(
+						manifest, listStep, deleteStep, 2);
+
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			metrics.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			new RunImpl("guarded existing-prefix DELETE canary", scenario, engine, runId).run();
+
+			final var listTerminal = metrics.getTerminalSteps().stream()
+							.filter(entry -> !entry.distributed && listStep.equals(entry.stepId))
+							.findFirst()
+							.orElseThrow();
+			final var deleteTerminal = metrics.getTerminalSteps().stream()
+							.filter(entry -> !entry.distributed && deleteStep.equals(entry.stepId))
+							.findFirst()
+							.orElseThrow();
+			assertEquals(OpType.LIST, listTerminal.opType);
+			assertEquals(OpType.DELETE, deleteTerminal.opType);
+			assertEquals(1, deleteTerminal.successCount,
+							"timed metrics must contain one DELETE request, not discovery operations");
+		}
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, runId, IntegrityInputProvenance.ENGINE_STEP, listStep);
+		assertEquals(3, completion.sourceRecordCount());
+		assertEquals(3, completion.uniqueRecordCount());
+		assertEquals(2, completion.selectedRecordCount());
+		assertFalse(completion.manifestSha256().isBlank());
+		final var frozen = new ArrayList<IntegrityManifestDataItem>();
+		try (final var input = new IntegrityManifestItemInput(manifest)) {
+			assertEquals(2, input.get(frozen, 2));
+		}
+		assertEquals(List.of("guarded/alpha", "guarded/bravo"),
+						frozen.stream().map(IntegrityManifestDataItem::name).toList());
+		assertTrue(frozen.stream().allMatch(item -> item.versionId() == null));
+
+		final int listIndex = requestIndex("GET", "list-type=2");
+		final int deleteIndex = requestIndex("POST", "delete");
+		assertTrue(listIndex >= 0 && deleteIndex > listIndex,
+						"DELETE request must follow complete frozen discovery");
+		final CapturedRequest list = requests.get(listIndex);
+		assertEquals("/bucket", list.rawPath());
+		assertEquals("list-type=2&prefix=guarded%2F&max-keys=1000", list.rawQuery());
+		final String body = requests.get(deleteIndex).body();
+		assertTrue(body.contains("<Key>guarded/alpha</Key>"));
+		assertTrue(body.contains("<Key>guarded/bravo</Key>"));
+		assertFalse(body.contains("guarded/zulu"));
+		assertFalse(body.contains("<VersionId>"), "existing-prefix mode is current-key only");
+	}
+
+	@Test
+	void outOfPrefixDiscoveryResponseStopsBeforeAnyDeleteRequest(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 903;
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		listResponse = "<ListBucketResult>"
+						+ "<Contents><Key>guarded/inside</Key><Size>7</Size></Contents>"
+						+ "<Contents><Key>outside/untrusted</Key><Size>8</Size></Contents>"
+						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+		final String scenario = existingPrefixScenario(
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0);
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			assertThrows(
+							IntegrityTerminalException.class,
+							() -> new RunImpl("out-of-prefix guarded discovery", scenario, engine, runId).run());
+		}
+		final List<CapturedRequest> listRequests = requests.stream()
+						.filter(request -> "GET".equals(request.method())
+										&& request.rawQuery() != null
+										&& request.rawQuery().contains("list-type=2"))
+						.toList();
+		assertEquals(1, listRequests.size());
+		assertEquals("/bucket", listRequests.get(0).rawPath());
+		assertEquals(
+						"list-type=2&prefix=guarded%2F&max-keys=1000",
+						listRequests.get(0).rawQuery());
+		assertEquals(
+						0,
+						requests.stream()
+										.filter(request -> "DELETE".equals(request.method())
+														|| "POST".equals(request.method()))
+										.count());
+		assertFalse(Files.exists(manifest));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void outOfPrefixDelimiterProbeStopsBeforeShardDiscoveryOrDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 904;
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		listResponse = "<ListBucketResult>"
+						+ "<CommonPrefixes><Prefix>outside/a/</Prefix></CommonPrefixes>"
+						+ "<CommonPrefixes><Prefix>outside/b/</Prefix></CommonPrefixes>"
+						+ "<CommonPrefixes><Prefix>outside/c/</Prefix></CommonPrefixes>"
+						+ "<CommonPrefixes><Prefix>outside/d/</Prefix></CommonPrefixes>"
+						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+		final String scenario = existingPrefixScenario(
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0)
+						.replace("\"limit\": {\"concurrency\": 1}", "\"limit\": {\"concurrency\": 4}");
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			final var failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> new RunImpl("out-of-prefix delimiter probe", scenario, engine, runId).run());
+			Throwable cause = failure;
+			while (cause.getCause() != null) {
+				cause = cause.getCause();
+			}
+			assertTrue(cause.getMessage().contains("outside requested prefix"));
+		}
+		final List<CapturedRequest> listRequests = requests.stream()
+						.filter(request -> "GET".equals(request.method()))
+						.toList();
+		assertEquals(1, listRequests.size());
+		assertEquals("/bucket", listRequests.get(0).rawPath());
+		assertEquals(
+						"list-type=2&prefix=guarded%2F&delimiter=%2F&max-keys=1000",
+						listRequests.get(0).rawQuery());
+		assertEquals(
+						0,
+						requests.stream()
+										.filter(request -> "DELETE".equals(request.method())
+														|| "POST".equals(request.method()))
+										.count());
+		assertFalse(Files.exists(manifest));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	@Timeout(30)
+	void integrityDiscoveryKeepsStartupPartitionAfterAdaptiveThreshold(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 905;
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final AtomicInteger delimiterProbeCount = new AtomicInteger();
+		final AtomicInteger listPageCount = new AtomicInteger();
+		listResponseFactory = request -> {
+			if (request.rawQuery() != null && request.rawQuery().contains("delimiter=%2F")) {
+				if (delimiterProbeCount.incrementAndGet() == 1) {
+					return "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+				}
+				return "<ListBucketResult>"
+								+ "<CommonPrefixes><Prefix>outside/a/</Prefix></CommonPrefixes>"
+								+ "<CommonPrefixes><Prefix>outside/b/</Prefix></CommonPrefixes>"
+								+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
+			}
+			final int page = listPageCount.incrementAndGet();
+			final String pageBody = "<ListBucketResult>"
+							+ "<Contents><Key>guarded/alpha-" + page + "</Key><Size>9</Size></Contents>"
+							+ "<Contents><Key>guarded/zulu-" + page + "</Key><Size>7</Size></Contents>";
+			if (page <= 50) {
+				return pageBody
+								+ "<NextContinuationToken>page-" + page + "</NextContinuationToken>"
+								+ "<IsTruncated>true</IsTruncated></ListBucketResult>";
+			}
+			return pageBody + "<IsTruncated>false</IsTruncated></ListBucketResult>";
+		};
+		final String scenario = existingPrefixScenario(
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 2)
+						.replace("\"limit\": {\"concurrency\": 1}", "\"limit\": {\"concurrency\": 4}")
+						.replace(
+										"\"include_versions\": false, \"max_keys\": 1000}",
+										"\"include_versions\": false, \"max_keys\": 1000, "
+														+ "\"sharding\": {\"mode\": \"static\", \"radix\": 1, "
+														+ "\"delimiters\": \"/\"}}");
+		final Config config = scenarioConfig(runId);
+		config.val("load-op-limit-count", 1);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			new RunImpl("immutable integrity LIST partition", scenario, engine, runId).run();
+		}
+		final List<CapturedRequest> listRequests = requests.stream()
+						.filter(request -> "GET".equals(request.method()))
+						.toList();
+		assertEquals(52, listRequests.size());
+		assertEquals(51, listPageCount.get());
+		assertEquals(1, delimiterProbeCount.get());
+		assertEquals(
+						"list-type=2&prefix=guarded%2F&delimiter=%2F&max-keys=1000",
+						listRequests.get(0).rawQuery());
+		assertEquals("list-type=2&prefix=guarded%2F&max-keys=1000", listRequests.get(1).rawQuery());
+		assertTrue(listRequests.get(51).rawQuery().contains("continuation-token=page-50"));
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest,
+						runId,
+						IntegrityInputProvenance.ENGINE_STEP,
+						tempDir.getFileName() + "-list");
+		assertEquals(102, completion.sourceRecordCount());
+		assertEquals(2, completion.selectedRecordCount());
+		assertEquals(1, requests.stream().filter(request -> "POST".equals(request.method())).count());
+		assertEquals(0, requests.stream().filter(request -> "DELETE".equals(request.method())).count());
+	}
+
+	@Test
+	void emptyGuardedDiscoveryStopsBeforeAnyDeleteRequest(@TempDir final Path tempDir)
+					throws Exception {
+		final long runId = 902;
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		listResponse = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+		final String scenario = existingPrefixScenario(
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0);
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			final var failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> new RunImpl("empty guarded discovery", scenario, engine, runId).run());
+			assertTrue(failure.getMessage().contains("zero object identities"));
+		}
+		assertEquals(0, requests.stream().filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method())).count());
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	private String existingPrefixScenario(
+					final Path manifest,
+					final String listStep,
+					final String deleteStep,
+					final long maxCount) {
+		final String manifestPath = manifest.toString().replace("\\", "\\\\").replace("\"", "\\\"");
+		return """
+						var verifyInputFile = "%s";
+						Load.config({
+						  "storage": {
+						    "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						    "integrity": {"mode": "metadata", "algorithm": "sha256",
+						      "input": {"provenance": "none", "expectedProducerId": ""},
+						      "selection": {"maxCount": %d, "requireNonEmpty": true}}
+						  },
+						  "item": {"type": "path", "input": {"file": "", "path": "/bucket"},
+						    "naming": {"type": "random", "radix": 36, "prefix": "guarded/"},
+						    "output": {"file": verifyInputFile}},
+						  "load": {"batch": {"size": 1000}, "op": {"type": "list",
+						    "list": {"delimiter": "", "fetch_metadata": true,
+						      "include_versions": false, "max_keys": 1000},
+						    "limit": {"count": 0, "rate": 0}, "wait": {"finish": true}},
+						    "step": {"id": "%s", "limit": {"size": 0, "time": 0}}},
+						  "output": {"metrics": {"summary": {"persist": true}}}
+						}).run();
+						DeleteLoad.config({
+						  "storage": {
+						    "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						    "integrity": {"mode": "metadata", "algorithm": "sha256",
+						      "input": {"provenance": "engine_step", "expectedProducerId": "%s"}}
+						  },
+						  "item": {"type": "data", "input": {"file": verifyInputFile}},
+						  "load": {"batch": {"size": 2}, "op": {"type": "delete",
+						    "delete": {"standalone": true, "batchSize": 2},
+						    "recycle": {"mode": false}, "retry": false, "wait": {"finish": true}},
+						    "step": {"id": "%s"}},
+						  "output": {"metrics": {"summary": {"persist": true}}}
+						}).run();
+						""".formatted(manifestPath, maxCount, listStep, listStep, deleteStep);
+	}
+
+	private Config scenarioConfig(final long runId) throws IOException {
+		final Config driverConfig = S3StorageDriverTest.baseConfig(
+						false, 4, false, null, "127.0.0.1");
+		final Config defaults = new BundledDefaultsProvider().config("-", driverConfig.schema());
+		final Config config = ConfigUtil.merge("-", List.of(defaults, driverConfig));
+		config.val("run-id", runId);
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		config.val("output-color", false);
+		return config;
+	}
+
+	private int requestIndex(final String method, final String queryToken) {
+		for (int index = 0; index < requests.size(); index++) {
+			final CapturedRequest request = requests.get(index);
+			if (method.equals(request.method())
+							&& request.rawQuery() != null
+							&& request.rawQuery().contains(queryToken)) {
+				return index;
+			}
+		}
+		return -1;
+	}
+
 	private static Path copyContractResource(final Path tempDir, final String name)
 					throws IOException {
 		final Path target = tempDir.resolve(name);
@@ -439,7 +766,19 @@ final class S3DeleteRequestIntegrationTest {
 						exchange.getRequestHeaders().getFirst("Authorization"),
 						new String(requestBody, StandardCharsets.UTF_8));
 		requests.add(request);
-		if ("PUT".equals(request.method())) {
+		if ("GET".equals(request.method())
+						&& request.rawQuery() != null
+						&& request.rawQuery().contains("list-type=2")) {
+			final String responseXml = listResponseFactory != null
+							? listResponseFactory.apply(request)
+							: listResponse == null
+											? "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"
+											: listResponse;
+			final byte[] responseBody = responseXml.getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().set("Content-Type", "application/xml");
+			exchange.sendResponseHeaders(200, responseBody.length);
+			exchange.getResponseBody().write(responseBody);
+		} else if ("PUT".equals(request.method())) {
 			if (putResponseCount.incrementAndGet() == 1) {
 				exchange.getResponseHeaders().set("x-amz-version-id", "returned-version");
 			}

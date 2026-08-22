@@ -36,6 +36,8 @@ type Params struct {
 
 	// Standalone DELETE workload. The public workload remains registry-gated until qualification.
 	DeleteBatchSize        int
+	DeleteExisting         bool
+	AllowEmptyPrefix       bool
 	SelectionSourceCount   int
 	SelectionUniqueCount   int
 	SelectionSelectedCount int

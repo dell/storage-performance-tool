@@ -382,6 +382,53 @@ func TestOrchestratorIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *test
 	}
 }
 
+func TestOrchestratorExistingPrefixDeleteCapabilityFailureStopsBeforeRunAndCleansUp(t *testing.T) {
+	var runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
+				`"input":{"provenance":"string","expectedProducerId":"string"},` +
+				`"selection":{"maxCount":"long"}}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	err := orchestrator.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDM.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+}
+
 func TestOrchestratorCancellationDuringIntegrityCapabilityStopsBeforeRunAndCleansUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var runPosts atomic.Int64

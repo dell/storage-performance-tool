@@ -5,6 +5,7 @@ Copyright © 2026 Dell Technologies
 package tui
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 // integritySchemaJSON mirrors the shape the engine serves at /config/schema: a nested document whose
@@ -27,7 +29,7 @@ const integritySchemaJSON = `{
         "provenance": "string"
       },
       "mode": "string",
-      "selection": {"maxCount": "long"}
+      "selection": {"maxCount": "long", "requireNonEmpty": "boolean"}
     }
   },
   "run": {"id": "long"}
@@ -49,11 +51,80 @@ func schemaServer(t *testing.T, status int, body string) *httptest.Server {
 }
 
 func TestVerifyIntegrityCapability_ValidSchema(t *testing.T) {
-	server := schemaServer(t, http.StatusOK, integritySchemaJSON)
+	server := schemaServer(t, http.StatusOK, `{
+		"storage":{"integrity":{
+			"algorithm":"string",
+			"input":{"expectedProducerId":"string","provenance":"string"},
+			"mode":"string",
+			"selection":{"maxCount":"long"}
+		}}
+	}`)
 	defer server.Close()
 
 	if err := NewSptAPIClient(server.URL).VerifyIntegrityCapability("ghcr.io/dell/spt:test"); err != nil {
-		t.Fatalf("expected a valid schema to pass, got: %v", err)
+		t.Fatalf("legacy verification schema should remain compatible, got: %v", err)
+	}
+}
+
+func TestScenarioIntegrityCapabilityPathsAreScopedToTheSelectedWorkload(t *testing.T) {
+	containsPath := func(paths []string, want string) bool {
+		for _, path := range paths {
+			if path == want {
+				return true
+			}
+		}
+		return false
+	}
+	if containsPath(constants.RequiredIntegritySchemaPaths, constants.IntegritySelectionNonEmptyPath) {
+		t.Fatalf("legacy verification paths unexpectedly require %q", constants.IntegritySelectionNonEmptyPath)
+	}
+	verification := scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify}
+	if !scenario.RequiresIntegrityCapability(verification) {
+		t.Fatal("write verification should require the integrity capability probe")
+	}
+	if containsPath(scenario.IntegritySchemaPathsFor(verification), constants.IntegritySelectionNonEmptyPath) {
+		t.Fatal("write verification inherited the delete-existing-only nonempty guard")
+	}
+	existingDelete := scenario.Params{WorkloadType: scenario.WorkloadTypeDelete, DeleteExisting: true}
+	if !scenario.RequiresIntegrityCapability(existingDelete) {
+		t.Fatal("existing-prefix DELETE should require the integrity capability probe")
+	}
+	if !scenario.RequiresIntegrityRuntimeIdentity(existingDelete) {
+		t.Fatal("existing-prefix DELETE should require immutable runtime identity")
+	}
+	if !containsPath(scenario.IntegritySchemaPathsFor(existingDelete), constants.IntegritySelectionNonEmptyPath) {
+		t.Fatalf("existing-prefix DELETE paths omitted %q", constants.IntegritySelectionNonEmptyPath)
+	}
+	seededDelete := scenario.Params{WorkloadType: scenario.WorkloadTypeDelete}
+	if scenario.RequiresIntegrityCapability(seededDelete) ||
+		scenario.RequiresIntegrityRuntimeIdentity(seededDelete) ||
+		len(scenario.IntegritySchemaPathsFor(seededDelete)) != 0 {
+		t.Fatal("seeded DELETE unexpectedly activated the existing-prefix capability probe")
+	}
+}
+
+func TestVerifyScenarioIntegrityCapability_ExistingDeleteRequiresNonemptyGuard(t *testing.T) {
+	body := `{"storage":{"integrity":{"mode":"string","algorithm":"string",
+		"input":{"provenance":"string","expectedProducerId":"string"},
+		"selection":{"maxCount":"long"}}}}`
+	server := schemaServer(t, http.StatusOK, body)
+	defer server.Close()
+
+	err := NewSptAPIClient(server.URL).VerifyScenarioIntegrityCapabilityContext(
+		context.Background(), "", scenario.Params{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		})
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("existing-prefix capability error = %v, want ErrEngineIncompatible", err)
+	}
+	var incompatible *IncompatibleEngineError
+	if !errors.As(err, &incompatible) {
+		t.Fatalf("existing-prefix capability error type = %T", err)
+	}
+	if len(incompatible.MissingPaths) != 1 ||
+		incompatible.MissingPaths[0] != constants.IntegritySelectionNonEmptyPath {
+		t.Fatalf("existing-prefix missing paths = %v", incompatible.MissingPaths)
 	}
 }
 
@@ -64,7 +135,7 @@ func TestVerifyIntegrityCapability_ArbitraryLeafDescriptorsAccepted(t *testing.T
 		"algorithm": null,
 		"input": {"expectedProducerId": 17, "provenance": ["anything"]},
 		"mode": {"nested": "still-present"},
-		"selection": {"maxCount": "anything"}
+		"selection": {"maxCount": "anything", "requireNonEmpty": {"descriptor": true}}
 	}}}`
 	server := schemaServer(t, http.StatusOK, body)
 	defer server.Close()
@@ -88,7 +159,7 @@ func TestVerifyIntegrityCapability_MissingPaths(t *testing.T) {
 		{
 			name: "integrity present but input subtree absent",
 			body: `{"storage":{"integrity":{"mode":"string","algorithm":"string",
-				"selection":{"maxCount":"long"}}}}`,
+				"selection":{"maxCount":"long","requireNonEmpty":"boolean"}}}}`,
 			wantMissing: []string{
 				constants.IntegrityInputProvenancePath,
 				constants.IntegrityInputProducerIDPath,
@@ -97,7 +168,7 @@ func TestVerifyIntegrityCapability_MissingPaths(t *testing.T) {
 		{
 			name: "single leaf absent",
 			body: `{"storage":{"integrity":{"mode":"string","algorithm":"string",
-				"input":{"provenance":"string"},"selection":{"maxCount":"long"}}}}`,
+				"input":{"provenance":"string"},"selection":{"maxCount":"long","requireNonEmpty":"boolean"}}}}`,
 			wantMissing: []string{constants.IntegrityInputProducerIDPath},
 		},
 		{

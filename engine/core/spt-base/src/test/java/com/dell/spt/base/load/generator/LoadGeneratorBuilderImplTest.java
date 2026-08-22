@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
@@ -244,15 +245,15 @@ public class LoadGeneratorBuilderImplTest {
 	void integrityDiscoveryRejectsIncompleteDelimiterPartitions() throws Exception {
 		final var incompleteResults = List.of(
 						new ListDiscoveryProbe.DiscoverResult(
-										List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+										List.of("campaign/!unicode/a/", "campaign/!unicode/b/", "campaign/!unicode/c/", "campaign/!unicode/d/"),
 										true,
 										false),
 						new ListDiscoveryProbe.DiscoverResult(
-										List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+										List.of("campaign/!unicode/a/", "campaign/!unicode/b/", "campaign/!unicode/c/", "campaign/!unicode/d/"),
 										false,
 										true),
 						new ListDiscoveryProbe.DiscoverResult(
-										List.of("campaign/a/", "campaign/b/"), false, false));
+										List.of("campaign/!unicode/a/", "campaign/!unicode/b/"), false, false));
 
 		for (final var result : incompleteResults) {
 			final var seeds = integrityListSeeds(result, null);
@@ -266,13 +267,27 @@ public class LoadGeneratorBuilderImplTest {
 	@Test
 	void integrityDiscoveryUsesProvenCompleteDelimiterPartition() throws Exception {
 		final var result = new ListDiscoveryProbe.DiscoverResult(
-						List.of("campaign/a/", "campaign/b/", "campaign/c/", "campaign/d/"),
+						List.of("campaign/!unicode/a/", "campaign/!unicode/b/", "campaign/!unicode/c/", "campaign/!unicode/d/"),
 						false,
 						false);
 
 		final var seeds = integrityListSeeds(result, null);
 
 		assertEquals(result.commonPrefixes(), seeds.stream().map(ListShard::prefix).toList());
+	}
+
+	@Test
+	void integrityDiscoveryRejectsDelimiterPrefixesOutsideImmutableRoot() {
+		final var result = new ListDiscoveryProbe.DiscoverResult(
+						List.of("outside/a/", "outside/b/", "outside/c/", "outside/d/"),
+						false,
+						false);
+
+		final var failure = assertThrows(
+						IllegalConfigurationException.class,
+						() -> integrityListSeeds(result, null));
+
+		assertTrue(failure.getMessage().contains("outside requested prefix"));
 	}
 
 	@Test

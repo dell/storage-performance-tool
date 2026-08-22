@@ -372,9 +372,17 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 
 func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error {
 	batchFlag := cmd.Flags().Lookup(flagDeleteBatchSize)
+	deleteExistingFlag := cmd.Flags().Lookup(flagDeleteExisting)
+	allowEmptyPrefixFlag := cmd.Flags().Lookup(flagAllowEmptyPrefix)
 	if workloadType != WorkloadTypeDelete {
 		if batchFlag != nil && batchFlag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteBatchSize, workloadType)
+		}
+		if deleteExistingFlag != nil && deleteExistingFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteExisting, workloadType)
+		}
+		if allowEmptyPrefixFlag != nil && allowEmptyPrefixFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagAllowEmptyPrefix, workloadType)
 		}
 		return nil
 	}
@@ -389,6 +397,42 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 	itemsFile := ""
 	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
 		itemsFile, _ = cmd.Flags().GetString("items-file")
+	}
+	deleteExisting := false
+	if deleteExistingFlag != nil {
+		deleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	}
+	allowEmptyPrefix := false
+	if allowEmptyPrefixFlag != nil {
+		allowEmptyPrefix, _ = cmd.Flags().GetBool(flagAllowEmptyPrefix)
+	}
+	if strings.TrimSpace(itemsFile) != "" && deleteExisting {
+		return errors.New("DELETE --items-file and --delete-existing are mutually exclusive source modes")
+	}
+	if allowEmptyPrefix && !deleteExisting {
+		return errors.New("DELETE --allow-empty-prefix requires --delete-existing")
+	}
+	if deleteExisting {
+		duration, _ := cmd.Flags().GetString("duration")
+		if strings.TrimSpace(duration) != "" {
+			return errors.New("DELETE existing-prefix finite count mode does not yet support --duration")
+		}
+		cleanup, _ := cmd.Flags().GetBool("cleanup")
+		if cleanup {
+			return errors.New("DELETE --delete-existing cannot be used with --cleanup because SPT did not create those objects")
+		}
+		prefixFlag := cmd.Flags().Lookup("prefix")
+		if prefixFlag == nil || !prefixFlag.Changed {
+			return errors.New("DELETE --delete-existing requires an explicit --prefix; use --prefix='' with --allow-empty-prefix only for intentional whole-bucket selection")
+		}
+		prefix, _ := cmd.Flags().GetString("prefix")
+		if prefix == "" && !allowEmptyPrefix {
+			return errors.New("DELETE whole-bucket selection requires both --prefix='' and --allow-empty-prefix")
+		}
+		if strings.HasPrefix(prefix, "/") {
+			return errors.New("DELETE existing-prefix --prefix must not start with '/' because S3 LIST removes that slash")
+		}
+		return nil
 	}
 	if strings.TrimSpace(itemsFile) == "" {
 		duration, _ := cmd.Flags().GetString("duration")

@@ -177,6 +177,18 @@ evidence. The following standalone DELETE step declares `engine_step` provenance
 CREATE step and consumes only the committed manifest. Consequently setup and DELETE keep separate
 step metrics, and a partial seed cannot enter timed DELETE.
 
+CLI guarded existing-prefix finite DELETE instead runs a completeness-preserving metadata-mode LIST
+for one exact bucket/prefix. LIST freezes canonical current-key identities, applies the global
+`storage.integrity.selection.maxCount` cap, and sets the normally disabled
+`storage.integrity.selection.requireNonEmpty` guard. Zero selected identities fail before completion
+publication. A delimiter-derived shard or returned identity outside the immutable LIST root prefix
+also fails and removes incomplete node artifacts, so the subsequent standalone DELETE cannot begin.
+Successful completion records the
+source/unique/selected counts, SHA-256 selection, and LIST-step provenance consumed by the DELETE
+step. Discovery and DELETE use separate step metrics; only the latter is timed as deletion. Versions
+and delete markers are not selected. Operators must keep the namespace quiescent because a
+concurrent write can replace a frozen current-key identity before deletion.
+
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.

@@ -98,6 +98,7 @@ final class S3AwsDeleteRequestIntegrationTest {
 		try (final var driver = newDriver()) {
 			final DeleteRequestOperation result = execute(
 							driver, operation(target("one", null), target("two", "version-2")));
+			awaitCompletionAccounting(driver);
 
 			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
 			final CapturedRequest request = onlyRequest("POST");
@@ -109,6 +110,16 @@ final class S3AwsDeleteRequestIntegrationTest {
 			assertEquals(1, driver.completedOpCount());
 			assertEquals(0, driver.activeOpCount());
 			assertTrue(result.duration() > 0);
+		}
+	}
+
+	private static void awaitCompletionAccounting(
+					final S3AwsStorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> driver)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while ((driver.completedOpCount() != 1 || driver.activeOpCount() != 0)
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(1);
 		}
 	}
 

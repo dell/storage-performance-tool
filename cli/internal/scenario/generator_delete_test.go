@@ -13,6 +13,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDeleteCLIContractFixtureMatchesPreparedRuntimeInputs(t *testing.T) {
@@ -268,6 +269,245 @@ func TestGenerateSeededDeleteScenarioUsesExplicitFiniteDefaults(t *testing.T) {
 	}
 	if got := generatedConfigValue(t, configs[0], "item", "naming", "prefix"); got != "spt-delete-881/" {
 		t.Fatalf("default seed namespace = %#v", got)
+	}
+}
+
+func TestGenerateExistingPrefixDeleteScenarioFreezesCurrentKeysBeforeTimedDelete(t *testing.T) {
+	generated, err := GenerateDeleteScenario(Params{
+		WorkloadType:    workload.Delete,
+		RunID:           882,
+		Bucket:          "existing-bucket",
+		Prefix:          "guarded/root/",
+		ObjectCount:     3,
+		Threads:         2,
+		S3Driver:        S3DriverNetty,
+		DeleteBatchSize: 2,
+		DeleteExisting:  true,
+		SelectionOrder:  SelectionOrderCanonical,
+		BaseTimestamp:   "20260822.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildStepPlanFromScenario(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Steps) != 2 || plan.Steps[0].Op != stepOpList || plan.Steps[1].Op != stepOpDelete {
+		t.Fatalf("existing-prefix DELETE plan = %+v, want discovery then delete", plan.Steps)
+	}
+
+	configs := parseGeneratedScenarioConfigs(t, generated)
+	if len(configs) != 2 {
+		t.Fatalf("existing-prefix DELETE configs = %d, want LIST and DELETE", len(configs))
+	}
+	discovery, deleteConfig := configs[0], configs[1]
+	if got := generatedConfigValue(t, discovery, "item", "input", "path"); got != "/existing-bucket" {
+		t.Fatalf("discovery bucket = %#v", got)
+	}
+	if got := generatedConfigValue(t, discovery, "item", "naming", "prefix"); got != "guarded/root/" {
+		t.Fatalf("discovery prefix = %#v", got)
+	}
+	if got := generatedConfigValue(t, discovery, "load", "batch", "size"); got != float64(defaultListBatchSize) {
+		t.Fatalf("discovery batch size = %#v, want shared default %d", got, defaultListBatchSize)
+	}
+	if got := generatedConfigValue(t, discovery, "load", "op", "list", "max_keys"); got != float64(defaultListBatchSize) {
+		t.Fatalf("discovery max keys = %#v, want shared default %d", got, defaultListBatchSize)
+	}
+	if got := generatedConfigValue(t, discovery, "load", "op", "list", "include_versions"); got != false {
+		t.Fatalf("existing-prefix version mode = %#v, want current-key listing", got)
+	}
+	if got := generatedConfigValue(t, discovery, "storage", "integrity", "selection", "maxCount"); got != float64(3) {
+		t.Fatalf("global discovered object cap = %#v, want 3", got)
+	}
+	if got := generatedConfigValue(t, discovery, "storage", "integrity", "selection", "requireNonEmpty"); got != true {
+		t.Fatalf("empty-discovery guard = %#v, want true", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "item", "input", "file"); got != "verifyInputFile" {
+		t.Fatalf("timed DELETE input = %#v, want frozen discovery manifest", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "storage", "integrity", "input", "provenance"); got != constants.IntegrityProvenanceEngineStep {
+		t.Fatalf("timed DELETE provenance = %#v", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "storage", "integrity", "input", "expectedProducerId"); got != plan.Steps[0].ID {
+		t.Fatalf("timed DELETE producer = %#v, want %q", got, plan.Steps[0].ID)
+	}
+	if _, ok := configPath(deleteConfig, "load", "op", "limit", "count"); ok {
+		t.Fatal("global object count was mapped to timed DELETE request-count limit")
+	}
+	if !strings.Contains(generated, "Discovery is setup and excluded from DELETE request timing") {
+		t.Fatalf("scenario omitted untimed discovery contract:\n%s", generated)
+	}
+}
+
+func TestGenerateWholeBucketDeleteExplicitlyOverridesInheritedPrefix(t *testing.T) {
+	params := Params{
+		WorkloadType:     workload.Delete,
+		RunID:            883,
+		Endpoint:         "http://127.0.0.1:9000",
+		Bucket:           "existing-bucket",
+		AllowEmptyPrefix: true,
+		DeleteExisting:   true,
+		Threads:          1,
+		DeleteBatchSize:  1,
+		SelectionOrder:   SelectionOrderCanonical,
+		EngineOverrides:  []string{"item.naming.prefix=unexpected/narrowing/"},
+		BaseTimestamp:    "20260822.120000.000",
+	}
+	defaultsYAML, err := GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defaults map[string]any
+	if err := yaml.Unmarshal(defaultsYAML, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	defaultPrefix, ok := configPath(defaults, "item", "naming", "prefix")
+	if !ok || defaultPrefix != "unexpected/narrowing/" {
+		t.Fatalf("test precondition: inherited prefix = %#v, present=%t\n%s", defaultPrefix, ok, defaultsYAML)
+	}
+
+	generated, err := GenerateDeleteScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery := parseGeneratedScenarioConfigs(t, generated)[0]
+	scenarioPrefix, ok := configPath(discovery, "item", "naming", "prefix")
+	if !ok {
+		t.Fatalf("whole-bucket scenario omitted the exact empty prefix and would inherit %#v:\n%s", defaultPrefix, generated)
+	}
+	// Load.config overlays the posted defaults. Rendering the empty leaf makes the effective
+	// discovery scope the whole exact bucket even when an advanced override supplied a prefix.
+	effectivePrefix := defaultPrefix
+	if ok {
+		effectivePrefix = scenarioPrefix
+	}
+	if effectivePrefix != "" {
+		t.Fatalf("whole-bucket effective prefix = %#v, want explicit empty string", effectivePrefix)
+	}
+}
+
+func TestGenerateExistingPrefixDeletePinsExhaustiveDiscoveryLimits(t *testing.T) {
+	params := Params{
+		WorkloadType:    workload.Delete,
+		RunID:           884,
+		Endpoint:        "http://127.0.0.1:9000",
+		Bucket:          "existing-bucket",
+		Prefix:          "guarded/",
+		DeleteExisting:  true,
+		Threads:         1,
+		DeleteBatchSize: 1,
+		SelectionOrder:  SelectionOrderCanonical,
+		EngineOverrides: []string{
+			"load.op.limit.count=1",
+			"load.step.limit.time=1s",
+			"load.step.limit.size=1",
+			"item.input.file=/engine-visible/narrow.csv",
+		},
+		BaseTimestamp: "20260822.120000.000",
+	}
+	defaultsYAML, err := GenerateDefaults(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defaults map[string]any
+	if err := yaml.Unmarshal(defaultsYAML, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range [][]string{
+		{"load", "op", "limit", "count"},
+		{"load", "step", "limit", "time"},
+		{"load", "step", "limit", "size"},
+	} {
+		if value, ok := configPath(defaults, path...); !ok || value == 0 {
+			t.Fatalf("test precondition: hostile inherited limit %v = %#v, present=%t\n%s",
+				path, value, ok, defaultsYAML)
+		}
+	}
+	if value, ok := configPath(defaults, "item", "input", "file"); !ok || value != "/engine-visible/narrow.csv" {
+		t.Fatalf("test precondition: hostile inherited item input file = %#v, present=%t\n%s",
+			value, ok, defaultsYAML)
+	}
+
+	generated, err := GenerateDeleteScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery := parseGeneratedScenarioConfigs(t, generated)[0]
+	for _, path := range [][]string{
+		{"load", "op", "limit", "count"},
+		{"load", "step", "limit", "time"},
+		{"load", "step", "limit", "size"},
+	} {
+		value, ok := configPath(discovery, path...)
+		if !ok || value != float64(0) {
+			t.Fatalf("discovery limit %v = %#v, present=%t; want explicit zero override:\n%s",
+				path, value, ok, generated)
+		}
+	}
+	if value, ok := configPath(discovery, "item", "input", "file"); !ok || value != "" {
+		t.Fatalf("discovery item input file = %#v, present=%t; want explicit empty override:\n%s",
+			value, ok, generated)
+	}
+}
+
+func TestGenerateExistingPrefixDeleteScenarioRequiresGuardedCurrentKeyScope(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		params Params
+		detail string
+	}{
+		{
+			name: "empty prefix", detail: "allow-empty-prefix",
+			params: Params{RunID: 1, Bucket: "b", DeleteExisting: true, Threads: 1, DeleteBatchSize: 1},
+		},
+		{
+			name: "slash prefix aliases whole bucket", detail: "must not start with '/'",
+			params: Params{RunID: 1, Bucket: "b", Prefix: "/", DeleteExisting: true, Threads: 1, DeleteBatchSize: 1},
+		},
+		{
+			name: "leading slash changes exact prefix", detail: "must not start with '/'",
+			params: Params{RunID: 1, Bucket: "b", Prefix: "/p/", DeleteExisting: true, AllowEmptyPrefix: true, Threads: 1, DeleteBatchSize: 1},
+		},
+		{
+			name: "all versions", detail: "current-key",
+			params: Params{RunID: 1, Bucket: "b", Prefix: "p/", DeleteExisting: true, Versions: VersionsAll, Threads: 1, DeleteBatchSize: 1},
+		},
+		{
+			name: "manifest source conflict", detail: "mutually exclusive",
+			params: Params{RunID: 1, Bucket: "b", Prefix: "p/", DeleteExisting: true, ItemsFile: "items.csv", Threads: 1, DeleteBatchSize: 1},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := GenerateDeleteScenario(test.params)
+			if err == nil || !strings.Contains(err.Error(), test.detail) {
+				t.Fatalf("GenerateDeleteScenario() error = %v, want %q", err, test.detail)
+			}
+		})
+	}
+}
+
+func TestGenerateExistingPrefixWholeBucketPreservesExplicitAllSelection(t *testing.T) {
+	generated, err := GenerateDeleteScenario(Params{
+		WorkloadType:     workload.Delete,
+		RunID:            883,
+		Bucket:           "whole-bucket",
+		DeleteExisting:   true,
+		AllowEmptyPrefix: true,
+		Threads:          1,
+		DeleteBatchSize:  1,
+		SelectionOrder:   SelectionOrderCanonical,
+		BaseTimestamp:    "20260822.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery := parseGeneratedScenarioConfigs(t, generated)[0]
+	if got := generatedConfigValue(t, discovery, "item", "naming", "prefix"); got != "" {
+		t.Fatalf("whole-bucket discovery prefix = %#v, want explicit empty string", got)
+	}
+	if got := generatedConfigValue(t, discovery, "storage", "integrity", "selection", "maxCount"); got != float64(0) {
+		t.Fatalf("whole-bucket object cap = %#v, want 0 (all)", got)
 	}
 }
 

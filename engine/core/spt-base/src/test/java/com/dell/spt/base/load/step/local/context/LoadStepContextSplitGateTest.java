@@ -415,6 +415,59 @@ public class LoadStepContextSplitGateTest {
 		assertEquals(2, selectedChildCount[0], "truncated probe results must not become split shards");
 	}
 
+	@Test
+	public void integrityDelimiterSplitNeverProbesPastTheImmutableStartupPartition() throws Exception {
+		final var metrics = new FakeMetrics(10, 1);
+		final StorageDriver<Item, Operation<Item>> driverMock = mock(
+						StorageDriver.class,
+						Mockito.withSettings().extraInterfaces(ListDiscoveryProbe.class));
+		doNothing().when(driverMock).operationResultOutput(any());
+		when(((ListDiscoveryProbe) driverMock)
+						.probeCommonPrefixes(anyString(), anyString(), anyString(), anyInt()))
+						.thenReturn(new ListDiscoveryProbe.DiscoverResult(
+										List.of("outside/a/", "outside/b/"), false, false));
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<Item, Operation<Item>> generatorMock = mock(LoadGenerator.class);
+		doNothing().when(generatorMock).recycle(any());
+		final LoadStepContextImpl<Item, Operation<Item>> ctx = new LoadStepContextImpl<>(
+						"hostile-split-test",
+						generatorMock,
+						driverMock,
+						metrics,
+						minimalLoadConfig(),
+						false,
+						ListShardMetricsRecorder.NO_OP,
+						"guarded/");
+		final Field windowsField = LoadStepContextImpl.class.getDeclaredField("splitWindows");
+		windowsField.setAccessible(true);
+		final ConcurrentMap<String, Object> splitWindows = (ConcurrentMap<String, Object>) windowsField.get(ctx);
+		final Class<?> windowClass = Class.forName(LoadStepContextImpl.class.getName() + "$Window");
+		final var ctor = windowClass.getDeclaredConstructor();
+		ctor.setAccessible(true);
+		final Object window = ctor.newInstance();
+		final Field firstKey = windowClass.getDeclaredField("firstKey");
+		firstKey.setAccessible(true);
+		firstKey.set(window, "guarded/a");
+		final Field lastKey = windowClass.getDeclaredField("lastKey");
+		lastKey.setAccessible(true);
+		lastKey.set(window, "guarded/z");
+		final Field pages = windowClass.getDeclaredField("pages");
+		pages.setAccessible(true);
+		pages.setInt(window, 49);
+		splitWindows.put("guarded/", window);
+		final ListShard shard = new ListShard("guarded/", null, null, "guarded/x");
+		final ListOperation<?> listOp = newListOp(
+						"/bucket", "guarded/a", "guarded/z", shard);
+		final Method method = LoadStepContextImpl.class.getDeclaredMethod(
+						"tryDelimiterSplit", ListShard.class, ListOperation.class);
+		method.setAccessible(true);
+
+		assertEquals(Boolean.FALSE, method.invoke(ctx, shard, listOp));
+		Mockito.verify((ListDiscoveryProbe) driverMock, Mockito.never())
+						.probeCommonPrefixes(anyString(), anyString(), anyString(), anyInt());
+		Mockito.verify(generatorMock, Mockito.never()).recycle(any());
+	}
+
 	private static Config minimalLoadConfig() {
 		final java.util.Map<String, Object> schema = new java.util.HashMap<>();
 		// batch-size => batch -> size

@@ -83,14 +83,28 @@ correctness workloads, not ordinary benchmarks; corruption returns exit code
 `20` and leaves a resumable `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
 
 Standalone DELETE remains publicly gated while its remaining safety and result
-contracts are completed. Its internal safe count-mode path owns what it deletes:
-with no `--items-file`, SPT creates exactly `--object-count` objects under a
+contracts are completed. Its default internal finite-count source owns what it deletes:
+with neither `--items-file` nor `--delete-existing`, SPT creates exactly `--object-count` objects under a
 run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
 then times DELETE against only that canonical manifest. `--prefix` changes the
-owned namespace root; it never discovers or selects existing objects. Omitting the
+owned namespace root by itself; it never discovers or selects existing objects. Omitting the
 count selects 2,500 objects, and omitting `--object-size` selects 1 KiB rather than
 the shared 1 MiB write default. PUT-returned versions are preserved for exact-version
 DELETE; objects without a returned version use current-key semantics.
+
+The separate destructive existing-prefix source requires `--delete-existing`, an exact
+`--bucket`, and an explicitly supplied, normally nonempty `--prefix`. An empty prefix selects
+the whole bucket and therefore requires the additional `--allow-empty-prefix` opt-in; no
+interactive confirmation substitutes for either flag. A destructive prefix must not start with
+`/`, because the S3 drivers remove that path separator before LIST. SPT lists current keys, freezes and
+canonicalizes the complete selection, applies `--object-count` (`0` means all), and refuses an
+empty result before any DELETE request. Discovery counts, the selected count, SHA-256, and LIST
+provenance are committed with the manifest. Any delimiter-derived shard or returned identity outside
+the immutable requested prefix is fatal and removes incomplete artifacts before DELETE. Distributed
+discovery also requires one immutable engine identity across all workers. Discovery is an untimed setup step; only
+the later standalone DELETE step contributes DELETE request measurements. Keep the namespace quiescent:
+a concurrent writer can replace a frozen current-key identity before it is deleted. Existing-prefix
+mode does not select versions or delete markers and rejects `--versions=all`.
 
 Seed and DELETE are separate engine steps, so setup time and PUT metrics do not enter
 DELETE request latency, duration, or throughput. Any seed failure or incomplete
@@ -428,8 +442,10 @@ Executes a benchmark test with the specified workload type.
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and the internal explicit-manifest DELETE slice (skips seed/discovery)
-- `--delete-batch-size`: Internal explicit-manifest DELETE request size, from 1 through 1000 (default 100). Multi-bucket manifests require 1
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and internal explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
+- `--delete-batch-size`: Internal standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
+- `--delete-existing`: Destructive internal DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
+- `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
@@ -455,6 +471,17 @@ allows multiple buckets when `--delete-batch-size=1`. `--object-count` caps obje
 manifest is globally canonicalized, and SPT records source/unique/selected counts and the staged
 SHA-256. Canonical selection order is deterministic but can differ from another tool's input order.
 This finite slice rejects `--duration`, `--prefix`, and `--cleanup`; failed staging is removed.
+
+The internal existing-prefix slice is mutually exclusive with `--items-file`. It requires
+`--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
+unless the command also supplies `--allow-empty-prefix`. A whole-bucket scope is never inferred,
+and neither opt-in is replaced by a prompt. The LIST setup phase selects current keys only,
+canonicalizes the complete result, applies the global object cap, and publishes source, unique,
+selected, SHA-256, and LIST-step provenance evidence before the DELETE step can start. An empty
+selection is fatal even if an empty-selection override is requested. LIST setup has its own step
+metrics and is excluded from DELETE timing. Operators must keep the namespace quiescent because
+current-key deletion cannot protect against a concurrent writer replacing a frozen identity.
+All-version and delete-marker selection, duration, and cleanup are unavailable in this slice.
 
 Multi-endpoint options:
 - `--endpoints`: Comma-separated list (or repeat the flag) to target multiple S3 endpoints.

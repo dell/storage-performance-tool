@@ -1441,6 +1441,7 @@ Available workload types:
 			params.RunID = time.Now().UnixMilli()
 		}
 		writeDeleteSeedConcurrencyWarning(cmd.ErrOrStderr(), params)
+		writeDeleteExistingSafetyWarning(cmd.ErrOrStderr(), params)
 
 		// Seed size warning for read workloads
 		if workloadType == WorkloadTypeRead {
@@ -1903,7 +1904,7 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
-	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; seeded DELETE: owned namespace root; list/read-verify: listing constraint")
+	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
@@ -1911,8 +1912,10 @@ func init() {
 	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
-	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; seeded DELETE creates exactly this many identities, while manifest DELETE caps canonical identities")
+	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; seeded DELETE creates this many identities, while manifest/existing-prefix DELETE caps the canonical selection")
 	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "Standalone DELETE logical request size (1 uses DeleteObject; 2-1000 use DeleteObjects)")
+	runCmd.Flags().Bool(flagDeleteExisting, false, "Destructive DELETE opt-in: discover and freeze current keys under the exact --bucket/--prefix before timing")
+	runCmd.Flags().Bool(flagAllowEmptyPrefix, false, "Second destructive DELETE opt-in required with --delete-existing --prefix='' to select an entire bucket")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
@@ -1933,7 +1936,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; omit for owned seeded DELETE")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
 	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
@@ -2147,6 +2150,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	itemsFile, _ := cmd.Flags().GetString("items-file")
 	params.ItemsFile = itemsFile
+	params.DeleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	params.AllowEmptyPrefix, _ = cmd.Flags().GetBool(flagAllowEmptyPrefix)
 	params.AllowEmptySelection, _ = cmd.Flags().GetBool("allow-empty-selection")
 	params.IntegrityMaxConsoleFailures, _ = cmd.Flags().GetInt("integrity-max-console-failures")
 
@@ -2294,7 +2299,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.MinimalTUI = minimalTUI
 
 	// Resolve source-specific defaults only after both selection and duration flags are known.
-	seededDelete := params.WorkloadType == WorkloadTypeDelete && strings.TrimSpace(params.ItemsFile) == ""
+	deleteWorkload := params.WorkloadType == WorkloadTypeDelete
+	if deleteWorkload {
+		params.SelectionOrder = scenario.SelectionOrderCanonical
+	}
+	seededDelete := deleteWorkload && strings.TrimSpace(params.ItemsFile) == "" && !params.DeleteExisting
 	if seededDelete {
 		if params.ObjectSize == "" {
 			params.ObjectSize = scenario.DefaultDeleteObjectSize
@@ -2302,7 +2311,6 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		if params.ObjectCount == 0 && strings.TrimSpace(params.Duration) == "" {
 			params.ObjectCount = scenario.DefaultDeleteObjectCount
 		}
-		params.SelectionOrder = scenario.SelectionOrderCanonical
 	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
 		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
 		params.WorkloadType != WorkloadTypeTables {
@@ -2489,7 +2497,8 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
 	}
-	if (params.WorkloadType == WorkloadTypeDelete && strings.TrimSpace(params.ItemsFile) != "") ||
+	if (params.WorkloadType == WorkloadTypeDelete &&
+		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||
 		params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
@@ -2539,7 +2548,19 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 	if params.WorkloadType == WorkloadTypeDelete {
 		lines = append(lines, fmt.Sprintf("DELETE Batch Size: %d", params.DeleteBatchSize))
-		if strings.TrimSpace(params.ItemsFile) == "" {
+		if params.DeleteExisting {
+			prefix := params.Prefix
+			if prefix == "" {
+				prefix = "(empty; entire bucket)"
+			}
+			lines = append(lines,
+				"DELETE Source: existing current-key prefix",
+				fmt.Sprintf("DELETE Scope: bucket=%s prefix=%s", params.Bucket, prefix),
+				"DANGER: deletes the frozen current-key selection from an existing namespace.",
+				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
+				"Discovery Phase: setup only; excluded from DELETE request timing.",
+			)
+		} else if strings.TrimSpace(params.ItemsFile) == "" {
 			lines = append(lines, "DELETE Source: seeded owned inventory")
 		} else {
 			lines = append(lines, "DELETE Source: explicit canonical manifest")
@@ -2569,7 +2590,7 @@ func formatScenarioParams(params scenario.Params) string {
 
 func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {
 	if output == nil || params.WorkloadType != WorkloadTypeDelete ||
-		strings.TrimSpace(params.ItemsFile) != "" || strings.TrimSpace(params.Duration) != "" ||
+		params.DeleteExisting || strings.TrimSpace(params.ItemsFile) != "" || strings.TrimSpace(params.Duration) != "" ||
 		params.ObjectCount <= 0 || params.Threads <= 0 || params.DeleteBatchSize <= 0 {
 		return
 	}
@@ -2582,6 +2603,21 @@ func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params)
 		output,
 		"Warning: seeded DELETE inventory (%d objects) is smaller than --threads * --delete-batch-size (%d * %d = %d); maximum full request waves: %d. The run continues without automatic inventory calibration.\n",
 		params.ObjectCount, params.Threads, params.DeleteBatchSize, capacity, fullWaves,
+	)
+}
+
+func writeDeleteExistingSafetyWarning(output io.Writer, params scenario.Params) {
+	if output == nil || params.WorkloadType != WorkloadTypeDelete || !params.DeleteExisting {
+		return
+	}
+	prefix := params.Prefix
+	if prefix == "" {
+		prefix = "(empty; entire bucket)"
+	}
+	_, _ = fmt.Fprintf(
+		output,
+		"DANGER: --delete-existing will delete the frozen current-key selection under bucket %q prefix %q. Keep the namespace quiescent; concurrent writers can replace a frozen identity before deletion. Discovery is setup and is excluded from DELETE request timing.\n",
+		params.Bucket, prefix,
 	)
 }
 

@@ -17,6 +17,8 @@ const (
 	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
 	flagVersions                     = "versions"
 	flagDeleteBatchSize              = "delete-batch-size"
+	flagDeleteExisting               = "delete-existing"
+	flagAllowEmptyPrefix             = "allow-empty-prefix"
 )
 
 // Workload type constants

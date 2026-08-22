@@ -309,8 +309,8 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
 	}
 
-	if scenario.IsIntegrityWorkload(params) {
-		if err := o.apiClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+	if scenario.RequiresIntegrityCapability(params) {
+		if err := o.apiClient.VerifyScenarioIntegrityCapabilityContext(ctx, image, params); err != nil {
 			logging.LogError("orchestrator", "integrity capability check failed, cleaning up container", err)
 			cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
 			if cleanupErr != nil {

@@ -15,12 +15,13 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
-// ErrEngineIncompatible indicates the engine cannot run a persisted-data verification workload.
+// ErrEngineIncompatible indicates the engine cannot run the selected persisted-data workload.
 var ErrEngineIncompatible = errors.New("engine is not integrity-capable")
 
-// IncompatibleEngineError explains why a verification run was refused before any object I/O.
+// IncompatibleEngineError explains why a persisted-data run was refused before any object I/O.
 // It always names the entry node and what could not be proven, and includes the configured engine
 // image when the caller knows it.
 type IncompatibleEngineError struct {
@@ -46,7 +47,7 @@ func (e *IncompatibleEngineError) Error() string {
 		b.WriteString("; engine image: ")
 		b.WriteString(e.EngineImage)
 	}
-	b.WriteString("; a verification workload requires an engine that declares the storage.integrity configuration")
+	b.WriteString("; this persisted-data workload requires an engine that declares the storage.integrity configuration")
 	return b.String()
 }
 
@@ -77,6 +78,23 @@ func (c *SptAPIClient) VerifyIntegrityCapability(engineImage string) error {
 // VerifyIntegrityCapabilityContext binds the schema capability probe to the
 // caller's launch lifecycle.
 func (c *SptAPIClient) VerifyIntegrityCapabilityContext(ctx context.Context, engineImage string) error {
+	return c.verifyIntegrityCapabilityPathsContext(
+		ctx, engineImage, constants.RequiredIntegritySchemaPaths)
+}
+
+// VerifyScenarioIntegrityCapabilityContext probes only the schema paths used by params. In
+// particular, the destructive existing-prefix guard must be present for that DELETE mode without
+// expanding verification-only planning or finalization to standalone DELETE.
+func (c *SptAPIClient) VerifyScenarioIntegrityCapabilityContext(
+	ctx context.Context, engineImage string, params scenario.Params,
+) error {
+	return c.verifyIntegrityCapabilityPathsContext(
+		ctx, engineImage, scenario.IntegritySchemaPathsFor(params))
+}
+
+func (c *SptAPIClient) verifyIntegrityCapabilityPathsContext(
+	ctx context.Context, engineImage string, requiredPaths []string,
+) error {
 	url := c.baseURL + constants.SptConfigSchemaEndpoint
 
 	req, err := http.NewRequestWithContext(normalizeContext(ctx), http.MethodGet, url, nil)
@@ -130,7 +148,7 @@ func (c *SptAPIClient) VerifyIntegrityCapabilityContext(ctx context.Context, eng
 		}
 	}
 
-	missing := missingSchemaPaths(schema, constants.RequiredIntegritySchemaPaths)
+	missing := missingSchemaPaths(schema, requiredPaths)
 	if len(missing) > 0 {
 		return &IncompatibleEngineError{
 			EntryNode:    c.baseURL,
@@ -142,7 +160,7 @@ func (c *SptAPIClient) VerifyIntegrityCapabilityContext(ctx context.Context, eng
 
 	logging.LogDebug("spt-api", "engine integrity capability confirmed",
 		"url", url,
-		"paths", len(constants.RequiredIntegritySchemaPaths))
+		"paths", len(requiredPaths))
 	return nil
 }
 

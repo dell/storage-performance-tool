@@ -15,6 +15,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
+	"github.com/spf13/cobra"
 )
 
 func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
@@ -42,6 +43,31 @@ func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
 	}
 	if externalParams.ObjectCount != 0 || externalParams.ObjectSize != "" {
 		t.Fatalf("external DELETE inherited seed defaults: %+v", externalParams)
+	}
+}
+
+func TestBuildScenarioParamsSelectsGuardedExistingPrefixWithoutSeedDefaults(t *testing.T) {
+	cmd := deleteValidationCommand(deleteValidationCase{
+		bucket: "existing", prefix: "guarded/root/", prefixSet: true,
+		deleteExisting: true, batchSize: 2,
+	})
+	if err := cmd.Flags().Set("object-count", "9"); err != nil {
+		t.Fatal(err)
+	}
+	params, err := buildScenarioParams(WorkloadTypeDelete, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !params.DeleteExisting || params.AllowEmptyPrefix {
+		t.Fatalf("existing-prefix controls = deleteExisting %t allowEmptyPrefix %t",
+			params.DeleteExisting, params.AllowEmptyPrefix)
+	}
+	if params.ObjectCount != 9 || params.ObjectSize != "" {
+		t.Fatalf("existing-prefix selection inherited seed defaults: %+v", params)
+	}
+	if params.SelectionOrder != scenario.SelectionOrderCanonical || params.Versions != scenario.VersionsCurrent {
+		t.Fatalf("existing-prefix identity = order %q versions %q",
+			params.SelectionOrder, params.Versions)
 	}
 }
 
@@ -110,6 +136,27 @@ func TestDeleteSeedConcurrencyWarningIsBoundedAndReportsFullWaves(t *testing.T) 
 	}
 }
 
+func TestDeleteExistingSafetyWarningNamesExactScopeAndUntimedDiscovery(t *testing.T) {
+	var output bytes.Buffer
+	writeDeleteExistingSafetyWarning(&output, scenario.Params{
+		WorkloadType:   WorkloadTypeDelete,
+		Bucket:         "existing",
+		Prefix:         "guarded/root/",
+		DeleteExisting: true,
+	})
+	got := output.String()
+	for _, want := range []string{
+		"DANGER: --delete-existing",
+		`bucket "existing" prefix "guarded/root/"`,
+		"Keep the namespace quiescent",
+		"Discovery is setup and is excluded from DELETE request timing",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("existing-prefix safety warning omitted %q: %q", want, got)
+		}
+	}
+}
+
 func TestPrepareDeleteManifestBundleStagesBeforeScenarioAndExecution(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "delete.csv")
 	if err := os.WriteFile(source, []byte(
@@ -153,6 +200,46 @@ func TestPrepareDeleteManifestBundleStagesBeforeScenarioAndExecution(t *testing.
 	}
 	if len(prepared.ExpectedStepIDs()) != 1 || !strings.HasSuffix(prepared.ExpectedStepIDs()[0], "-delete") {
 		t.Fatalf("expected step ids = %v", prepared.ExpectedStepIDs())
+	}
+}
+
+func TestPrepareExistingPrefixDeleteBuildsDiscoveryThenTimedDeleteWithoutExternalMounts(t *testing.T) {
+	scenarioPath := filepath.Join(t.TempDir(), "delete-existing.js")
+	prepared, err := prepareRunBundle(scenario.Params{
+		WorkloadType:    WorkloadTypeDelete,
+		Endpoint:        "http://127.0.0.1:9000",
+		AccessKey:       "access",
+		SecretKey:       "secret",
+		Bucket:          "existing",
+		Prefix:          "guarded/root/",
+		ObjectCount:     3,
+		Threads:         1,
+		DeleteBatchSize: 2,
+		DeleteExisting:  true,
+		SelectionOrder:  scenario.SelectionOrderCanonical,
+		RunID:           905,
+		BaseTimestamp:   "20260822.120000.000",
+	}, scenarioPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.Cleanup(context.Background()); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	}()
+	if len(prepared.Params().ItemFileMounts) != 0 {
+		t.Fatalf("existing-prefix DELETE unexpectedly staged external mounts: %+v",
+			prepared.Params().ItemFileMounts)
+	}
+	if len(prepared.ExpectedStepIDs()) != 2 ||
+		!strings.HasSuffix(prepared.ExpectedStepIDs()[0], "-list") ||
+		!strings.HasSuffix(prepared.ExpectedStepIDs()[1], "-delete") {
+		t.Fatalf("expected existing-prefix step ids = %v", prepared.ExpectedStepIDs())
+	}
+	generated := string(prepared.ScenarioJS())
+	if strings.Index(generated, "Load.config") >= strings.Index(generated, "DeleteLoad.config") {
+		t.Fatalf("timed DELETE was not ordered after frozen discovery:\n%s", generated)
 	}
 }
 
@@ -328,5 +415,32 @@ func TestDeleteManifestFailureStopsBeforeEveryOrchestrationSeam(t *testing.T) {
 			"orchestration calls after unsafe manifest: port=%d connect=%d local=%d multi=%d auto-results=%d",
 			portCalls, connectCalls, localCalls, multiCalls, autoResultsCalls,
 		)
+	}
+}
+
+func TestDeleteExistingSafetyValidationStopsBeforeOrchestrationSideEffects(t *testing.T) {
+	cmd := deleteValidationCommand(deleteValidationCase{
+		bucket: "existing", prefixSet: true, deleteExisting: true, batchSize: 1,
+	})
+	cmd.Use = "run <type>"
+	cmd.Args = cobra.ExactArgs(1)
+	cmd.SilenceUsage = true
+	cmd.PreRunE = ValidateRunCommand
+	var schemaProbes, scenarioPosts, objectIOStarts int
+	cmd.RunE = func(*cobra.Command, []string) error {
+		schemaProbes++
+		scenarioPosts++
+		objectIOStarts++
+		return nil
+	}
+	cmd.SetArgs([]string{WorkloadTypeDelete})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--allow-empty-prefix") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if schemaProbes != 0 || scenarioPosts != 0 || objectIOStarts != 0 {
+		t.Fatalf("rejected command crossed execution boundary: schema=%d post=%d io=%d",
+			schemaProbes, scenarioPosts, objectIOStarts)
 	}
 }
