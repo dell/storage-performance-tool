@@ -1027,6 +1027,21 @@ public class S3StorageDriverTest {
 		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
 	}
 
+	@Test
+	void legacyVersionDeleteUsesQuerySelectorInsteadOfResponseHeader() throws Exception {
+		Config cfg = baseConfig(true, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		Item item = new ItemImpl("/bucketV/key~VER+1=");
+		Operation<Item> op = new OperationImpl<>(123, OpType.DELETE, item, null, "/bucketV", TEST_CRED);
+
+		HttpRequest req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
+
+		assertEquals(HttpMethod.DELETE, req.method());
+		assertEquals("/bucketV/key?versionId=VER%2B1%3D", req.uri());
+		assertNull(req.headers().get("x-amz-version-id"));
+		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
+	}
+
 	@SuppressWarnings("unchecked")
 	private HttpRequest httpRequestFor(
 					final ListOperation<PathItemImpl> listOp, final TestS3Driver drv) throws Exception {

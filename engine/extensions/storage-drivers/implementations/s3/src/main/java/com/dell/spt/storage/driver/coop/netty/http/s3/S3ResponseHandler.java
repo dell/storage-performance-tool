@@ -7,6 +7,8 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.logging.LogUtil;
@@ -20,6 +22,8 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 
@@ -33,6 +37,8 @@ import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.xml.parsers.ParserConfigurationException;
+import org.xml.sax.SAXException;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -43,15 +49,49 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<ByteBuf> CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"content");
+	private static final AttributeKey<DeleteResponseBuffer> DELETE_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-delete-response");
 	private static final AttributeKey<ListResponseSpool> LIST_CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"spt-list-content");
 	private static final AttributeKey<IntegrityResponseObserver> INTEGRITY_OBSERVER_ATTR_KEY = AttributeKey.newInstance("spt-integrity-observer");
 	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
+	private static final int DELETE_RESPONSE_INITIAL_BUFFER_BYTES = 4 * 1024;
+	private static final int MAX_DELETE_RESPONSE_BYTES = 16 * 1024 * 1024;
 	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
+
+	private static final class DeleteResponseBuffer implements AutoCloseable {
+		private ByteBuf content;
+		private boolean overflow;
+
+		private void append(final Channel channel, final ByteBuf chunk) {
+			if (overflow) {
+				return;
+			}
+			if (content == null) {
+				content = channel.alloc().buffer(
+								Math.min(chunk.readableBytes(), DELETE_RESPONSE_INITIAL_BUFFER_BYTES),
+								MAX_DELETE_RESPONSE_BYTES);
+			}
+			if ((long) content.readableBytes() + chunk.readableBytes() > MAX_DELETE_RESPONSE_BYTES) {
+				overflow = true;
+				content.release();
+				content = null;
+				return;
+			}
+			content.writeBytes(chunk, chunk.readerIndex(), chunk.readableBytes());
+		}
+
+		@Override
+		public void close() {
+			if (content != null) {
+				content.release();
+				content = null;
+			}
+		}
+	}
 
 	private static final class ListResponseSpool implements AutoCloseable {
 		private final Path path;
@@ -140,6 +180,21 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected boolean handleResponseStatus(
+					final O op,
+					final HttpStatusClass statusClass,
+					final HttpResponseStatus responseStatus) {
+		if (!(op instanceof DeleteRequestOperation)) {
+			return super.handleResponseStatus(op, statusClass, responseStatus);
+		}
+		// Dedicated DELETE artifacts carry the actionable result. Avoid the inherited per-request
+		// warning here: it would repeat under load and serialize the representative first key.
+		final Operation.Status status = responseOperationStatus(statusClass, responseStatus);
+		op.status(status);
+		return Operation.Status.SUCC.equals(status);
+	}
+
+	@Override
 	protected final void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders) {
 		if (op instanceof PartialDataOperation && OpType.CREATE.equals(op.type())) {
 			// Capture part ETags for MPU write — needed for CompleteMultipartUpload XML body.
@@ -200,7 +255,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				}
 			}
 		}
-		if (op instanceof CompositeDataOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			bufferDeleteResponse(channel, deleteOperation, contentChunk);
+		} else if (op instanceof CompositeDataOperation) {
 			handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
 		} else if (op instanceof ListOperation) {
 			final ListOperation<?> listOp = (ListOperation<?>) op;
@@ -213,6 +270,24 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
 		}
+	}
+
+	private static void bufferDeleteResponse(
+					final Channel channel,
+					final DeleteRequestOperation operation,
+					final ByteBuf contentChunk) {
+		if (operation.deleteRequest().targets().size() == 1
+						|| operation.status() != Operation.Status.SUCC
+						|| !contentChunk.isReadable()) {
+			return;
+		}
+		final Attribute<DeleteResponseBuffer> responseAttr = channel.attr(DELETE_RESPONSE_ATTR_KEY);
+		DeleteResponseBuffer response = responseAttr.get();
+		if (response == null) {
+			response = new DeleteResponseBuffer();
+			responseAttr.set(response);
+		}
+		response.append(channel, contentChunk);
 	}
 
 	static IntegrityVerificationResult finishOutOfBandIntegrityRead(
@@ -320,7 +395,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				op.status(Operation.Status.RESP_FAIL_CORRUPT);
 			}
 		}
-		if (op instanceof ListOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			finishDeleteResponse(channel, deleteOperation);
+		} else if (op instanceof ListOperation) {
 			if (integrityListDiscovery()) {
 				finishListResponse(channel, (ListOperation<?>) op);
 			} else {
@@ -346,6 +423,57 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			}
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	private static void finishDeleteResponse(
+					final Channel channel, final DeleteRequestOperation operation) {
+		if (operation.status() != Operation.Status.SUCC) {
+			discardDeleteResponse(channel);
+			operation.completeDelete(DeleteTransportResult.failure(
+							operation.status(), S3StorageDriver.DELETE_FAILURE_MESSAGE));
+			return;
+		}
+		if (operation.deleteRequest().targets().size() == 1) {
+			discardDeleteResponse(channel);
+			operation.completeDelete(DeleteTransportResult.success(operation.deleteRequest().targets()));
+			return;
+		}
+		final DeleteResponseBuffer state = channel.attr(DELETE_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (state == null || state.overflow || state.content == null || !state.content.isReadable()) {
+			if (state != null) {
+				state.close();
+			}
+			operation.completeDelete(null);
+			return;
+		}
+		final DeleteTransportResult result;
+		try {
+			result = parseDeleteResponse(new ByteBufInputStream(state.content.duplicate()));
+		} finally {
+			state.close();
+		}
+		operation.completeDelete(result);
+	}
+
+	private static DeleteTransportResult parseDeleteResponse(final InputStream input) {
+		final var xmlHandler = new DeleteObjectsXmlHandler();
+		try (input) {
+			S3XmlParser.parse(input, xmlHandler);
+			return new DeleteTransportResult(xmlHandler.results(), null, null);
+		} catch (final IOException | ParserConfigurationException | SAXException ignored) {
+			// The shared reconciler turns an absent neutral result into one conservative protocol failure.
+			return null;
+		}
+	}
+
+	static void discardDeleteResponse(final Channel channel) {
+		if (channel == null) {
+			return;
+		}
+		final DeleteResponseBuffer state = channel.attr(DELETE_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (state != null) {
+			state.close();
+		}
 	}
 
 	private void finishListResponse(final Channel channel, final ListOperation<?> op) {

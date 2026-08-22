@@ -48,51 +48,45 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 
 	protected boolean handleResponseStatus(
 					final O op, final HttpStatusClass statusClass, final HttpResponseStatus responseStatus) {
-		switch (statusClass) {
-		case INFORMATIONAL:
+		final Operation.Status operationStatus = responseOperationStatus(statusClass, responseStatus);
+		if (!SUCC.equals(operationStatus)) {
 			Loggers.ERR.warn("{}: {}", op.toString(), responseStatus.toString());
-			op.status(RESP_FAIL_CLIENT);
-			break;
-		case SUCCESS:
-			op.status(SUCC);
-			return true;
-		case REDIRECTION:
-			Loggers.ERR.warn("{}: {}", op.toString(), responseStatus.toString());
-			op.status(RESP_FAIL_CLIENT);
-			break;
-		case CLIENT_ERROR:
-			Loggers.ERR.warn("{}: {}", op.toString(), responseStatus.toString());
-			if (HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE.equals(responseStatus)) {
-				op.status(RESP_FAIL_SVC);
-			} else if (HttpResponseStatus.REQUEST_URI_TOO_LONG.equals(responseStatus)) {
-				op.status(RESP_FAIL_SVC);
-			} else if (HttpResponseStatus.UNAUTHORIZED.equals(responseStatus)) {
-				op.status(RESP_FAIL_AUTH);
-			} else if (HttpResponseStatus.FORBIDDEN.equals(responseStatus)) {
-				op.status(RESP_FAIL_AUTH);
-			} else if (HttpResponseStatus.NOT_FOUND.equals(responseStatus)) {
-				op.status(RESP_FAIL_NOT_FOUND);
-			} else {
-				op.status(RESP_FAIL_CLIENT);
-			}
-			break;
-		case SERVER_ERROR:
-			Loggers.ERR.warn("{}: {}", op.toString(), responseStatus.toString());
-			if (HttpResponseStatus.GATEWAY_TIMEOUT.equals(responseStatus)) {
-				op.status(FAIL_TIMEOUT);
-			} else if (HttpResponseStatus.INSUFFICIENT_STORAGE.equals(responseStatus)) {
-				op.status(RESP_FAIL_SPACE);
-			} else {
-				op.status(RESP_FAIL_SVC);
-			}
-			break;
-		case UNKNOWN:
-			Loggers.ERR.warn("{}: {}", op.toString(), responseStatus.toString());
-			op.status(FAIL_UNKNOWN);
-			break;
 		}
+		op.status(operationStatus);
+		return SUCC.equals(operationStatus);
+	}
 
-		return false;
+	/** Maps one HTTP response to its operation status without logging or mutating the operation. */
+	protected static Operation.Status responseOperationStatus(
+					final HttpStatusClass statusClass, final HttpResponseStatus responseStatus) {
+		return switch (statusClass) {
+		case INFORMATIONAL, REDIRECTION -> RESP_FAIL_CLIENT;
+		case SUCCESS -> SUCC;
+		case CLIENT_ERROR -> {
+			if (HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE.equals(responseStatus)
+							|| HttpResponseStatus.REQUEST_URI_TOO_LONG.equals(responseStatus)) {
+				yield RESP_FAIL_SVC;
+			}
+			if (HttpResponseStatus.UNAUTHORIZED.equals(responseStatus)
+							|| HttpResponseStatus.FORBIDDEN.equals(responseStatus)) {
+				yield RESP_FAIL_AUTH;
+			}
+			if (HttpResponseStatus.NOT_FOUND.equals(responseStatus)) {
+				yield RESP_FAIL_NOT_FOUND;
+			}
+			yield RESP_FAIL_CLIENT;
+		}
+		case SERVER_ERROR -> {
+			if (HttpResponseStatus.GATEWAY_TIMEOUT.equals(responseStatus)) {
+				yield FAIL_TIMEOUT;
+			}
+			if (HttpResponseStatus.INSUFFICIENT_STORAGE.equals(responseStatus)) {
+				yield RESP_FAIL_SPACE;
+			}
+			yield RESP_FAIL_SVC;
+		}
+		case UNKNOWN -> FAIL_UNKNOWN;
+		};
 	}
 
 	protected abstract void handleResponseHeaders(final Channel channel, final O op, final HttpHeaders respHeaders);

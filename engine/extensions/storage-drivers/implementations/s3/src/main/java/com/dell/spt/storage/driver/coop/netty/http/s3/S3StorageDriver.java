@@ -33,6 +33,9 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.logging.LogUtil;
@@ -52,6 +55,7 @@ import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
@@ -104,6 +108,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				implements com.dell.spt.base.storage.driver.ListDiscoveryProbe {
 
 	private static final String REDACTED_HEADER_VALUE = "<redacted>";
+	static final String DELETE_FAILURE_MESSAGE = "S3 DELETE request failed at the transport or service boundary";
+	private static final String DELETE_QUERY = "delete";
+	private static final String DELETE_REQUEST_HEADER = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+					+ "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+	private static final String DELETE_REQUEST_OBJECT_START = "<Object><Key>";
+	private static final String DELETE_REQUEST_KEY_END = "</Key>";
+	private static final String DELETE_REQUEST_VERSION_START = "<VersionId>";
+	private static final String DELETE_REQUEST_VERSION_END = "</VersionId>";
+	private static final String DELETE_REQUEST_OBJECT_END = "</Object>";
+	private static final String DELETE_REQUEST_FOOTER = "<Quiet>false</Quiet></Delete>";
 
 	protected static final Base64.Encoder BASE64_ENCODER = Base64.getEncoder();
 	protected static final ThreadLocal<SAXParser> THREAD_LOCAL_XML_PARSER = new ThreadLocal<>();
@@ -812,7 +826,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected HttpRequest httpRequest(final O op, final String nodeAddr) throws URISyntaxException {
 		final HttpRequest httpRequest;
 		final OpType opType = op.type();
-		if (op instanceof CompositeDataOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			httpRequest = standaloneDeleteRequest(deleteOperation, nodeAddr);
+		} else if (op instanceof CompositeDataOperation) {
 			if (OpType.CREATE.equals(opType)) {
 				final var mpuOp = (CompositeDataOperation) op;
 				if (mpuOp.get(S3Api.KEY_MPU_ABORT) != null) {
@@ -828,7 +844,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			} else {
 				// Composite DELETE/UPDATE: the item happens to be composite (has data ranges) but
 				// the operation itself is a plain DELETE/UPDATE — delegate to the standard path.
-				httpRequest = super.httpRequest(op, nodeAddr);
+				httpRequest = ordinaryObjectRequest(op, nodeAddr);
 			}
 		} else if (op instanceof PartialDataOperation) {
 			if (OpType.CREATE.equals(opType)) {
@@ -846,9 +862,148 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						|| (integrityMetadataEnabled() && op.requestedVersionId() != null)) {
 			httpRequest = objectVersioningRequest(op, nodeAddr);
 		} else {
-			httpRequest = super.httpRequest(op, nodeAddr);
+			httpRequest = ordinaryObjectRequest(op, nodeAddr);
 		}
 		return httpRequest;
+	}
+
+	/**
+	 * Builds the established single-object request path and fails closed if explicit standalone
+	 * dispatch was ever bypassed.
+	 */
+	protected HttpRequest ordinaryObjectRequest(final O op, final String nodeAddr)
+					throws URISyntaxException {
+		if (op instanceof DeleteRequestOperation) {
+			throw new IllegalArgumentException(
+							"Standalone DELETE requests cannot enter the representative-item request builder");
+		}
+		return super.httpRequest(op, nodeAddr);
+	}
+
+	private HttpRequest standaloneDeleteRequest(
+					final DeleteRequestOperation operation, final String nodeAddr) {
+		final var deleteRequest = operation.deleteRequest();
+		if (deleteRequest.targets().size() > 1) {
+			return standaloneMultiDeleteRequest(operation, nodeAddr);
+		}
+		final var target = deleteRequest.targets().get(0);
+		final var objectUri = standaloneObjectUri(deleteRequest.bucket(), target);
+		final var uri = target.versionId() == null
+						? objectUri
+						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		if (nodeAddr != null) {
+			headers.set(HttpHeaderNames.HOST, nodeAddr);
+		}
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		applyDynamicHeaders(headers);
+		applySharedHeaders(headers);
+		applyAuthHeaders(headers, HttpMethod.DELETE, uri, deleteRequest.credential());
+		return new DefaultHttpRequest(HTTP_1_1, HttpMethod.DELETE, uri, headers);
+	}
+
+	private FullHttpRequest standaloneMultiDeleteRequest(
+					final DeleteRequestOperation operation, final String nodeAddr) {
+		final var deleteRequest = operation.deleteRequest();
+		final var xml = THREAD_LOCAL_STRB.get();
+		final byte[] content;
+		xml.setLength(0);
+		try {
+			xml.append(DELETE_REQUEST_HEADER);
+			for (final var target : deleteRequest.targets()) {
+				xml.append(DELETE_REQUEST_OBJECT_START);
+				appendXmlText(xml, target.key());
+				xml.append(DELETE_REQUEST_KEY_END);
+				if (target.versionId() != null) {
+					xml.append(DELETE_REQUEST_VERSION_START);
+					appendXmlText(xml, target.versionId());
+					xml.append(DELETE_REQUEST_VERSION_END);
+				}
+				xml.append(DELETE_REQUEST_OBJECT_END);
+			}
+			xml.append(DELETE_REQUEST_FOOTER);
+			content = xml.toString().getBytes(UTF_8);
+		} finally {
+			xml.setLength(0);
+		}
+		final var uri = SLASH + deleteRequest.bucket() + '?' + DELETE_QUERY;
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		if (nodeAddr != null) {
+			headers.set(HttpHeaderNames.HOST, nodeAddr);
+		}
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, content.length);
+		headers.set(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_XML);
+		headers.set(
+						HttpHeaderNames.CONTENT_MD5,
+						BASE64_ENCODER.encodeToString(THREAD_LOCAL_MD5.get().digest(content)));
+		applyDynamicHeaders(headers);
+		applySharedHeaders(headers);
+		applyAuthHeaders(headers, HttpMethod.POST, uri, deleteRequest.credential());
+		return new DefaultFullHttpRequest(
+						HTTP_1_1,
+						HttpMethod.POST,
+						uri,
+						Unpooled.wrappedBuffer(content),
+						headers,
+						EmptyHttpHeaders.INSTANCE);
+	}
+
+	private static String standaloneObjectUri(final String bucket, final DeleteTarget target) {
+		final var uri = THREAD_LOCAL_STRB.get();
+		uri.setLength(0);
+		try {
+			uri.append(SLASH).append(bucket).append(SLASH);
+			appendPercentEncodedPath(uri, target.key());
+			return uri.toString();
+		} finally {
+			uri.setLength(0);
+		}
+	}
+
+	private static void appendPercentEncodedPath(final StringBuilder out, final String value) {
+		final byte[] bytes = value.getBytes(UTF_8);
+		for (final byte b : bytes) {
+			final int ch = b & 0xFF;
+			if (isUnreserved(ch) || ch == '/') {
+				out.append((char) ch);
+			} else {
+				out.append('%')
+								.append(URI_HEX_DIGITS[(ch >>> 4) & 0xF])
+								.append(URI_HEX_DIGITS[ch & 0xF]);
+			}
+		}
+	}
+
+	private static void appendXmlText(final StringBuilder escaped, final String value) {
+		for (int i = 0; i < value.length(); i++) {
+			final char ch = value.charAt(i);
+			switch (ch) {
+			case '&':
+				escaped.append("&amp;");
+				break;
+			case '<':
+				escaped.append("&lt;");
+				break;
+			case '>':
+				escaped.append("&gt;");
+				break;
+			case '\"':
+				escaped.append("&quot;");
+				break;
+			case '\'':
+				escaped.append("&apos;");
+				break;
+			case '\r':
+				escaped.append("&#13;");
+				break;
+			default:
+				if (ch < 0x20 && ch != '\n' && ch != '\t') {
+					throw new IllegalArgumentException(
+									"S3 DELETE identity contains a character forbidden by XML 1.0");
+				}
+				escaped.append(ch);
+			}
+		}
 	}
 
 	private HttpRequest listRequest(final ListOperation<?> op, final String nodeAddr) {
@@ -1378,7 +1533,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
 		final String objectUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
-		final String uri = explicitVersionCarrier && versionId != null
+		final boolean useVersionQuery = versionId != null
+						&& (explicitVersionCarrier || OpType.DELETE.equals(opType));
+		final String uri = useVersionQuery
 						? objectUri + "?versionId=" + percentEncode(versionId)
 						: objectUri;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
@@ -1416,9 +1573,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			applyRangesHeaders(httpHeaders, dataOp);
 			break;
 		case DELETE:
-			if (!explicitVersionCarrier && versionId != null) {
-				httpHeaders.set("x-amz-version-id", versionId);
-			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			break;
 		}
@@ -1563,6 +1717,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	public void complete(final Channel channel, final O op) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			if (deleteOperation.deleteResult() == null) {
+				if (Operation.Status.SUCC.equals(op.status())) {
+					deleteOperation.completeDelete(null);
+				} else {
+					deleteOperation.completeDelete(DeleteTransportResult.failure(
+									deleteFailureStatus(op.status()),
+									DELETE_FAILURE_MESSAGE));
+				}
+			}
+			S3ResponseHandler.discardDeleteResponse(channel);
+		}
 		if (channel != null && op instanceof ListOperation) {
 			try {
 				S3ResponseHandler.discardListResponse(channel);
@@ -1664,6 +1830,31 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} else {
 			super.complete(channel, op);
 		}
+	}
+
+	private static Operation.Status deleteFailureStatus(final Operation.Status status) {
+		if (status == null) {
+			return Operation.Status.FAIL_UNKNOWN;
+		}
+		return switch (status) {
+		case FAIL_UNKNOWN,
+						FAIL_IO,
+						FAIL_TIMEOUT,
+						RESP_FAIL_UNKNOWN,
+						RESP_FAIL_CLIENT,
+						RESP_FAIL_SVC,
+						RESP_FAIL_NOT_FOUND,
+						RESP_FAIL_AUTH,
+						RESP_FAIL_CORRUPT,
+						RESP_FAIL_SPACE ->
+			status;
+		default -> Operation.Status.FAIL_UNKNOWN;
+		};
+	}
+
+	@Override
+	public boolean supportsStandaloneDeleteRequests() {
+		return true;
 	}
 
 	private void scheduleFailedCompletionAbort(
