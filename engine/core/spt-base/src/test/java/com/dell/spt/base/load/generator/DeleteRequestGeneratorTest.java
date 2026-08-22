@@ -24,6 +24,8 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -40,7 +42,7 @@ import org.junit.jupiter.api.Test;
 class DeleteRequestGeneratorTest {
 
 	@Test
-	void normalInputExhaustionFlushesOneTailAndUsesOneRequestPermit() throws Exception {
+	void finalKnownIdentityFlushesAndTimestampsTheTailWithoutASecondEofRead() throws Exception {
 		final var throttlePermits = new ArrayList<Integer>();
 		final var throttle = new com.github.akurilov.commons.concurrent.throttle.Throttle() {
 			@Override
@@ -58,9 +60,9 @@ class DeleteRequestGeneratorTest {
 		final var generator = generator(input("tail-input", 4), output, List.of(throttle));
 
 		try {
+			final long beforeExhaustionNanos = System.nanoTime();
 			generator.doWork();
-			assertTrue(output.operations.isEmpty(), "partial tail must not dispatch before input exhaustion");
-			generator.doWork();
+			final long afterExhaustionNanos = System.nanoTime();
 
 			assertEquals(4, generator.consumedItemCount());
 			assertEquals(1, generator.generatedOpCount());
@@ -68,6 +70,88 @@ class DeleteRequestGeneratorTest {
 			assertEquals(1, output.operations.size());
 			assertEquals(List.of("key-0", "key-1", "key-2", "key-3"),
 							keys(output.operations.get(0)));
+			assertTrue(generator.schedulingExhaustedAtNanos() >= beforeExhaustionNanos);
+			assertTrue(generator.schedulingExhaustedAtNanos() <= afterExhaustionNanos);
+		} finally {
+			generator.close();
+		}
+	}
+
+	@Test
+	void finalKnownIdentityIsTimestampedAtHandoffBeforeLaterGeneratorCleanup() throws Exception {
+		final CountDownLatch finalHandoffReached = new CountDownLatch(1);
+		final CountDownLatch releaseFinalHandoff = new CountDownLatch(1);
+		final var builder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(3);
+		builder.opType(OpType.DELETE).credentialInput(new ConstantValueInputImpl<>(Credential.NONE));
+		final var generator = new LoadGeneratorImpl<IntegrityManifestDataItem, DeleteRequestOperation>(
+						input("timestamp-handoff-input", 4),
+						new DeleteRequestAssembler(builder, 100),
+						List.of(),
+						new CollectingOutput(),
+						4,
+						0,
+						100,
+						false,
+						false) {
+			@Override
+			void afterFinalOperationHandoff() {
+				finalHandoffReached.countDown();
+				try {
+					assertTrue(releaseFinalHandoff.await(2, TimeUnit.SECONDS));
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+			}
+		};
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Thread worker = Thread.ofPlatform().start(() -> {
+			try {
+				generator.doWork();
+			} catch (final Throwable thrown) {
+				failure.set(thrown);
+			}
+		});
+
+		try {
+			assertTrue(finalHandoffReached.await(1, TimeUnit.SECONDS));
+			assertTrue(
+							generator.schedulingExhaustedAtNanos() < Long.MAX_VALUE,
+							"final accepted output was not timestamped until later cleanup");
+		} finally {
+			releaseFinalHandoff.countDown();
+			worker.join(TimeUnit.SECONDS.toMillis(2));
+			generator.close();
+		}
+		assertFalse(worker.isAlive());
+		assertNull(failure.get());
+	}
+
+	@Test
+	void finalKnownIdentityRecordsExhaustionWhenNanoTimeIsLongMax() throws Exception {
+		final var builder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(1);
+		builder.opType(OpType.DELETE).credentialInput(new ConstantValueInputImpl<>(Credential.NONE));
+		final var generator = new LoadGeneratorImpl<IntegrityManifestDataItem, DeleteRequestOperation>(
+						input("long-max-timestamp-input", 1),
+						new DeleteRequestAssembler(builder, 100),
+						List.of(),
+						new CollectingOutput(),
+						1,
+						0,
+						100,
+						false,
+						false) {
+			@Override
+			long schedulingExhaustionTimeNanos() {
+				return Long.MAX_VALUE;
+			}
+		};
+
+		try {
+			generator.doWork();
+
+			assertTrue(generator.schedulingExhaustionNanos().isPresent());
+			assertEquals(Long.MAX_VALUE, generator.schedulingExhaustionNanos().orElseThrow());
 		} finally {
 			generator.close();
 		}
@@ -75,7 +159,7 @@ class DeleteRequestGeneratorTest {
 
 	@Test
 	void admissionClosureRecoversRetainedTailAsOneUnattemptedRequest() throws Exception {
-		final var output = new CollectingOutput();
+		final var output = new CollectingOutput(false);
 		final var generator = generator(input("stop-input", 3), output, List.of());
 		final var lifecycle = new OperationLifecycleTracker<DeleteRequestOperation>();
 		generator.operationLifecycle(lifecycle);
@@ -93,6 +177,87 @@ class DeleteRequestGeneratorTest {
 			assertEquals(1, generator.generatedOpCount());
 			assertEquals(1, lifecycle.snapshot().unattempted());
 		} finally {
+			generator.close();
+		}
+	}
+
+	@Test
+	void absoluteAdmissionDeadlineRejectsHandoffWithoutWaitingForTheGuardThread() throws Exception {
+		final var output = new CollectingOutput();
+		final var generator = generator(input("deadline-input", 4), output, List.of());
+
+		try {
+			generator.openAdmissionUntil(System.nanoTime() - 1);
+			generator.doWork();
+
+			assertTrue(output.operations.isEmpty());
+		} finally {
+			generator.close();
+		}
+	}
+
+	@Test
+	void assemblyCrossingTheAbsoluteDeadlineNeverEntersTheGeneratorBuffer() throws Exception {
+		final var assemblyEntered = new CountDownLatch(1);
+		final var releaseAssembly = new CountDownLatch(1);
+		final var builder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(1) {
+			@Override
+			public Credential nextCredential(final IntegrityManifestDataItem item)
+							throws java.io.IOException {
+				assemblyEntered.countDown();
+				try {
+					if (!releaseAssembly.await(2, TimeUnit.SECONDS)) {
+						throw new AssertionError("timed out waiting to cross the admission deadline");
+					}
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+				return super.nextCredential(item);
+			}
+		};
+		builder.opType(OpType.DELETE).credentialInput(new ConstantValueInputImpl<>(Credential.NONE));
+		final var output = new CollectingOutput();
+		final var generator = new LoadGeneratorImpl<IntegrityManifestDataItem, DeleteRequestOperation>(
+						input("assembly-deadline-input", 1),
+						new DeleteRequestAssembler(builder, 1),
+						List.of(),
+						output,
+						1,
+						0,
+						100,
+						false,
+						false);
+		final var lifecycle = new OperationLifecycleTracker<DeleteRequestOperation>();
+		generator.operationLifecycle(lifecycle);
+		final var failure = new AtomicReference<Throwable>();
+		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100);
+		generator.openAdmissionUntil(deadlineNanos);
+		final var worker = Thread.ofPlatform().start(() -> {
+			try {
+				generator.doWork();
+			} catch (final Throwable thrown) {
+				failure.set(thrown);
+			}
+		});
+
+		try {
+			assertTrue(assemblyEntered.await(1, TimeUnit.SECONDS));
+			while (!DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+				Thread.onSpinWait();
+			}
+			releaseAssembly.countDown();
+			worker.join(TimeUnit.SECONDS.toMillis(2));
+
+			assertFalse(worker.isAlive());
+			assertNull(failure.get());
+			assertTrue(output.operations.isEmpty());
+			assertTrue(generator.recoverBufferedOperations().isEmpty(),
+							"post-deadline assembly must be settled without entering the generator buffer");
+			assertEquals(1, lifecycle.snapshot().unattempted());
+		} finally {
+			releaseAssembly.countDown();
+			worker.join(TimeUnit.SECONDS.toMillis(2));
 			generator.close();
 		}
 	}
@@ -223,6 +388,10 @@ class DeleteRequestGeneratorTest {
 	void cancellationRecoveryDoesNotWaitForAnInterruptIgnoringInputRead() throws Exception {
 		final var input = new InterruptIgnoringInput(4);
 		final var generator = generator(input, new CollectingOutput(), List.of());
+		// Keep lazy Log4j configuration outside the bounded cancellation thread. The
+		// production path deliberately emits a warning after its one-second task wait;
+		// classpath/configuration startup is not part of the admission-lock invariant.
+		Loggers.ERR.isWarnEnabled();
 		final var failure = new AtomicReference<Throwable>();
 		final var cancellation = new Thread(() -> {
 			try {
@@ -329,9 +498,21 @@ class DeleteRequestGeneratorTest {
 
 	private static final class CollectingOutput implements Output<DeleteRequestOperation> {
 		private final List<DeleteRequestOperation> operations = new ArrayList<>();
+		private final boolean accepting;
+
+		private CollectingOutput() {
+			this(true);
+		}
+
+		private CollectingOutput(final boolean accepting) {
+			this.accepting = accepting;
+		}
 
 		@Override
 		public boolean put(final DeleteRequestOperation operation) {
+			if (!accepting) {
+				return false;
+			}
 			operations.add(operation);
 			return true;
 		}
@@ -339,6 +520,9 @@ class DeleteRequestGeneratorTest {
 		@Override
 		public int put(
 						final List<DeleteRequestOperation> buffer, final int from, final int to) {
+			if (!accepting) {
+				return 0;
+			}
 			operations.addAll(buffer.subList(from, to));
 			return to - from;
 		}

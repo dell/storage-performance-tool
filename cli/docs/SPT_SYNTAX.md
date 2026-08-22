@@ -100,9 +100,9 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
-| `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`) |
+| `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`). Internal standalone DELETE requires enough finite live inventory to remain schedulable for the full interval |
 | `--prefix-shards` | | `-1` | Prefix directories for generated object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
-| `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks |
+| `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks and duration-based internal standalone DELETE |
 | `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
@@ -131,15 +131,16 @@ objects: `--object-count` caps its deterministic discovery selection and
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
 
-#### Finite-count DELETE contract (internal, not public)
+#### Count and duration DELETE contract (internal, not public)
 
-The still-planned public `delete` command currently has three internal finite-count
+The still-planned public `delete` command currently has three internal finite-inventory
 slices. With no external source-selection flag, seeded mode is selected. It writes
 only beneath `spt-delete-<run-id>/`, or `<prefix-root>/spt-delete-<run-id>/` when
 `--prefix` is supplied. The prefix is therefore a seed namespace root and never an
 existing-data selection opt-in. With neither count nor duration, seeded mode creates
 and selects exactly 2,500 objects. `--object-count=N` creates and selects exactly N
-global identities, and an omitted size resolves explicitly to 1 KiB.
+global identities. A duration run instead uses `--seed-objects=N`, also defaulting to
+2,500; there is no automatic calibration. An omitted size resolves explicitly to 1 KiB.
 When the requested count is smaller than the configured load-step node count,
 the seed phase activates only enough slices to give every participant a positive
 share; the shares still sum to exactly N. The timed DELETE phase may use all
@@ -157,8 +158,8 @@ seed elapsed time, PUT latency, and PUT throughput do not enter DELETE measureme
 An inventory below `threads * delete-batch-size` is valid but cannot fill one complete
 concurrency wave. The CLI emits one bounded warning and reports
 `floor(objects / (threads * batch-size))` as the maximum number of full request waves.
-SPT does not increase the inventory automatically. Duration mode and seeded cleanup
-remain assigned to later internal slices and are rejected for now.
+SPT does not increase the inventory automatically. Seeded cleanup remains assigned to a
+later internal slice and is rejected for now.
 
 Explicit-manifest mode is selected by `--items-file`.
 
@@ -173,7 +174,9 @@ The private staged manifest is sorted by canonical identity, then `--object-coun
 global prefix (`0` means all). The CLI records source, unique, and selected counts plus the staged
 SHA-256 completion evidence, and reports that canonical order may differ from another tool's input
 order. A multi-bucket input must use `--delete-batch-size=1`; same-bucket input may use batching or
-single-object requests. Explicit-manifest mode rejects `--duration`, `--prefix`, and `--cleanup`. A failed
+single-object requests. Duration mode consumes this frozen inventory without recycling and is invalid
+if the inventory exhausts before the requested deadline. Explicit-manifest mode rejects `--prefix`
+and `--cleanup`. A failed
 validation or staging attempt stops before container/remote orchestration, and the private staging
 directory is removed. The public registry remains gated until the remaining DELETE safety and
 qualification tickets are complete.
@@ -202,10 +205,34 @@ requested prefix are fatal; incomplete node artifacts are removed, and `--allow-
 cannot permit DELETE I/O. Distributed discovery proves one immutable engine identity across every
 worker before startup. LIST
 has separate setup metrics and its duration is excluded from DELETE request latency, duration, and
-throughput. Existing-prefix mode rejects
-`--versions=all`, delete-marker selection, `--duration`, and `--cleanup`. Keep the exact namespace
+throughput. Duration mode consumes this frozen current-key inventory without recycling and is invalid
+if it exhausts before the requested deadline. Existing-prefix mode rejects
+`--versions=all`, delete-marker selection, and `--cleanup`. Keep the exact namespace
 quiescent for the entire run: a concurrent writer can replace a frozen current-key identity before
 the timed DELETE reaches it. The public workload registry remains gated.
+
+Count and duration are mutually exclusive. A duration run must retain enough live identities to
+schedule logical DELETE requests until the deadline; early exhaustion invalidates the result and
+seeded mode instructs the operator to increase `--seed-objects`. Stable auto-termination, recycle,
+and engine retries remain incompatible, and no public DELETE request-rate control is exposed.
+At the deadline the controller closes generator and driver admission across every local or
+distributed input slice before permitting recovery on any slice. Generator-buffered and
+driver-queued targets become unattempted. Actually dispatched requests drain for at most
+`load.op.wait.limit` (30 seconds by default); their terminal outcomes and latency remain measured.
+Dispatched targets without terminal results after the bound are unresolved and invalidate the run.
+Slices drain through a bounded coordinator against one step-wide remaining-time budget, so the
+bound is not multiplied by input count. It retains at most one lifecycle call per frozen input,
+offers every input each phase, and does not duplicate blocked calls on cleanup retry. Each worker
+compares source-monotonic exhaustion with its own scheduled deadline and retains only the semantic
+verdict; the controller requires a reached-deadline verdict from every slice after admission closes.
+Delayed, missing, or failed evidence cannot validate a run, and monotonic timestamps are never
+compared across hosts. Before scheduling begins, every slice is initialized with admission held;
+the controller prepares the same requested interval everywhere, then releases all ready slices in a
+separate concurrent phase. Long worker
+drains are started once and polled through short control-plane calls, so the 30-second drain remains
+safe with the shipped 10-second RMI response timeout. Exhaustion at the deadline is valid.
+Scheduled time and drain time are logged separately. `--threads` bounds concurrent logical DELETE
+requests, not object targets within each request.
 
 All-version discovery requires the target's list-version permission
 (`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never

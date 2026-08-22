@@ -1,17 +1,17 @@
 package com.dell.spt.base.load.generator;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
-import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.config.CliArgUtil;
+import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.ItemType;
@@ -20,6 +20,7 @@ import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -52,14 +53,46 @@ class StandaloneDeleteConfigurationTest {
 	void engineCliOverridesResolveThroughTheShippedStandaloneDeleteSchema() {
 		final var config = TestConfigBuilder.config();
 		final var parsed = CliArgUtil.parseArgs(
-						"--load-op-delete-standalone", "--load-op-delete-batchSize=17");
+						"--load-op-delete-standalone", "--load-op-delete-batchSize=17",
+						"--load-op-delete-duration");
 		parsed.forEach(config::val);
 
-		final var standalone = com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig.from(
-						config.configVal("load"));
+		final var standalone = StandaloneDeleteConfig.from(config.configVal("load"));
 
 		assertTrue(standalone.enabled());
 		assertEquals(17, standalone.batchSize());
+		assertTrue(standalone.durationMode());
+	}
+
+	@Test
+	void durationModeRejectsMissingDeadlineAndRequestCountWhileCountModeRemainsCompatible() {
+		final var missingDeadline = standaloneConfig();
+		missingDeadline.val("load-op-delete-duration", true);
+		missingDeadline.val("load-step-limit-time", 0);
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> StandaloneDeleteConfig.from(missingDeadline.configVal("load")));
+
+		final var requestCount = standaloneConfig();
+		requestCount.val("load-op-delete-duration", true);
+		requestCount.val("load-step-limit-time", "10s");
+		requestCount.val("load-op-limit-count", 1L);
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> StandaloneDeleteConfig.from(requestCount.configVal("load")));
+
+		final var countMode = standaloneConfig();
+		countMode.val("load-step-limit-time", "0s");
+		countMode.val("load-op-limit-count", 1L);
+		assertFalse(StandaloneDeleteConfig.from(countMode.configVal("load")).durationMode());
+
+		final var mismatchedDurationFlag = standaloneConfig();
+		mismatchedDurationFlag.val("load-op-delete-duration", false);
+		mismatchedDurationFlag.val("load-step-limit-time", "10s");
+		final var mismatch = assertThrows(
+						IllegalConfigurationException.class,
+						() -> StandaloneDeleteConfig.from(mismatchedDurationFlag.configVal("load")));
+		assertTrue(mismatch.getMessage().contains("load-op-delete-duration"));
 	}
 
 	@Test
@@ -209,6 +242,7 @@ class StandaloneDeleteConfigurationTest {
 		config.val("load-op-delete-batchSize", 100);
 		config.val("load-op-recycle-mode", false);
 		config.val("load-op-retry", false);
+		config.val("load-step-limit-time", "0s");
 		config.val("item-output-file", "");
 		return config;
 	}

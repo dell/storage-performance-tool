@@ -19,6 +19,8 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.DurationAwaitStatus;
+import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
@@ -50,10 +52,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -62,6 +71,8 @@ import org.apache.logging.log4j.Level;
 public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				extends LoadStepBase
 				implements LoadStepClient<T> {
+	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
+	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
 	private final List<FileManager> fileMgrs = new ArrayList<>();
@@ -74,6 +85,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> storageAuthFileSlicers = new ArrayList<>();
 	private final static int MAX_SLEEP_TIME_MILLIS = 120_000; // 2min.
+	private volatile IntegrityTerminalException durationStopFailure;
+	private volatile IntegrityTerminalException durationValidityFailure;
+	private volatile boolean durationAdmissionBarrierSatisfied;
+	private boolean durationCleanupRetryPending;
+	private long durationDrainDeadlineNanos = Long.MIN_VALUE;
+	private boolean durationDrainDeadlineSet;
+	private final Map<LoadStep, DurationAwaitStatus> durationAwaitStatuses = synchronizedIdentityMap();
+	private final Set<LoadStep> durationAwaitStatusProbes = Collections.synchronizedSet(
+					Collections.newSetFromMap(new IdentityHashMap<>()));
 
 	public LoadStepClientBase(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
@@ -81,11 +101,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		super(config, extensions, ctxConfigs, metricsMgr);
 	}
 
+	private static <K, V> Map<K, V> synchronizedIdentityMap() {
+		return Collections.synchronizedMap(new IdentityHashMap<>());
+	}
+
 	private MetricsAggregator metricsAggregator = null;
 
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
+		resetDurationLifecycleForStart();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			// need to set the once generated step id
 			config.val("load-step-id", loadStepId());
@@ -127,6 +152,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.info(
 							"{}: load step client started, additional nodes: {}", loadStepId(),
 							Arrays.toString(nodeAddrs.toArray()));
+		}
+	}
+
+	private void resetDurationLifecycleForStart() {
+		if (standaloneDeleteDurationMode()) {
+			durationStopFailure = null;
+			durationValidityFailure = null;
+			durationAdmissionBarrierSatisfied = false;
+			durationCleanupRetryPending = false;
+			durationDrainDeadlineNanos = Long.MIN_VALUE;
+			durationDrainDeadlineSet = false;
+			durationAwaitStatuses.clear();
 		}
 	}
 
@@ -688,6 +725,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doShutdown() {
+		if (standaloneDeleteDurationMode()) {
+			coordinateDurationStop();
+			return;
+		}
 		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
@@ -695,6 +736,198 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
 			}
 		});
+	}
+
+	private void coordinateDurationStop() {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		if (activeSlices.isEmpty()) {
+			durationAdmissionBarrierSatisfied = true;
+			return;
+		}
+		durationAdmissionBarrierSatisfied = false;
+		boolean interrupted = false;
+		final DurationPhaseAttempt admissionResult = invokeRetainedDurationPhase(
+						"distributed-admission",
+						activeSlices,
+						LoadStep::closeOperationAdmissionForStepStop,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-admission-close-");
+		interrupted |= recordDurationPhaseResult("close operation admission", admissionResult);
+		if (!admissionResult.succeeded()) {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+			return;
+		}
+		durationAdmissionBarrierSatisfied = true;
+		if (!durationDrainDeadlineSet) {
+			// Compatibility for an explicit stop before await() established a scheduled boundary.
+			durationDrainDeadlineNanos = durationDrainDeadlineNanos(System.nanoTime());
+			durationDrainDeadlineSet = true;
+		}
+		final DurationPhaseAttempt verdictResult = invokeRetainedDurationPhase(
+						"distributed-duration-verdict",
+						activeSlices,
+						this::probeDurationAwaitStatus,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-duration-verdict-");
+		interrupted |= verdictResult.interrupted();
+		if (!verdictResult.succeeded()) {
+			if (verdictResult.failures().isEmpty()) {
+				recordDurationValidityFailure(
+								"Standalone DELETE could not confirm duration validity for every distributed input slice",
+								null);
+			} else {
+				for (final Throwable failure : verdictResult.failures()) {
+					recordDurationValidityFailure(
+									"Standalone DELETE could not confirm duration validity for every distributed input slice",
+									failure);
+				}
+			}
+		}
+		for (final LoadStep slice : activeSlices) {
+			final DurationAwaitStatus status = durationAwaitStatuses.get(slice);
+			if (status == DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE) {
+				recordDurationValidityFailure(
+								"Standalone DELETE inventory slice exhausted before the requested duration; "
+												+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
+								null);
+			} else if (status != DurationAwaitStatus.REACHED_DEADLINE) {
+				recordDurationValidityFailure(
+								"Standalone DELETE could not confirm that every distributed input slice reached its duration deadline",
+								null);
+			}
+		}
+		final DurationPhaseAttempt recoveryResult = invokeRetainedDurationPhase(
+						"distributed-recovery",
+						activeSlices,
+						LoadStep::recoverQueuedOperationsForStepStop,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-recovery-");
+		interrupted |= recordDurationPhaseResult("recover queued operations", recoveryResult);
+		if (!recoveryResult.succeeded()) {
+			restoreDurationStopInterrupt(interrupted);
+			return;
+		}
+		final long drainPhaseDeadlineNanos = durationStopPhaseDeadlineNanos();
+		final DurationPhaseAttempt drainResult = invokeRetainedDurationPhase(
+						"distributed-drain",
+						activeSlices,
+						slice -> drainDispatchedOperations(
+										slice,
+										DurationTime.remainingNanos(
+														durationDrainDeadlineNanos, System.nanoTime()),
+										drainPhaseDeadlineNanos),
+						drainPhaseDeadlineNanos,
+						"spt-delete-drain-");
+		interrupted |= recordDurationPhaseResult("drain dispatched operations", drainResult);
+		if (!drainResult.succeeded()) {
+			restoreDurationStopInterrupt(interrupted);
+			return;
+		}
+		final DurationPhaseAttempt validationResult = invokeRetainedDurationPhase(
+						"distributed-terminal-validation",
+						activeSlices,
+						LoadStep::validateTerminalStateForStepStop,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-terminal-validation-");
+		interrupted |= validationResult.interrupted();
+		if (!validationResult.succeeded()) {
+			if (validationResult.failures().isEmpty()) {
+				recordDurationValidityFailure(
+								"Standalone DELETE terminal accounting could not be validated after the drain",
+								null);
+			} else {
+				for (final Throwable failure : validationResult.failures()) {
+					recordDurationValidityFailure(
+									"Standalone DELETE terminal accounting failed after the drain",
+									failure);
+				}
+			}
+		}
+		final DurationPhaseAttempt shutdownResult = invokeRetainedDurationPhase(
+						"distributed-shutdown",
+						activeSlices,
+						LoadStep::shutdown,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-shutdown-");
+		interrupted |= recordDurationPhaseResult("shutdown", shutdownResult);
+		restoreDurationStopInterrupt(interrupted);
+	}
+
+	private static void drainDispatchedOperations(
+					final LoadStep slice,
+					final long remainingNanos,
+					final long pollDeadlineNanos) throws Exception {
+		slice.startDispatchedOperationsDrainForStepStop(remainingNanos);
+		while (!slice.isDispatchedOperationsDrainCompleteForStepStop()) {
+			final long pollRemainingNanos = DurationTime.remainingNanos(
+							pollDeadlineNanos, System.nanoTime());
+			if (pollRemainingNanos == 0) {
+				throw new java.util.concurrent.TimeoutException(
+								"distributed dispatched-operation drain did not complete before its phase deadline");
+			}
+			TimeUnit.NANOSECONDS.sleep(Math.min(DURATION_DRAIN_POLL_NANOS, pollRemainingNanos));
+		}
+	}
+
+	private static void restoreDurationStopInterrupt(final boolean interrupted) {
+		if (interrupted) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private long durationDrainDeadlineNanos(final long scheduledDeadlineNanos) {
+		final long waitNanos = TimeUnit.SECONDS.toNanos(
+						Math.max(0, config.intVal("load-op-wait-limit")));
+		return durationDeadlineNanos(scheduledDeadlineNanos, waitNanos);
+	}
+
+	private boolean recordDurationPhaseResult(
+					final String phase, final DurationPhaseAttempt result) {
+		for (final Throwable failure : result.failures()) {
+			recordDurationStopFailure(phase, failure);
+		}
+		return result.interrupted();
+	}
+
+	private DurationPhaseAttempt invokeStepSlicePhase(
+					final List<LoadStep> activeSlices,
+					final StepSlicePhase action,
+					final long deadlineNanos,
+					final String threadNamePrefix) {
+		if (activeSlices.isEmpty()) {
+			return new DurationPhaseAttempt(List.of(), false, true);
+		}
+		return invokeRetainedDurationPhase(
+						"distributed-" + threadNamePrefix,
+						activeSlices,
+						action::execute,
+						deadlineNanos,
+						threadNamePrefix);
+	}
+
+	private synchronized void recordDurationStopFailure(final String phase, final Throwable cause) {
+		durationStopFailure = appendTerminalFailure(
+						durationStopFailure,
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE failed to " + phase + " across distributed slices",
+						cause);
+	}
+
+	private synchronized void recordDurationValidityFailure(final String message, final Throwable cause) {
+		durationValidityFailure = appendTerminalFailure(
+						durationValidityFailure,
+						IntegrityTerminalException.Category.EXECUTION,
+						message,
+						cause);
+	}
+
+	@FunctionalInterface
+	private interface StepSlicePhase {
+		void execute(LoadStep slice) throws Exception;
 	}
 
 	@Override
@@ -708,47 +941,277 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.debug(
 							"{}: await for {} step slices for at most {} {}...", loadStepId(), stepSliceCount,
 							timeout, timeUnit.name().toLowerCase(Locale.ROOT));
-			return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
-				try {
-					final var invokeTimeMillis = System.currentTimeMillis();
-					final var timeOutMillis = timeUnit.toMillis(timeout);
-					var awaitResult = false;
-					while (timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
-						if (Thread.currentThread().isInterrupted()) {
-							throwUnchecked(new InterruptedException());
+			if (standaloneDeleteDurationMode()) {
+				return awaitDurationSlicesAndStop(timeout, timeUnit, stepSliceCount);
+			}
+			try {
+				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
+					try {
+						final var invokeTimeMillis = System.currentTimeMillis();
+						final var timeOutMillis = timeUnit.toMillis(timeout);
+						var awaitResult = false;
+						while (timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
+							if (Thread.currentThread().isInterrupted()) {
+								throwUnchecked(new InterruptedException());
+							}
+							awaitResult = stepSlice.await(1, TimeUnit.MILLISECONDS);
+							if (awaitResult) { // awaitResult = (0 == countDown)
+								break;
+							}
 						}
-						awaitResult = stepSlice.await(1, TimeUnit.MILLISECONDS);
-						if (awaitResult) { // awaitResult = (0 == countDown)
-							break;
-						}
+						return awaitResult;
+					} catch (final InterruptedException e) {
+						throwUnchecked(e);
+					} catch (final RemoteException e) {
+						return false;
 					}
-					return awaitResult;
-				} catch (final InterruptedException e) {
-					throwUnchecked(e);
-				} catch (final RemoteException e) {
 					return false;
-				}
-				return false;
-			}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
-		} finally {
-			Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
-			doStop();
+				}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
+			} finally {
+				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
+				doStop();
+			}
 		}
 	}
 
+	private boolean awaitDurationSlicesAndStop(
+					final long timeout, final TimeUnit timeUnit, final int stepSliceCount)
+					throws InterruptedException {
+		boolean awaitResult = false;
+		RuntimeException awaitFailure = null;
+		try {
+			awaitResult = awaitDurationSlices(timeout, timeUnit);
+		} catch (final RuntimeException failure) {
+			awaitFailure = failure;
+		} finally {
+			Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
+			stop();
+		}
+		if (awaitFailure != null) {
+			if (durationValidityFailure != null && durationValidityFailure != awaitFailure) {
+				awaitFailure.addSuppressed(durationValidityFailure);
+			}
+			throw awaitFailure;
+		}
+		if (durationValidityFailure != null) {
+			throw durationValidityFailure;
+		}
+		return awaitResult;
+	}
+
+	private boolean awaitDurationSlices(final long timeout, final TimeUnit timeUnit)
+					throws InterruptedException {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final long timeoutNanos = Math.max(0, timeUnit.toNanos(timeout));
+		if (activeSlices.isEmpty()) {
+			throw new IllegalStateException("No active step slices are available");
+		}
+		final DurationPhaseAttempt prepareResult = invokeRetainedDurationPhase(
+						"distributed-duration-prepare",
+						activeSlices,
+						slice -> slice.prepareDurationInterval(timeoutNanos),
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-duration-prepare-");
+		failDurationStartPhase(
+						prepareResult,
+						"Standalone DELETE could not prepare the requested duration on every distributed input slice");
+		return startAndAwaitDurationSlices(activeSlices, timeoutNanos);
+	}
+
+	private boolean startAndAwaitDurationSlices(
+					final List<LoadStep> activeSlices, final long timeoutNanos)
+					throws InterruptedException {
+		final DurationPhaseAttempt startResult = invokeRetainedDurationPhase(
+						"distributed-duration-start",
+						activeSlices,
+						slice -> slice.startDurationInterval(timeoutNanos),
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-duration-start-");
+		failDurationStartPhase(
+						startResult,
+						"Standalone DELETE could not arm the requested duration on every distributed input slice");
+		// Worker-private monotonic clocks cannot be compared across RMI. Establish the one
+		// controller deadline only after every worker acknowledged its own duration arm, so the
+		// controller never closes admission before a successfully armed worker reaches its boundary.
+		final long deadlineNanos = durationDeadlineNanos(timeoutNanos);
+		durationDrainDeadlineNanos = durationDrainDeadlineNanos(deadlineNanos);
+		durationDrainDeadlineSet = true;
+		return awaitDurationSlices(activeSlices, deadlineNanos);
+	}
+
+	private void failDurationStartPhase(
+					final DurationPhaseAttempt result, final String message) throws InterruptedException {
+		if (result.succeeded()) {
+			return;
+		}
+		if (result.failures().isEmpty()) {
+			recordDurationValidityFailure(message, null);
+		} else {
+			for (final Throwable failure : result.failures()) {
+				recordDurationValidityFailure(message, failure);
+			}
+		}
+		if (result.interrupted()) {
+			Thread.currentThread().interrupt();
+			throw new InterruptedException("interrupted while preparing distributed duration interval");
+		}
+		throw durationValidityFailure;
+	}
+
+	private boolean awaitDurationSlices(
+					final List<LoadStep> activeSlices, final long deadlineNanos)
+					throws InterruptedException {
+		if (activeSlices.isEmpty()) {
+			throw new IllegalStateException("No active step slices are available");
+		}
+		// A remote call may ignore interruption; do not dedicate a platform thread to it.
+		final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+						Thread.ofVirtual().name("spt-delete-await-", 0).factory());
+		final var completions = new ExecutorCompletionService<DurationSliceProbe>(executor);
+		final List<Future<DurationSliceProbe>> outstanding = new ArrayList<>(activeSlices.size());
+		try {
+			for (final LoadStep slice : activeSlices) {
+				outstanding.add(completions.submit(() -> awaitDurationSlice(slice, deadlineNanos)));
+			}
+			int completed = 0;
+			while (completed < activeSlices.size()) {
+				final long remainingNanos = DurationTime.remainingNanos(
+								deadlineNanos, System.nanoTime());
+				if (remainingNanos == 0) {
+					return false;
+				}
+				final Future<DurationSliceProbe> completedProbe = completions.poll(remainingNanos, TimeUnit.NANOSECONDS);
+				if (completedProbe == null) {
+					return false;
+				}
+				completed++;
+				try {
+					final DurationSliceProbe probe = completedProbe.get();
+					if (DurationTime.deadlineReached(
+									deadlineNanos, probe.observedAtNanos())) {
+						return false;
+					}
+					if (probe.failure() != null) {
+						throwUnchecked(probe.failure());
+					}
+					if (probe.exhausted()) {
+						throw standaloneDeleteEarlyExhaustionFailure();
+					}
+				} catch (final ExecutionException e) {
+					if (DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+						return false;
+					}
+					throwUnchecked(e.getCause());
+				}
+			}
+			return false;
+		} finally {
+			outstanding.forEach(future -> future.cancel(true));
+			executor.shutdownNow();
+		}
+	}
+
+	private DurationSliceProbe awaitDurationSlice(final LoadStep stepSlice, final long deadlineNanos)
+					throws InterruptedException {
+		while (!DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+			if (Thread.currentThread().isInterrupted()) {
+				throw new InterruptedException();
+			}
+			final long remainingNanos = Math.max(
+							1, DurationTime.remainingNanos(deadlineNanos, System.nanoTime()));
+			try {
+				final long pollNanos = Math.min(DURATION_REMOTE_AWAIT_POLL_NANOS, remainingNanos);
+				if (stepSlice.await(pollNanos, TimeUnit.NANOSECONDS)) {
+					return new DurationSliceProbe(true, System.nanoTime(), null);
+				}
+				final DurationAwaitStatus status = probeDurationAwaitStatus(stepSlice);
+				if (status == null) {
+					continue;
+				}
+				if (status == DurationAwaitStatus.REACHED_DEADLINE) {
+					return new DurationSliceProbe(false, System.nanoTime(), null);
+				}
+				if (status == DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE) {
+					return new DurationSliceProbe(true, System.nanoTime(), null);
+				}
+				if (status == DurationAwaitStatus.FAILED) {
+					return new DurationSliceProbe(
+									false,
+									System.nanoTime(),
+									terminalFailure(
+													IntegrityTerminalException.Category.EXECUTION,
+													"Standalone DELETE worker could not establish duration validity",
+													null));
+				}
+			} catch (final RemoteException e) {
+				return new DurationSliceProbe(
+								false,
+								System.nanoTime(),
+								terminalFailure(
+												IntegrityTerminalException.Category.EXECUTION,
+												"Standalone DELETE duration run lost a remote input slice before the deadline",
+												e));
+			} catch (final RuntimeException failure) {
+				return new DurationSliceProbe(false, System.nanoTime(), failure);
+			}
+		}
+		return new DurationSliceProbe(false, System.nanoTime(), null);
+	}
+
+	private DurationAwaitStatus probeDurationAwaitStatus(final LoadStep stepSlice)
+					throws RemoteException {
+		if (!durationAwaitStatusProbes.add(stepSlice)) {
+			return null;
+		}
+		try {
+			final DurationAwaitStatus status = stepSlice.durationAwaitStatus();
+			durationAwaitStatuses.put(stepSlice, status);
+			return status;
+		} finally {
+			durationAwaitStatusProbes.remove(stepSlice);
+		}
+	}
+
+	private record DurationSliceProbe(boolean exhausted, long observedAtNanos, Throwable failure) {}
+
 	@Override
 	protected final void doStop() {
-		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
-			try (
-							final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
-											KEY_CLASS_NAME, getClass().getSimpleName())) {
-				stepSlice.stop();
-			} catch (final Exception e) {
-				throwUncheckedIfInterrupted(e);
-				LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
-								stepSlice);
+		if (standaloneDeleteDurationMode()) {
+			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+				super.doStop();
+				return;
 			}
-		});
+			final List<LoadStep> activeSlices = stepSlices.stream()
+							.filter(slice -> slice != null)
+							.collect(Collectors.toList());
+			final var result = invokeStepSlicePhase(
+							activeSlices,
+							stepSlice -> {
+								try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
+												KEY_CLASS_NAME, getClass().getSimpleName())) {
+									stepSlice.stop();
+								}
+							},
+							durationStopPhaseDeadlineNanos(),
+							"spt-delete-step-stop-");
+			if (recordDurationPhaseResult("stop", result)) {
+				Thread.currentThread().interrupt();
+			}
+		} else {
+			stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
+				try (
+								final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
+												KEY_CLASS_NAME, getClass().getSimpleName())) {
+					stepSlice.stop();
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
+									stepSlice);
+				}
+			});
+		}
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();
@@ -777,8 +1240,43 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doClose()
 					throws IOException {
+		final boolean durationMode = standaloneDeleteDurationMode();
+		boolean durationStopRecoordinated = false;
+		if (durationMode) {
+			if (durationCleanupRetryPending) {
+				// The prior close surfaced its sticky failure. Start a new explicit cleanup
+				// attempt without duplicating any still-running retained phase invocation.
+				durationStopFailure = null;
+				durationAdmissionBarrierSatisfied = false;
+			} else if (durationStopFailure != null || !durationAdmissionBarrierSatisfied) {
+				durationCleanupRetryPending = true;
+				if (durationStopFailure == null) {
+					recordDurationStopFailure(
+									"close operation admission",
+									new IllegalStateException("operation admission closure was not confirmed"));
+				}
+				throw durationStopFailure;
+			}
+			if (durationCleanupRetryPending) {
+				coordinateDurationStop();
+				if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+					durationCleanupRetryPending = true;
+					throw durationStopFailure;
+				}
+				durationStopRecoordinated = true;
+			}
+			if (durationStopRecoordinated) {
+				doStop();
+				if (durationStopFailure != null) {
+					durationCleanupRetryPending = true;
+					throw durationStopFailure;
+				}
+			}
+		}
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			IntegrityTerminalException terminalCause = null;
+			IntegrityTerminalException terminalCause = durationStopFailure;
+			durationStopFailure = null;
+			boolean durationSlicesClosed = true;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
 			if (integrityModeEnabled()) {
 				try {
@@ -793,7 +1291,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			try {
-				super.doClose();
+				closeMetricsContexts();
 			} catch (final Throwable cause) {
 				throwUncheckedIfInterrupted(cause);
 				if (!integrityModeEnabled()) {
@@ -821,28 +1319,55 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				metricsAggregator = null;
 			}
-			for (final var stepSlice : stepSlices) {
-				if (stepSlice == null) {
-					continue;
+			if (durationMode && durationAdmissionBarrierSatisfied) {
+				final List<LoadStep> activeSlices = stepSlices.stream()
+								.filter(slice -> slice != null)
+								.collect(Collectors.toList());
+				final var result = invokeStepSlicePhase(
+								activeSlices,
+								stepSlice -> {
+									stepSlice.close();
+									Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
+								},
+								durationStopPhaseDeadlineNanos(),
+								"spt-delete-step-close-");
+				for (final Throwable failure : result.failures()) {
+					terminalCause = appendTerminalFailure(
+									terminalCause,
+									IntegrityTerminalException.Category.CLEANUP,
+									"failed to close a step slice with terminal accounting",
+									failure);
 				}
-				try {
-					stepSlice.close();
-					Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
-				} catch (final Exception e) {
-					throwUncheckedIfInterrupted(e);
-					LogUtil.exception(Level.WARN, e, "{}: failed to close the step service \"{}\"", loadStepId(),
-									stepSlice);
-					if (integrityModeEnabled()) {
-						terminalCause = appendTerminalFailure(
-										terminalCause,
-										IntegrityTerminalException.Category.CLEANUP,
-										"failed to close metadata-mode step slice",
-										e);
+				durationSlicesClosed = result.succeeded();
+				if (result.interrupted()) {
+					Thread.currentThread().interrupt();
+				}
+			} else if (!durationMode) {
+				for (final var stepSlice : stepSlices) {
+					if (stepSlice == null) {
+						continue;
+					}
+					try {
+						stepSlice.close();
+						Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
+					} catch (final Exception e) {
+						throwUncheckedIfInterrupted(e);
+						LogUtil.exception(Level.WARN, e, "{}: failed to close the step service \"{}\"", loadStepId(),
+										stepSlice);
+						if (integrityModeEnabled()) {
+							terminalCause = appendTerminalFailure(
+											terminalCause,
+											IntegrityTerminalException.Category.CLEANUP,
+											"failed to close a step slice with terminal accounting",
+											e);
+						}
 					}
 				}
 			}
 			Loggers.MSG.debug("{}: closed all {} step slices", loadStepId(), stepSlices.size());
-			stepSlices.clear();
+			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
+				stepSlices.clear();
+			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
 					integrityLogFileAggregator.close();
@@ -953,24 +1478,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			storageAuthFileSlicers.clear();
 			if (terminalCause != null) {
+				if (durationMode) {
+					durationStopFailure = terminalCause;
+					durationCleanupRetryPending = true;
+				}
 				throw terminalCause;
 			}
+			if (durationMode) {
+				durationCleanupRetryPending = false;
+			}
+			closeRetainedDurationPhases();
 		}
-	}
-
-	private IntegrityTerminalException appendTerminalFailure(
-					final IntegrityTerminalException current,
-					final IntegrityTerminalException.Category category,
-					final String message,
-					final Throwable cause) {
-		final var failure = terminalFailure(category, message, cause);
-		if (current == null) {
-			return failure;
-		}
-		if (failure != current) {
-			current.addSuppressed(failure);
-		}
-		return current;
 	}
 
 	private static void rethrowCloseFailure(final Throwable cause) throws IOException {

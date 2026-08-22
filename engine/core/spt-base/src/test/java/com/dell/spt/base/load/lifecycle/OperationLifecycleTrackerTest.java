@@ -123,6 +123,86 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void terminalDeadlineRejectsACompletionBeforeTheLaterDrainPhaseBegins() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("post-deadline-completion");
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+		tracker.enforceTerminalDeadline(System.nanoTime() - 1);
+
+		assertFalse(tracker.completionStarted(op));
+		assertEquals(0, tracker.snapshot().terminal());
+		assertEquals(1, tracker.snapshot().unresolved());
+		assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+	}
+
+	@Test
+	void terminalDeadlineWinsWhenOutputStartedBeforeButFinishedAfterTheCutoff() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("cutoff-during-output");
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+		assertTrue(tracker.completionStarted(op));
+		tracker.enforceTerminalDeadline(System.nanoTime() - 1);
+
+		assertFalse(tracker.terminal(op));
+		assertEquals(0, tracker.snapshot().terminal());
+		assertEquals(1, tracker.snapshot().unresolved());
+		assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+	}
+
+	@Test
+	void terminalDeadlineIsRecheckedAfterWaitingForLifecycleOwnership() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("cutoff-while-terminal-waits");
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+		assertTrue(tracker.completionStarted(op));
+		final var terminalAccepted = new java.util.concurrent.atomic.AtomicReference<Boolean>();
+		final Thread terminalThread;
+		synchronized (op.lifecycle()) {
+			terminalThread = Thread.ofPlatform().start(() -> terminalAccepted.set(tracker.terminal(op)));
+			final long waitDeadlineNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+			while (terminalThread.getState() != Thread.State.BLOCKED
+							&& System.nanoTime() < waitDeadlineNanos) {
+				Thread.onSpinWait();
+			}
+			assertEquals(Thread.State.BLOCKED, terminalThread.getState());
+			tracker.enforceTerminalDeadline(System.nanoTime() - 1);
+		}
+		terminalThread.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(2));
+
+		assertFalse(terminalThread.isAlive());
+		assertFalse(terminalAccepted.get());
+		assertEquals(0, tracker.snapshot().terminal());
+		assertEquals(1, tracker.snapshot().unresolved());
+	}
+
+	@Test
+	void terminalDeadlineGuardResolvesNeverCompletingDispatchedWork() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("never-completes");
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+
+		assertEquals(1, tracker.expireTerminalDeadline());
+		assertFalse(tracker.completionStarted(op));
+		assertEquals(1, tracker.snapshot().unresolved());
+	}
+
+	@Test
+	void absoluteDispatchDeadlineRejectsTransportHandoffWithoutWaitingForTheGuardThread() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("post-deadline-dispatch");
+		assertTrue(tracker.driverQueued(op));
+		tracker.enforceDispatchDeadline(System.nanoTime() - 1);
+
+		assertFalse(tracker.dispatched(op));
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, op.lifecycle().state());
+		assertEquals(0, tracker.snapshot().dispatched());
+	}
+
+	@Test
 	void terminalWorkDoesNotAccumulateInOutstandingMemory() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final int operationCount = 4096;

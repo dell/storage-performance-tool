@@ -556,7 +556,6 @@ func TestGenerateSeededDeleteScenarioRejectsNonFiniteOrInvalidInputs(t *testing.
 		params Params
 		detail string
 	}{
-		{name: "duration", params: Params{RunID: 1, Bucket: "b", Duration: "1m", Threads: 1, DeleteBatchSize: 1}, detail: "finite count"},
 		{name: "bucket", params: Params{RunID: 1, Threads: 1, DeleteBatchSize: 1}, detail: "requires a bucket"},
 		{name: "negative count", params: Params{RunID: 1, Bucket: "b", ObjectCount: -1, Threads: 1, DeleteBatchSize: 1}, detail: "non-negative"},
 	} {
@@ -583,6 +582,83 @@ func TestDeleteGeneratorIsInternalWhilePublicRegistryRemainsGated(t *testing.T) 
 	})
 	if err != nil || !strings.Contains(generated, "DeleteLoad.config") {
 		t.Fatalf("internal delete generation = %q, %v", generated, err)
+	}
+}
+
+func TestGenerateDeleteDurationScenariosUseFiniteLiveInventoriesWithoutRecycle(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     Params
+		wantSetup  string
+		wantSource string
+	}{
+		{
+			name: "seeded",
+			params: Params{
+				WorkloadType: workload.Delete, RunID: 21, Bucket: "owned", Duration: "45s",
+				SeedCount: 4321, Threads: 3, DeleteBatchSize: 100,
+			},
+			wantSetup:  `"limit": {"count": 4321}`,
+			wantSource: "CreateLoad.config",
+		},
+		{
+			name: "manifest",
+			params: Params{
+				WorkloadType: workload.Delete, RunID: 22, ItemsFile: "/input/items.csv",
+				Duration: "45s", Threads: 3, DeleteBatchSize: 1,
+			},
+			wantSource: "Standalone DELETE explicit-manifest",
+		},
+		{
+			name: "existing prefix",
+			params: Params{
+				WorkloadType: workload.Delete, RunID: 23, Bucket: "existing", Prefix: "safe/",
+				DeleteExisting: true, Duration: "45s", Threads: 3, DeleteBatchSize: 100,
+			},
+			wantSource: "Load.config",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generated, err := GenerateDeleteScenario(test.params)
+			if err != nil {
+				t.Fatalf("GenerateDeleteScenario() error = %v", err)
+			}
+			for _, want := range []string{
+				test.wantSource,
+				`"delete": {"standalone": true, "batchSize":`,
+				`"duration": true`,
+				`"limit": {"time": "45s"}`,
+				`"recycle": {"mode": false}`,
+				`"retry": false`,
+				`"wait": {"finish": true}`,
+			} {
+				if !strings.Contains(generated, want) {
+					t.Fatalf("duration DELETE scenario omitted %q:\n%s", want, generated)
+				}
+			}
+			if test.wantSetup != "" && !strings.Contains(generated, test.wantSetup) {
+				t.Fatalf("duration DELETE setup omitted %q:\n%s", test.wantSetup, generated)
+			}
+			deleteStep := generated[strings.LastIndex(generated, "DeleteLoad.config"):]
+			if strings.Contains(deleteStep, `"limit": {"count"`) {
+				t.Fatalf("duration DELETE incorrectly mapped identities to request count:\n%s", deleteStep)
+			}
+		})
+	}
+}
+
+func TestGenerateSeededDeleteDurationDefaultsToFinite2500IdentityInventory(t *testing.T) {
+	generated, err := GenerateDeleteScenario(Params{
+		WorkloadType: workload.Delete, RunID: 24, Bucket: "owned", Duration: "30s",
+		Threads: 1, DeleteBatchSize: DefaultDeleteBatchSize,
+	})
+	if err != nil {
+		t.Fatalf("GenerateDeleteScenario() error = %v", err)
+	}
+	if !strings.Contains(generated, `"limit": {"count": 2500}`) {
+		t.Fatalf("seeded duration default inventory missing:\n%s", generated)
 	}
 }
 

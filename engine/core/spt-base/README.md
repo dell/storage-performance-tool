@@ -139,6 +139,11 @@ The internal standalone DELETE spine is explicitly enabled by `load.op.delete.st
 off so cleanup steps, read-workload cleanup, and mixed-workload DELETE keep their existing single-item
 `DataOperation` behavior. A capable storage driver must opt in through
 `StorageDriver.supportsStandaloneDeleteRequests()` before the step can initialize.
+`load.op.delete.duration` is also shipped off. When enabled it requires a positive
+`load.step.limit.time`, forbids generic request-count limiting, and treats finite input exhaustion
+before that deadline as an invalid run. The CLI sizes seeded duration inventory with
+`--seed-objects` (2,500 by default); manifest and prefix modes use their frozen selections without
+recycling. Recycle and engine retries remain forbidden in both count and duration modes.
 
 A `DeleteRequestOperation` represents one logical API request and owns an immutable ordered list of 1 through 1,000
 canonical targets. Every target has the same bucket and effective credential and snapshots its key, size, and optional
@@ -188,6 +193,29 @@ source/unique/selected counts, SHA-256 selection, and LIST-step provenance consu
 step. Discovery and DELETE use separate step metrics; only the latter is timed as deletion. Versions
 and delete markers are not selected. Operators must keep the namespace quiescent because a
 concurrent write can replace a frozen current-key identity before deletion.
+
+At a duration deadline the controller closes generator and driver admission across every local or
+distributed input slice before permitting queued-work recovery on any slice. Generator-buffered,
+assembler-tail, and driver-queued-but-undispatched identities are
+unattempted. Requests that reached actual driver dispatch remain attempted and drain for at most
+`load.op.wait.limit`, whose shipped default is 30 seconds; drained outcomes and latencies remain in
+the DELETE phase. Any dispatched target without a terminal result after that bound is unresolved and
+invalidates the run. A bounded coordinator passes each slice the remaining part of one step-wide
+drain budget, so the configured bound is not multiplied by input count. It retains one lifecycle
+invocation per frozen slice, offers every slice each phase, and reuses incomplete invocations rather
+than multiplying blocked work on cleanup retry. During setup each duration generator holds
+admission while its driver initializes; after every slice is ready, the controller first prepares
+the same requested interval everywhere and then releases scheduling in a separate concurrent phase
+on each worker's local monotonic clock.
+Remote drains start once and expose a short status-poll RPC, keeping control calls below the shipped
+RMI response timeout even when the configured drain bound is longer. The generator records source-monotonic scheduling
+exhaustion. Each worker compares that timestamp with its own deadline and retains a semantic
+verdict; after admission closes, the controller requires every slice to report that it reached its
+deadline. Remote monotonic timestamps are never compared, and delayed, missing, or failed evidence
+fails closed. Exhaustion is invalid only when it is strictly earlier than the scheduled deadline. The lifecycle invariant must reconcile after normal completion, deadline stop,
+cancellation, and bounded drain. Monotonic scheduled and drain intervals are observable separately.
+Storage concurrency (`--threads` in CLI-generated scenarios) limits logical DELETE requests rather
+than the number of object targets held by those requests.
 
 # 3. Bundles and Extenstions
 

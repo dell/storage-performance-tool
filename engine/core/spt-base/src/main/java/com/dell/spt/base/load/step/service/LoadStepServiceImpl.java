@@ -6,6 +6,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.logging.Loggers;
@@ -16,11 +17,14 @@ import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 
 public final class LoadStepServiceImpl extends ServiceBase implements LoadStepService {
 
 	private final LoadStep localLoadStep;
+	private CompletableFuture<Void> durationDrainTask;
 
 	public LoadStepServiceImpl(
 					final int port,
@@ -54,6 +58,17 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	}
 
 	@Override
+	protected void doShutdown() {
+		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
+			localLoadStep.shutdown();
+			Loggers.MSG.debug("Step service for \"{}\" is shutdown", safeLoadStepId());
+		} catch (final RemoteException e) {
+			Loggers.ERR.warn("Step service shutdown failure for {}", safeLoadStepId(), e);
+			throw new IllegalStateException("Failed to shutdown load step service " + safeLoadStepId(), e);
+		}
+	}
+
+	@Override
 	protected void doStop() {
 		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
 			localLoadStep.stop();
@@ -67,8 +82,8 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	@Override
 	protected final void doClose() throws IOException {
 		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, localLoadStep.loadStepId())) {
-			super.doStop();
 			localLoadStep.close();
+			super.doStop();
 			Loggers.MSG.info("Step service for \"{}\" is closed", localLoadStep.loadStepId());
 		}
 	}
@@ -97,6 +112,89 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	@Override
 	public final List<? extends AllMetricsSnapshot> metricsSnapshots() throws RemoteException {
 		return localLoadStep.metricsSnapshots();
+	}
+
+	@Override
+	public final void prepareDurationInterval(final long durationNanos) throws RemoteException {
+		localLoadStep.prepareDurationInterval(durationNanos);
+	}
+
+	@Override
+	public final void startDurationInterval(final long durationNanos) throws RemoteException {
+		localLoadStep.startDurationInterval(durationNanos);
+	}
+
+	@Override
+	public final void closeOperationAdmissionForStepStop() throws RemoteException {
+		localLoadStep.closeOperationAdmissionForStepStop();
+	}
+
+	@Override
+	public final void recoverQueuedOperationsForStepStop() throws RemoteException {
+		localLoadStep.recoverQueuedOperationsForStepStop();
+	}
+
+	@Override
+	public final void drainDispatchedOperationsForStepStop(final long remainingNanos)
+					throws RemoteException {
+		localLoadStep.drainDispatchedOperationsForStepStop(remainingNanos);
+	}
+
+	@Override
+	public final synchronized void startDispatchedOperationsDrainForStepStop(
+					final long remainingNanos) {
+		if (durationDrainTask != null) {
+			if (!durationDrainTask.isDone()) {
+				return;
+			}
+			try {
+				durationDrainTask.join();
+				return;
+			} catch (final CompletionException ignored) {
+				// An explicit controller cleanup retry may safely begin a fresh local attempt.
+			}
+		}
+		final CompletableFuture<Void> nextTask = new CompletableFuture<>();
+		durationDrainTask = nextTask;
+		final Thread drainThread = Thread.ofPlatform()
+						.daemon()
+						.name("spt-delete-service-drain-" + safeLoadStepId())
+						.unstarted(() -> {
+							try {
+								localLoadStep.drainDispatchedOperationsForStepStop(remainingNanos);
+								nextTask.complete(null);
+							} catch (final Throwable failure) {
+								nextTask.completeExceptionally(failure);
+							}
+						});
+		drainThread.start();
+	}
+
+	@Override
+	public final synchronized boolean isDispatchedOperationsDrainCompleteForStepStop()
+					throws RemoteException {
+		if (durationDrainTask == null || !durationDrainTask.isDone()) {
+			return false;
+		}
+		try {
+			durationDrainTask.join();
+			return true;
+		} catch (final CompletionException failure) {
+			final Throwable cause = failure.getCause();
+			throw new RemoteException(
+							"standalone DELETE dispatched-operation drain failed",
+							cause instanceof Exception exception ? exception : new Exception(cause));
+		}
+	}
+
+	@Override
+	public final void validateTerminalStateForStepStop() throws RemoteException {
+		localLoadStep.validateTerminalStateForStepStop();
+	}
+
+	@Override
+	public final DurationAwaitStatus durationAwaitStatus() throws RemoteException {
+		return localLoadStep.durationAwaitStatus();
 	}
 
 	@Override

@@ -130,7 +130,7 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	})
 }
 
-// GenerateDeleteScenario renders the internally available finite-count DELETE slices. The
+// GenerateDeleteScenario renders the internally available count- and duration-based DELETE slices. The
 // public workload registry remains gated until the complete DELETE feature is qualified.
 func GenerateDeleteScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
@@ -142,6 +142,10 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	}
 	if params.Threads <= 0 {
 		return "", fmt.Errorf("delete threads must be positive")
+	}
+	duration := strings.TrimSpace(params.Duration)
+	if duration != "" && params.ObjectCount != 0 {
+		return "", fmt.Errorf("delete object count and duration are mutually exclusive")
 	}
 	selectionOrder := params.SelectionOrder
 	if selectionOrder == "" {
@@ -172,13 +176,11 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		ItemsFile:      params.ItemsFile,
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
+		Duration:       duration,
 	})
 }
 
 func generateExistingPrefixDeleteScenario(params Params, selectionOrder string) (string, error) {
-	if strings.TrimSpace(params.Duration) != "" {
-		return "", fmt.Errorf("delete existing-prefix finite count mode does not yet support duration")
-	}
 	if params.Cleanup {
 		return "", fmt.Errorf("delete existing-prefix mode cannot use cleanup because SPT did not create the selected objects")
 	}
@@ -230,20 +232,25 @@ func generateExistingPrefixDeleteScenario(params Params, selectionOrder string) 
 		ListBatchSize:  defaultListBatchSize,
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
+		Duration:       strings.TrimSpace(params.Duration),
 	})
 }
 
 func generateSeededDeleteScenario(params Params, selectionOrder string) (string, error) {
-	if strings.TrimSpace(params.Duration) != "" {
-		return "", fmt.Errorf("delete seeded finite count mode does not yet support duration")
-	}
 	if strings.TrimSpace(params.Bucket) == "" {
 		return "", fmt.Errorf("delete seeded mode requires a bucket")
 	}
 	if params.ObjectCount < 0 {
 		return "", fmt.Errorf("delete object count must be non-negative")
 	}
+	duration := strings.TrimSpace(params.Duration)
 	seedCount := params.ObjectCount
+	if duration != "" {
+		seedCount = params.SeedCount
+		if seedCount < 0 {
+			return "", fmt.Errorf("delete seed object count must be positive for duration mode")
+		}
+	}
 	if seedCount == 0 {
 		seedCount = DefaultDeleteObjectCount
 	}
@@ -277,6 +284,7 @@ func generateSeededDeleteScenario(params Params, selectionOrder string) (string,
 		SeedCount:      seedCount,
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
+		Duration:       duration,
 	})
 }
 

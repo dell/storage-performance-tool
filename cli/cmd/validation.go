@@ -386,6 +386,9 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		}
 		return nil
 	}
+	if autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds"); autoTerminate > 0 {
+		return errors.New("standalone DELETE does not support --auto-terminate-seconds; use --duration and provide enough live inventory for the full interval")
+	}
 	batchSize := scenario.DefaultDeleteBatchSize
 	if batchFlag != nil {
 		batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
@@ -413,10 +416,6 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		return errors.New("DELETE --allow-empty-prefix requires --delete-existing")
 	}
 	if deleteExisting {
-		duration, _ := cmd.Flags().GetString("duration")
-		if strings.TrimSpace(duration) != "" {
-			return errors.New("DELETE existing-prefix finite count mode does not yet support --duration")
-		}
 		cleanup, _ := cmd.Flags().GetBool("cleanup")
 		if cleanup {
 			return errors.New("DELETE --delete-existing cannot be used with --cleanup because SPT did not create those objects")
@@ -437,17 +436,16 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 	if strings.TrimSpace(itemsFile) == "" {
 		duration, _ := cmd.Flags().GetString("duration")
 		if strings.TrimSpace(duration) != "" {
-			return errors.New("DELETE seeded finite count mode does not yet support --duration")
+			seedObjects, _ := cmd.Flags().GetInt("seed-objects")
+			if seedObjects <= 0 {
+				return errors.New("DELETE duration mode requires --seed-objects to be greater than zero")
+			}
 		}
 		cleanup, _ := cmd.Flags().GetBool("cleanup")
 		if cleanup {
-			return errors.New("DELETE seeded finite count mode does not yet support --cleanup")
+			return errors.New("DELETE seeded mode does not support --cleanup")
 		}
 		return nil
-	}
-	duration, _ := cmd.Flags().GetString("duration")
-	if strings.TrimSpace(duration) != "" {
-		return errors.New("DELETE explicit-manifest finite count mode does not yet support --duration")
 	}
 	prefix, _ := cmd.Flags().GetString("prefix")
 	if strings.TrimSpace(prefix) != "" {

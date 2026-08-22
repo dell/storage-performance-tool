@@ -55,6 +55,7 @@ type deleteManifestScenarioData struct {
 	ItemsFile      string
 	BatchSize      int
 	SelectionOrder string
+	Duration       string
 }
 
 type deleteSeededScenarioData struct {
@@ -68,6 +69,7 @@ type deleteSeededScenarioData struct {
 	SeedCount      int
 	BatchSize      int
 	SelectionOrder string
+	Duration       string
 }
 
 type deleteExistingScenarioData struct {
@@ -80,6 +82,7 @@ type deleteExistingScenarioData struct {
 	ListBatchSize  int
 	BatchSize      int
 	SelectionOrder string
+	Duration       string
 }
 
 var integrityScenarioTemplates = template.Must(
@@ -183,12 +186,12 @@ DeleteLoad.config({
     "batch": {"size": {{.BatchSize}}},
     "op": {
       "type": "delete",
-      "delete": {"standalone": true, "batchSize": {{.BatchSize}}},
+      "delete": {"standalone": true, "batchSize": {{.BatchSize}}, "duration": {{if .Duration}}true{{else}}false{{end}}},
       "recycle": {"mode": false},
       "retry": false,
       "wait": {"finish": true}
     },
-    "step": {"id": {{jsq .DeleteStep}}}
+    "step": {"id": {{jsq .DeleteStep}}{{if .Duration}}, "limit": {"time": {{jsq .Duration}}}{{end}}}
   },
   {{template "summary"}}
 }).run();
@@ -220,12 +223,12 @@ DeleteLoad.config({
     "batch": {"size": {{.BatchSize}}},
     "op": {
       "type": "delete",
-      "delete": {"standalone": true, "batchSize": {{.BatchSize}}},
+      "delete": {"standalone": true, "batchSize": {{.BatchSize}}, "duration": {{if .Duration}}true{{else}}false{{end}}},
       "recycle": {"mode": false},
       "retry": false,
       "wait": {"finish": true}
     },
-    "step": {"id": {{jsq .DeleteStep}}}
+    "step": {"id": {{jsq .DeleteStep}}{{if .Duration}}, "limit": {"time": {{jsq .Duration}}}{{end}}}
   },
   {{template "summary"}}
 }).run();
@@ -259,12 +262,12 @@ DeleteLoad.config({
     "batch": {"size": {{.BatchSize}}},
     "op": {
       "type": "delete",
-      "delete": {"standalone": true, "batchSize": {{.BatchSize}}},
+      "delete": {"standalone": true, "batchSize": {{.BatchSize}}, "duration": {{if .Duration}}true{{else}}false{{end}}},
       "recycle": {"mode": false},
       "retry": false,
       "wait": {"finish": true}
     },
-    "step": {"id": {{jsq .DeleteStep}}}
+    "step": {"id": {{jsq .DeleteStep}}{{if .Duration}}, "limit": {"time": {{jsq .Duration}}}{{end}}}
   },
   {{template "summary"}}
 }).run();

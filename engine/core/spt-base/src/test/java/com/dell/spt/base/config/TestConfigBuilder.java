@@ -228,6 +228,7 @@ public class TestConfigBuilder {
 		Map<String, Object> opDelete = new HashMap<>();
 		opDelete.put("standalone", false);
 		opDelete.put("batchSize", 100);
+		opDelete.put("duration", false);
 		op.put("delete", opDelete);
 
 		Map<String, Object> opWait = new HashMap<>();

@@ -6,6 +6,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import java.util.List;
+import java.util.OptionalLong;
 
 /** Created on 11.07.16. */
 public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Task, AutoCloseable {
@@ -15,6 +16,14 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 
 	/** Opens operation admission before a start or restart. */
 	default void openAdmission() {}
+
+	/** Opens operation admission until the supplied absolute monotonic deadline. */
+	default void openAdmissionUntil(final long deadlineNanos) {
+		openAdmission();
+	}
+
+	/** Holds admission before the first start without transitioning the task lifecycle. */
+	default void holdAdmission() {}
 
 	/** Atomically closes admission before shutdown recovery begins. */
 	default void closeAdmission() {
@@ -28,6 +37,30 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 
 	/** Returns true when the item input has been fully consumed. */
 	boolean isItemInputFinished();
+
+	/**
+	 * Returns the monotonic time when this finite generator lost the ability to schedule another
+	 * fresh operation, or {@link Long#MAX_VALUE} while it remains schedulable. Use {@link
+	 * #schedulingExhaustionNanos()} when explicit presence is required because {@code Long.MAX_VALUE}
+	 * is also a valid monotonic timestamp.
+	 */
+	default long schedulingExhaustedAtNanos() {
+		return Long.MAX_VALUE;
+	}
+
+	/**
+	 * Returns the scheduling-exhaustion transition with explicit presence.
+	 *
+	 * <p>The compatibility default adapts the historical {@link Long#MAX_VALUE} sentinel. Built-in
+	 * generators override this method so that {@code Long.MAX_VALUE} remains a valid monotonic
+	 * timestamp.
+	 */
+	default OptionalLong schedulingExhaustionNanos() {
+		final long exhaustedAtNanos = schedulingExhaustedAtNanos();
+		return exhaustedAtNanos == Long.MAX_VALUE
+						? OptionalLong.empty()
+						: OptionalLong.of(exhaustedAtNanos);
+	}
 
 	/** Returns the number of operations generated including recycled ones. */
 	long generatedOpCount();

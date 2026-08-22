@@ -4,32 +4,55 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
+import com.dell.spt.base.load.step.service.LoadStepService;
+import com.dell.spt.base.load.step.service.LoadStepServiceImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
+import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.config.Configurator;
@@ -42,6 +65,8 @@ import org.apache.logging.log4j.core.config.Configurator;
  */
 @DisplayName("LoadStepClientBase Tests")
 class LoadStepClientBaseTest {
+	private static final int BLOCKING_PHASE_WIDTH = 8;
+	private static final String REAL_RMI_STEP_TYPE = "duration-rmi-test";
 
 	private Config testConfig;
 	private List<Extension> extensions;
@@ -79,6 +104,1015 @@ class LoadStepClientBaseTest {
 						IntegrityTerminalException.class,
 						() -> LoadStepClientBase.requireMatchingRunId(mock(LoadStep.class), 0L));
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+	}
+
+	@Test
+	void durationClientFailsWhenAnyOneOfMultipleSlicesExhaustsEarly() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep exhausted = mock(LoadStep.class);
+		final LoadStep stillActive = mock(LoadStep.class);
+		when(exhausted.await(anyLong(), any(java.util.concurrent.TimeUnit.class))).thenReturn(true);
+		when(stillActive.await(anyLong(), any(java.util.concurrent.TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, exhausted);
+		addStepSlice(client, stillActive);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, java.util.concurrent.TimeUnit.SECONDS));
+		assertTrue(failure.getMessage().contains("inventory slice exhausted before the requested duration"));
+	}
+
+	@Test
+	void durationClientFailsClosedWhenAnyRemoteSliceBecomesUnreachable() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep unavailable = mock(LoadStep.class);
+		final LoadStep stillActive = mock(LoadStep.class);
+		when(unavailable.await(anyLong(), any(java.util.concurrent.TimeUnit.class)))
+						.thenThrow(new RemoteException("lost worker"));
+		when(stillActive.await(anyLong(), any(java.util.concurrent.TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, unavailable);
+		addStepSlice(client, stillActive);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, java.util.concurrent.TimeUnit.SECONDS));
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+	}
+
+	@Test
+	void durationAwaitUsesShortControlPlanePollsAndAcceptsTheWorkerDeadlineVerdict() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		final AtomicLong longestAwaitNanos = new AtomicLong();
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			final long requestedNanos = invocation.getArgument(1, TimeUnit.class)
+							.toNanos(invocation.getArgument(0));
+			longestAwaitNanos.accumulateAndGet(requestedNanos, Math::max);
+			if (requestedNanos > TimeUnit.SECONDS.toNanos(1)) {
+				throw new RemoteException("simulated shipped RMI response timeout");
+			}
+			return false;
+		});
+		addStepSlice(client, slice);
+
+		assertDoesNotThrow(() -> client.await(30, TimeUnit.SECONDS));
+		assertTrue(longestAwaitNanos.get() <= TimeUnit.SECONDS.toNanos(1));
+		verify(slice, atLeastOnce()).durationAwaitStatus();
+	}
+
+	@Test
+	void durationControllerDeadlineStartsAfterEveryWorkerArmAcknowledges() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep delayedWorker = mock(LoadStep.class);
+		final AtomicLong workerDeadlineNanos = new AtomicLong(Long.MAX_VALUE);
+		final AtomicLong workerArmedAtNanos = new AtomicLong();
+		doAnswer(invocation -> {
+			Thread.sleep(250);
+			final long armedAtNanos = System.nanoTime();
+			final long durationNanos = invocation.getArgument(0, Long.class);
+			if (workerArmedAtNanos.compareAndSet(0, armedAtNanos)) {
+				workerDeadlineNanos.set(armedAtNanos + durationNanos);
+			}
+			return null;
+		}).when(delayedWorker).startDurationInterval(anyLong());
+		when(delayedWorker.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(delayedWorker.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		when(delayedWorker.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		addStepSlice(client, delayedWorker);
+
+		assertDoesNotThrow(() -> client.await(200, TimeUnit.MILLISECONDS));
+		final Field drainDeadlineField = LoadStepClientBase.class.getDeclaredField(
+						"durationDrainDeadlineNanos");
+		drainDeadlineField.setAccessible(true);
+		final long controllerDeadlineNanos = drainDeadlineField.getLong(client)
+						- TimeUnit.SECONDS.toNanos(1);
+		assertTrue(
+						controllerDeadlineNanos - workerArmedAtNanos.get() >= TimeUnit.MILLISECONDS.toNanos(150),
+						() -> "the common controller deadline was established before the worker arm barrier: "
+										+ "worker=" + workerDeadlineNanos.get() + ", controller="
+										+ controllerDeadlineNanos);
+		assertDoesNotThrow(client::close);
+		assertNoLiveThreads(
+						"spt-delete-duration-prepare-",
+						"spt-delete-duration-start-",
+						"spt-delete-await-",
+						"spt-delete-admission-close-",
+						"spt-delete-duration-verdict-",
+						"spt-delete-recovery-",
+						"spt-delete-drain-",
+						"spt-delete-terminal-validation-",
+						"spt-delete-shutdown-",
+						"spt-delete-step-stop-");
+	}
+
+	private static void assertNoLiveThreads(final String... namePrefixes)
+					throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		List<String> liveNames;
+		do {
+			liveNames = Thread.getAllStackTraces().keySet().stream()
+							.filter(Thread::isAlive)
+							.map(Thread::getName)
+							.filter(name -> java.util.Arrays.stream(namePrefixes).anyMatch(name::startsWith))
+							.toList();
+			if (liveNames.isEmpty()) {
+				return;
+			}
+			Thread.sleep(10);
+		} while (System.nanoTime() < deadlineNanos);
+		fail("duration client lifecycle threads remain live: " + liveNames);
+	}
+
+	@Test
+	void durationAwaitUsesShortPollsThroughRealRmiForALongRequestedInterval() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("real-rmi-duration");
+		when(local.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		final AtomicLong longestAwaitNanos = new AtomicLong();
+		when(local.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			final long requestedNanos = invocation.getArgument(1, TimeUnit.class)
+							.toNanos(invocation.getArgument(0));
+			longestAwaitNanos.accumulateAndGet(requestedNanos, Math::max);
+			if (requestedNanos > TimeUnit.SECONDS.toNanos(1)) {
+				throw new RemoteException("simulated shipped RMI response timeout");
+			}
+			return false;
+		});
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		LoadStepServiceImpl service = null;
+		try {
+			final int port;
+			try (ServerSocket socket = new ServerSocket(0)) {
+				socket.setReuseAddress(true);
+				port = socket.getLocalPort();
+			}
+			service = newRealDurationService(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			addRawStepSlice(client, remote);
+
+			assertDoesNotThrow(() -> client.await(30, TimeUnit.SECONDS));
+			assertTrue(longestAwaitNanos.get() <= TimeUnit.SECONDS.toNanos(1));
+			assertDoesNotThrow(client::close);
+			assertTrue(client.isClosed());
+		} finally {
+			if (service != null && !service.isClosed()) {
+				service.close();
+			}
+			ServiceUtil.shutdown();
+			if (originalHost == null) {
+				System.clearProperty("java.rmi.server.hostname");
+			} else {
+				System.setProperty("java.rmi.server.hostname", originalHost);
+			}
+		}
+	}
+
+	@Test
+	void terminalValidationFailureInvalidatesButStillClosesEveryReachableSlice() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep unresolved = mock(LoadStep.class);
+		when(unresolved.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		doThrow(new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"unresolved dispatched request"))
+						.when(unresolved).validateTerminalStateForStepStop();
+		addStepSlice(client, unresolved);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, TimeUnit.MILLISECONDS));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("unresolved dispatched request"));
+		verify(unresolved).recoverQueuedOperationsForStepStop();
+		verify(unresolved).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(unresolved).validateTerminalStateForStepStop();
+		verify(unresolved).shutdown();
+		verify(unresolved).stop();
+		assertDoesNotThrow(client::close);
+		verify(unresolved).close();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationAwaitArmsEverySliceBeforeAnySliceMayRun() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep first = mock(LoadStep.class);
+		final LoadStep delayedLast = mock(LoadStep.class);
+		final CountDownLatch preparationsEntered = new CountDownLatch(2);
+		final CountDownLatch releaseLastPreparation = new CountDownLatch(1);
+		final AtomicLong firstArmedAt = new AtomicLong();
+		final AtomicLong lastArmedAt = new AtomicLong();
+		final AtomicLong firstDurationNanos = new AtomicLong();
+		final AtomicLong lastDurationNanos = new AtomicLong();
+		doAnswer(invocation -> {
+			firstDurationNanos.set(invocation.getArgument(0));
+			preparationsEntered.countDown();
+			return null;
+		}).when(first).prepareDurationInterval(anyLong());
+		doAnswer(invocation -> {
+			lastDurationNanos.set(invocation.getArgument(0));
+			preparationsEntered.countDown();
+			assertTrue(releaseLastPreparation.await(1, TimeUnit.SECONDS));
+			return null;
+		}).when(delayedLast).prepareDurationInterval(anyLong());
+		doAnswer(invocation -> {
+			firstArmedAt.set(System.nanoTime());
+			return null;
+		}).when(first).startDurationInterval(anyLong());
+		doAnswer(invocation -> {
+			lastArmedAt.set(System.nanoTime());
+			return null;
+		}).when(delayedLast).startDurationInterval(anyLong());
+		when(first.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(delayedLast.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, first);
+		addStepSlice(client, delayedLast);
+
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(50, TimeUnit.MILLISECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(preparationsEntered.await(1, TimeUnit.SECONDS));
+			verify(first, never()).startDurationInterval(anyLong());
+			verify(delayedLast, never()).startDurationInterval(anyLong());
+			verify(first, never()).await(anyLong(), any(TimeUnit.class));
+			verify(delayedLast, never()).await(anyLong(), any(TimeUnit.class));
+		} finally {
+			releaseLastPreparation.countDown();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+
+		assertFalse(awaitThread.isAlive());
+		assertNull(awaitFailure.get());
+		assertEquals(TimeUnit.MILLISECONDS.toNanos(50), firstDurationNanos.get());
+		assertEquals(firstDurationNanos.get(), lastDurationNanos.get());
+		verify(first).startDurationInterval(firstDurationNanos.get());
+		verify(delayedLast).startDurationInterval(firstDurationNanos.get());
+		assertTrue(
+						Math.abs(firstArmedAt.get() - lastArmedAt.get()) < TimeUnit.SECONDS.toNanos(1),
+						"duration arm RPCs were serialized instead of coordinated");
+	}
+
+	@Test
+	void durationPublicStopCoordinatesEverySliceWithBoundedWorkersAndOneDrainBudget() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final int sliceCount = BLOCKING_PHASE_WIDTH + 2;
+		final AtomicInteger admissionsClosed = new AtomicInteger();
+		final AtomicInteger queuesRecovered = new AtomicInteger();
+		final AtomicInteger phaseViolations = new AtomicInteger();
+		final AtomicInteger activeDrains = new AtomicInteger();
+		final AtomicInteger maxActiveDrains = new AtomicInteger();
+		final AtomicLong minimumDrainBudgetNanos = new AtomicLong(Long.MAX_VALUE);
+		final List<LoadStep> slices = new java.util.ArrayList<>(sliceCount);
+
+		for (int i = 0; i < sliceCount; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			doAnswer(invocation -> {
+				admissionsClosed.incrementAndGet();
+				return null;
+			}).when(slice).closeOperationAdmissionForStepStop();
+			doAnswer(invocation -> {
+				if (admissionsClosed.get() != sliceCount) {
+					phaseViolations.incrementAndGet();
+				}
+				queuesRecovered.incrementAndGet();
+				return null;
+			}).when(slice).recoverQueuedOperationsForStepStop();
+			doAnswer(invocation -> {
+				if (queuesRecovered.get() != sliceCount) {
+					phaseViolations.incrementAndGet();
+				}
+				final long budgetNanos = invocation.getArgument(0);
+				minimumDrainBudgetNanos.accumulateAndGet(budgetNanos, Math::min);
+				final int active = activeDrains.incrementAndGet();
+				maxActiveDrains.accumulateAndGet(active, Math::max);
+				try {
+					Thread.sleep(Math.min(100, TimeUnit.NANOSECONDS.toMillis(budgetNanos)));
+				} finally {
+					activeDrains.decrementAndGet();
+				}
+				return null;
+			}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+			slices.add(slice);
+			addStepSlice(client, slice);
+		}
+
+		final long startedNanos = System.nanoTime();
+		assertDoesNotThrow(client::stop);
+		final long elapsedNanos = System.nanoTime() - startedNanos;
+
+		assertEquals(sliceCount, admissionsClosed.get());
+		assertEquals(sliceCount, queuesRecovered.get());
+		assertEquals(0, phaseViolations.get());
+		assertTrue(maxActiveDrains.get() > 1);
+		assertTrue(maxActiveDrains.get() > BLOCKING_PHASE_WIDTH);
+		assertTrue(maxActiveDrains.get() <= sliceCount);
+		assertTrue(minimumDrainBudgetNanos.get() > 0);
+		assertTrue(elapsedNanos < TimeUnit.SECONDS.toNanos(1));
+		for (final LoadStep slice : slices) {
+			verify(slice).shutdown();
+			verify(slice).stop();
+		}
+		assertDoesNotThrow(client::close);
+	}
+
+	@Test
+	void durationStopPreservesAdmissionFailureWithoutCrossingRecoveryBarrier() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final int sliceCount = BLOCKING_PHASE_WIDTH + 1;
+		final List<LoadStep> slices = new java.util.ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			if (i == 0) {
+				doAnswer(invocation -> {
+					throw new RemoteException("admission unavailable");
+				}).when(slice).closeOperationAdmissionForStepStop();
+			}
+			slices.add(slice);
+			addStepSlice(client, slice);
+		}
+
+		assertDoesNotThrow(client::stop);
+		for (final LoadStep slice : slices) {
+			verify(slice).closeOperationAdmissionForStepStop();
+			verify(slice, never()).recoverQueuedOperationsForStepStop();
+			verify(slice, never()).startDispatchedOperationsDrainForStepStop(anyLong());
+			verify(slice, never()).shutdown();
+			verify(slice, never()).stop();
+		}
+		final var failure = assertThrows(IntegrityTerminalException.class, client::close);
+		assertTrue(failure.getMessage().contains("close operation admission"));
+		for (final LoadStep slice : slices) {
+			verify(slice, never()).close();
+		}
+	}
+
+	@Test
+	void durationFailedCloseRetainsSlicesForSafeCleanupRetry() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicInteger admissionAttempts = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			if (admissionAttempts.incrementAndGet() == 1) {
+				throw new RemoteException("transient admission failure");
+			}
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addStepSlice(client, slice);
+
+		assertDoesNotThrow(client::stop);
+		assertThrows(IntegrityTerminalException.class, client::close);
+		verify(slice, never()).close();
+
+		assertDoesNotThrow(client::close);
+		verify(slice, times(2)).closeOperationAdmissionForStepStop();
+		verify(slice).recoverQueuedOperationsForStepStop();
+		verify(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(slice).shutdown();
+		verify(slice).stop();
+		verify(slice).close();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationRunRetriesTransientCleanupAndClosesRetainedSliceThreads() throws Exception {
+		final Config config = durationConfig();
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final AtomicInteger admissionAttempts = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			if (admissionAttempts.incrementAndGet() == 1) {
+				throw new RemoteException("transient admission failure");
+			}
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, List.of(factory), ctxConfigs, mockMetricsManager);
+
+		final var failure = assertThrows(IntegrityTerminalException.class, client::run);
+
+		assertTrue(failure.getMessage().contains("inventory slice exhausted before the requested duration"));
+		verify(slice, times(2)).closeOperationAdmissionForStepStop();
+		verify(slice).recoverQueuedOperationsForStepStop();
+		verify(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(slice).shutdown();
+		verify(slice).stop();
+		verify(slice).close();
+		assertTrue(client.isClosed());
+		assertNoLiveThreads(
+						"spt-delete-duration-prepare-",
+						"spt-delete-duration-start-",
+						"spt-delete-await-",
+						"spt-delete-admission-close-",
+						"spt-delete-duration-verdict-",
+						"spt-delete-recovery-",
+						"spt-delete-drain-",
+						"spt-delete-terminal-validation-",
+						"spt-delete-shutdown-",
+						"spt-delete-step-stop-",
+						"spt-delete-step-close-");
+	}
+
+	@Test
+	void durationRepeatedRecoveryFailureRetainsSlicesUntilFullCleanupRetry() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicInteger recoveryAttempts = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			if (recoveryAttempts.incrementAndGet() <= 2) {
+				throw new RemoteException("transient recovery failure");
+			}
+			return null;
+		}).when(slice).recoverQueuedOperationsForStepStop();
+		addStepSlice(client, slice);
+
+		assertDoesNotThrow(client::stop);
+		assertThrows(IntegrityTerminalException.class, client::close);
+		verify(slice, never()).close();
+
+		assertThrows(IntegrityTerminalException.class, client::close);
+		verify(slice, never()).close();
+
+		assertDoesNotThrow(client::close);
+		verify(slice, times(3)).closeOperationAdmissionForStepStop();
+		verify(slice, times(3)).recoverQueuedOperationsForStepStop();
+		verify(slice).close();
+		assertTrue(client.isClosed());
+	}
+
+	@ParameterizedTest
+	@EnumSource(RemoteCleanupFailurePhase.class)
+	void durationCleanupRetriesOnlyTheFailedSliceForEveryLaterPhase(
+					final RemoteCleanupFailurePhase failedPhase) throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicInteger attempts = new AtomicInteger();
+		final LoadStep failing = mock(LoadStep.class);
+		final LoadStep healthy = mock(LoadStep.class);
+		configureOneShotFailure(failing, failedPhase, attempts);
+		addStepSlice(client, failing);
+		addStepSlice(client, healthy);
+
+		assertDoesNotThrow(client::stop);
+		assertThrows(IntegrityTerminalException.class, client::close);
+		assertDoesNotThrow(client::close);
+
+		verifyRemotePhase(failing, failedPhase, times(2));
+		verifyRemotePhase(healthy, failedPhase, times(1));
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationAwaitRejectsRemoteEarlyExhaustionDeliveredAfterDeadline() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep exhaustedAfterDeadline = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			Thread.sleep(20);
+			return true;
+		}).when(exhaustedAfterDeadline).await(anyLong(), any(TimeUnit.class));
+		addStepSlice(client, exhaustedAfterDeadline);
+		when(exhaustedAfterDeadline.durationAwaitStatus())
+						.thenReturn(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE);
+
+		assertThrows(IntegrityTerminalException.class, () -> client.await(1, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	void durationAwaitAcceptsSourceVerdictReachedDespiteLateProbeDelivery() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep reachedDeadline = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			Thread.sleep(20);
+			return true;
+		}).when(reachedDeadline).await(anyLong(), any(TimeUnit.class));
+		addStepSlice(client, reachedDeadline);
+
+		assertFalse(client.await(1, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	void durationAwaitFailsClosedWhenAWorkerCannotProvideDurationEvidence() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep missingEvidence = mock(LoadStep.class);
+		when(missingEvidence.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, missingEvidence);
+		when(missingEvidence.durationAwaitStatus()).thenReturn(DurationAwaitStatus.NOT_STARTED);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, TimeUnit.MILLISECONDS));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+	}
+
+	@Test
+	void durationVerdictRpcFailureStillReconcilesAndClosesEveryReachableSlice() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep missingEvidence = mock(LoadStep.class);
+		when(missingEvidence.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, missingEvidence);
+		when(missingEvidence.durationAwaitStatus())
+						.thenThrow(new RemoteException("duration verdict unavailable"));
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, TimeUnit.MILLISECONDS));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		verify(missingEvidence).closeOperationAdmissionForStepStop();
+		verify(missingEvidence).recoverQueuedOperationsForStepStop();
+		verify(missingEvidence).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(missingEvidence).shutdown();
+		verify(missingEvidence).stop();
+		assertDoesNotThrow(client::close);
+		verify(missingEvidence).close();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationAwaitFailsBoundedlyAndRetainsAHungVerdictWithoutDuplicateSubmission() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch verdictEntered = new CountDownLatch(1);
+		final CountDownLatch releaseVerdict = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, slice);
+		doAnswer(invocation -> {
+			verdictEntered.countDown();
+			while (releaseVerdict.getCount() > 0) {
+				try {
+					releaseVerdict.await();
+				} catch (final InterruptedException ignored) {
+					// Model an RMI status call which ignores controller-side cancellation.
+				}
+			}
+			return DurationAwaitStatus.REACHED_DEADLINE;
+		}).when(slice).durationAwaitStatus();
+
+		try {
+			final long startedNanos = System.nanoTime();
+			assertThrows(
+							IntegrityTerminalException.class,
+							() -> client.await(1, TimeUnit.MILLISECONDS));
+			assertTrue(verdictEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(System.nanoTime() - startedNanos < TimeUnit.SECONDS.toNanos(3));
+			assertDoesNotThrow(client::close);
+			verify(slice).durationAwaitStatus();
+		} finally {
+			releaseVerdict.countDown();
+		}
+
+		verify(slice).durationAwaitStatus();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationRecoveryOffersEverySliceOnceAndRetainsBlockedCallsAcrossRetry() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final int sliceCount = BLOCKING_PHASE_WIDTH + 2;
+		final CountDownLatch blockersEntered = new CountDownLatch(BLOCKING_PHASE_WIDTH);
+		final CountDownLatch trailingEntered = new CountDownLatch(2);
+		final CountDownLatch releaseBlockers = new CountDownLatch(1);
+		final CountDownLatch retryAdmissionCompleted = new CountDownLatch(1);
+		final AtomicInteger admissionCalls = new AtomicInteger();
+		final List<LoadStep> slices = new ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
+			final int index = i;
+			final LoadStep slice = mock(LoadStep.class);
+			doAnswer(invocation -> {
+				if (admissionCalls.incrementAndGet() == 2 * sliceCount) {
+					retryAdmissionCompleted.countDown();
+				}
+				return null;
+			}).when(slice).closeOperationAdmissionForStepStop();
+			doAnswer(invocation -> {
+				if (index < BLOCKING_PHASE_WIDTH) {
+					blockersEntered.countDown();
+					while (releaseBlockers.getCount() > 0) {
+						try {
+							releaseBlockers.await();
+						} catch (final InterruptedException ignored) {
+							// Model a black-holed RPC which ignores cancellation.
+						}
+					}
+				} else {
+					trailingEntered.countDown();
+				}
+				return null;
+			}).when(slice).recoverQueuedOperationsForStepStop();
+			slices.add(slice);
+			addStepSlice(client, slice);
+		}
+
+		final AtomicReference<Throwable> retryFailure = new AtomicReference<>();
+		try {
+			assertDoesNotThrow(client::stop);
+			assertTrue(blockersEntered.await(5, TimeUnit.SECONDS));
+			assertTrue(trailingEntered.await(1, TimeUnit.SECONDS));
+			assertThrows(IntegrityTerminalException.class, client::close);
+			final Thread retry = Thread.ofPlatform().start(() -> {
+				try {
+					client.close();
+				} catch (final Throwable failure) {
+					retryFailure.set(failure);
+				}
+			});
+			assertTrue(retryAdmissionCompleted.await(1, TimeUnit.SECONDS));
+			for (final LoadStep slice : slices) {
+				verify(slice, times(1)).recoverQueuedOperationsForStepStop();
+				verify(slice, never()).startDispatchedOperationsDrainForStepStop(anyLong());
+			}
+			releaseBlockers.countDown();
+			retry.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(retry.isAlive());
+			assertNull(retryFailure.get());
+			assertTrue(client.isClosed());
+		} finally {
+			releaseBlockers.countDown();
+		}
+	}
+
+	@Test
+	void durationAwaitUsesOneControllerDeadlineAndProbesSlicesQueuedBeyondWorkerBound() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		for (int i = 0; i < BLOCKING_PHASE_WIDTH; i++) {
+			final LoadStep active = mock(LoadStep.class);
+			doAnswer(invocation -> {
+				Thread.sleep(5);
+				return false;
+			}).when(active).await(anyLong(), any(TimeUnit.class));
+			addStepSlice(client, active);
+		}
+		final AtomicLong exhaustedProbeNanos = new AtomicLong();
+		final LoadStep exhaustedBeyondWorkerBound = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			exhaustedProbeNanos.compareAndSet(0, System.nanoTime());
+			return true;
+		}).when(exhaustedBeyondWorkerBound).await(anyLong(), any(TimeUnit.class));
+		addStepSlice(client, exhaustedBeyondWorkerBound);
+		final LoadStep activeBeyondWorkerBound = mock(LoadStep.class);
+		when(activeBeyondWorkerBound.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		addStepSlice(client, activeBeyondWorkerBound);
+
+		final long startedNanos = System.nanoTime();
+		final long deadlineNanos = startedNanos + TimeUnit.MILLISECONDS.toNanos(200);
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(200, TimeUnit.MILLISECONDS));
+		final long elapsedNanos = System.nanoTime() - startedNanos;
+
+		assertTrue(failure.getMessage().contains("inventory slice exhausted"));
+		verify(exhaustedBeyondWorkerBound).await(anyLong(), any(TimeUnit.class));
+		assertTrue(
+						exhaustedProbeNanos.get() < deadlineNanos,
+						"a queued slice was first probed only after the controller deadline");
+		assertTrue(elapsedNanos < TimeUnit.SECONDS.toNanos(1));
+	}
+
+	@Test
+	void durationAwaitCancelsBlockingPeersImmediatelyAfterOneSliceExhausts() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch blockingProbeEntered = new CountDownLatch(1);
+		final CountDownLatch releaseBlockingProbe = new CountDownLatch(1);
+		final CountDownLatch blockingProbeInterrupted = new CountDownLatch(1);
+		final LoadStep blocking = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			blockingProbeEntered.countDown();
+			try {
+				releaseBlockingProbe.await();
+			} catch (final InterruptedException e) {
+				blockingProbeInterrupted.countDown();
+				throw e;
+			}
+			return false;
+		}).when(blocking).await(anyLong(), any(TimeUnit.class));
+		final LoadStep exhausted = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			assertTrue(blockingProbeEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		}).when(exhausted).await(anyLong(), any(TimeUnit.class));
+		addStepSlice(client, blocking);
+		addStepSlice(client, exhausted);
+
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(10, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(blockingProbeEntered.await(1, TimeUnit.SECONDS));
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			assertFalse(awaitThread.isAlive(), "early exhaustion must not wait for a blocking peer");
+			assertTrue(awaitFailure.get() instanceof IntegrityTerminalException);
+			assertTrue(blockingProbeInterrupted.await(1, TimeUnit.SECONDS));
+		} finally {
+			releaseBlockingProbe.countDown();
+			awaitThread.interrupt();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+	}
+
+	@Test
+	void durationAwaitProbesTrailingSliceBeyondUninterruptibleWorkerWave() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch blockersEntered = new CountDownLatch(BLOCKING_PHASE_WIDTH);
+		final CountDownLatch releaseBlockers = new CountDownLatch(1);
+		final AtomicReference<Thread> blockingProbeThread = new AtomicReference<>();
+		for (int i = 0; i < BLOCKING_PHASE_WIDTH; i++) {
+			final LoadStep blocker = mock(LoadStep.class);
+			doAnswer(invocation -> {
+				blockingProbeThread.compareAndSet(null, Thread.currentThread());
+				blockersEntered.countDown();
+				while (true) {
+					try {
+						releaseBlockers.await();
+						return false;
+					} catch (final InterruptedException ignored) {
+						// Model a black-holed RMI probe which does not cooperate with cancellation.
+					}
+				}
+			}).when(blocker).await(anyLong(), any(TimeUnit.class));
+			addStepSlice(client, blocker);
+		}
+		final LoadStep exhausted = mock(LoadStep.class);
+		when(exhausted.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		addStepSlice(client, exhausted);
+
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(10, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(blockersEntered.await(5, TimeUnit.SECONDS));
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			assertFalse(
+							awaitThread.isAlive(),
+							"uninterruptible leading probes starved a trailing exhausted slice");
+			assertTrue(awaitFailure.get() instanceof IntegrityTerminalException);
+			verify(exhausted).await(anyLong(), any(TimeUnit.class));
+			assertTrue(
+							blockingProbeThread.get().isVirtual(),
+							"a cancellation-resistant remote probe retained a platform thread");
+		} finally {
+			releaseBlockers.countDown();
+			awaitThread.interrupt();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+	}
+
+	@Test
+	void durationStopTimesOutBlockingAdmissionWithoutCrossingRecoveryBarrier() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch blockingAdmissionEntered = new CountDownLatch(1);
+		final CountDownLatch releaseBlockingAdmission = new CountDownLatch(1);
+		final CountDownLatch blockingAdmissionInterrupted = new CountDownLatch(1);
+		final LoadStep blocking = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			blockingAdmissionEntered.countDown();
+			try {
+				releaseBlockingAdmission.await();
+			} catch (final InterruptedException e) {
+				blockingAdmissionInterrupted.countDown();
+				throw e;
+			}
+			return null;
+		}).when(blocking).closeOperationAdmissionForStepStop();
+		final LoadStep healthy = mock(LoadStep.class);
+		addStepSlice(client, blocking);
+		addStepSlice(client, healthy);
+
+		final Thread stopThread = Thread.ofPlatform().start(client::stop);
+		try {
+			assertTrue(blockingAdmissionEntered.await(1, TimeUnit.SECONDS));
+			stopThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(stopThread.isAlive(), "a blocking phase call must not stall distributed cleanup");
+			assertFalse(blockingAdmissionInterrupted.await(100, TimeUnit.MILLISECONDS));
+			verify(healthy, never()).recoverQueuedOperationsForStepStop();
+			verify(healthy, never()).startDispatchedOperationsDrainForStepStop(anyLong());
+			verify(healthy, never()).shutdown();
+			verify(healthy, never()).stop();
+			final var failure = assertThrows(IntegrityTerminalException.class, client::close);
+			assertTrue(failure.getMessage().contains("close operation admission"));
+			verify(blocking, never()).close();
+			verify(healthy, never()).close();
+			releaseBlockingAdmission.countDown();
+			assertDoesNotThrow(client::close);
+			assertTrue(client.isClosed());
+		} finally {
+			releaseBlockingAdmission.countDown();
+			stopThread.interrupt();
+			stopThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+	}
+
+	@Test
+	void durationAdmissionBarrierOffersClosureBeyondUninterruptibleWorkerWave() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch blockersEntered = new CountDownLatch(BLOCKING_PHASE_WIDTH);
+		final CountDownLatch releaseBlockers = new CountDownLatch(1);
+		for (int i = 0; i < BLOCKING_PHASE_WIDTH; i++) {
+			final LoadStep blocker = mock(LoadStep.class);
+			doAnswer(invocation -> {
+				blockersEntered.countDown();
+				while (true) {
+					try {
+						releaseBlockers.await();
+						return null;
+					} catch (final InterruptedException ignored) {
+						// Model a black-holed RMI call which does not cooperate with cancellation.
+					}
+				}
+			}).when(blocker).closeOperationAdmissionForStepStop();
+			addStepSlice(client, blocker);
+		}
+		final CountDownLatch trailingAdmissionClosed = new CountDownLatch(1);
+		final LoadStep trailing = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			trailingAdmissionClosed.countDown();
+			return null;
+		}).when(trailing).closeOperationAdmissionForStepStop();
+		addStepSlice(client, trailing);
+
+		final Thread stopThread = Thread.ofPlatform().start(client::stop);
+		try {
+			assertTrue(blockersEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(
+							trailingAdmissionClosed.await(1, TimeUnit.SECONDS),
+							"a trailing slice never received the deadline admission-close signal");
+			stopThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(stopThread.isAlive(), "an uninterruptible close RPC stalled the controller");
+			verify(trailing, never()).recoverQueuedOperationsForStepStop();
+		} finally {
+			releaseBlockers.countDown();
+			stopThread.interrupt();
+			stopThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+	}
+
+	@Test
+	void durationDrainBudgetIncludesQueueRecoveryTime() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicLong drainBudgetNanos = new AtomicLong(Long.MAX_VALUE);
+		final LoadStep slice = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			Thread.sleep(700);
+			return null;
+		}).when(slice).recoverQueuedOperationsForStepStop();
+		doAnswer(invocation -> {
+			drainBudgetNanos.set(invocation.getArgument(0));
+			return null;
+		}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		addStepSlice(client, slice);
+
+		assertDoesNotThrow(client::stop);
+
+		assertTrue(drainBudgetNanos.get() > 0);
+		assertTrue(
+						drainBudgetNanos.get() < TimeUnit.MILLISECONDS.toNanos(600),
+						"queue recovery received time outside the one step-wide drain budget");
+	}
+
+	@Test
+	void durationDrainBudgetStartsAtTheScheduledDeadlineBeforeAdmissionClosure() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicLong drainBudgetNanos = new AtomicLong(Long.MAX_VALUE);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		doAnswer(invocation -> {
+			Thread.sleep(700);
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		doAnswer(invocation -> {
+			drainBudgetNanos.set(invocation.getArgument(0));
+			return null;
+		}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		addStepSlice(client, slice);
+
+		assertDoesNotThrow(() -> client.await(1, TimeUnit.MILLISECONDS));
+
+		assertTrue(drainBudgetNanos.get() > 0);
+		assertTrue(
+						drainBudgetNanos.get() < TimeUnit.MILLISECONDS.toNanos(600),
+						"admission closure received time outside the scheduled-deadline drain budget");
+	}
+
+	@Test
+	void durationDrainBudgetStartsBeforeDistributedVerdictCollection() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicLong drainBudgetNanos = new AtomicLong(Long.MAX_VALUE);
+		final LoadStep slice = mock(LoadStep.class);
+		addStepSlice(client, slice);
+		doAnswer(invocation -> {
+			Thread.sleep(700);
+			return DurationAwaitStatus.REACHED_DEADLINE;
+		}).when(slice).durationAwaitStatus();
+		doAnswer(invocation -> {
+			drainBudgetNanos.set(invocation.getArgument(0));
+			return null;
+		}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+
+		assertDoesNotThrow(client::stop);
+
+		assertTrue(drainBudgetNanos.get() > 0);
+		assertTrue(
+						drainBudgetNanos.get() < TimeUnit.MILLISECONDS.toNanos(600),
+						"duration verdict collection received time outside the one step-wide drain budget");
+	}
+
+	private static Config durationConfig() {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "distributed-duration");
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", true);
+		config.val("load-step-limit-time", "60s");
+		return config;
 	}
 
 	@Test
@@ -1009,6 +2043,83 @@ class LoadStepClientBaseTest {
 			assertDoesNotThrow(() -> linearClient.doShutdown());
 			assertDoesNotThrow(() -> linearClient.doClose());
 			assertDoesNotThrow(() -> linearClient.doStop());
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void addStepSlice(final LoadStepClientBase<?> client, final LoadStep slice) {
+		try {
+			when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+			addRawStepSlice(client, slice);
+		} catch (final RemoteException e) {
+			throw new LinkageError(e.getMessage(), e);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void addRawStepSlice(final LoadStepClientBase<?> client, final LoadStep slice) {
+		try {
+			final Field field = LoadStepClientBase.class.getDeclaredField("stepSlices");
+			field.setAccessible(true);
+			((List<LoadStep>) field.get(client)).add(slice);
+		} catch (final ReflectiveOperationException e) {
+			throw new LinkageError(e.getMessage(), e);
+		}
+	}
+
+	private static LoadStepServiceImpl newRealDurationService(
+					final LoadStep localLoadStep, final int port) {
+		final Config serviceConfig = TestConfigBuilder.config();
+		serviceConfig.val("load-step-id", "real-rmi-duration");
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(REAL_RMI_STEP_TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(localLoadStep);
+		return new LoadStepServiceImpl(
+						port,
+						List.of(factory),
+						REAL_RMI_STEP_TYPE,
+						serviceConfig,
+						List.of(),
+						mock(MetricsManager.class));
+	}
+
+	private enum RemoteCleanupFailurePhase {
+		RECOVERY, DRAIN, SHUTDOWN, STOP, CLOSE
+	}
+
+	private static void configureOneShotFailure(
+					final LoadStep slice,
+					final RemoteCleanupFailurePhase phase,
+					final AtomicInteger attempts) throws Exception {
+		final org.mockito.stubbing.Answer<Void> answer = invocation -> {
+			if (attempts.incrementAndGet() == 1) {
+				throw new RemoteException("transient " + phase.name().toLowerCase(Locale.ROOT));
+			}
+			return null;
+		};
+		switch (phase) {
+		case RECOVERY -> doAnswer(answer).when(slice).recoverQueuedOperationsForStepStop();
+		case DRAIN -> doAnswer(answer).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		case SHUTDOWN -> doAnswer(answer).when(slice).shutdown();
+		case STOP -> doAnswer(answer).when(slice).stop();
+		case CLOSE -> doAnswer(answer).when(slice).close();
+		default -> throw new AssertionError(phase);
+		}
+	}
+
+	private static void verifyRemotePhase(
+					final LoadStep slice,
+					final RemoteCleanupFailurePhase phase,
+					final org.mockito.verification.VerificationMode mode) throws Exception {
+		switch (phase) {
+		case RECOVERY -> verify(slice, mode).recoverQueuedOperationsForStepStop();
+		case DRAIN -> verify(slice, mode).startDispatchedOperationsDrainForStepStop(anyLong());
+		case SHUTDOWN -> verify(slice, mode).shutdown();
+		case STOP -> verify(slice, mode).stop();
+		case CLOSE -> verify(slice, mode).close();
+		default -> throw new AssertionError(phase);
 		}
 	}
 

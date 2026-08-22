@@ -21,6 +21,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
@@ -36,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
@@ -77,6 +79,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
+	private record SchedulingExhaustion(long observedAtNanos) {}
+
 	private volatile boolean recycleQueueFullState = false;
 	private volatile boolean itemInputFinishFlag = false;
 	private volatile boolean opInputFinishFlag = false;
@@ -113,7 +117,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
+	private final AtomicReference<SchedulingExhaustion> schedulingExhaustion = new AtomicReference<>();
 	private final AtomicBoolean admissionOpen = new AtomicBoolean(true);
+	private volatile long admissionDeadlineNanos;
+	private volatile boolean admissionDeadlineSet;
 	private final AtomicBoolean assemblerFinished = new AtomicBoolean(false);
 	private final Lock assemblyLock = new ReentrantLock();
 	private final Lock admissionLock = new ReentrantLock();
@@ -328,6 +335,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							if (items == null) {
 								itemInputFinishFlag = true;
 								pendingOpCount += finishAssemblerNormally(opBuff);
+								if (!recycleFlag) {
+									opInputFinishFlag = true;
+								}
 								Loggers.MSG.debug(
 												"End of items input \"{}\", generated op count: {}",
 												itemInput.toString(),
@@ -339,9 +349,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 									if (n > 0) {
 										final long newlyBuilt = buildOps(items, opBuff, n);
 										pendingOpCount = (int) (pendingOpCount + newlyBuilt);
+										pendingOpCount += finishKnownStandaloneInput(opBuff);
 									} else {
 										itemInputFinishFlag = true;
 										pendingOpCount += finishAssemblerNormally(opBuff);
+										if (!recycleFlag) {
+											opInputFinishFlag = true;
+										}
 									}
 								} catch (final ConcurrentModificationException cme) {
 									Loggers.MSG.debug(
@@ -386,6 +400,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								final var op = opBuff.get(0);
 								if (opOutput.put(op)) {
 									outputOpCounter.increment();
+									onFinalOperationHandoff();
 									bufferedOperations.remove(identityKey(op));
 									if (pendingOpCount == 1) {
 										opBuff.clear();
@@ -412,6 +427,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								final var writtenCount = opOutput.put(opBuff, 0, permittedCount);
 								assertOutputRange("Operation output", writtenCount, permittedCount, opBuff.size());
 								outputOpCounter.add(writtenCount);
+								onFinalOperationHandoff();
 								for (var i = 0; i < writtenCount; i++) {
 									bufferedOperations.remove(identityKey(opBuff.get(i)));
 								}
@@ -483,6 +499,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
 			if (isFinished()) {
+				if (finiteSchedulingExhausted()) {
+					recordSchedulingExhaustion();
+				}
 				try {
 					stop();
 				} catch (final IllegalStateException e) {
@@ -490,6 +509,72 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 			}
 		}
+	}
+
+	@Override
+	public final long schedulingExhaustedAtNanos() {
+		final SchedulingExhaustion exhaustion = schedulingExhaustion.get();
+		return exhaustion == null ? Long.MAX_VALUE : exhaustion.observedAtNanos();
+	}
+
+	@Override
+	public final OptionalLong schedulingExhaustionNanos() {
+		final SchedulingExhaustion exhaustion = schedulingExhaustion.get();
+		return exhaustion == null
+						? OptionalLong.empty()
+						: OptionalLong.of(exhaustion.observedAtNanos());
+	}
+
+	private boolean finiteSchedulingExhausted() {
+		return !recycleFlag
+						&& itemInputFinishFlag
+						&& opInputFinishFlag
+						&& generatedOpCount() == outputOpCounter.sum();
+	}
+
+	private void onFinalOperationHandoff() {
+		if (finiteSchedulingExhausted()) {
+			recordSchedulingExhaustion();
+			afterFinalOperationHandoff();
+		}
+	}
+
+	private void recordSchedulingExhaustion() {
+		if (schedulingExhaustion.get() == null) {
+			schedulingExhaustion.compareAndSet(
+							null, new SchedulingExhaustion(schedulingExhaustionTimeNanos()));
+		}
+	}
+
+	/** Package-local deterministic clock seam, read only for a finite scheduling transition. */
+	long schedulingExhaustionTimeNanos() {
+		return System.nanoTime();
+	}
+
+	/** Package-local deterministic scheduling seam, invoked only for the final finite handoff. */
+	void afterFinalOperationHandoff() {}
+
+	private int finishKnownStandaloneInput(final CircularBuffer<O> opBuff) throws IOException {
+		if (standaloneDeleteInputIdentityCount < 0) {
+			return 0;
+		}
+		final long consumedIdentityCount = consumedItemsCounter.sum();
+		if (consumedIdentityCount < standaloneDeleteInputIdentityCount) {
+			return 0;
+		}
+		if (consumedIdentityCount > standaloneDeleteInputIdentityCount) {
+			throw contractFailure(
+							"Standalone DELETE consumed "
+											+ consumedIdentityCount
+											+ " identities from an input that reported "
+											+ standaloneDeleteInputIdentityCount);
+		}
+		itemInputFinishFlag = true;
+		final int finishedOperationCount = finishAssemblerNormally(opBuff);
+		if (!recycleFlag) {
+			opInputFinishFlag = true;
+		}
+		return finishedOperationCount;
 	}
 
 	private List<I> getItems(final Input<I> itemInput, final int n) {
@@ -528,10 +613,22 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private boolean isAdmissionOpen() {
 		admissionLock.lock();
 		try {
-			return admissionOpen.get();
+			return admissionAllowedLocked();
 		} finally {
 			admissionLock.unlock();
 		}
+	}
+
+	private boolean admissionAllowedLocked() {
+		if (!admissionOpen.get()) {
+			return false;
+		}
+		if (admissionDeadlineSet
+						&& DurationTime.deadlineReached(admissionDeadlineNanos, System.nanoTime())) {
+			admissionOpen.set(false);
+			return false;
+		}
+		return true;
 	}
 
 	@SuppressWarnings("ThreadPriorityCheck") // intentional cooperative scheduler hint
@@ -561,7 +658,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 		assemblyLock.lock();
 		try {
-			if (!admissionOpen.get() || assemblerFinished.get()) {
+			if (!isAdmissionOpen() || assemblerFinished.get()) {
 				return 0;
 			}
 			final var assemblyBuffer = threadLocalAssemblyBuff.get();
@@ -592,25 +689,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 													+ availableOperationSlots
 													+ " buffer slots available");
 				}
-				var bufferedCount = 0;
-				admissionLock.lock();
-				try {
-					if (admissionOpen.get()) {
-						opBuff.addAll(assemblyBuffer);
-						for (final O op : assemblyBuffer) {
-							operationLifecycle.generatorBuffered(op);
-							bufferedOperations.add(identityKey(op));
-						}
-						bufferedCount = emittedOperationCount;
-					} else {
-						for (final O op : assemblyBuffer) {
-							operationLifecycle.generatorBuffered(op);
-							operationLifecycle.unattempted(op);
-						}
-					}
-				} finally {
-					admissionLock.unlock();
-				}
+				final var bufferedCount = admitAssembledOperations(opBuff, assemblyBuffer);
 				consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
 				builtTasksCounter.add(emittedOperationCount);
 				return bufferedCount;
@@ -634,6 +713,28 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			return 0;
 		} finally {
 			assemblyLock.unlock();
+		}
+	}
+
+	private int admitAssembledOperations(
+					final CircularBuffer<O> opBuff, final List<O> assemblyBuffer) {
+		admissionLock.lock();
+		try {
+			if (admissionAllowedLocked()) {
+				opBuff.addAll(assemblyBuffer);
+				for (final O op : assemblyBuffer) {
+					operationLifecycle.generatorBuffered(op);
+					bufferedOperations.add(identityKey(op));
+				}
+				return assemblyBuffer.size();
+			}
+			for (final O op : assemblyBuffer) {
+				operationLifecycle.generatorBuffered(op);
+				operationLifecycle.unattempted(op);
+			}
+			return 0;
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
@@ -689,12 +790,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 													+ availableOperationSlots
 													+ " buffer slots are available");
 				}
-				opBuff.addAll(assemblyBuffer);
-				for (final O op : assemblyBuffer) {
-					operationLifecycle.generatorBuffered(op);
-					bufferedOperations.add(identityKey(op));
-				}
-				return result.emittedOperationCount();
+				return admitAssembledOperations(opBuff, assemblyBuffer);
 			} finally {
 				assemblyBuffer.clear();
 			}
@@ -768,7 +864,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	public final void recycle(final O op) {
 		admissionLock.lock();
 		try {
-			if (!admissionOpen.get()) {
+			if (!admissionAllowedLocked()) {
 				operationLifecycle.unattempted(op);
 				return;
 			}
@@ -789,7 +885,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	public final void retry(final O op) {
 		admissionLock.lock();
 		try {
-			if (!admissionOpen.get()) {
+			if (!admissionAllowedLocked()) {
 				operationLifecycle.unattempted(op);
 				return;
 			}
@@ -810,7 +906,31 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	public final void openAdmission() {
 		admissionLock.lock();
 		try {
+			admissionDeadlineSet = false;
 			admissionOpen.set(true);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void openAdmissionUntil(final long deadlineNanos) {
+		admissionLock.lock();
+		try {
+			admissionDeadlineNanos = deadlineNanos;
+			admissionDeadlineSet = true;
+			admissionOpen.set(!DurationTime.deadlineReached(deadlineNanos, System.nanoTime()));
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void holdAdmission() {
+		admissionLock.lock();
+		try {
+			admissionDeadlineSet = false;
+			admissionOpen.set(false);
 		} finally {
 			admissionLock.unlock();
 		}
@@ -916,7 +1036,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			O retryOp = null;
 			admissionLock.lock();
 			try {
-				if (!admissionOpen.get()) {
+				if (!admissionAllowedLocked()) {
 					break;
 				}
 				retryOp = retryQueue.poll();
@@ -978,7 +1098,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private void requeueRetry(final O retryOp) {
 		admissionLock.lock();
 		try {
-			if (admissionOpen.get()) {
+			if (admissionAllowedLocked()) {
 				retryQueue.add(retryOp);
 			} else {
 				operationLifecycle.unattempted(retryOp);

@@ -13,6 +13,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -128,6 +129,91 @@ class OperationDispatchTaskTest {
 
 		assertEquals(1, lifecycle.inFlightCount());
 		assertEquals(1, lifecycle.snapshot().dispatched());
+	}
+
+	@Test
+	void successfulLegacySingleSubmitCrossingDeadlineBecomesUnresolved() throws Exception {
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("legacy-deadline-single", 0, 1),
+						null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.successfulSubmitStartsTransport(op)).thenReturn(true);
+		assertTrue(lifecycle.driverQueued(op));
+		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100);
+		lifecycle.enforceDispatchDeadline(deadlineNanos);
+		when(driverMock.submit(op)).thenAnswer(invocation -> {
+			assertFalse(DurationTime.deadlineReached(deadlineNanos, System.nanoTime()));
+			while (!DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+				Thread.onSpinWait();
+			}
+			return true;
+		});
+
+		inOpQueue.add(op);
+		task.doWork();
+
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(op));
+		assertEquals(1, lifecycle.snapshot().unresolved());
+		assertEquals(0, lifecycle.snapshot().unattempted());
+	}
+
+	@Test
+	void expiredLegacyChildQueueOperationIsRejectedBeforeSubmit() throws Exception {
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("expired-legacy-child", 0, 1),
+						null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.successfulSubmitStartsTransport(op)).thenReturn(true);
+		when(driverMock.submit(op)).thenReturn(true);
+		lifecycle.enforceDispatchDeadline(System.nanoTime());
+		childOpQueue = spy(childOpQueue);
+		when(childOpQueue.isEmpty()).thenReturn(false);
+		task = new OperationDispatchTask<>(
+						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
+						dispatchLock, dispatchReady, 16);
+		childOpQueue.add(op);
+
+		task.doWork();
+
+		verify(driverMock, never()).submit(op);
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(op));
+		assertEquals(1, lifecycle.snapshot().unattempted());
+	}
+
+	@Test
+	void successfulLegacyBatchSubmitCrossingDeadlineBecomesUnresolved() throws Exception {
+		final Operation<Item> first = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("legacy-deadline-batch-1", 0, 1),
+						null, "/bucket", null);
+		final Operation<Item> second = new OperationImpl<>(
+						0, OpType.DELETE, new DataItemImpl("legacy-deadline-batch-2", 0, 1),
+						null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.successfulSubmitStartsTransport(any(Operation.class))).thenReturn(true);
+		assertTrue(lifecycle.driverQueued(first));
+		assertTrue(lifecycle.driverQueued(second));
+		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100);
+		lifecycle.enforceDispatchDeadline(deadlineNanos);
+		when(driverMock.submit(anyList(), anyInt(), anyInt())).thenAnswer(invocation -> {
+			assertFalse(DurationTime.deadlineReached(deadlineNanos, System.nanoTime()));
+			while (!DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+				Thread.onSpinWait();
+			}
+			return invocation.getArgument(2, Integer.class)
+							- invocation.getArgument(1, Integer.class);
+		});
+
+		inOpQueue.add(first);
+		inOpQueue.add(second);
+		task.doWork();
+
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(first));
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(second));
+		assertEquals(2, lifecycle.snapshot().unresolved());
+		assertEquals(0, lifecycle.snapshot().unattempted());
 	}
 
 	@Test

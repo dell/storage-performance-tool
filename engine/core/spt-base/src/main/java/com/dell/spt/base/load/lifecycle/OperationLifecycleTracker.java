@@ -2,6 +2,7 @@ package com.dell.spt.base.load.lifecycle;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.step.DurationTime;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -10,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
@@ -97,7 +99,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 	}
 
-	private static final OperationLifecycleTracker<?> DISABLED = new OperationLifecycleTracker<>(false);
+	private static final OperationLifecycleTracker<?> DISABLED = new OperationLifecycleTracker<>(false, null);
 
 	private final boolean enabled;
 	private final Consumer<O> dispatchPublicationObserver;
@@ -111,16 +113,17 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private final LongAdder terminal = new LongAdder();
 	private final LongAdder unattempted = new LongAdder();
 	private final LongAdder unresolved = new LongAdder();
+	private volatile long dispatchDeadlineNanos;
+	private volatile boolean dispatchDeadlineSet;
+	private final AtomicBoolean terminalDeadlineExpired = new AtomicBoolean();
+	private volatile long terminalDeadlineNanos;
+	private volatile boolean terminalDeadlineSet;
 	private final ArrayList<O> unattemptedOperations = new ArrayList<>();
 	private final ArrayList<O> unresolvedOperations = new ArrayList<>();
 
 	/** Creates an enabled tracker for one load-step run. */
 	public OperationLifecycleTracker() {
 		this(true, null);
-	}
-
-	private OperationLifecycleTracker(final boolean enabled) {
-		this(enabled, null);
 	}
 
 	OperationLifecycleTracker(final Consumer<O> dispatchPublicationObserver) {
@@ -172,6 +175,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		terminal.reset();
 		unattempted.reset();
 		unresolved.reset();
+		dispatchDeadlineSet = false;
+		terminalDeadlineExpired.set(false);
+		terminalDeadlineSet = false;
 		synchronized (unattemptedOperations) {
 			unattemptedOperations.clear();
 		}
@@ -197,6 +203,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	public boolean driverQueued(final O op) {
 		if (!enabled) {
 			return true;
+		}
+		if (dispatchDeadlineReached()) {
+			return false;
 		}
 		if (!transition(op, op.startNextLifecycle(), OperationLifecycleState.DRIVER_QUEUED)) {
 			return false;
@@ -304,7 +313,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		final O op = token.operation;
 		if (token.lifecycle.isTracked()) {
 			synchronized (token.lifecycle) {
-				if (lifecycle(op) != token.lifecycle || !token.lifecycle.dispatched()) {
+				if (dispatchDeadlineReached()
+								|| lifecycle(op) != token.lifecycle
+								|| !token.lifecycle.dispatched()) {
 					return false;
 				}
 				recordDispatched(op);
@@ -314,7 +325,8 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 		synchronized (compatibilityStates) {
 			final var compatibilityState = compatibilityState(op);
-			if (compatibilityState == null
+			if (dispatchDeadlineReached()
+							|| compatibilityState == null
 							|| compatibilityState.circulation != token.compatibilityCirculation
 							|| compatibilityState.state != OperationLifecycleState.DRIVER_QUEUED) {
 				return false;
@@ -328,6 +340,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private boolean publishDispatch(
 					final O op, final OperationLifecycle lifecycle, final boolean explicit) {
+		if (dispatchDeadlineReached()) {
+			return false;
+		}
 		final boolean transitioned;
 		if (lifecycle.isTracked()) {
 			transitioned = explicit
@@ -363,7 +378,68 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	/** Claims the one completion callback allowed to construct and publish a terminal result. */
 	public boolean completionStarted(final O op) {
-		return !enabled || transition(op, lifecycle(op), OperationLifecycleState.COMPLETING);
+		if (!enabled) {
+			return true;
+		}
+		if (terminalDeadlineReached()) {
+			unresolved(op);
+			return false;
+		}
+		if (!transition(op, lifecycle(op), OperationLifecycleState.COMPLETING)) {
+			return false;
+		}
+		if (terminalDeadlineReached()) {
+			unresolved(op);
+			return false;
+		}
+		return true;
+	}
+
+	/** Arms the absolute monotonic cutoff after which transport dispatch is rejected. */
+	public synchronized void enforceDispatchDeadline(final long deadlineNanos) {
+		if (!enabled) {
+			return;
+		}
+		final long observedNanos = System.nanoTime();
+		if (!dispatchDeadlineSet
+						|| DurationTime.remainingNanos(deadlineNanos, observedNanos) < DurationTime.remainingNanos(dispatchDeadlineNanos, observedNanos)) {
+			dispatchDeadlineNanos = deadlineNanos;
+			dispatchDeadlineSet = true;
+		}
+	}
+
+	private boolean dispatchDeadlineReached() {
+		return dispatchDeadlineSet
+						&& DurationTime.deadlineReached(dispatchDeadlineNanos, System.nanoTime());
+	}
+
+	/** Arms the absolute monotonic cutoff after which terminal outcomes are rejected. */
+	public synchronized void enforceTerminalDeadline(final long deadlineNanos) {
+		if (!enabled || terminalDeadlineExpired.get()) {
+			return;
+		}
+		final long observedNanos = System.nanoTime();
+		if (!terminalDeadlineSet
+						|| DurationTime.remainingNanos(deadlineNanos, observedNanos) < DurationTime.remainingNanos(terminalDeadlineNanos, observedNanos)) {
+			terminalDeadlineNanos = deadlineNanos;
+			terminalDeadlineSet = true;
+		}
+	}
+
+	/** Atomically closes terminal admission and resolves work still in flight at the cutoff. */
+	public int expireTerminalDeadline() {
+		if (!enabled) {
+			return 0;
+		}
+		terminalDeadlineExpired.set(true);
+		return resolveOutstandingAsUnresolved();
+	}
+
+	private boolean terminalDeadlineReached() {
+		return terminalDeadlineExpired.get()
+						|| (terminalDeadlineSet
+										&& DurationTime.deadlineReached(
+														terminalDeadlineNanos, System.nanoTime()));
 	}
 
 	/** Records one successfully published terminal result and releases outstanding ownership. */
@@ -371,7 +447,39 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!enabled) {
 			return true;
 		}
-		if (!commitTerminal(op)) {
+		final var lifecycle = lifecycle(op);
+		final boolean deadlineWon;
+		if (lifecycle.isTracked()) {
+			synchronized (lifecycle) {
+				if (lifecycle.state() != OperationLifecycleState.COMPLETING) {
+					return false;
+				}
+				deadlineWon = terminalDeadlineReached();
+				if (deadlineWon ? !lifecycle.unresolved() : !lifecycle.terminal()) {
+					return false;
+				}
+				if (!deadlineWon) {
+					observeTerminal(op);
+				}
+			}
+		} else {
+			synchronized (compatibilityStates) {
+				final var compatibilityState = compatibilityState(op);
+				if (compatibilityState == null
+								|| compatibilityState.state != OperationLifecycleState.COMPLETING) {
+					return false;
+				}
+				deadlineWon = terminalDeadlineReached();
+				compatibilityState.state = deadlineWon
+								? OperationLifecycleState.UNRESOLVED
+								: OperationLifecycleState.TERMINAL;
+				if (!deadlineWon) {
+					observeTerminal(op);
+				}
+			}
+		}
+		if (deadlineWon) {
+			recordUnresolved(op);
 			return false;
 		}
 		outstanding.remove(identityKey(op));
@@ -379,30 +487,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		inFlight.decrementAndGet();
 		terminal.increment();
 		return true;
-	}
-
-	private boolean commitTerminal(final O op) {
-		final var lifecycle = lifecycle(op);
-		if (lifecycle.isTracked()) {
-			synchronized (lifecycle) {
-				if (lifecycle.state() != OperationLifecycleState.COMPLETING
-								|| !lifecycle.terminal()) {
-					return false;
-				}
-				observeTerminal(op);
-				return true;
-			}
-		}
-		synchronized (compatibilityStates) {
-			final var compatibilityState = compatibilityState(op);
-			if (compatibilityState == null
-							|| compatibilityState.state != OperationLifecycleState.COMPLETING) {
-				return false;
-			}
-			compatibilityState.state = OperationLifecycleState.TERMINAL;
-			observeTerminal(op);
-			return true;
-		}
 	}
 
 	private void observeTerminal(final O op) {
@@ -441,6 +525,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!transition(op, lifecycle(op), OperationLifecycleState.UNRESOLVED)) {
 			return false;
 		}
+		recordUnresolved(op);
+		return true;
+	}
+
+	private void recordUnresolved(final O op) {
 		outstanding.remove(identityKey(op));
 		inFlightOperations.remove(identityKey(op));
 		inFlight.decrementAndGet();
@@ -448,7 +537,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		synchronized (unresolvedOperations) {
 			unresolvedOperations.add(op);
 		}
-		return true;
 	}
 
 	/**
@@ -596,6 +684,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 					final OperationLifecycleState next) {
 		if (lifecycle.isTracked()) {
 			synchronized (lifecycle) {
+				if (next == OperationLifecycleState.DRIVER_QUEUED && dispatchDeadlineReached()) {
+					return false;
+				}
 				return switch (next) {
 				case GENERATOR_BUFFERED -> lifecycle.generatorBuffered();
 				case DRIVER_QUEUED -> lifecycle.driverQueued();
@@ -609,6 +700,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 			}
 		}
 		synchronized (compatibilityStates) {
+			if (next == OperationLifecycleState.DRIVER_QUEUED && dispatchDeadlineReached()) {
+				return false;
+			}
 			var compatibilityState = compatibilityState(op);
 			final var current = compatibilityState == null
 							? OperationLifecycleState.NEW
