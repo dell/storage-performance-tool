@@ -49,8 +49,9 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 	private final Path manifestPath;
 	private final List<FileManager> fileManagers;
 	private final List<String> sourceNames;
-	private final long selectionLimit;
+	private final long recordLimit;
 	private final OpType artifactOpType;
+	private final boolean requireExactOutputCount;
 
 	public CsvArtifactAggregator(
 					final String loadStepId,
@@ -58,14 +59,14 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final List<Config> configSlices,
 					final String itemOutputFile,
 					final long runId,
-					final long selectionLimit) {
+					final long recordLimit) {
 		this(
 						loadStepId,
 						fileManagers,
 						configSlices,
 						itemOutputFile,
 						runId,
-						selectionLimit,
+						recordLimit,
 						legacyArtifactOpType(itemOutputFile));
 	}
 
@@ -75,14 +76,35 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final List<Config> configSlices,
 					final String itemOutputFile,
 					final long runId,
-					final long selectionLimit,
+					final long recordLimit,
 					final OpType artifactOpType) {
+		this(
+						loadStepId,
+						fileManagers,
+						configSlices,
+						itemOutputFile,
+						runId,
+						recordLimit,
+						artifactOpType,
+						false);
+	}
+
+	public CsvArtifactAggregator(
+					final String loadStepId,
+					final List<FileManager> fileManagers,
+					final List<Config> configSlices,
+					final String itemOutputFile,
+					final long runId,
+					final long recordLimit,
+					final OpType artifactOpType,
+					final boolean requireExactOutputCount) {
 		this.loadStepId = loadStepId;
 		this.runId = runId;
 		this.manifestPath = Path.of(itemOutputFile);
 		this.fileManagers = List.copyOf(fileManagers);
-		this.selectionLimit = Math.max(0, selectionLimit);
+		this.recordLimit = Math.max(0, recordLimit);
 		this.artifactOpType = artifactOpType;
+		this.requireExactOutputCount = requireExactOutputCount;
 		this.sourceNames = new ArrayList<>(fileManagers.size());
 		for (int i = 0; i < fileManagers.size(); i++) {
 			final FileManager fileManager = fileManagers.get(i);
@@ -139,6 +161,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 
 	private void collectAndPublish(final long failedOperationCount) throws IOException {
 		final boolean discovery = OpType.LIST.equals(artifactOpType);
+		final boolean seededCreate = requireExactOutputCount && OpType.CREATE.equals(artifactOpType);
 		if (discovery && failedOperationCount < 0) {
 			throw terminal(
 							Category.EXECUTION,
@@ -151,6 +174,20 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 							"LIST discovery recorded " + failedOperationCount
 											+ (failedOperationCount == 1 ? " failed operation" : " failed operations")
 											+ "; refusing to publish a partial manifest",
+							null);
+		}
+		if (seededCreate && failedOperationCount < 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"terminal CREATE seed failure count is unavailable; refusing to publish seed inventory",
+							null);
+		}
+		if (seededCreate && failedOperationCount > 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"CREATE seed recorded " + failedOperationCount
+											+ (failedOperationCount == 1 ? " failed operation" : " failed operations")
+											+ "; refusing to publish incomplete seed inventory",
 							null);
 		}
 		final Path parent = manifestPath.toAbsolutePath().getParent();
@@ -219,7 +256,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		final Path staging = Files.createTempFile(parent, "." + manifestPath.getFileName(), ".staging");
 		final AggregationCounts counts;
 		try {
-			counts = aggregateBounded(nodeSources, staging, discovery ? selectionLimit : 0);
+			counts = aggregateBounded(nodeSources, staging, discovery ? recordLimit : 0);
 		} catch (final IOException | RuntimeException e) {
 			try {
 				Files.deleteIfExists(staging);
@@ -249,6 +286,13 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 			}
 		}
 		IntegrityManifestCompletion.atomicMove(staging, manifestPath);
+		if (seededCreate && recordLimit > 0 && counts.selected() != recordLimit) {
+			throw terminal(
+							Category.EXECUTION,
+							"CREATE seed expected " + recordLimit + " successful objects but froze "
+											+ counts.selected(),
+							null);
+		}
 		final IntegrityManifestCompletion completion = IntegrityManifestCompletion.create(
 						manifestPath,
 						runId,

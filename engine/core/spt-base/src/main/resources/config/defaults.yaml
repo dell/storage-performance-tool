@@ -160,6 +160,8 @@ storage:
       expectedProducerId: ""
       provenance: none
     mode: none
+    output:
+      requireExactCount: false
     selection:
       maxCount: 0
   namespace: null

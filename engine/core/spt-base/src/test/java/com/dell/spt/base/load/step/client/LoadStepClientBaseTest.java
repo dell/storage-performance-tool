@@ -82,6 +82,47 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void exactOutputCountOmitsDistributedSlicesWithZeroShare() {
+		final Config config = TestConfigBuilder.config();
+		config.val("storage-integrity-output-requireExactCount", true);
+		config.val("load-op-limit-count", 2L);
+		final List<String> activeRemotes = LoadStepClientBase.participatingRemoteNodeAddrs(
+						config, List.of("worker-a", "worker-b", "worker-c"));
+
+		assertEquals(List.of("worker-a"), activeRemotes);
+		final List<Config> slices = new ArrayList<>();
+		for (int i = 0; i < 1 + activeRemotes.size(); i++) {
+			slices.add(ConfigSliceUtil.initSlice(config));
+		}
+		ConfigSliceUtil.sliceLongValueBalanced(2L, slices, "load-op-limit-count");
+		assertEquals(2L, slices.stream().mapToLong(
+						slice -> slice.longVal("load-op-limit-count")).sum());
+		assertTrue(slices.stream().allMatch(
+						slice -> slice.longVal("load-op-limit-count") > 0));
+
+		config.val("load-op-limit-count", 5L);
+		final List<String> remainderRemotes = LoadStepClientBase.participatingRemoteNodeAddrs(
+						config, List.of("worker-a", "worker-b", "worker-c"));
+		assertEquals(List.of("worker-a", "worker-b", "worker-c"), remainderRemotes);
+		final List<Config> remainderSlices = new ArrayList<>();
+		for (int i = 0; i < 1 + remainderRemotes.size(); i++) {
+			remainderSlices.add(ConfigSliceUtil.initSlice(config));
+		}
+		ConfigSliceUtil.sliceLongValueBalanced(5L, remainderSlices, "load-op-limit-count");
+		assertEquals(5L, remainderSlices.stream().mapToLong(
+						slice -> slice.longVal("load-op-limit-count")).sum());
+		assertTrue(remainderSlices.stream().allMatch(
+						slice -> slice.longVal("load-op-limit-count") > 0));
+
+		final Config writeVerify = TestConfigBuilder.config();
+		writeVerify.val("load-op-limit-count", 2L);
+		assertEquals(
+						List.of("worker-a", "worker-b", "worker-c"),
+						LoadStepClientBase.participatingRemoteNodeAddrs(
+										writeVerify, List.of("worker-a", "worker-b", "worker-c")));
+	}
+
+	@Test
 	@SuppressWarnings("unchecked")
 	void terminalFailureCountsSumEveryContextByOperationType() {
 		final MetricsContext<AllMetricsSnapshot> listA = mock(MetricsContext.class);

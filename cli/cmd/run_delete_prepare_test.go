@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -15,6 +16,99 @@ import (
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 )
+
+func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
+	seeded := deleteValidationCommand(deleteValidationCase{
+		bucket: "owned", batchSize: scenario.DefaultDeleteBatchSize, prefix: "team/root/",
+	})
+	params, err := buildScenarioParams(WorkloadTypeDelete, seeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ObjectCount != scenario.DefaultDeleteObjectCount ||
+		params.ObjectSize != scenario.DefaultDeleteObjectSize {
+		t.Fatalf("seeded DELETE defaults = count %d size %q", params.ObjectCount, params.ObjectSize)
+	}
+	if params.Prefix != "team/root/" {
+		t.Fatalf("seeded DELETE root prefix = %q", params.Prefix)
+	}
+
+	external := deleteValidationCommand(deleteValidationCase{
+		itemsFile: "delete.csv", batchSize: 1,
+	})
+	externalParams, err := buildScenarioParams(WorkloadTypeDelete, external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if externalParams.ObjectCount != 0 || externalParams.ObjectSize != "" {
+		t.Fatalf("external DELETE inherited seed defaults: %+v", externalParams)
+	}
+}
+
+func TestBuildSeededDeleteScenarioOwnsNamespaceAndOrdersFinitePhases(t *testing.T) {
+	cmd := deleteValidationCommand(deleteValidationCase{
+		bucket: "owned", batchSize: 2, prefix: "/team/root/",
+	})
+	if err := cmd.Flags().Set("object-count", "17"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("threads", "3"); err != nil {
+		t.Fatal(err)
+	}
+	params, err := buildScenarioParams(WorkloadTypeDelete, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params.RunID = 904
+	params.BaseTimestamp = "20260822.120000.000"
+	generated, err := scenario.GenerateDeleteScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := scenario.BuildStepPlanFromScenario(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Steps) != 2 || plan.Steps[0].Op != "seed" || plan.Steps[1].Op != "delete" {
+		t.Fatalf("seeded DELETE plan = %+v", plan.Steps)
+	}
+	for _, want := range []string{
+		`"naming": {"prefix": "team/root/spt-delete-904/"}`,
+		`"op": {"type": "create", "limit": {"count": 17}}`,
+		`"item": {"type": "data", "input": {"file": writtenFile}}`,
+	} {
+		if !strings.Contains(generated, want) {
+			t.Fatalf("seeded DELETE scenario omitted %q:\n%s", want, generated)
+		}
+	}
+	if strings.Contains(generated, `"type": "list"`) || strings.Contains(generated, "ListLoad.config") {
+		t.Fatalf("seeded DELETE activated existing-prefix discovery:\n%s", generated)
+	}
+}
+
+func TestDeleteSeedConcurrencyWarningIsBoundedAndReportsFullWaves(t *testing.T) {
+	params := scenario.Params{
+		WorkloadType:    WorkloadTypeDelete,
+		ObjectCount:     7,
+		Threads:         4,
+		DeleteBatchSize: 2,
+	}
+	var output bytes.Buffer
+	writeDeleteSeedConcurrencyWarning(&output, params)
+	writeDeleteSeedConcurrencyWarning(&output, scenario.Params{
+		WorkloadType:    WorkloadTypeDelete,
+		ObjectCount:     8,
+		Threads:         4,
+		DeleteBatchSize: 2,
+	})
+	got := output.String()
+	if strings.Count(got, "Warning:") != 1 || !strings.Contains(got, "maximum full request waves: 0") {
+		t.Fatalf("DELETE seed concurrency warning = %q", got)
+	}
+	if !strings.Contains(got, "continues without automatic inventory calibration") {
+		t.Fatalf("DELETE seed warning omitted no-calibration contract: %q", got)
+	}
+}
 
 func TestPrepareDeleteManifestBundleStagesBeforeScenarioAndExecution(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "delete.csv")

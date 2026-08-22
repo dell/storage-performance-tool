@@ -394,6 +394,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				ObjectSize:          "256KB",
 				ObjectCount:         50,
 				Duration:            "",
+				SelectionOrder:      scenario.SelectionOrderCanonical,
 				ObjectDataDedupable: true,
 			},
 			wantErr: false,

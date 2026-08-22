@@ -268,6 +268,7 @@ func TestFormatScenarioParams(t *testing.T) {
 			name: "Delete workload reports canonical selection evidence",
 			params: scenario.ScenarioParams{
 				WorkloadType:           WorkloadTypeDelete,
+				ItemsFile:              "manifest.csv",
 				Threads:                4,
 				DeleteBatchSize:        100,
 				SelectionSourceCount:   12,

@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.github.akurilov.confuse.Config;
@@ -85,6 +86,91 @@ class CsvArtifactAggregatorTest {
 		final var completion = IntegrityManifestCompletion.validate(
 						manifest, 101, IntegrityInputProvenance.ENGINE_STEP, "create-step");
 		assertEquals(0, completion.selectedRecordCount());
+	}
+
+	@Test
+	void seededCreateFailureStopsBeforePublishingFrozenInventory() throws Exception {
+		final Path manifest = tempDir.resolve("seed.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,successful,1024,returned-version\r\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"seed-step",
+										List.of(FileManager.INSTANCE),
+										List.of(),
+										manifest.toString(),
+										102,
+										2,
+										OpType.CREATE,
+										true)
+										.close(1));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("seed recorded 1 failed operation"));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void seededCreateRequiresExactFrozenInventoryCount() throws Exception {
+		final Path manifest = tempDir.resolve("seed.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,only-one,1024,returned-version\r\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"seed-step",
+										List.of(FileManager.INSTANCE),
+										List.of(),
+										manifest.toString(),
+										103,
+										2,
+										OpType.CREATE,
+										true)
+										.close(0));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("expected 2 successful objects but froze 1"));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void writeVerifyFixedCountPreservesSuccessfulCreatesWhenOtherCreatesFail() throws Exception {
+		assertPartialWriteVerifyCreatePublishes(2);
+	}
+
+	@Test
+	void writeVerifyDurationPreservesSuccessfulCreatesWhenOtherCreatesFail() throws Exception {
+		assertPartialWriteVerifyCreatePublishes(0);
+	}
+
+	private void assertPartialWriteVerifyCreatePublishes(final long configuredCount) throws Exception {
+		final Path manifest = tempDir.resolve("write-verify-" + configuredCount + ".csv");
+		final long runId = 104 + configuredCount;
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,successful,1024,returned-version\r\n");
+
+		new CsvArtifactAggregator(
+						"write-step",
+						List.of(FileManager.INSTANCE),
+						List.of(),
+						manifest.toString(),
+						runId,
+						configuredCount,
+						OpType.CREATE)
+						.close(1);
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, runId, IntegrityInputProvenance.ENGINE_STEP, "write-step");
+		assertEquals(1, completion.selectedRecordCount());
 	}
 
 	@Test
