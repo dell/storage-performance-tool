@@ -17,6 +17,7 @@ Spt storage driver extention for testing of **S3 type storages**. The repo conta
     4.2. [Object Tagging](#42-object-tagging)<br/>
     4.3. [Versioning](#43-versioning)<br/>
     4.4. [Multipart Upload](#44-multipart-upload)<br/>
+    4.5. [Standalone DELETE requests](#45-standalone-delete-requests)<br/>
 5. [Minio S3 server](#5-minio-s3-server)<br/>
 
 ## 1. Features
@@ -507,6 +508,31 @@ java -jar spt-base-<VERSION>.jar \
     --storage-checksum-enabled \
     --storage-checksum-algorithm=crc32c
 ```
+
+### 4.5. Standalone DELETE requests
+
+The engine's standalone DELETE request type is handled explicitly before the legacy
+single-object, versioning, and object-tagging branches:
+
+* One target produces one signed `DELETE /<bucket>/<key>` (`DeleteObject`) request.
+* Two through 1,000 same-bucket targets produce one signed, non-quiet
+  `POST /<bucket>?delete` (`DeleteObjects`) request. The XML body retains every key and
+  optional requested version and includes the required `Content-MD5` header.
+* A target without a version ID uses current-key semantics. A target with a version ID
+  uses the standard `versionId` selector for a single request or the `VersionId` XML
+  element in a batch request. Exact-version targets are never downgraded silently.
+* `storage-object-tagging-enabled` does not transform a standalone object DELETE into a
+  tagging request. Existing cleanup and mixed-workload DELETE operations keep their
+  established single-object behavior; legacy exact-version DELETE also uses the standard
+  `versionId` query selector.
+
+Non-quiet batch responses are reconciled by requested key and version identity. A full
+response accepts every target; a valid mixture of `Deleted` and `Error` entries produces
+a partial request result. Missing, duplicate, malformed, oversized, or unexpected
+identities fail the logical request conservatively and fail every target as a protocol defect. Transport
+or service failure likewise fails every target operationally. The adapter does not emit
+new per-request logs or include request bodies, credentials, object keys, or version IDs
+in protocol-failure log messages.
 
 ## 5. Minio S3 server
 
