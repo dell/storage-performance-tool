@@ -60,8 +60,16 @@ The driver uses the CRT-based HTTP client for S3 operations. The Apache HTTP cli
 The driver uses `S3AsyncClient` with CompletableFuture for all S3 operations:
 - `putObject()` - Uses `AsyncRequestBody` for uploads
 - `readObject()` - Uses `AsyncResponseTransformer.toBytes()` for downloads
-- `deleteObject()` - Async delete operation
+- `deleteObject()` - Async legacy single-object delete operation
+- standalone DELETE requests - `DeleteObject` for one target and one non-quiet
+  `DeleteObjects` call for 2 through 1,000 same-bucket targets
 - `listObjects()` - Async list operation with pagination and first response body byte timing for LIST TTFB metrics
+
+Standalone targets with a version ID use exact-version deletion; targets without one retain
+ordinary current-key semantics, including delete-marker behavior on versioned buckets. The SDK
+response is reconciled by key and version before the logical request completes, so partial and
+malformed batch responses cannot be reported as full success. SDK-managed retries remain inside
+the single logical request future and timing sample.
 
 ### Blocking Compatibility
 
@@ -174,6 +182,10 @@ The S3StorageDriver implements the standard StorageDriver interface:
 - `listObjects(String prefix)` - Returns List<StorageMetadata>
 - `copyObject(String sourceKey, String destinationKey)`
 - `getObjectMetadata(String key)` - Returns StorageMetadata
+
+The method list above describes the legacy single-object API. Batched deletion is exposed only
+through the engine's first-class standalone `DeleteRequestOperation`; the driver does not provide
+a separate public `deleteObjects()` utility method.
 
 ## Error Handling
 

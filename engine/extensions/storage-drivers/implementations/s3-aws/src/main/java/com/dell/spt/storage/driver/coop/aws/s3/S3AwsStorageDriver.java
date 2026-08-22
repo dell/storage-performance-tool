@@ -16,6 +16,10 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
+import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -89,6 +93,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_UPLOAD_ID = "uploadId";
 	private static final String KEY_MPU_ABORT = "mpuAbort";
 	private static final String KEY_MPU_FAILURE = "mpuFailure";
+	private static final String DELETE_TRANSPORT_FAILURE = "AWS SDK DELETE request failed";
 
 	private final S3AsyncClient s3AsyncClient;
 	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
@@ -362,7 +367,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 
 			if (op.type() != OpType.READ) {
-				finishOperation(op);
+				if (op instanceof DeleteRequestOperation) {
+					finishStandaloneDeleteOperation(op);
+				} else {
+					finishOperation(op);
+				}
 				if (aborting) {
 					op.status(Operation.Status.FAIL_UNKNOWN);
 					emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, mpuFailure(mpuOp));
@@ -394,19 +403,51 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 													+ "; abort failed: " + classifyFailure(abortFailure).name());
 				}
 			}
-			op.status(originalStatus);
+			if (op instanceof DeleteRequestOperation deleteOperation) {
+				if (deleteOperation.deleteResult() == null) {
+					deleteOperation.completeDelete(DeleteTransportResult.failure(
+									originalStatus, DELETE_TRANSPORT_FAILURE));
+				}
+			} else {
+				op.status(originalStatus);
+			}
 			final Throwable failure = e instanceof java.util.concurrent.CompletionException
 							&& e.getCause() != null ? e.getCause() : e;
-			LOG.error(
-							"{} {} requested version {} failed: {}: {}",
-							op.type(), op.item().name(), op.requestedVersionId(),
-							originalStatus, failure);
-			LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
+			if (op instanceof DeleteRequestOperation deleteOperation) {
+				LOG.debug(
+								"Standalone DELETE request with {} targets failed: {}",
+								deleteOperation.deleteRequest().targets().size(), originalStatus);
+			} else {
+				LOG.error(
+								"{} {} requested version {} failed: {}: {}",
+								op.type(), op.item().name(), op.requestedVersionId(),
+								originalStatus, failure);
+				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
+			}
 			try {
 				op.startResponse();
 				op.finishResponse();
 			} catch (final Exception responseEx) {
 				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
+			}
+		}
+	}
+
+	private void finishStandaloneDeleteOperation(final O op) {
+		final var deleteOperation = (DeleteRequestOperation) op;
+		try {
+			op.startResponse();
+			op.finishResponse();
+			if (deleteOperation.deleteResult() == null) {
+				deleteOperation.completeDelete(null);
+			}
+		} catch (final IllegalStateException e) {
+			LOG.debug("Standalone DELETE response timing finalization failed", e);
+			if (deleteOperation.deleteResult() == null) {
+				deleteOperation.completeDelete(DeleteTransportResult.failure(
+								Status.FAIL_UNKNOWN, DELETE_TRANSPORT_FAILURE));
+			} else {
+				op.status(Status.FAIL_UNKNOWN);
 			}
 		}
 	}
@@ -646,6 +687,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	CompletableFuture<Void> execute(final O op) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			return deleteRequest(deleteOperation);
+		}
+
 		// Handle composite operations (multipart upload)
 		if (op instanceof CompositeDataOperation) {
 			return executeCompositeOperation((CompositeDataOperation) op);
@@ -902,15 +947,120 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return client;
 	}
 
-	private CompletableFuture<Void> deleteObject(final O op) {
+	CompletableFuture<Void> deleteObject(final O op) {
+		if (op instanceof DeleteRequestOperation) {
+			return CompletableFuture.failedFuture(new IllegalArgumentException(
+							"Standalone DELETE requests cannot enter the representative-item request builder"));
+		}
 		final var bk = resolveBucketAndKey(op);
-
-		return s3AsyncClient.deleteObject(
-						DeleteObjectRequest.builder()
-										.bucket(bk[0])
-										.key(bk[1])
-										.build())
+		final String versionId = op.requestedVersionId();
+		final var request = DeleteObjectRequest.builder()
+						.bucket(bk[0])
+						.key(bk[1]);
+		if (versionId != null && !versionId.isEmpty()) {
+			request.versionId(versionId);
+		}
+		return deleteClient(versionId != null).deleteObject(request.build())
 						.thenApply(response -> null);
+	}
+
+	private CompletableFuture<Void> deleteRequest(final DeleteRequestOperation operation) {
+		final var request = operation.deleteRequest();
+		if (request.targets().size() == 1) {
+			final var target = request.targets().get(0);
+			final var sdkRequest = DeleteObjectRequest.builder()
+							.bucket(request.bucket())
+							.key(target.key());
+			if (target.versionId() != null) {
+				sdkRequest.versionId(target.versionId());
+			}
+			return deleteClient(target.versionId() != null)
+							.deleteObject(sdkRequest.build())
+							.handle((response, failure) -> {
+								completeDelete(
+												operation,
+												failure,
+												response == null ? null : DeleteTransportResult.success(request.targets()));
+								return null;
+							});
+		}
+
+		final var objectIdentifiers = request.targets().stream()
+						.map(S3AwsStorageDriver::objectIdentifier)
+						.toList();
+		final var sdkRequest = DeleteObjectsRequest.builder()
+						.bucket(request.bucket())
+						.delete(Delete.builder()
+										.objects(objectIdentifiers)
+										.quiet(false)
+										.build())
+						.build();
+		final boolean exactVersion = request.targets().stream()
+						.anyMatch(target -> target.versionId() != null);
+		return deleteClient(exactVersion)
+						.deleteObjects(sdkRequest)
+						.handle((response, failure) -> {
+							completeDelete(operation, failure, deleteTransportResult(response));
+							return null;
+						});
+	}
+
+	private static ObjectIdentifier objectIdentifier(final DeleteTarget target) {
+		final var identifier = ObjectIdentifier.builder().key(target.key());
+		if (target.versionId() != null) {
+			identifier.versionId(target.versionId());
+		}
+		return identifier.build();
+	}
+
+	private static DeleteTransportResult deleteTransportResult(
+					final DeleteObjectsResponse response) {
+		if (response == null) {
+			return null;
+		}
+		final var targetResults = new ArrayList<DeleteTransportTargetResult>(
+						response.deleted().size() + response.errors().size());
+		for (final var deleted : response.deleted()) {
+			targetResults.add(new DeleteTransportTargetResult(
+							deleted.key(), deleted.versionId(), true, null));
+		}
+		for (final var error : response.errors()) {
+			targetResults.add(new DeleteTransportTargetResult(
+							error.key(), error.versionId(), false, deleteErrorMessage(error)));
+		}
+		return new DeleteTransportResult(targetResults, null, null);
+	}
+
+	private static String deleteErrorMessage(final S3Error error) {
+		final String code = error.code();
+		final String message = error.message();
+		if (code == null || code.isEmpty()) {
+			return message;
+		}
+		return message == null || message.isEmpty() ? code : code + ": " + message;
+	}
+
+	private static void completeDelete(
+					final DeleteRequestOperation operation,
+					final Throwable failure,
+					final DeleteTransportResult successfulResult) {
+		if (failure == null) {
+			operation.completeDelete(successfulResult);
+			return;
+		}
+		final Exception exception = failure instanceof Exception
+						? (Exception) failure
+						: new RuntimeException(failure);
+		final Status status = classifyFailure(exception);
+		LOG.debug(
+						"Standalone DELETE request with {} targets failed: {}",
+						operation.deleteRequest().targets().size(), status);
+		operation.completeDelete(DeleteTransportResult.failure(
+						status, DELETE_TRANSPORT_FAILURE));
+	}
+
+	private S3AsyncClient deleteClient(final boolean exactVersion) {
+		return exactVersion ? exactVersionS3Client() : s3AsyncClient;
 	}
 
 	private CompletableFuture<Void> headObject(final O op) {
@@ -1572,6 +1722,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return s3AsyncClient.copyObject(reqBuilder.build())
 						.thenApply(response -> null);
+	}
+
+	@Override
+	public boolean supportsStandaloneDeleteRequests() {
+		return true;
 	}
 
 	@Override
