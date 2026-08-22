@@ -4,7 +4,10 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.load.step.client.LoadStepClient.OUTPUT_PROGRESS_PERIOD_MILLIS;
 
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogUtil;
@@ -16,6 +19,8 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -24,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
+import org.apache.commons.csv.CSVPrinter;
 
 public final class ItemInputFileSlicer implements AutoCloseable {
 
@@ -62,7 +68,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					throw new IllegalStateException(
 									"File manager for slice #" + i + " is null; remote node may not be reachable");
 				}
-				final var itemInputFileName = fileMgr.newTmpFileName();
+				final var itemInputFileName = fileMgr.newTmpFileName() + (strictMode ? ".csv" : "");
 				itemInputFileSlices.put(fileMgr, itemInputFileName);
 				final var configSlice = configSlices.get(i);
 				configSlice.val("item-input-file", itemInputFileName);
@@ -131,6 +137,10 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 
 	private <I extends Item> void scatterItems(final Input<I> itemInput, final int batchSize)
 					throws IOException {
+		if (strictMode) {
+			scatterIntegrityItems(itemInput, batchSize);
+			return;
+		}
 
 		Loggers.MSG.info("{}: slice the item input \"{}\"...", loadStepId, itemInput);
 
@@ -170,6 +180,83 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		}
 	}
 
+	private <I extends Item> void scatterIntegrityItems(
+					final Input<I> itemInput, final int batchSize) throws IOException {
+		Loggers.MSG.info("{}: slice the canonical item input \"{}\"...", loadStepId, itemInput);
+		final List<FileManager> sliceFileMgrs = fileMgrs.stream().filter(fileMgr -> fileMgr != null).toList();
+		if (sliceFileMgrs.isEmpty()) {
+			throw new IOException("no item-input file slices are available");
+		}
+		final Map<FileManager, ByteArrayOutputStream> buffers = new HashMap<>(sliceFileMgrs.size());
+		final Map<FileManager, CSVPrinter> printers = new HashMap<>(sliceFileMgrs.size());
+		try {
+			for (final FileManager fileMgr : sliceFileMgrs) {
+				final var buffer = new ByteArrayOutputStream(batchSize * APPROX_LINE_LENGTH);
+				final var printer = new CSVPrinter(
+								new OutputStreamWriter(buffer, StandardCharsets.UTF_8), IntegrityCsvFormat.RFC4180_LF);
+				printer.printRecord(IntegrityManifestItemInput.HEADER);
+				printer.flush();
+				fileMgr.writeToFile(itemInputFileSlices.get(fileMgr), buffer.toByteArray());
+				buffer.reset();
+				buffers.put(fileMgr, buffer);
+				printers.put(fileMgr, printer);
+			}
+
+			final List<I> items = new ArrayList<>(batchSize);
+			long count = 0;
+			long nextSliceIndex = 0;
+			while (true) {
+				final int itemCount;
+				try {
+					itemCount = itemInput.get(items, batchSize);
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					if (e instanceof EOFException) {
+						break;
+					}
+					throw e;
+				}
+				if (itemCount <= 0) {
+					break;
+				}
+				for (int i = 0; i < itemCount; i++) {
+					if (!(items.get(i) instanceof IntegrityManifestDataItem item)) {
+						throw new IOException("canonical integrity input produced a non-manifest item");
+					}
+					final FileManager fileMgr = sliceFileMgrs.get((int) (nextSliceIndex % sliceFileMgrs.size()));
+					printers.get(fileMgr).printRecord(
+									item.bucket(), item.name(), item.size(), item.versionId() == null ? "" : item.versionId());
+					nextSliceIndex++;
+				}
+				items.clear();
+				for (final FileManager fileMgr : sliceFileMgrs) {
+					final CSVPrinter printer = printers.get(fileMgr);
+					final ByteArrayOutputStream buffer = buffers.get(fileMgr);
+					printer.flush();
+					final byte[] data = buffer.toByteArray();
+					if (data.length > 0) {
+						fileMgr.writeToFile(itemInputFileSlices.get(fileMgr), data);
+						buffer.reset();
+					}
+				}
+				count += itemCount;
+			}
+			Loggers.MSG.info(
+							"Canonical items input \"{}\": {} items was distributed among the {} load step slices",
+							itemInput,
+							count,
+							sliceFileMgrs.size());
+		} finally {
+			for (final CSVPrinter printer : printers.values()) {
+				try {
+					printer.close(true);
+				} catch (final IOException e) {
+					LogUtil.exception(Level.WARN, e, "Failed to close a canonical item-input slice writer");
+				}
+			}
+		}
+	}
+
 	private <I extends Item> void transferData(
 					final Input<I> itemInput,
 					final Map<FileManager, ByteArrayOutputStream> itemsOutByteBuffs,
@@ -178,10 +265,17 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					throws IOException {
 
 		final int sliceCount = itemsOutByteBuffs.size();
+		if (sliceCount == 0) {
+			throw new IOException("no item-input file slices are available");
+		}
+		final List<FileManager> sliceFileMgrs = fileMgrs.stream()
+						.filter(itemsOutputs::containsKey)
+						.toList();
 		final List<I> itemsBuff = new ArrayList<>(batchSize);
 
 		int n;
 		long count = 0;
+		long nextSliceIndex = 0;
 		long lastProgressOutputTimeMillis = System.currentTimeMillis();
 
 		Loggers.MSG.info(
@@ -207,7 +301,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 
 				// distribute the items using the round robin
 				for (int i = 0; i < n; i++) {
-					itemsOutputs.get(fileMgrs.get(i % sliceCount)).writeUnshared(itemsBuff.get(i));
+					final int sliceIndex = (int) (nextSliceIndex % sliceCount);
+					itemsOutputs.get(sliceFileMgrs.get(sliceIndex)).writeUnshared(itemsBuff.get(i));
+					nextSliceIndex++;
 				}
 
 				itemsBuff.clear();

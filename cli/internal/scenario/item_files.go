@@ -28,7 +28,31 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 	var mounts []FileMount
 	var err error
 	if params.ItemsFile != "" {
-		if params.WorkloadType == WorkloadTypeReadVerify {
+		switch params.WorkloadType {
+		case WorkloadTypeDelete:
+			staged, stageErr := integrity.StageDeleteInputManifest(
+				params.ItemsFile, params.RunID, params.ObjectCount, params.Bucket)
+			if stageErr != nil {
+				return params, fmt.Errorf("--items-file: %w", stageErr)
+			}
+			if staged.MultipleBuckets && params.DeleteBatchSize > MinDeleteBatchSize {
+				cleanupErr := os.RemoveAll(staged.StagingDir)
+				return params, errors.Join(
+					fmt.Errorf("--items-file is a multi-bucket manifest; use --delete-batch-size=1"),
+					cleanupErr,
+				)
+			}
+			params.ItemStagingDirs = append(params.ItemStagingDirs, staged.StagingDir)
+			params.ItemsFile = containerItemFilesDir + "/" + integrity.VerifyInputName
+			params.SelectionSourceCount = staged.Completion.SourceRecordCount
+			params.SelectionUniqueCount = staged.Completion.UniqueRecordCount
+			params.SelectionSelectedCount = staged.Completion.SelectedRecordCount
+			params.SelectionSHA256 = staged.Completion.ManifestSHA256
+			params.SelectionOrder = SelectionOrderCanonical
+			mounts = append(mounts,
+				FileMount{HostPath: staged.ManifestPath, ContainerPath: params.ItemsFile},
+				FileMount{HostPath: staged.CompletionPath, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})
+		case WorkloadTypeReadVerify:
 			stagingDir, manifest, marker, stageErr := integrity.StageInputManifest(params.ItemsFile, params.RunID)
 			if stageErr != nil {
 				return params, fmt.Errorf("--items-file: %w", stageErr)
@@ -38,7 +62,7 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 			mounts = append(mounts,
 				FileMount{HostPath: manifest, ContainerPath: params.ItemsFile},
 				FileMount{HostPath: marker, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})
-		} else {
+		default:
 			params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
 			if err != nil {
 				return params, fmt.Errorf("--items-file: %w", err)

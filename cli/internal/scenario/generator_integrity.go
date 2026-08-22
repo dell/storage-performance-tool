@@ -130,6 +130,45 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	})
 }
 
+// GenerateDeleteScenario renders the internally available explicit-manifest DELETE slice. The
+// public workload registry remains gated until the complete DELETE feature is qualified.
+func GenerateDeleteScenario(params Params) (string, error) {
+	if params.RunID <= 0 {
+		return "", fmt.Errorf("delete requires a positive run id")
+	}
+	if strings.TrimSpace(params.ItemsFile) == "" {
+		return "", fmt.Errorf("delete explicit-manifest mode requires a canonical items file")
+	}
+	if params.DeleteBatchSize < MinDeleteBatchSize || params.DeleteBatchSize > MaxDeleteBatchSize {
+		return "", fmt.Errorf("delete batch size must be between %d and %d",
+			MinDeleteBatchSize, MaxDeleteBatchSize)
+	}
+	if params.Threads <= 0 {
+		return "", fmt.Errorf("delete threads must be positive")
+	}
+	selectionOrder := params.SelectionOrder
+	if selectionOrder == "" {
+		selectionOrder = SelectionOrderCanonical
+	}
+	if selectionOrder != SelectionOrderCanonical {
+		return "", fmt.Errorf("delete selection order must be %q", SelectionOrderCanonical)
+	}
+	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
+		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
+		DeleteStorage: integrityStorageTemplateData{
+			Driver:      resolveStorageDriverType(params.S3Driver),
+			Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceCLIStager,
+				ExpectedProducerID: constants.IntegrityCLIStagerProducerID,
+			},
+		},
+		ItemsFile:      params.ItemsFile,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+	})
+}
+
 func quoteJS(value string) string {
 	return fmt.Sprintf("\"%s\"", escapeJSONString(value))
 }

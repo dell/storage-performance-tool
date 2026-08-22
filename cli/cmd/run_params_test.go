@@ -265,6 +265,26 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 		},
 		{
+			name: "Delete workload reports canonical selection evidence",
+			params: scenario.ScenarioParams{
+				WorkloadType:           WorkloadTypeDelete,
+				Threads:                4,
+				DeleteBatchSize:        100,
+				SelectionSourceCount:   12,
+				SelectionUniqueCount:   10,
+				SelectionSelectedCount: 7,
+				SelectionSHA256:        "abc123",
+				SelectionOrder:         scenario.SelectionOrderCanonical,
+			},
+			expected: []string{
+				"Object Size: (not applicable)",
+				"DELETE Batch Size: 100",
+				"Selection Order: canonical",
+				"Selection Records: source=12 unique=10 selected=7 sha256=abc123",
+				"Warning: canonical key order can affect cross-tool DELETE comparisons.",
+			},
+		},
+		{
 			name: "Write with part-size shows multipart info",
 			params: scenario.ScenarioParams{
 				WorkloadType: "write",

@@ -55,6 +55,10 @@ const (
 // In production it points to portcheck.ResolvePortConflict; tests can override.
 var resolvePortConflictFunc = portcheck.ResolvePortConflict
 
+// validateRunWorkloadTypeFunc keeps command-path tests behind the same workload gate as
+// production while allowing prerelease workload slices to exercise later safety seams.
+var validateRunWorkloadTypeFunc = ValidateWorkloadType
+
 type autoResultsRunTracker interface {
 	WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error)
 	SetDebug(bool)
@@ -303,7 +307,9 @@ var integrityRuntimeGOOS = runtime.GOOS
 const integritySupportedGOOS = "linux"
 
 func prepareExternalItemFilesForRun(params scenario.Params) (scenario.Params, error) {
-	if scenario.IsIntegrityWorkload(params) && integrityRuntimeGOOS != integritySupportedGOOS {
+	if (scenario.IsIntegrityWorkload(params) ||
+		(params.WorkloadType == WorkloadTypeDelete && params.ItemsFile != "")) &&
+		integrityRuntimeGOOS != integritySupportedGOOS {
 		return params, fmt.Errorf(
 			"%s is unsupported on %s: crash-durable verification evidence requires "+
 				"a parent-directory synchronization primitive; use the Linux CLI",
@@ -1420,7 +1426,7 @@ Available workload types:
 		workloadType := args[0]
 
 		// Validate workload type
-		if err := ValidateWorkloadType(workloadType); err != nil {
+		if err := validateRunWorkloadTypeFunc(workloadType); err != nil {
 			return err
 		}
 
@@ -1430,7 +1436,8 @@ Available workload types:
 			return err
 		}
 
-		if workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify {
+		if workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify ||
+			workloadType == WorkloadTypeDelete {
 			params.RunID = time.Now().UnixMilli()
 		}
 
@@ -1459,6 +1466,9 @@ Available workload types:
 		scenarioContent := string(prepared.ScenarioJS())
 		expectedStepIDs := prepared.ExpectedStepIDs()
 		verificationRun := scenario.IsIntegrityWorkload(params)
+		if params.WorkloadType == WorkloadTypeDelete && params.SelectionOrder == scenario.SelectionOrderCanonical {
+			fmt.Println("DELETE selection order: canonical. Cross-tool comparisons may be affected by input ordering.")
+		}
 		for _, notice := range integrityCostNotices(params) {
 			fmt.Println(notice)
 		}
@@ -1900,7 +1910,8 @@ func init() {
 	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
-	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; read-verify --versions=all caps version identities")
+	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; read-verify and explicit-manifest DELETE cap canonical identities")
+	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "Standalone DELETE logical request size (1 uses DeleteObject; 2-1000 use DeleteObjects)")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
@@ -1921,7 +1932,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read/read-verify workload")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or the internal explicit-manifest DELETE slice")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
 	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
@@ -2113,6 +2124,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	objectCount, _ := cmd.Flags().GetInt("object-count")
 	params.ObjectCount = objectCount
+	params.DeleteBatchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
 
 	duration, _ := cmd.Flags().GetString("duration")
 	params.Duration = duration
@@ -2281,7 +2293,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.MinimalTUI = minimalTUI
 
 	// Set defaults (tables workload has no object size concept)
-	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList &&
+	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete && params.WorkloadType != WorkloadTypeList &&
 		params.WorkloadType != WorkloadTypeReadVerify && params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
 	}
@@ -2466,7 +2478,8 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
 	}
-	if params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
+	if params.WorkloadType == WorkloadTypeDelete || params.WorkloadType == WorkloadTypeList ||
+		params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
@@ -2512,6 +2525,22 @@ func formatScenarioParams(params scenario.Params) string {
 			readback = "Deferred"
 		}
 		lines = append(lines, "Verification Readback: "+readback)
+	}
+	if params.WorkloadType == WorkloadTypeDelete {
+		lines = append(lines, fmt.Sprintf("DELETE Batch Size: %d", params.DeleteBatchSize))
+		if params.SelectionOrder != "" {
+			lines = append(lines,
+				"Selection Order: "+params.SelectionOrder,
+				fmt.Sprintf(
+					"Selection Records: source=%d unique=%d selected=%d sha256=%s",
+					params.SelectionSourceCount,
+					params.SelectionUniqueCount,
+					params.SelectionSelectedCount,
+					params.SelectionSHA256,
+				),
+				"Warning: canonical key order can affect cross-tool DELETE comparisons.",
+			)
+		}
 	}
 	if params.KeepScenario {
 		lines = append(lines, "Keep Scenario: Yes")

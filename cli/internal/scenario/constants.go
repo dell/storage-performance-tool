@@ -11,6 +11,7 @@ const (
 	workloadTypeWriteVerify = workload.WriteVerify
 	workloadTypeReadVerify  = workload.ReadVerify
 	workloadTypeMixed       = workload.Mixed
+	workloadTypeDelete      = workload.Delete
 	workloadTypeMock        = workload.Mock
 	workloadTypeList        = workload.List
 	workloadTypeTables      = workload.Tables
@@ -107,6 +108,17 @@ const (
 	stepOpMixed  = "mixed"
 )
 
+const (
+	// MinDeleteBatchSize is the smallest valid standalone DELETE request size.
+	MinDeleteBatchSize = 1
+	// DefaultDeleteBatchSize is the default standalone DELETE request size.
+	DefaultDeleteBatchSize = 100
+	// MaxDeleteBatchSize is the S3 DeleteObjects request limit.
+	MaxDeleteBatchSize = 1000
+	// SelectionOrderCanonical names the deterministic global DELETE selection order.
+	SelectionOrderCanonical = "canonical"
+)
+
 // DefaultReadPhasePauseSeconds preserves the historical pause between read
 // scenario phases while allowing qualification runs to request a longer settle.
 const DefaultReadPhasePauseSeconds = 10
@@ -160,6 +172,7 @@ const (
 	WorkloadTypeReadVerify  = workloadTypeReadVerify
 	WorkloadTypeTables      = workloadTypeTables
 	WorkloadTypeMixed       = workloadTypeMixed
+	WorkloadTypeDelete      = workloadTypeDelete
 )
 
 // Mixed workload template keys
