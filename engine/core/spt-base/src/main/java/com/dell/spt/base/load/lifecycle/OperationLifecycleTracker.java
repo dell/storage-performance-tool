@@ -101,6 +101,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private final boolean enabled;
 	private final Consumer<O> dispatchPublicationObserver;
+	private volatile Consumer<O> terminalObserver;
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
 	private final Set<IdentityKey<O>> inFlightOperations = ConcurrentHashMap.newKeySet();
 	private final ReferenceQueue<O> compatibilityReferences = new ReferenceQueue<>();
@@ -146,6 +147,15 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	/** Returns whether an operation carries per-circulation lifecycle state itself. */
 	public boolean isOperationLifecycleTracked(final O op) {
 		return !enabled || lifecycle(op).isTracked();
+	}
+
+	/**
+	 * Installs a bounded, non-blocking callback which commits derived accounting only when the
+	 * terminal transition wins against drain-time unresolved recovery. The callback runs inside
+	 * that ownership decision and therefore must not block or throw.
+	 */
+	public void terminalObserver(final Consumer<O> observer) {
+		terminalObserver = observer;
 	}
 
 	/** Clears completed-run counters before a representative lifecycle restart. */
@@ -361,7 +371,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!enabled) {
 			return true;
 		}
-		if (!transition(op, lifecycle(op), OperationLifecycleState.TERMINAL)) {
+		if (!commitTerminal(op)) {
 			return false;
 		}
 		outstanding.remove(identityKey(op));
@@ -369,6 +379,37 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		inFlight.decrementAndGet();
 		terminal.increment();
 		return true;
+	}
+
+	private boolean commitTerminal(final O op) {
+		final var lifecycle = lifecycle(op);
+		if (lifecycle.isTracked()) {
+			synchronized (lifecycle) {
+				if (lifecycle.state() != OperationLifecycleState.COMPLETING
+								|| !lifecycle.terminal()) {
+					return false;
+				}
+				observeTerminal(op);
+				return true;
+			}
+		}
+		synchronized (compatibilityStates) {
+			final var compatibilityState = compatibilityState(op);
+			if (compatibilityState == null
+							|| compatibilityState.state != OperationLifecycleState.COMPLETING) {
+				return false;
+			}
+			compatibilityState.state = OperationLifecycleState.TERMINAL;
+			observeTerminal(op);
+			return true;
+		}
+	}
+
+	private void observeTerminal(final O op) {
+		final var observer = terminalObserver;
+		if (observer != null) {
+			observer.accept(op);
+		}
 	}
 
 	/** Recovers an operation which never reached actual dispatch. */

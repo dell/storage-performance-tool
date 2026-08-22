@@ -73,6 +73,11 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 		return false;
 	}
 
+	/** Returns whether this driver explicitly handles first-class standalone DELETE requests. */
+	default boolean supportsStandaloneDeleteRequests() {
+		return false;
+	}
+
 	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */
 	default IntegrityTerminalException terminalFailure() {
 		return null;

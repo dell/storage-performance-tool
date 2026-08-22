@@ -38,6 +38,18 @@ public interface OperationAssembler<I extends Item, O extends Operation<I>> exte
 	OperationAssemblyResult assemble(final List<I> items, final List<O> operations)
 					throws IOException, IllegalArgumentException;
 
+	/**
+	 * Finalizes the assembler exactly once. Stateful assemblers may append one retained logical
+	 * operation. A normal completion result is dispatchable; operations returned for any other
+	 * reason are recovery identities which callers must classify as unattempted.
+	 *
+	 * <p>The compatibility default has no retained state.
+	 */
+	default OperationAssemblyResult finish(
+					final OperationAssemblyStopReason reason, final List<O> operations) throws IOException {
+		return new OperationAssemblyResult(0, 0);
+	}
+
 	/** Releases resources owned or retained by this assembler. */
 	@Override
 	void close();

@@ -18,7 +18,7 @@ import org.apache.commons.csv.CSVRecord;
 
 /** RFC 4180 reader for canonical {@code bucket,key,size,version_id} manifests. */
 public final class IntegrityManifestItemInput
-				implements FileInput<IntegrityManifestDataItem> {
+				implements FileInput<IntegrityManifestDataItem>, RemainingItemCountInput<IntegrityManifestDataItem> {
 
 	public static final List<String> HEADER = List.of("bucket", "key", "size", "version_id");
 
@@ -28,15 +28,16 @@ public final class IntegrityManifestItemInput
 					.get();
 
 	private final Path manifestPath;
+	private final long itemCount;
 	private Reader reader;
 	private CSVParser parser;
 	private Iterator<CSVRecord> records;
+	private long remainingItemCount;
 
 	public IntegrityManifestItemInput(final Path manifestPath) throws IOException {
 		this.manifestPath = manifestPath;
-		if (!hasCanonicalHeader(manifestPath)) {
-			throw new IOException("integrity manifest does not have the exact canonical header");
-		}
+		this.itemCount = countRows(manifestPath);
+		this.remainingItemCount = itemCount;
 		open();
 	}
 
@@ -56,7 +57,12 @@ public final class IntegrityManifestItemInput
 	@Override
 	public IntegrityManifestDataItem get() {
 		try {
-			return records.hasNext() ? item(records.next()) : null;
+			if (!records.hasNext()) {
+				return null;
+			}
+			final var item = item(records.next());
+			remainingItemCount--;
+			return item;
 		} catch (final RuntimeException e) {
 			throw manifestFailure(e);
 		}
@@ -76,6 +82,7 @@ public final class IntegrityManifestItemInput
 		} catch (final RuntimeException e) {
 			throw manifestFailure(e);
 		}
+		remainingItemCount -= count;
 		return count;
 	}
 
@@ -86,7 +93,13 @@ public final class IntegrityManifestItemInput
 			records.next();
 			skipped++;
 		}
+		remainingItemCount -= skipped;
 		return skipped;
+	}
+
+	@Override
+	public long remainingItemCount() {
+		return remainingItemCount;
 	}
 
 	@Override
@@ -94,6 +107,7 @@ public final class IntegrityManifestItemInput
 		close();
 		try {
 			open();
+			remainingItemCount = itemCount;
 		} catch (final IOException e) {
 			throwUnchecked(e);
 		}
@@ -132,11 +146,47 @@ public final class IntegrityManifestItemInput
 		records = parser.iterator();
 	}
 
+	private static long countRows(final Path path) throws IOException {
+		try (final Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8);
+						final CSVParser parser = CSVFormat.RFC4180.parse(reader)) {
+			final Iterator<CSVRecord> records = parser.iterator();
+			if (!records.hasNext() || !HEADER.equals(records.next().toList())) {
+				throw new IOException("integrity manifest does not have the exact canonical header");
+			}
+			long count = 0;
+			while (records.hasNext()) {
+				validateRecord(records.next());
+				count = Math.addExact(count, 1);
+			}
+			return count;
+		} catch (final RuntimeException e) {
+			throw new IOException("failed to count canonical integrity manifest rows", e);
+		}
+	}
+
 	private static IntegrityManifestDataItem item(final CSVRecord record) {
+		final long size = validateRecord(record);
+		return new IntegrityManifestDataItem(
+						record.get(0), record.get(1), size, record.get(3));
+	}
+
+	private static long validateRecord(final CSVRecord record) {
 		if (record.size() != HEADER.size()) {
 			throw new IllegalArgumentException(
 							"integrity manifest record " + record.getRecordNumber() + " must have four fields");
 		}
+		if (record.get(0).isEmpty()) {
+			throw new IllegalArgumentException(
+							"integrity manifest record " + record.getRecordNumber() + " has an empty bucket");
+		}
+		if (record.get(1).isEmpty()) {
+			throw new IllegalArgumentException(
+							"integrity manifest record " + record.getRecordNumber() + " has an empty key");
+		}
+		return parseSize(record);
+	}
+
+	private static long parseSize(final CSVRecord record) {
 		final long size;
 		try {
 			size = Long.parseLong(record.get(2));
@@ -144,8 +194,11 @@ public final class IntegrityManifestItemInput
 			throw new IllegalArgumentException(
 							"integrity manifest record " + record.getRecordNumber() + " has invalid size", e);
 		}
-		return new IntegrityManifestDataItem(
-						record.get(0), record.get(1), size, record.get(3));
+		if (size < 0) {
+			throw new IllegalArgumentException(
+							"integrity manifest record " + record.getRecordNumber() + " has negative size");
+		}
+		return size;
 	}
 
 	private IllegalArgumentException manifestFailure(final RuntimeException cause) {

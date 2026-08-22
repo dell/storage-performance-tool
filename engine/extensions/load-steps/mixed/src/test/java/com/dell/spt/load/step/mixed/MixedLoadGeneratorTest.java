@@ -2,12 +2,16 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.DataItemFactoryImpl;
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -247,6 +251,66 @@ class MixedLoadGeneratorTest {
 		assertEquals(300, createCount, "CREATE ops should match configured 30% weight");
 		assertEquals(100, deleteCount, "DELETE ops should match configured 10% weight");
 		assertEquals(200, statCount, "STAT ops should match configured 20% weight");
+	}
+
+	@Test
+	@DisplayName("Mixed DELETE retains the legacy single-item data operation")
+	void mixedDeleteRetainsLegacySingleItemDataOperation() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.CREATE, 1);
+		weights.put(OpType.DELETE, 999);
+		final OpSchedule schedule = new OpSchedule(weights);
+		final PoolItemInput pool = new PoolItemInput(List.of(new DataItemImpl("seed", 0, 1)));
+		for (int i = 0; i < 1000; i++) {
+			pool.addDeleteItem(new DataItemImpl("delete-" + i, 0, 1));
+		}
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		builders.put(
+						OpType.DELETE,
+						new DataOperationsBuilderImpl<>(0)
+										.opType(OpType.DELETE)
+										.inputPath("/bucket")
+										.fixedRanges(List.of())
+										.randomRangesCount(0)
+										.sizeThreshold(Long.MAX_VALUE));
+		final List<Operation> captured = new ArrayList<>();
+		final Output<Operation> output = new Output<>() {
+			@Override
+			public boolean put(final Operation operation) {
+				captured.add(operation);
+				return true;
+			}
+
+			@Override
+			public int put(final List<Operation> operations, final int from, final int to) {
+				captured.addAll(operations.subList(from, to));
+				return to - from;
+			}
+
+			@Override
+			public int put(final List<Operation> operations) {
+				return put(operations, 0, operations.size());
+			}
+
+			@Override
+			public Input<Operation> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		};
+		final MixedLoadGenerator generator = newGenerator(schedule, pool, builders, output);
+
+		dispatch(generator, schedule.size());
+
+		final var deleteOperations = captured.stream()
+						.filter(operation -> operation.type() == OpType.DELETE)
+						.toList();
+		assertFalse(deleteOperations.isEmpty());
+		assertTrue(deleteOperations.stream().allMatch(DataOperation.class::isInstance));
+		assertTrue(deleteOperations.stream().noneMatch(DeleteRequestOperation.class::isInstance));
 	}
 
 	// ── Generator lifecycle ───────────────────────────────────────────────

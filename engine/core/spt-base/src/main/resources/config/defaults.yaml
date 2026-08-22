@@ -58,6 +58,9 @@ load:
     retryLimit: 10
     shuffle: false
     type: create
+    delete:
+      standalone: false
+      batchSize: 100
     list:
       delimiter: null
       fetch_metadata: false

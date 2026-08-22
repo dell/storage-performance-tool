@@ -225,6 +225,10 @@ public class TestConfigBuilder {
 		op.put("retryLimit", 10);
 		op.put("shuffle", false);
 		op.put("type", "create");
+		Map<String, Object> opDelete = new HashMap<>();
+		opDelete.put("standalone", false);
+		opDelete.put("batchSize", 100);
+		op.put("delete", opDelete);
 
 		Map<String, Object> opWait = new HashMap<>();
 		opWait.put("finish", false);
