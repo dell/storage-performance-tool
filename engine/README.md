@@ -97,7 +97,7 @@ SPT supports multiple S3 storage driver backends. Use `--storage-driver-type` to
 |-------|-------------|
 | `s3` | Default Netty/REST-based S3 driver |
 | `s3-aws` | AWS SDK v2 synchronous client |
-| `s3-rdma` | RDMA-accelerated S3 driver (requires RDMA hardware) |
+| `s3-rdma` | S3 driver with optional RDMA acceleration for PUT/GET; other operations use HTTP |
 
 ```bash
 # Write test using the AWS SDK driver
@@ -375,8 +375,17 @@ SPT acts as an **RDMA target**: it registers a memory buffer, creates a DC (Dyna
 |-------------|-------------|
 | PUT (write) | Server performs **RDMA READ** from client memory |
 | GET (read)  | Server performs **RDMA WRITE** to client memory |
+| DELETE | None; uses the inherited Netty S3 HTTP `DeleteObject`/`DeleteObjects` path |
 
 Because the server initiates the data transfer, the HTTP request body is empty and **`Content-Length` is set to 0**. The actual object size is encoded in the RDMA token. This is critical for compatibility with HTTP frameworks (e.g. Jetty) that block until the declared body bytes arrive.
+
+Standalone DELETE requests are indivisible non-data operations. They keep their complete target
+list and use the inherited HTTP implementation even when the RDMA transport is available: one
+target issues `DeleteObject`, while multiple same-bucket targets issue one non-quiet
+`DeleteObjects` request. Current-key and exact-version behavior therefore matches the Netty S3
+driver. DELETE qualification uses deterministic unavailable-transport and fake-available-transport
+contract tests; RDMA-capable hardware is not required because DELETE transfers no payload over
+RDMA.
 
 ### RDMA Token Format
 
@@ -409,7 +418,7 @@ The driver is implemented in three layers:
 - **`RdmaTransport`** (Java) — JNI bridge that manages buffer registration, token generation, and native lifecycle.
 - **`libspt_rdma.so`** (`rdma_native.c`, ~675 lines of C) — native implementation using `libibverbs`, `libmlx5`, and `librdmacm`. Handles device initialization, DC Target creation, memory registration, and token formatting.
 
-### Requirements
+### PUT/GET RDMA Requirements
 
 - **Linux only** (RDMA stack depends on `libibverbs` / kernel verbs)
 - RDMA-capable NIC (NVIDIA/Mellanox ConnectX-4 or newer)

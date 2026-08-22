@@ -29,12 +29,14 @@ import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -112,6 +114,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					final boolean verifyFlag,
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
+		this(
+						stepId,
+						itemDataInput,
+						storageConfig,
+						verifyFlag,
+						batchSize,
+						RdmaTransport::new);
+	}
+
+	S3RdmaStorageDriver(
+					final String stepId,
+					final DataInput itemDataInput,
+					final Config storageConfig,
+					final boolean verifyFlag,
+					final int batchSize,
+					final Function<RdmaConfig, RdmaTransport> transportFactory)
+					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 
 		// Parse RDMA configuration
@@ -122,7 +141,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		endpointAddrs = buildEndpointAddrs();
 
 		// Initialize RDMA transport
-		rdmaTransport = new RdmaTransport(rdmaConfig);
+		rdmaTransport = Objects.requireNonNull(
+						transportFactory, "RDMA transport factory").apply(rdmaConfig);
+		Objects.requireNonNull(rdmaTransport, "RDMA transport");
 		boolean transportInitialized = false;
 		try {
 			if (rdmaConfig.isEnabled()) {
