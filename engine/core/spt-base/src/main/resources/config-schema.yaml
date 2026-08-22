@@ -147,6 +147,8 @@ storage:
       expectedProducerId: string
       provenance: string
     mode: string
+    output:
+      requireExactCount: boolean
     selection:
       maxCount: long
   namespace: string

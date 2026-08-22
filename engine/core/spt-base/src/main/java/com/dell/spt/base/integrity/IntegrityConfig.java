@@ -62,6 +62,14 @@ public record IntegrityConfig(
 		return mode == IntegrityMode.METADATA;
 	}
 
+	/** Returns whether this step requires its output manifest to match the configured operation count. */
+	public static boolean requiresExactOutputCount(final Config storageConfig) {
+		final Config integrityOutput = storageConfig
+					.configVal("integrity")
+					.configVal("output");
+		return integrityOutput != null && integrityOutput.boolVal("requireExactCount");
+	}
+
 	public static boolean isSupportedDriver(final String driverType) {
 		return driverType != null
 				&& SUPPORTED_DRIVER_TYPES.contains(driverType.trim().toLowerCase(Locale.ROOT));
@@ -80,7 +88,13 @@ public record IntegrityConfig(
 			throw new IllegalConfigurationException("load step configuration is missing");
 		}
 		final IntegrityConfig integrity = fromStorage(stepConfig.configVal("storage"));
+		final boolean requireExactOutputCount =
+					requiresExactOutputCount(stepConfig.configVal("storage"));
 		if (!integrity.enabled()) {
+			if (requireExactOutputCount) {
+				throw excluded(
+							"storage.integrity.output.requireExactCount requires metadata integrity mode");
+			}
 			return integrity;
 		}
 		final long selectionMaxCount = stepConfig
@@ -98,6 +112,18 @@ public record IntegrityConfig(
 		}
 		if (!Set.of("create", "read", "list", "delete").contains(opType)) {
 			throw excluded("operation type " + opType + " is outside integrity metadata v1");
+		}
+		if (requireExactOutputCount) {
+			if (!"create".equals(opType)) {
+				throw excluded("storage.integrity.output.requireExactCount is valid only for CREATE");
+			}
+			if (stepConfig.longVal("load-op-limit-count") <= 0) {
+				throw excluded("storage.integrity.output.requireExactCount requires a positive load.op.limit.count");
+			}
+			final String outputFile = stepConfig.stringVal("item-output-file");
+			if (outputFile == null || outputFile.isBlank()) {
+				throw excluded("storage.integrity.output.requireExactCount requires item.output.file");
+			}
 		}
 		if ("create".equals(opType)) {
 			requireEmpty(stepConfig.stringVal("item-data-input-file"),

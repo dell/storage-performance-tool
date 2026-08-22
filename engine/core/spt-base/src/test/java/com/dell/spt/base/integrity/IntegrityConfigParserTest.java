@@ -99,6 +99,35 @@ class IntegrityConfigParserTest {
 		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.fromStorage(null));
 	}
 
+	@Test
+	void exactOutputCountPolicyRequiresFiniteCreate() {
+		final var create = metadataStep("create");
+		create.val("storage-integrity-output-requireExactCount", true);
+		create.val("load-op-limit-count", 2L);
+		create.val("item-output-file", "written.csv");
+		IntegrityConfig.validateLoadStep(create);
+
+		final var unlimitedCreate = metadataStep("create");
+		unlimitedCreate.val("storage-integrity-output-requireExactCount", true);
+		unlimitedCreate.val("item-output-file", "written.csv");
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(unlimitedCreate));
+
+		final var read = metadataStep("read");
+		read.val("storage-integrity-output-requireExactCount", true);
+		read.val("load-op-limit-count", 2L);
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(read));
+
+		final var disabled = TestConfigBuilder.config();
+		disabled.val("storage-integrity-output-requireExactCount", true);
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(disabled));
+	}
+
 	private static com.github.akurilov.confuse.Config metadataStep(final String opType) {
 		final var config = TestConfigBuilder.config();
 		config.val("storage-driver-type", "s3");

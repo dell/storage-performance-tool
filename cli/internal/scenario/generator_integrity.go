@@ -130,14 +130,11 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	})
 }
 
-// GenerateDeleteScenario renders the internally available explicit-manifest DELETE slice. The
+// GenerateDeleteScenario renders the internally available finite-count DELETE slices. The
 // public workload registry remains gated until the complete DELETE feature is qualified.
 func GenerateDeleteScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
 		return "", fmt.Errorf("delete requires a positive run id")
-	}
-	if strings.TrimSpace(params.ItemsFile) == "" {
-		return "", fmt.Errorf("delete explicit-manifest mode requires a canonical items file")
 	}
 	if params.DeleteBatchSize < MinDeleteBatchSize || params.DeleteBatchSize > MaxDeleteBatchSize {
 		return "", fmt.Errorf("delete batch size must be between %d and %d",
@@ -153,6 +150,9 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	if selectionOrder != SelectionOrderCanonical {
 		return "", fmt.Errorf("delete selection order must be %q", SelectionOrderCanonical)
 	}
+	if strings.TrimSpace(params.ItemsFile) == "" {
+		return generateSeededDeleteScenario(params, selectionOrder)
+	}
 	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
 		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
 		DeleteStorage: integrityStorageTemplateData{
@@ -167,6 +167,62 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
 	})
+}
+
+func generateSeededDeleteScenario(params Params, selectionOrder string) (string, error) {
+	if strings.TrimSpace(params.Duration) != "" {
+		return "", fmt.Errorf("delete seeded finite count mode does not yet support duration")
+	}
+	if strings.TrimSpace(params.Bucket) == "" {
+		return "", fmt.Errorf("delete seeded mode requires a bucket")
+	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("delete object count must be non-negative")
+	}
+	seedCount := params.ObjectCount
+	if seedCount == 0 {
+		seedCount = DefaultDeleteObjectCount
+	}
+	objectSize := strings.TrimSpace(params.ObjectSize)
+	if objectSize == "" {
+		objectSize = DefaultDeleteObjectSize
+	}
+	ts := resolveTimestamp(params)
+	seedStep := formatStepID(1, ts, stepOpSeed)
+	driver := resolveStorageDriverType(params.S3Driver)
+	return executeIntegrityScenario("delete-seeded", deleteSeededScenarioData{
+		SeedStep:   seedStep,
+		DeleteStep: formatStepID(2, ts, stepOpDelete),
+		SeedStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:              constants.IntegrityProvenanceNone,
+				RequireExactOutputCount: true,
+			},
+		},
+		DeleteStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceEngineStep,
+				ExpectedProducerID: seedStep,
+			},
+		},
+		BucketPath:     "/" + strings.TrimPrefix(strings.TrimSpace(params.Bucket), "/"),
+		ObjectSize:     objectSize,
+		Namespace:      deleteSeedNamespace(params.Prefix, params.RunID),
+		SeedCount:      seedCount,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+	})
+}
+
+func deleteSeedNamespace(root string, runID int64) string {
+	root = strings.Trim(strings.TrimSpace(root), "/")
+	namespace := fmt.Sprintf("spt-delete-%d/", runID)
+	if root == "" {
+		return namespace
+	}
+	return root + "/" + namespace
 }
 
 func quoteJS(value string) string {

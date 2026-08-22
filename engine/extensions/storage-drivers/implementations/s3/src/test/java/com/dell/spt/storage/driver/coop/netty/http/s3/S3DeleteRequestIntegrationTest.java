@@ -46,6 +46,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.script.ScriptEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -62,6 +65,7 @@ final class S3DeleteRequestIntegrationTest {
 	private HttpServer server;
 	private volatile String multiDeleteResponse;
 	private volatile int multiDeleteStatus = 200;
+	private final AtomicInteger putResponseCount = new AtomicInteger();
 
 	@BeforeEach
 	void startServer() throws IOException {
@@ -228,6 +232,100 @@ final class S3DeleteRequestIntegrationTest {
 		assertTrue(body.contains("<VersionId>version-comma</VersionId>"));
 	}
 
+	@Test
+	void seededScenarioFreezesReturnedVersionsBeforeTimedCurrentAndExactDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 900;
+		final String scenarioId = tempDir.getFileName().toString();
+		final String seedStep = scenarioId + "-seed";
+		final String deleteStep = scenarioId + "-delete";
+		final Path manifest = tempDir.resolve("written.csv");
+		final String manifestPath = manifest.toString().replace("\\", "\\\\").replace("\"", "\\\"");
+		final String scenario = """
+						CreateLoad.config({
+						  "storage": {
+						    "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						    "integrity": {"mode": "metadata", "algorithm": "sha256",
+						      "input": {"provenance": "none", "expectedProducerId": ""},
+						      "output": {"requireExactCount": true}}
+						  },
+						  "item": {"type": "data", "data": {"size": "1KiB"},
+						    "naming": {"prefix": "safe-root/spt-delete-900/"},
+						    "output": {"path": "/bucket", "file": "%s"}},
+						  "load": {"op": {"type": "create", "limit": {"count": 2}},
+						    "step": {"id": "%s"}},
+						  "output": {"metrics": {"summary": {"persist": true}}}
+						}).run();
+						DeleteLoad.config({
+						  "storage": {
+						    "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						    "integrity": {"mode": "metadata", "algorithm": "sha256",
+						      "input": {"provenance": "engine_step", "expectedProducerId": "%s"}}
+						  },
+						  "item": {"type": "data", "input": {"file": "%s"}},
+						  "load": {"batch": {"size": 2}, "op": {"type": "delete",
+						    "delete": {"standalone": true, "batchSize": 2},
+						    "recycle": {"mode": false}, "retry": false, "wait": {"finish": true}},
+						    "step": {"id": "%s"}},
+						  "output": {"metrics": {"summary": {"persist": true}}}
+						}).run();
+						""".formatted(manifestPath, seedStep, seedStep, manifestPath, deleteStep);
+
+		final Config driverConfig = S3StorageDriverTest.baseConfig(
+						false, 4, false, null, "127.0.0.1");
+		final Config defaults = new BundledDefaultsProvider().config("-", driverConfig.schema());
+		final Config config = ConfigUtil.merge("-", List.of(defaults, driverConfig));
+		config.val("run-id", runId);
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		config.val("output-color", false);
+
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			metrics.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			new RunImpl("seeded DELETE scenario canary", scenario, engine, runId).run();
+
+			final var seedTerminal = metrics.getTerminalSteps().stream()
+							.filter(entry -> !entry.distributed && seedStep.equals(entry.stepId))
+							.findFirst()
+							.orElseThrow();
+			final var deleteTerminal = metrics.getTerminalSteps().stream()
+							.filter(entry -> !entry.distributed && deleteStep.equals(entry.stepId))
+							.findFirst()
+							.orElseThrow();
+			assertEquals(OpType.CREATE, seedTerminal.opType);
+			assertEquals(2, seedTerminal.successCount);
+			assertEquals(OpType.DELETE, deleteTerminal.opType);
+			assertEquals(1, deleteTerminal.successCount,
+							"timed metrics must count one logical batch request, not seed operations");
+		}
+
+		final var frozen = new ArrayList<IntegrityManifestDataItem>();
+		try (final var input = new IntegrityManifestItemInput(manifest)) {
+			assertEquals(2, input.get(frozen, 2));
+		}
+		assertEquals(2, frozen.size());
+		assertEquals(1, frozen.stream().filter(item -> item.versionId() == null).count());
+		assertEquals(1, frozen.stream().filter(
+						item -> "returned-version".equals(item.versionId())).count());
+		assertTrue(frozen.stream().allMatch(
+						item -> item.name().startsWith("safe-root/spt-delete-900/")));
+
+		assertEquals(2, requests.stream().filter(request -> "PUT".equals(request.method())).count());
+		final CapturedRequest delete = requests.stream()
+						.filter(request -> "POST".equals(request.method()) && "delete".equals(request.rawQuery()))
+						.findFirst()
+						.orElseThrow();
+		assertEquals(2, delete.body().split("<Object>", -1).length - 1);
+		assertEquals(1, delete.body().split("<VersionId>returned-version</VersionId>", -1).length - 1);
+	}
+
 	private static Path copyContractResource(final Path tempDir, final String name)
 					throws IOException {
 		final Path target = tempDir.resolve(name);
@@ -341,7 +439,12 @@ final class S3DeleteRequestIntegrationTest {
 						exchange.getRequestHeaders().getFirst("Authorization"),
 						new String(requestBody, StandardCharsets.UTF_8));
 		requests.add(request);
-		if ("HEAD".equals(request.method())) {
+		if ("PUT".equals(request.method())) {
+			if (putResponseCount.incrementAndGet() == 1) {
+				exchange.getResponseHeaders().set("x-amz-version-id", "returned-version");
+			}
+			exchange.sendResponseHeaders(200, -1);
+		} else if ("HEAD".equals(request.method())) {
 			exchange.sendResponseHeaders(200, -1);
 		} else if ("DELETE".equals(request.method())) {
 			exchange.sendResponseHeaders(204, -1);
@@ -351,7 +454,10 @@ final class S3DeleteRequestIntegrationTest {
 				exchange.close();
 				return;
 			}
-			final byte[] responseBody = multiDeleteResponse.getBytes(StandardCharsets.UTF_8);
+			final String responseXml = multiDeleteResponse == null
+							? successfulDeleteResponse(request.body())
+							: multiDeleteResponse;
+			final byte[] responseBody = responseXml.getBytes(StandardCharsets.UTF_8);
 			exchange.getResponseHeaders().set("Content-Type", "application/xml");
 			exchange.sendResponseHeaders(200, responseBody.length);
 			exchange.getResponseBody().write(responseBody);
@@ -359,6 +465,21 @@ final class S3DeleteRequestIntegrationTest {
 			exchange.sendResponseHeaders(500, -1);
 		}
 		exchange.close();
+	}
+
+	private static String successfulDeleteResponse(final String requestBody) {
+		final Matcher objects = Pattern.compile(
+						"<Object><Key>(.*?)</Key>(?:<VersionId>(.*?)</VersionId>)?</Object>",
+						Pattern.DOTALL).matcher(requestBody);
+		final StringBuilder response = new StringBuilder("<DeleteResult>");
+		while (objects.find()) {
+			response.append("<Deleted><Key>").append(objects.group(1)).append("</Key>");
+			if (objects.group(2) != null) {
+				response.append("<VersionId>").append(objects.group(2)).append("</VersionId>");
+			}
+			response.append("</Deleted>");
+		}
+		return response.append("</DeleteResult>").toString();
 	}
 
 	private record CapturedRequest(

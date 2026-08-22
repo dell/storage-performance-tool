@@ -391,6 +391,14 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		itemsFile, _ = cmd.Flags().GetString("items-file")
 	}
 	if strings.TrimSpace(itemsFile) == "" {
+		duration, _ := cmd.Flags().GetString("duration")
+		if strings.TrimSpace(duration) != "" {
+			return errors.New("DELETE seeded finite count mode does not yet support --duration")
+		}
+		cleanup, _ := cmd.Flags().GetBool("cleanup")
+		if cleanup {
+			return errors.New("DELETE seeded finite count mode does not yet support --cleanup")
+		}
 		return nil
 	}
 	duration, _ := cmd.Flags().GetString("duration")

@@ -177,6 +177,100 @@ func TestPrepareDeleteManifestAndGenerateTerminalScenario(t *testing.T) {
 	}
 }
 
+func TestGenerateSeededDeleteScenarioFreezesUniqueInventoryBeforeTimedDelete(t *testing.T) {
+	generated, err := GenerateDeleteScenario(Params{
+		WorkloadType:    workload.Delete,
+		RunID:           880,
+		Bucket:          "bucket-a",
+		Prefix:          "/team/root/",
+		ObjectCount:     3,
+		Threads:         2,
+		S3Driver:        S3DriverAws,
+		DeleteBatchSize: 2,
+		BaseTimestamp:   "20260822.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(generated, "ListLoad.config") || strings.Contains(generated, `"type": "list"`) {
+		t.Fatalf("seeded DELETE must not discover existing objects:\n%s", generated)
+	}
+
+	plan, err := BuildStepPlanFromScenario(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Steps) != 2 || plan.Steps[0].Op != stepOpSeed || plan.Steps[1].Op != stepOpDelete {
+		t.Fatalf("seeded DELETE plan = %+v, want seed then delete", plan.Steps)
+	}
+
+	configs := parseGeneratedScenarioConfigs(t, generated)
+	if len(configs) != 2 {
+		t.Fatalf("seeded DELETE configs = %d, want CREATE and DELETE", len(configs))
+	}
+	seed, deleteConfig := configs[0], configs[1]
+	if got := generatedConfigValue(t, seed, "load", "op", "type"); got != "create" {
+		t.Fatalf("seed operation = %#v, want create", got)
+	}
+	if got := generatedConfigValue(t, seed, "load", "op", "limit", "count"); got != float64(3) {
+		t.Fatalf("seed count = %#v, want 3", got)
+	}
+	if got := generatedConfigValue(t, seed, "item", "data", "size"); got != "1KiB" {
+		t.Fatalf("seed object size = %#v, want 1KiB", got)
+	}
+	if got := generatedConfigValue(t, seed, "item", "naming", "prefix"); got != "team/root/spt-delete-880/" {
+		t.Fatalf("seed namespace = %#v, want safe unique child of supplied root", got)
+	}
+	if got := generatedConfigValue(t, seed, "item", "output", "file"); got != "writtenFile" {
+		t.Fatalf("seed manifest output = %#v, want writtenFile", got)
+	}
+	if got := generatedConfigValue(t, seed, "storage", "integrity", "input", "provenance"); got != constants.IntegrityProvenanceNone {
+		t.Fatalf("seed provenance = %#v, want none", got)
+	}
+	if got := generatedConfigValue(t, seed, "storage", "integrity", "output", "requireExactCount"); got != true {
+		t.Fatalf("seed exact-output policy = %#v, want true", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "item", "input", "file"); got != "writtenFile" {
+		t.Fatalf("timed DELETE input = %#v, want frozen writtenFile", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "storage", "integrity", "input", "provenance"); got != constants.IntegrityProvenanceEngineStep {
+		t.Fatalf("timed DELETE provenance = %#v, want engine_step", got)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "storage", "integrity", "input", "expectedProducerId"); got != plan.Steps[0].ID {
+		t.Fatalf("timed DELETE producer = %#v, want %q", got, plan.Steps[0].ID)
+	}
+	if got := generatedConfigValue(t, deleteConfig, "load", "op", "delete", "standalone"); got != true {
+		t.Fatalf("timed DELETE standalone = %#v, want true", got)
+	}
+	if _, ok := configPath(deleteConfig, "load", "op", "limit", "count"); ok {
+		t.Fatal("global object count was incorrectly mapped to timed request-count limit")
+	}
+}
+
+func TestGenerateSeededDeleteScenarioUsesExplicitFiniteDefaults(t *testing.T) {
+	generated, err := GenerateDeleteScenario(Params{
+		WorkloadType:    workload.Delete,
+		RunID:           881,
+		Bucket:          "bucket-a",
+		Threads:         1,
+		DeleteBatchSize: DefaultDeleteBatchSize,
+		BaseTimestamp:   "20260822.120000.000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := parseGeneratedScenarioConfigs(t, generated)
+	if got := generatedConfigValue(t, configs[0], "load", "op", "limit", "count"); got != float64(2500) {
+		t.Fatalf("default seed count = %#v, want 2500", got)
+	}
+	if got := generatedConfigValue(t, configs[0], "item", "data", "size"); got != "1KiB" {
+		t.Fatalf("default seed size = %#v, want 1KiB", got)
+	}
+	if got := generatedConfigValue(t, configs[0], "item", "naming", "prefix"); got != "spt-delete-881/" {
+		t.Fatalf("default seed namespace = %#v", got)
+	}
+}
+
 func TestPrepareDeleteManifestRejectsMultiBucketBatching(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "delete.csv")
 	if err := os.WriteFile(source, []byte(
@@ -203,9 +297,28 @@ func TestGenerateDeleteScenarioRejectsIncompleteManifestContract(t *testing.T) {
 		detail string
 	}{
 		{name: "run id", params: Params{ItemsFile: "/in.csv", DeleteBatchSize: 1}, detail: "positive run id"},
-		{name: "items file", params: Params{RunID: 1, DeleteBatchSize: 1}, detail: "canonical items file"},
+		{name: "seed bucket", params: Params{RunID: 1, Threads: 1, DeleteBatchSize: 1}, detail: "requires a bucket"},
 		{name: "batch low", params: Params{RunID: 1, ItemsFile: "/in.csv", DeleteBatchSize: 0}, detail: "between 1 and 1000"},
 		{name: "batch high", params: Params{RunID: 1, ItemsFile: "/in.csv", DeleteBatchSize: 1001}, detail: "between 1 and 1000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := GenerateDeleteScenario(test.params)
+			if err == nil || !strings.Contains(err.Error(), test.detail) {
+				t.Fatalf("GenerateDeleteScenario() error = %v, want %q", err, test.detail)
+			}
+		})
+	}
+}
+
+func TestGenerateSeededDeleteScenarioRejectsNonFiniteOrInvalidInputs(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		params Params
+		detail string
+	}{
+		{name: "duration", params: Params{RunID: 1, Bucket: "b", Duration: "1m", Threads: 1, DeleteBatchSize: 1}, detail: "finite count"},
+		{name: "bucket", params: Params{RunID: 1, Threads: 1, DeleteBatchSize: 1}, detail: "requires a bucket"},
+		{name: "negative count", params: Params{RunID: 1, Bucket: "b", ObjectCount: -1, Threads: 1, DeleteBatchSize: 1}, detail: "non-negative"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := GenerateDeleteScenario(test.params)

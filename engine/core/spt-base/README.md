@@ -164,6 +164,19 @@ round-robin cursor across input reads, preserving exactly-one ownership even whe
 boundaries do not align with the number of slices. Multi-bucket inputs therefore require batch size
 one, while same-bucket inputs may use the configured batch size.
 
+CLI-seeded finite DELETE instead runs a metadata-mode CREATE step with
+`load.op.limit.count` set to the exact global inventory size and writes canonical
+`written.csv` output. This phase alone sets
+`storage.integrity.output.requireExactCount=true`; the shipped false default preserves
+write-verification's existing partial-success manifest behavior. When the count is smaller than
+the configured load-step node count, the controller activates only enough seed slices for every
+slice to receive a positive count share. The integrity writer records the PUT response version when present and an
+empty version otherwise. Controller aggregation requires an available zero seed-failure count and
+requires the frozen selected-record count to equal the CREATE count before publishing completion
+evidence. The following standalone DELETE step declares `engine_step` provenance for that exact
+CREATE step and consumes only the committed manifest. Consequently setup and DELETE keep separate
+step metrics, and a partial seed cannot enter timed DELETE.
+
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.

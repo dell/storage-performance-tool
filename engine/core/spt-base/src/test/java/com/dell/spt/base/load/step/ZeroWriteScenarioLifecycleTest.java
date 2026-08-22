@@ -61,6 +61,46 @@ class ZeroWriteScenarioLifecycleTest {
 		assertFalse(Files.exists(tempDir.resolve("verified.csv")));
 	}
 
+	@Test
+	void incompleteSeedInventoryStopsBeforeDeleteConfiguration() throws Exception {
+		final long runId = 717;
+		final Path manifest = tempDir.resolve("written.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\n"
+										+ "bucket,only-one,1024,returned-version\n");
+		final var aggregation = new CsvArtifactAggregator(
+						"seed-step",
+						List.of(FileManager.INSTANCE),
+						List.of(),
+						manifest.toString(),
+						runId,
+						2,
+						com.dell.spt.base.item.op.OpType.CREATE,
+						true);
+		final var deleteConfigured = new AtomicBoolean();
+		final var deleteObjectIOEntered = new AtomicBoolean();
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(
+						Thread.currentThread().getContextClassLoader());
+		assertNotNull(engine, "default JavaScript engine must be available for scenario execution");
+		engine.put("CreateLoad", new ZeroWriteCreateLoad(aggregation));
+		engine.put("DeleteLoad", new ObservedReadLoad(deleteConfigured, deleteObjectIOEntered));
+		final String scenario = """
+						CreateLoad.config({"load":{"step":{"id":"seed-step"}}}).run();
+						DeleteLoad.config({"item":{"input":{"file":"written.csv"}},"load":{"step":{"id":"delete-step"}}}).run();
+						""";
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						new RunImpl("incomplete seeded DELETE lifecycle", scenario, engine, runId)::run);
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("expected 2 successful objects but froze 1"));
+		assertFalse(deleteConfigured.get(), "dependent DELETE configuration ran after incomplete seed");
+		assertFalse(deleteObjectIOEntered.get(), "dependent DELETE object I/O ran after incomplete seed");
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
 	public static final class ZeroWriteCreateLoad {
 		private final CsvArtifactAggregator aggregation;
 

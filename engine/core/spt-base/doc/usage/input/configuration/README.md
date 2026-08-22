@@ -153,6 +153,20 @@ on DELETE batch size. Multi-bucket manifests use `load-op-delete-batchSize=1`; s
 may batch. Worker file slicing uses one persistent round-robin cursor across input read batches so
 each selected identity has exactly one worker owner.
 
+For CLI-seeded finite DELETE, the CREATE phase sets `load.op.limit.count` to the requested
+global inventory count and writes a canonical metadata-mode `written.csv`. Returned PUT versions
+are stored as exact identities; absent returned versions remain current-key identities. The seed
+sets `storage.integrity.output.requireExactCount=true`; this boolean defaults to false, is valid
+only for a metadata-mode CREATE with a positive `load.op.limit.count` and `item.output.file`, and
+does not change write-verification's partial-success manifest contract. If the exact count is less
+than the configured load-step node count, only enough seed slices are activated to keep every
+active slice's count positive; their shares still sum to the requested global count. CREATE
+aggregation requires both zero terminal operation failures and exactly the configured count before
+publishing its completion record. The timed standalone DELETE phase then sets
+`storage.integrity.input.provenance=engine_step` with the CREATE step ID and consumes that committed
+file. `load.op.limit.count` is intentionally absent from the DELETE phase because its unit would be
+logical requests after batching, not selected object identities.
+
 One standalone `DeleteRequestOperation` is one request metric and owns its entire immutable target
 list. Its compatibility `item()` accessor is only the first target and must not be used for batch
 execution or output. A completed snapshot preserves the request and its ordered per-target

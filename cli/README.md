@@ -82,6 +82,23 @@ for later campaigns, then use `read-verify` for later checks. These are
 correctness workloads, not ordinary benchmarks; corruption returns exit code
 `20` and leaves a resumable `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
 
+Standalone DELETE remains publicly gated while its remaining safety and result
+contracts are completed. Its internal safe count-mode path owns what it deletes:
+with no `--items-file`, SPT creates exactly `--object-count` objects under a
+run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
+then times DELETE against only that canonical manifest. `--prefix` changes the
+owned namespace root; it never discovers or selects existing objects. Omitting the
+count selects 2,500 objects, and omitting `--object-size` selects 1 KiB rather than
+the shared 1 MiB write default. PUT-returned versions are preserved for exact-version
+DELETE; objects without a returned version use current-key semantics.
+
+Seed and DELETE are separate engine steps, so setup time and PUT metrics do not enter
+DELETE request latency, duration, or throughput. Any seed failure or incomplete
+frozen inventory stops before timed DELETE. If the inventory is smaller than
+`threads * delete-batch-size`, the CLI warns once and reports the maximum complete
+request waves; it does not auto-calibrate or reject the finite run solely for
+concurrency underfill.
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)

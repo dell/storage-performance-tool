@@ -1440,6 +1440,7 @@ Available workload types:
 			workloadType == WorkloadTypeDelete {
 			params.RunID = time.Now().UnixMilli()
 		}
+		writeDeleteSeedConcurrencyWarning(cmd.ErrOrStderr(), params)
 
 		// Seed size warning for read workloads
 		if workloadType == WorkloadTypeRead {
@@ -1902,7 +1903,7 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
-	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; list/read-verify: listing constraint")
+	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; seeded DELETE: owned namespace root; list/read-verify: listing constraint")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
@@ -1910,7 +1911,7 @@ func init() {
 	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
-	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; read-verify and explicit-manifest DELETE cap canonical identities")
+	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; seeded DELETE creates exactly this many identities, while manifest DELETE caps canonical identities")
 	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "Standalone DELETE logical request size (1 uses DeleteObject; 2-1000 use DeleteObjects)")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
@@ -1932,7 +1933,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or the internal explicit-manifest DELETE slice")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; omit for owned seeded DELETE")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
 	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
@@ -2292,9 +2293,19 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")
 	params.MinimalTUI = minimalTUI
 
-	// Set defaults (tables workload has no object size concept)
-	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete && params.WorkloadType != WorkloadTypeList &&
-		params.WorkloadType != WorkloadTypeReadVerify && params.WorkloadType != WorkloadTypeTables {
+	// Resolve source-specific defaults only after both selection and duration flags are known.
+	seededDelete := params.WorkloadType == WorkloadTypeDelete && strings.TrimSpace(params.ItemsFile) == ""
+	if seededDelete {
+		if params.ObjectSize == "" {
+			params.ObjectSize = scenario.DefaultDeleteObjectSize
+		}
+		if params.ObjectCount == 0 && strings.TrimSpace(params.Duration) == "" {
+			params.ObjectCount = scenario.DefaultDeleteObjectCount
+		}
+		params.SelectionOrder = scenario.SelectionOrderCanonical
+	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
+		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
+		params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
 	}
 
@@ -2478,8 +2489,8 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
 	}
-	if params.WorkloadType == WorkloadTypeDelete || params.WorkloadType == WorkloadTypeList ||
-		params.WorkloadType == WorkloadTypeReadVerify {
+	if (params.WorkloadType == WorkloadTypeDelete && strings.TrimSpace(params.ItemsFile) != "") ||
+		params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
@@ -2528,18 +2539,23 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 	if params.WorkloadType == WorkloadTypeDelete {
 		lines = append(lines, fmt.Sprintf("DELETE Batch Size: %d", params.DeleteBatchSize))
+		if strings.TrimSpace(params.ItemsFile) == "" {
+			lines = append(lines, "DELETE Source: seeded owned inventory")
+		} else {
+			lines = append(lines, "DELETE Source: explicit canonical manifest")
+		}
 		if params.SelectionOrder != "" {
-			lines = append(lines,
-				"Selection Order: "+params.SelectionOrder,
-				fmt.Sprintf(
+			lines = append(lines, "Selection Order: "+params.SelectionOrder)
+			if params.SelectionSHA256 != "" {
+				lines = append(lines, fmt.Sprintf(
 					"Selection Records: source=%d unique=%d selected=%d sha256=%s",
 					params.SelectionSourceCount,
 					params.SelectionUniqueCount,
 					params.SelectionSelectedCount,
 					params.SelectionSHA256,
-				),
-				"Warning: canonical key order can affect cross-tool DELETE comparisons.",
-			)
+				))
+			}
+			lines = append(lines, "Warning: canonical key order can affect cross-tool DELETE comparisons.")
 		}
 	}
 	if params.KeepScenario {
@@ -2549,6 +2565,24 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {
+	if output == nil || params.WorkloadType != WorkloadTypeDelete ||
+		strings.TrimSpace(params.ItemsFile) != "" || strings.TrimSpace(params.Duration) != "" ||
+		params.ObjectCount <= 0 || params.Threads <= 0 || params.DeleteBatchSize <= 0 {
+		return
+	}
+	capacity := int64(params.Threads) * int64(params.DeleteBatchSize)
+	if int64(params.ObjectCount) >= capacity {
+		return
+	}
+	fullWaves := int64(params.ObjectCount) / capacity
+	_, _ = fmt.Fprintf(
+		output,
+		"Warning: seeded DELETE inventory (%d objects) is smaller than --threads * --delete-batch-size (%d * %d = %d); maximum full request waves: %d. The run continues without automatic inventory calibration.\n",
+		params.ObjectCount, params.Threads, params.DeleteBatchSize, capacity, fullWaves,
+	)
 }
 
 // seedSizeWarnBytes is 50 GB — warn if the total seed footprint exceeds this.

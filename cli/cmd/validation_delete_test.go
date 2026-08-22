@@ -22,6 +22,9 @@ type deleteValidationCase struct {
 
 func TestValidateDeleteManifestFlags(t *testing.T) {
 	tests := []deleteValidationCase{
+		{name: "seeded default", bucket: "owned", batchSize: 100},
+		{name: "seeded prefix remains owned", bucket: "owned", prefix: "team/root/", batchSize: 100},
+		{name: "seeded duration deferred", bucket: "owned", batchSize: 100, duration: "1m", wantDetail: "seeded finite count mode"},
 		{name: "optional bucket assertion omitted", itemsFile: "delete.csv", batchSize: 1},
 		{name: "optional bucket assertion present", itemsFile: "delete.csv", bucket: "expected", batchSize: 100},
 		{name: "batch low", itemsFile: "delete.csv", batchSize: 0, wantDetail: "between 1 and 1000"},
@@ -72,6 +75,8 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().Int("auth-version", 4, "")
 	cmd.Flags().String("part-size", "", "")
 	cmd.Flags().String("object-size", "", "")
+	cmd.Flags().Int("threads", 1, "")
+	cmd.Flags().Bool("object-data-dedupable", true, "")
 	cmd.Flags().Int("mpu-concurrent-objects", 0, "")
 	cmd.Flags().Int("mpu-concurrent-parts", 0, "")
 	cmd.Flags().Float64("object-data-compressibility", 0, "")
