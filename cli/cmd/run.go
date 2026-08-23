@@ -1916,6 +1916,9 @@ func init() {
 	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "Standalone DELETE logical request size (1 uses DeleteObject; 2-1000 use DeleteObjects)")
 	runCmd.Flags().Bool(flagDeleteExisting, false, "Destructive DELETE opt-in: discover and freeze current keys under the exact --bucket/--prefix before timing")
 	runCmd.Flags().Bool(flagAllowEmptyPrefix, false, "Second destructive DELETE opt-in required with --delete-existing --prefix='' to select an entire bucket")
+	runCmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "Maximum operational DELETE object failures permitted; the budget trips only above this object count")
+	runCmd.Flags().Float64(flagMaxFailurePercent, 0, "Maximum cumulative operational DELETE object failure percentage (0-100); mutually exclusive with --max-failed-objects")
+	runCmd.Flags().Duration(flagFailureBudgetGrace, scenario.DefaultFailureBudgetGrace, "Measured-phase grace before evaluating a positive DELETE failure percentage")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
@@ -2152,6 +2155,23 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.ItemsFile = itemsFile
 	params.DeleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
 	params.AllowEmptyPrefix, _ = cmd.Flags().GetBool(flagAllowEmptyPrefix)
+	if workloadType == WorkloadTypeDelete {
+		params.FailureBudgetMode = scenario.FailureBudgetModeFixed
+		params.MaxFailedObjects = scenario.DefaultMaxFailedObjects
+		params.FailureBudgetGrace = scenario.DefaultFailureBudgetGrace
+		if cmd.Flags().Lookup(flagMaxFailedObjects) != nil {
+			params.MaxFailedObjects, _ = cmd.Flags().GetInt64(flagMaxFailedObjects)
+		}
+		if flag := cmd.Flags().Lookup(flagMaxFailurePercent); flag != nil {
+			params.MaxFailurePercent, _ = cmd.Flags().GetFloat64(flagMaxFailurePercent)
+			if flag.Changed {
+				params.FailureBudgetMode = scenario.FailureBudgetModePercentage
+			}
+		}
+		if cmd.Flags().Lookup(flagFailureBudgetGrace) != nil {
+			params.FailureBudgetGrace, _ = cmd.Flags().GetDuration(flagFailureBudgetGrace)
+		}
+	}
 	params.AllowEmptySelection, _ = cmd.Flags().GetBool("allow-empty-selection")
 	params.IntegrityMaxConsoleFailures, _ = cmd.Flags().GetInt("integrity-max-console-failures")
 

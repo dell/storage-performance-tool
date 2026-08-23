@@ -72,6 +72,7 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(2, step.operationLifecycle().terminal());
 			assertEquals(2, step.deleteObjectLifecycle().selected());
 			assertEquals(2, step.deleteObjectLifecycle().accepted());
+			assertEquals(2, step.deleteObjectLifecycle().fullSuccessfulRequests());
 			assertTrue(step.deleteObjectLifecycle().reconciled());
 			assertEquals(2, metrics.lastSnapshot().successSnapshot().count());
 		} finally {

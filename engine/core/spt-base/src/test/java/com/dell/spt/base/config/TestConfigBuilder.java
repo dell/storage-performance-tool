@@ -230,6 +230,12 @@ public class TestConfigBuilder {
 		opDelete.put("batchSize", 100);
 		opDelete.put("duration", false);
 		op.put("delete", opDelete);
+		Map<String, Object> failureBudget = new HashMap<>();
+		failureBudget.put("mode", "fixed");
+		failureBudget.put("maxFailedObjects", 100000L);
+		failureBudget.put("maxFailurePercent", 0.0);
+		failureBudget.put("graceSeconds", 30L);
+		op.put("failureBudget", failureBudget);
 
 		Map<String, Object> opWait = new HashMap<>();
 		opWait.put("finish", false);

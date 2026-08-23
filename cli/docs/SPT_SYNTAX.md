@@ -111,6 +111,9 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--delete-batch-size` | | `100` | Internal standalone DELETE canonical identities per logical request (`1` through `1000`); multi-bucket manifests require `1` |
 | `--delete-existing` | | `false` | Destructive internal DELETE opt-in: discover and freeze current keys under the exact `--bucket` and explicitly supplied `--prefix` before timing |
 | `--allow-empty-prefix` | | `false` | Second destructive opt-in required with `--delete-existing --prefix=''` to select an entire bucket; a prompt cannot replace it |
+| `--max-failed-objects` | | `100000` | Standalone DELETE operational failed-object budget. Permits exactly this many failed targets and trips only when the global count is greater; zero is strict. Mutually exclusive with `--max-failure-percent` |
+| `--max-failure-percent` | | *(unset)* | Alternative cumulative operational failed-object percentage, inclusive from 0 through 100. Zero is enforced immediately; positive values are evaluated after the grace period and at completion |
+| `--failure-budget-grace` | | `30s` | Measured-phase delay before evaluating a positive `--max-failure-percent`; whole seconds only, and an explicit value is accepted only with a positive percentage budget |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
 | `--versions` | | `current` | `read-verify` bucket/prefix discovery only. `current` uses ordinary object listing; `all` uses `ListObjectVersions`, preserves exact version IDs, and excludes delete markers. Omit with `--items-file` |
@@ -233,6 +236,23 @@ drains are started once and polled through short control-plane calls, so the 30-
 safe with the shipped 10-second RMI response timeout. Exhaustion at the deadline is valid.
 Scheduled time and drain time are logged separately. `--threads` bounds concurrent logical DELETE
 requests, not object targets within each request.
+
+The controller enforces one global operational failed-object policy across all workers. The fixed
+default is 100,000 failed DELETE targets—an object-unit default distinct from the deprecated legacy
+failed-operation controls. The fixed boundary is inclusive. Percentage mode divides operational
+failures by cumulative accepted-plus-operationally-failed target outcomes; zero is immediate,
+positive values wait for grace during the run, and every value is reevaluated at completion.
+Workers only publish counters, and missing terminal counters fail closed.
+
+When a budget is exceeded, the same coordinated stop closes admission, recovers undispatched work,
+and drains dispatched requests. Drain reconciliation can increase the final failed count beyond the
+trigger, so output never describes the threshold as a hard cap. Only timed-phase operational target
+failures consume budget. Setup, discovery, manifest, verification, protocol/correctness, and
+unresolved failures retain separate fatal classifications. Cleanup failures are reported separately
+and never change the standalone DELETE benchmark verdict or exit code. Output prominently reports
+the selected policy and threshold, failed-object count, and observed percentage. Completed-cleanly and
+completed-within-budget outcomes exit 0; failed or inconclusive outcomes exit nonzero. A 100%
+budget still cannot validate zero fully successful requests or zero accepted objects.
 
 All-version discovery requires the target's list-version permission
 (`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never

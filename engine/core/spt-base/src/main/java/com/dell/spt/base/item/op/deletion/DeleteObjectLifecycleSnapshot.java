@@ -16,10 +16,26 @@ public record DeleteObjectLifecycleSnapshot(
 			long unattempted,
 			long unresolved,
 			long protocolFailed,
-			boolean reconciled) {
+			long fullSuccessfulRequests,
+			boolean reconciled) implements java.io.Serializable {
+
+	private static final long serialVersionUID = 1L;
+
+	/** Compatibility constructor retained for extension code compiled against the lifecycle v1 shape. */
+	public DeleteObjectLifecycleSnapshot(
+				final long selected,
+				final long attempted,
+				final long accepted,
+				final long failed,
+				final long unattempted,
+				final long unresolved,
+				final long protocolFailed,
+				final boolean reconciled) {
+		this(selected, attempted, accepted, failed, unattempted, unresolved, protocolFailed, 0, reconciled);
+	}
 
 	/** Returns the reconciled zero-work compatibility snapshot. */
 	public static DeleteObjectLifecycleSnapshot empty() {
-		return new DeleteObjectLifecycleSnapshot(0, 0, 0, 0, 0, 0, 0, true);
+		return new DeleteObjectLifecycleSnapshot(0, 0, 0, 0, 0, 0, 0, 0, true);
 	}
 }

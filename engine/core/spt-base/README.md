@@ -217,6 +217,26 @@ cancellation, and bounded drain. Monotonic scheduled and drain intervals are obs
 Storage concurrency (`--threads` in CLI-generated scenarios) limits logical DELETE requests rather
 than the number of object targets held by those requests.
 
+Standalone DELETE additionally uses `load.op.failureBudget`, evaluated globally by the controller
+from worker lifecycle snapshots. Its shipped default is the new object-unit policy
+`mode=fixed,maxFailedObjects=100000`; the legacy `load.op.limit.fail` operation controls remain
+compatible and deprecated rather than being repurposed. Standalone DELETE bypasses those
+per-worker request-unit controls; existing workloads retain them unchanged. Count-mode workers
+hold scheduling until every slice is ready and the controller releases one concurrent admission
+barrier. Fixed mode permits the exact threshold and trips above it. Percentage mode uses
+operational failures divided by accepted-plus-operationally-
+failed object outcomes, accepts 0 through 100, enforces zero immediately, defers positive live
+evaluation for `graceSeconds` (default 30), and always reevaluates at completion.
+
+A breach uses the coordinated admission-close, queued-work recovery, and dispatched-request drain.
+Consequently terminal failures may overshoot the trigger; it is not a hard cap. Protocol and
+correctness failures, unresolved identities, and setup/manifest/verification failures remain
+outside budget room and fatal. Cleanup failures are reported separately and never change the
+standalone DELETE benchmark verdict or exit code. Missing terminal worker counters fail closed. A
+terminal run is reported as completed cleanly, completed within budget, or failed, including policy,
+threshold, failed-object count, and observed percentage. The first two exit successfully; failed is
+nonzero. A 100% policy cannot validate zero fully successful requests or zero accepted objects.
+
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.

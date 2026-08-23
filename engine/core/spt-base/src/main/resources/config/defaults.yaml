@@ -62,6 +62,13 @@ load:
       standalone: false
       batchSize: 100
       duration: false
+    # Controller-level object-unit failure policy. Existing limit.fail fields retain their
+    # legacy failed-operation meanings and are not used as this budget.
+    failureBudget:
+      mode: fixed
+      maxFailedObjects: 100000
+      maxFailurePercent: 0.0
+      graceSeconds: 30
     list:
       delimiter: null
       fetch_metadata: false

@@ -47,14 +47,18 @@ reference.
 | item-type                                      | Enum | data                     | The type of the item to use, the possible values are: "data", "path", "token". In case of filesystem "data" means files and "path" means directories
 | load-batch-size                                | Integer >= 1| 4096              | The count of the items/operations processed by a single invocation. For multipart upload (MPU) and other composite writes, cooperative storage drivers derive MPU scheduling limits and apply bounded child-operation backpressure. Setting this to `1` remains a conservative troubleshooting option, but it is no longer required for MPU correctness. |
 | load-op-limit-count                            | Integer >= 0 | 0                 | The maximum number of the load operations to execute for a load step. 0 means infinite
-| load-op-limit-fail-count                       | Integer >= 0 | 100000            | The maximum number of the failed load operations before the step will be stopped, 0 means no limit
-| load-op-limit-fail-rate                        | Boolean | false                  | Stop the step if failures rate is more than success rate and if the flag is set to true
+| load-op-limit-fail-count                       | Integer >= 0 | 100000            | Deprecated legacy failed-operation count control, retained unchanged for existing workloads; it is not the standalone DELETE failed-object budget. 0 means no limit. |
+| load-op-limit-fail-rate                        | Boolean | false                  | Deprecated legacy operation failure-rate switch, retained unchanged for existing workloads; it is not the standalone DELETE failed-object percentage. |
 | load-op-limit-rate                             | Float >= 0 | 0                   | The maximum number of the load operations to execute per second (throughput limit). 0 means no rate limit.
 | load-op-limit-recycle                          | Integer >= 1 | 1000000           | The load operations and results queues size limit
 | load-op-output-duplicates                      | Flag | false                     | Specifies whether to add duplicates to output items list when in recycle mode or only print them once. No duplicates by default |
 | load-op-delete-standalone                      | Flag | false                     | Internal engine capability gate for first-class standalone DELETE requests. It requires `load-op-type=delete`, `item-type=data`, a finite input with an exact unread-identity count, a driver that explicitly supports standalone DELETE requests, and a terminal topology. The public CLI enables this only after its safety gates are satisfied. |
 | load-op-delete-batchSize                       | Integer 1..1000 | 100              | Number of canonical object identities in each standalone DELETE logical request. The assembler carries one partial batch across input reads and emits one tail at normal exhaustion. This setting does not alter legacy cleanup or mixed-workload DELETE. |
 | load-op-delete-duration                        | Flag | false                     | Marks standalone DELETE as duration mode. Requires positive `load-step-limit-time`, no generic `load-op-limit-count`, no recycle, and no engine retry. Frozen input is never recycled; exhausting it before the deadline invalidates the run. |
+| load-op-failureBudget-mode                     | `fixed` or `percentage` | `fixed` | Controller-owned standalone DELETE operational failed-object policy. Existing workloads continue using their legacy controls. |
+| load-op-failureBudget-maxFailedObjects         | Integer >= 0 | 100000 | Fixed object-unit threshold. Exactly the configured count is permitted; scheduling stops only when the global operational failed-object count is greater. Zero is strict. |
+| load-op-failureBudget-maxFailurePercent        | Float 0..100 | 0 | Percentage of cumulative accepted-plus-operationally-failed DELETE object outcomes. Zero is immediate; positive values observe grace and all values are reevaluated at completion. |
+| load-op-failureBudget-graceSeconds             | Integer >= 0 | 30 | Measured-phase grace before live evaluation of a positive percentage budget. It does not suppress completion evaluation. |
 | load-op-recycle-mode                           | Flag | false                     | Specifies whether to recycle the successfully finished operations multiple times or not
 | load-op-recycle-contents-update                | Flag | false                     | Specifies whether to update the contents of the recycled object. Note: usually you just want to have a new object. This is rarely used. E.g. s3 versioning.
 | load-op-retry                                  | Flag | false                     | Specifies whether to retry the failed operations or not. **Note:** For multipart uploads, individual part retries (up to 3 per part) happen automatically regardless of this flag. This flag controls whole-operation-level retry. A retried operation is redispatched after a full-jitter exponential backoff (200ms base, 1s cap) rather than immediately. Only transient failures are retried (`FAIL_IO`, `FAIL_TIMEOUT`, `FAIL_UNKNOWN`, `RESP_FAIL_UNKNOWN`, `RESP_FAIL_SVC`) — permanent failures (auth, not-found, client request errors, corruption, out-of-space) are counted as failed immediately regardless of the retry limit. Not supported by every load generator (e.g. mixed-mode workloads); enabling it against one that doesn't support requeueing raises a configuration error at step start rather than silently dropping failures. |
@@ -228,6 +232,24 @@ compared across hosts, and delayed, missing, or failed evidence fails closed. On
 strictly before the scheduled deadline invalidates duration mode. Monotonic
 scheduled and drain intervals are reported separately. `storage-driver-limit-concurrency` (the
 CLI's `--threads`) bounds logical DELETE requests, not the object targets inside a batch.
+
+For standalone DELETE, workers publish lifecycle counters and only the controller aggregates them
+and decides the global `load.op.failureBudget` outcome. The shipped fixed default permits 100,000
+operationally failed object targets and is a new object-unit default, not continuity with the
+deprecated `load.op.limit.fail` operation controls. Fixed and percentage thresholds are inclusive:
+they stop only when the observed value is greater. Percentage mode uses cumulative accepted plus
+operationally failed object outcomes; zero is enforced immediately, positive values begin live
+evaluation after grace, and completion always reevaluates.
+
+A breach closes scheduling, recovers undispatched targets, and drains dispatched requests, so the
+final failure total may exceed the trigger—the threshold is not a hard cap. Only operational target
+failures in the timed DELETE phase consume the budget. Setup, discovery, manifest, verification,
+protocol/correctness, and unresolved failures retain separate fatal classifications. Cleanup
+failures are reported separately and never change the standalone DELETE benchmark verdict or exit
+code. Missing counters from any participant make terminal evidence inconclusive and failed. Terminal
+output distinguishes completed cleanly, completed within budget, and failed while reporting policy,
+threshold, failed objects, and observed percentage; the completed outcomes exit 0 and failed exits
+nonzero. Even 100% cannot validate zero fully successful requests or zero accepted objects.
 
 The reconciler keys each response by object key plus requested version. Missing, duplicate,
 malformed, or unexpected identities are protocol defects: the request fails closed and every target

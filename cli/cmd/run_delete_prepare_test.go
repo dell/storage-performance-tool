@@ -33,6 +33,11 @@ func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
 	if params.Prefix != "team/root/" {
 		t.Fatalf("seeded DELETE root prefix = %q", params.Prefix)
 	}
+	if params.FailureBudgetMode != scenario.FailureBudgetModeFixed ||
+		params.MaxFailedObjects != scenario.DefaultMaxFailedObjects ||
+		params.FailureBudgetGrace != scenario.DefaultFailureBudgetGrace {
+		t.Fatalf("seeded DELETE failure budget defaults = %+v", params)
+	}
 
 	external := deleteValidationCommand(deleteValidationCase{
 		itemsFile: "delete.csv", batchSize: 1,
@@ -43,6 +48,27 @@ func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
 	}
 	if externalParams.ObjectCount != 0 || externalParams.ObjectSize != "" {
 		t.Fatalf("external DELETE inherited seed defaults: %+v", externalParams)
+	}
+}
+
+func TestBuildScenarioParamsSelectsPercentageObjectFailureBudget(t *testing.T) {
+	cmd := deleteValidationCommand(deleteValidationCase{
+		bucket: "owned", batchSize: scenario.DefaultDeleteBatchSize,
+	})
+	if err := cmd.Flags().Set(flagMaxFailurePercent, "12.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set(flagFailureBudgetGrace, "45s"); err != nil {
+		t.Fatal(err)
+	}
+
+	params, err := buildScenarioParams(WorkloadTypeDelete, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.FailureBudgetMode != scenario.FailureBudgetModePercentage ||
+		params.MaxFailurePercent != 12.5 || params.FailureBudgetGrace.String() != "45s" {
+		t.Fatalf("percentage failure budget params = %+v", params)
 	}
 }
 

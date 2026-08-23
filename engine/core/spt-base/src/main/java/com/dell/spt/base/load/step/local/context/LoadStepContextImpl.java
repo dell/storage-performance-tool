@@ -29,6 +29,7 @@ import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.item.op.deletion.DeletePhaseTimingSnapshot;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
@@ -145,6 +146,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean operationDrainComplete = new AtomicBoolean(false);
 	private final AtomicBoolean startedOnce = new AtomicBoolean(false);
 	private final AtomicBoolean durationIntervalStarted = new AtomicBoolean(false);
+	private final AtomicBoolean objectFailureBudgetAdmissionHeld = new AtomicBoolean(false);
+	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
 	private final boolean standaloneDeleteEnabled;
 	private final boolean standaloneDeleteDurationMode;
@@ -153,9 +156,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicLong deleteAdmissionClosedNanos = new AtomicLong();
 	private final AtomicLong deleteDrainCompletedNanos = new AtomicLong();
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
-	private final LongAdder deleteAcceptedObjects = new LongAdder();
-	private final LongAdder deleteFailedObjects = new LongAdder();
-	private final LongAdder deleteProtocolFailedObjects = new LongAdder();
+	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters = new DeleteObjectLifecycleCounters();
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -356,8 +357,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.sizeLimit = configSizeLimit.get() > 0 ? configSizeLimit.get() : Long.MAX_VALUE;
 		final Config failConfig = opLimitConfig.configVal("fail");
 		final long configFailCount = failConfig.longVal("count");
-		this.failCountLimit = configFailCount > 0 ? configFailCount : Long.MAX_VALUE;
-		this.failRateLimitFlag = failConfig.boolVal("rate");
+		this.failCountLimit = standaloneDelete.enabled()
+						? Long.MAX_VALUE
+						: configFailCount > 0 ? configFailCount : Long.MAX_VALUE;
+		this.failRateLimitFlag = !standaloneDelete.enabled() && failConfig.boolVal("rate");
 		this.waitOpFinishBeforeStop = opConfig.boolVal("wait-finish");
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
@@ -1143,15 +1146,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		driverRecoveryPending = null;
 		operationDrainComplete.set(false);
 		durationIntervalStarted.set(false);
+		objectFailureBudgetAdmissionReleased.set(false);
 		operationLifecycle.reset();
 		if (standaloneDeleteEnabled) {
-			deleteScheduledStartedNanos.set(standaloneDeleteDurationMode ? 0 : System.nanoTime());
+			deleteScheduledStartedNanos.set(
+							standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()
+											? 0
+											: System.nanoTime());
 			deleteScheduledDeadlineNanos.set(0);
 			deleteAdmissionClosedNanos.set(0);
 			deleteDrainCompletedNanos.set(0);
 			deleteDrainTimestampRecorded.set(false);
 		}
-		if (standaloneDeleteDurationMode) {
+		if (standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
 			generator.holdAdmission();
 		} else {
 			generator.openAdmission();
@@ -1165,13 +1172,51 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
-		if (!standaloneDeleteDurationMode) {
+		if (!standaloneDeleteDurationMode && !objectFailureBudgetAdmissionHeld.get()) {
 			try {
 				generator.start();
 			} catch (final IllegalStateException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
 			}
+		}
+	}
+
+	@Override
+	public final void holdObjectFailureBudgetAdmission() {
+		if (!standaloneDeleteEnabled || standaloneDeleteDurationMode) {
+			return;
+		}
+		if (startedOnce.get()) {
+			throw new IllegalStateException(id + ": object failure-budget admission must be held before start");
+		}
+		objectFailureBudgetAdmissionHeld.set(true);
+	}
+
+	@Override
+	public final void releaseObjectFailureBudgetAdmission() {
+		if (!standaloneDeleteEnabled || standaloneDeleteDurationMode) {
+			return;
+		}
+		operationAdmissionCloseLock.lock();
+		try {
+			if (!objectFailureBudgetAdmissionHeld.get()) {
+				return;
+			}
+			if (objectFailureBudgetAdmissionReleased.get()) {
+				return;
+			}
+			if (!startedOnce.get() || stepShuttingDown.get() || operationAdmissionClosed.get()) {
+				throw new IllegalStateException(
+								id + ": object failure-budget admission closed before the controller release");
+			}
+			final long releasedNanos = System.nanoTime();
+			deleteScheduledStartedNanos.set(releasedNanos);
+			generator.openAdmission();
+			generator.start();
+			objectFailureBudgetAdmissionReleased.set(true);
+		} finally {
+			operationAdmissionCloseLock.unlock();
 		}
 	}
 
@@ -1281,8 +1326,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final var operationSnapshot = operationLifecycle.snapshot();
 		final var selected = Math.addExact(
 						generator.consumedItemCount(), generator.aggregateUnattemptedItemCount());
-		final var accepted = deleteAcceptedObjects.sum();
-		final var failed = deleteFailedObjects.sum();
+		final var terminalCounters = deleteObjectLifecycleCounters.snapshot();
+		final var accepted = terminalCounters.accepted();
+		final var failed = terminalCounters.failed();
 		final var unattempted = Math.addExact(
 						deleteTargetCount(operationSnapshot.unattemptedOperations()),
 						generator.aggregateUnattemptedItemCount());
@@ -1297,7 +1343,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						failed,
 						unattempted,
 						unresolved,
-						deleteProtocolFailedObjects.sum(),
+						terminalCounters.protocolFailed(),
+						terminalCounters.fullSuccessfulRequests(),
 						reconciled);
 	}
 
@@ -1369,11 +1416,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteOperation.completeDelete(null);
 		}
 		final var result = deleteOperation.deleteResult();
-		deleteAcceptedObjects.add(result.acceptedObjectCount());
-		deleteFailedObjects.add(result.failedObjectCount());
-		if (result.failureClassification() == DeleteFailureClassification.PROTOCOL) {
-			deleteProtocolFailedObjects.add(result.failedObjectCount());
-		}
+		final long acceptedObjects = result.acceptedObjectCount();
+		final long failedObjects = result.failedObjectCount();
+		deleteObjectLifecycleCounters.recordTerminal(
+						acceptedObjects,
+						failedObjects,
+						result.failureClassification() == DeleteFailureClassification.PROTOCOL
+										? failedObjects
+										: 0,
+						result.outcome() == DeleteRequestOutcome.FULL_SUCCESS ? 1 : 0);
 		final var metrics = resolveMetrics(operation.type());
 		if (Status.SUCC.equals(result.operationStatus())) {
 			metrics.markSucc(

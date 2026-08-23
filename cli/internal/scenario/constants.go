@@ -1,6 +1,8 @@
 package scenario
 
 import (
+	"time"
+
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -120,9 +122,18 @@ const (
 	DefaultDeleteBatchSize = 100
 	// MaxDeleteBatchSize is the S3 DeleteObjects request limit.
 	MaxDeleteBatchSize = 1000
+	// DefaultMaxFailedObjects is the standalone DELETE object-unit failure budget.
+	DefaultMaxFailedObjects int64 = 100000
+	// FailureBudgetModeFixed selects a fixed failed-object threshold.
+	FailureBudgetModeFixed = "fixed"
+	// FailureBudgetModePercentage selects a cumulative attempted-object percentage.
+	FailureBudgetModePercentage = "percentage"
 	// SelectionOrderCanonical names the deterministic global DELETE selection order.
 	SelectionOrderCanonical = "canonical"
 )
+
+// DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.
+const DefaultFailureBudgetGrace = 30 * time.Second
 
 // DefaultReadPhasePauseSeconds preserves the historical pause between read
 // scenario phases while allowing qualification runs to request a longer settle.

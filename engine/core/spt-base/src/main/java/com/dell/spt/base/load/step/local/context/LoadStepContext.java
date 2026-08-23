@@ -26,14 +26,28 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 		return new OperationLifecycleSnapshot<>(0, 0, 0, 0, 0, 0, 0, java.util.List.of(), java.util.List.of());
 	}
 
-	/** Returns object-level identity accounting for a standalone DELETE step. */
+	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
-		return DeleteObjectLifecycleSnapshot.empty();
+		return null;
 	}
 
 	/** Returns scheduled/admission and post-admission drain timing for standalone DELETE. */
 	default DeletePhaseTimingSnapshot deletePhaseTiming() {
 		return DeletePhaseTimingSnapshot.empty();
+	}
+
+	/** Holds standalone DELETE count scheduling until every controller slice is ready. */
+	default void holdObjectFailureBudgetAdmission() {
+		throw unsupportedStandaloneDeleteCountAdmission();
+	}
+
+	/** Releases standalone DELETE count scheduling after the controller start barrier. */
+	default void releaseObjectFailureBudgetAdmission() {
+		throw unsupportedStandaloneDeleteCountAdmission();
+	}
+
+	private static UnsupportedOperationException unsupportedStandaloneDeleteCountAdmission() {
+		return new UnsupportedOperationException("standalone DELETE count admission is unsupported");
 	}
 
 	/**

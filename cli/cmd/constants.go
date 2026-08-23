@@ -19,6 +19,9 @@ const (
 	flagDeleteBatchSize              = "delete-batch-size"
 	flagDeleteExisting               = "delete-existing"
 	flagAllowEmptyPrefix             = "allow-empty-prefix"
+	flagMaxFailedObjects             = "max-failed-objects"
+	flagMaxFailurePercent            = "max-failure-percent"
+	flagFailureBudgetGrace           = "failure-budget-grace"
 )
 
 // Workload type constants

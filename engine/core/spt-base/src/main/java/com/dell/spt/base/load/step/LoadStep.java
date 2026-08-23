@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step;
 
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.concurrent.AsyncRunnable;
 import java.io.IOException;
 import java.rmi.RemoteException;
@@ -18,6 +19,14 @@ public interface LoadStep extends Daemon {
 
 	List<? extends AllMetricsSnapshot> metricsSnapshots() throws RemoteException;
 
+	/** Publishes worker object counters for the controller; compatibility workers provide no evidence. */
+	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() throws RemoteException {
+		return null;
+	}
+
+	/** Releases controller-gated standalone DELETE count scheduling. */
+	default void releaseObjectFailureBudgetAdmission() throws RemoteException {}
+
 	/** Prepares the worker-local standalone DELETE interval without releasing scheduling. */
 	default void prepareDurationInterval(final long durationNanos) throws RemoteException {}
 
@@ -26,6 +35,16 @@ public interface LoadStep extends Daemon {
 
 	/** Closes operation admission for a coordinated duration stop without recovering work. */
 	default void closeOperationAdmissionForStepStop() throws RemoteException {}
+
+	/**
+	 * Tightens the dispatched-operation terminal deadline before admission closure or recovery.
+	 * Compatibility workers must fail closed rather than silently accepting a later completion.
+	 */
+	default void enforceDispatchedOperationsDeadlineForStepStop(final long remainingNanos)
+					throws RemoteException {
+		throw new RemoteException(
+						"worker does not support the coordinated dispatched-operation deadline");
+	}
 
 	/** Recovers undispatched work after every distributed slice has closed admission. */
 	default void recoverQueuedOperationsForStepStop() throws RemoteException {}

@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -24,6 +26,8 @@ import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -167,6 +171,55 @@ class StandaloneDeleteConfigurationTest {
 	}
 
 	@Test
+	void standaloneDeleteLeavesLegacyRequestFailureLimitsToExistingWorkloads() throws Exception {
+		final Config standaloneCount = standaloneConfig();
+		standaloneCount.val("load-op-limit-fail-count", 1L);
+		standaloneCount.val("load-op-limit-fail-rate", false);
+		final Config ordinaryCount = TestConfigBuilder.config();
+		ordinaryCount.val("load-op-limit-fail-count", 1L);
+		ordinaryCount.val("load-op-limit-fail-rate", false);
+
+		assertFalse(stopsForLegacyFailureControls(standaloneCount, 2L, 0.0, 0.0));
+		assertTrue(stopsForLegacyFailureControls(ordinaryCount, 2L, 0.0, 0.0));
+
+		final Config standaloneRate = standaloneConfig();
+		standaloneRate.val("load-op-limit-fail-count", 100L);
+		standaloneRate.val("load-op-limit-fail-rate", true);
+		final Config ordinaryRate = TestConfigBuilder.config();
+		ordinaryRate.val("load-op-limit-fail-count", 100L);
+		ordinaryRate.val("load-op-limit-fail-rate", true);
+
+		assertFalse(stopsForLegacyFailureControls(standaloneRate, 0L, 2.0, 1.0));
+		assertTrue(stopsForLegacyFailureControls(ordinaryRate, 0L, 2.0, 1.0));
+	}
+
+	@Test
+	void closedCountAdmissionCannotBeReleasedAfterControllerBreach() throws Exception {
+		final Config config = standaloneConfig();
+		final LoadGenerator generator = mock(LoadGenerator.class);
+		final var context = new LoadStepContextImpl(
+						"standalone-delete-count-admission",
+						generator,
+						supportedDriver(),
+						mock(MetricsContext.class),
+						config.configVal("load"),
+						false);
+
+		try {
+			context.holdObjectFailureBudgetAdmission();
+			context.start();
+			verify(generator).holdAdmission();
+			verify(generator, never()).start();
+			context.closeOperationAdmissionForStepStop();
+			assertThrows(IllegalStateException.class, context::releaseObjectFailureBudgetAdmission);
+			verify(generator, never()).openAdmission();
+			verify(generator, never()).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@Test
 	void standaloneBatchSizeIsStrictlyBounded() {
 		for (final var invalid : List.of(0, 1001)) {
 			final var config = standaloneConfig();
@@ -245,6 +298,40 @@ class StandaloneDeleteConfigurationTest {
 		config.val("load-step-limit-time", "0s");
 		config.val("item-output-file", "");
 		return config;
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private static boolean stopsForLegacyFailureControls(
+					final Config config,
+					final long failedCount,
+					final double failedRate,
+					final double successRate) throws Exception {
+		final MetricsContext metrics = mock(MetricsContext.class);
+		final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class);
+		final RateMetricSnapshot failures = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot successes = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot bytes = mock(RateMetricSnapshot.class);
+		when(metrics.lastSnapshot()).thenReturn(snapshot);
+		when(snapshot.failsSnapshot()).thenReturn(failures);
+		when(snapshot.successSnapshot()).thenReturn(successes);
+		when(snapshot.byteSnapshot()).thenReturn(bytes);
+		when(failures.count()).thenReturn(failedCount);
+		when(failures.last()).thenReturn(failedRate);
+		when(successes.last()).thenReturn(successRate);
+		final LoadStepContextImpl context = new LoadStepContextImpl(
+						"legacy-failure-control-contract",
+						mock(LoadGenerator.class),
+						supportedDriver(),
+						metrics,
+						config.configVal("load"),
+						false);
+		context.start();
+		try {
+			return context.isDone();
+		} finally {
+			context.close();
+		}
 	}
 
 	@SuppressWarnings("unchecked")
