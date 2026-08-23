@@ -3,6 +3,7 @@ package scenario
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
@@ -143,6 +144,10 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	if params.Threads <= 0 {
 		return "", fmt.Errorf("delete threads must be positive")
 	}
+	failureBudget, err := resolveDeleteFailureBudget(params)
+	if err != nil {
+		return "", err
+	}
 	duration := strings.TrimSpace(params.Duration)
 	if duration != "" && params.ObjectCount != 0 {
 		return "", fmt.Errorf("delete object count and duration are mutually exclusive")
@@ -158,10 +163,10 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		return "", fmt.Errorf("delete existing-prefix and explicit-manifest sources are mutually exclusive")
 	}
 	if params.DeleteExisting {
-		return generateExistingPrefixDeleteScenario(params, selectionOrder)
+		return generateExistingPrefixDeleteScenario(params, selectionOrder, failureBudget)
 	}
 	if strings.TrimSpace(params.ItemsFile) == "" {
-		return generateSeededDeleteScenario(params, selectionOrder)
+		return generateSeededDeleteScenario(params, selectionOrder, failureBudget)
 	}
 	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
 		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
@@ -177,10 +182,15 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
 		Duration:       duration,
+		FailureBudget:  failureBudget,
 	})
 }
 
-func generateExistingPrefixDeleteScenario(params Params, selectionOrder string) (string, error) {
+func generateExistingPrefixDeleteScenario(
+	params Params,
+	selectionOrder string,
+	failureBudget deleteFailureBudgetTemplateData,
+) (string, error) {
 	if params.Cleanup {
 		return "", fmt.Errorf("delete existing-prefix mode cannot use cleanup because SPT did not create the selected objects")
 	}
@@ -233,10 +243,15 @@ func generateExistingPrefixDeleteScenario(params Params, selectionOrder string) 
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
 		Duration:       strings.TrimSpace(params.Duration),
+		FailureBudget:  failureBudget,
 	})
 }
 
-func generateSeededDeleteScenario(params Params, selectionOrder string) (string, error) {
+func generateSeededDeleteScenario(
+	params Params,
+	selectionOrder string,
+	failureBudget deleteFailureBudgetTemplateData,
+) (string, error) {
 	if strings.TrimSpace(params.Bucket) == "" {
 		return "", fmt.Errorf("delete seeded mode requires a bucket")
 	}
@@ -285,7 +300,31 @@ func generateSeededDeleteScenario(params Params, selectionOrder string) (string,
 		BatchSize:      params.DeleteBatchSize,
 		SelectionOrder: selectionOrder,
 		Duration:       duration,
+		FailureBudget:  failureBudget,
 	})
+}
+
+func resolveDeleteFailureBudget(params Params) (deleteFailureBudgetTemplateData, error) {
+	mode := params.FailureBudgetMode
+	maxFailedObjects := params.MaxFailedObjects
+	grace := params.FailureBudgetGrace
+	if grace < 0 {
+		return deleteFailureBudgetTemplateData{}, fmt.Errorf("delete failure-budget grace must be non-negative")
+	}
+	if grace%time.Second != 0 {
+		return deleteFailureBudgetTemplateData{}, fmt.Errorf("delete failure-budget grace must use whole seconds")
+	}
+	if mode == "" {
+		mode = FailureBudgetModeFixed
+		maxFailedObjects = DefaultMaxFailedObjects
+		grace = DefaultFailureBudgetGrace
+	}
+	return deleteFailureBudgetTemplateData{
+		Mode:              mode,
+		MaxFailedObjects:  maxFailedObjects,
+		MaxFailurePercent: params.MaxFailurePercent,
+		GraceSeconds:      int64(grace / time.Second),
+	}, nil
 }
 
 func deleteSeedNamespace(root string, runID int64) string {

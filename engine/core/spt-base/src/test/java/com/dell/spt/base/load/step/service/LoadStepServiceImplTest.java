@@ -164,16 +164,20 @@ public class LoadStepServiceImplTest {
 			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
 
 			final LoadStepServiceImpl svc = newServiceWith(local);
+			svc.releaseObjectFailureBudgetAdmission();
 			svc.prepareDurationInterval(456L);
 			svc.startDurationInterval(456L);
 			assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, svc.durationAwaitStatus());
 			svc.closeOperationAdmissionForStepStop();
+			svc.enforceDispatchedOperationsDeadlineForStepStop(123L);
 			svc.recoverQueuedOperationsForStepStop();
 			svc.drainDispatchedOperationsForStepStop(123L);
 			svc.validateTerminalStateForStepStop();
 			svc.shutdown();
 
 			verify(local).closeOperationAdmissionForStepStop();
+			verify(local).enforceDispatchedOperationsDeadlineForStepStop(123L);
+			verify(local).releaseObjectFailureBudgetAdmission();
 			verify(local).prepareDurationInterval(456L);
 			verify(local).startDurationInterval(456L);
 			verify(local).durationAwaitStatus();

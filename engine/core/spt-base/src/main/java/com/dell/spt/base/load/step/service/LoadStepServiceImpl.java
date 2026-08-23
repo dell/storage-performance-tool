@@ -9,6 +9,7 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -115,6 +116,16 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	}
 
 	@Override
+	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() throws RemoteException {
+		return localLoadStep.deleteObjectLifecycle();
+	}
+
+	@Override
+	public final void releaseObjectFailureBudgetAdmission() throws RemoteException {
+		localLoadStep.releaseObjectFailureBudgetAdmission();
+	}
+
+	@Override
 	public final void prepareDurationInterval(final long durationNanos) throws RemoteException {
 		localLoadStep.prepareDurationInterval(durationNanos);
 	}
@@ -127,6 +138,12 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	@Override
 	public final void closeOperationAdmissionForStepStop() throws RemoteException {
 		localLoadStep.closeOperationAdmissionForStepStop();
+	}
+
+	@Override
+	public final void enforceDispatchedOperationsDeadlineForStepStop(final long remainingNanos)
+					throws RemoteException {
+		localLoadStep.enforceDispatchedOperationsDeadlineForStepStop(remainingNanos);
 	}
 
 	@Override

@@ -8,7 +8,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -16,6 +18,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // ValidateWorkloadType checks if the provided workload type is valid
@@ -374,6 +377,9 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 	batchFlag := cmd.Flags().Lookup(flagDeleteBatchSize)
 	deleteExistingFlag := cmd.Flags().Lookup(flagDeleteExisting)
 	allowEmptyPrefixFlag := cmd.Flags().Lookup(flagAllowEmptyPrefix)
+	maxFailedObjectsFlag := cmd.Flags().Lookup(flagMaxFailedObjects)
+	maxFailurePercentFlag := cmd.Flags().Lookup(flagMaxFailurePercent)
+	failureBudgetGraceFlag := cmd.Flags().Lookup(flagFailureBudgetGrace)
 	if workloadType != WorkloadTypeDelete {
 		if batchFlag != nil && batchFlag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteBatchSize, workloadType)
@@ -384,7 +390,43 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		if allowEmptyPrefixFlag != nil && allowEmptyPrefixFlag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagAllowEmptyPrefix, workloadType)
 		}
+		for _, flag := range []*pflag.Flag{maxFailedObjectsFlag, maxFailurePercentFlag, failureBudgetGraceFlag} {
+			if flag != nil && flag.Changed {
+				return fmt.Errorf(ErrFlagNotSupported, "--"+flag.Name, workloadType)
+			}
+		}
 		return nil
+	}
+	if maxFailedObjectsFlag != nil && maxFailurePercentFlag != nil &&
+		maxFailedObjectsFlag.Changed && maxFailurePercentFlag.Changed {
+		return errors.New("--max-failed-objects and --max-failure-percent are mutually exclusive")
+	}
+	if maxFailedObjectsFlag != nil {
+		maxFailedObjects, _ := cmd.Flags().GetInt64(flagMaxFailedObjects)
+		if maxFailedObjects < 0 {
+			return errors.New("--max-failed-objects must be greater than or equal to zero")
+		}
+	}
+	maxFailurePercent := 0.0
+	if maxFailurePercentFlag != nil {
+		maxFailurePercent, _ = cmd.Flags().GetFloat64(flagMaxFailurePercent)
+		if math.IsNaN(maxFailurePercent) || math.IsInf(maxFailurePercent, 0) ||
+			maxFailurePercent < 0 || maxFailurePercent > 100 {
+			return errors.New("--max-failure-percent must be between 0 and 100 inclusive")
+		}
+	}
+	if failureBudgetGraceFlag != nil {
+		failureBudgetGrace, _ := cmd.Flags().GetDuration(flagFailureBudgetGrace)
+		if failureBudgetGrace < 0 {
+			return errors.New("--failure-budget-grace must be greater than or equal to zero")
+		}
+		if failureBudgetGrace%time.Second != 0 {
+			return errors.New("--failure-budget-grace must be a whole number of seconds")
+		}
+		if failureBudgetGraceFlag.Changed &&
+			(maxFailurePercentFlag == nil || !maxFailurePercentFlag.Changed || maxFailurePercent <= 0) {
+			return errors.New("--failure-budget-grace requires a positive --max-failure-percent")
+		}
 	}
 	if autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds"); autoTerminate > 0 {
 		return errors.New("standalone DELETE does not support --auto-terminate-seconds; use --duration and provide enough live inventory for the full interval")

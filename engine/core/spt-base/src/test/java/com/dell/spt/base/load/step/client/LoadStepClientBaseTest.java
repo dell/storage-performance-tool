@@ -8,9 +8,13 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
+import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.LoadStepService;
 import com.dell.spt.base.load.step.service.LoadStepServiceImpl;
+import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -39,6 +43,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -47,6 +52,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -55,7 +61,11 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Configurator;
+import org.apache.logging.log4j.core.config.Property;
 
 /**
  * Comprehensive unit tests for LoadStepClientBase.
@@ -118,10 +128,26 @@ class LoadStepClientBaseTest {
 		addStepSlice(client, exhausted);
 		addStepSlice(client, stillActive);
 
-		final var failure = assertThrows(
-						IntegrityTerminalException.class,
-						() -> client.await(1, java.util.concurrent.TimeUnit.SECONDS));
-		assertTrue(failure.getMessage().contains("inventory slice exhausted before the requested duration"));
+		final String durationValidityStatus = "overall run already failed duration validity; failure-budget status only";
+		final CapturingMessageAppender appender = new CapturingMessageAppender(durationValidityStatus);
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			final var failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> client.await(1, java.util.concurrent.TimeUnit.SECONDS));
+			assertTrue(failure.getMessage().contains("inventory slice exhausted before the requested duration"));
+			assertDoesNotThrow(client::close);
+			assertTrue(appender.awaitTarget(1, TimeUnit.SECONDS));
+			final List<String> messages = appender.messages();
+			assertTrue(messages.stream().anyMatch(message -> message.contains(durationValidityStatus)));
+			assertFalse(messages.stream().anyMatch(message -> message.contains(
+							"Standalone DELETE completed cleanly")));
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
 	}
 
 	@Test
@@ -217,19 +243,22 @@ class LoadStepClientBaseTest {
 	private static void assertNoLiveThreads(final String... namePrefixes)
 					throws InterruptedException {
 		final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-		List<String> liveNames;
+		List<Thread> liveThreads;
 		do {
-			liveNames = Thread.getAllStackTraces().keySet().stream()
+			liveThreads = Thread.getAllStackTraces().keySet().stream()
 							.filter(Thread::isAlive)
-							.map(Thread::getName)
-							.filter(name -> java.util.Arrays.stream(namePrefixes).anyMatch(name::startsWith))
+							.filter(thread -> java.util.Arrays.stream(namePrefixes)
+											.anyMatch(thread.getName()::startsWith))
 							.toList();
-			if (liveNames.isEmpty()) {
+			if (liveThreads.isEmpty()) {
 				return;
 			}
 			Thread.sleep(10);
 		} while (System.nanoTime() < deadlineNanos);
-		fail("duration client lifecycle threads remain live: " + liveNames);
+		fail("duration client lifecycle threads remain live: "
+						+ liveThreads.stream()
+										.map(thread -> thread.getName() + " " + java.util.Arrays.toString(thread.getStackTrace()))
+										.toList());
 	}
 
 	@Test
@@ -240,6 +269,7 @@ class LoadStepClientBaseTest {
 		final LoadStep local = mock(LoadStep.class);
 		when(local.loadStepId()).thenReturn("real-rmi-duration");
 		when(local.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		when(local.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 		final AtomicLong longestAwaitNanos = new AtomicLong();
 		when(local.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
 			final long requestedNanos = invocation.getArgument(1, TimeUnit.class)
@@ -266,6 +296,8 @@ class LoadStepClientBaseTest {
 
 			assertDoesNotThrow(() -> client.await(30, TimeUnit.SECONDS));
 			assertTrue(longestAwaitNanos.get() <= TimeUnit.SECONDS.toNanos(1));
+			verify(local, atLeastOnce())
+							.enforceDispatchedOperationsDeadlineForStepStop(anyLong());
 			assertDoesNotThrow(client::close);
 			assertTrue(client.isClosed());
 		} finally {
@@ -279,6 +311,17 @@ class LoadStepClientBaseTest {
 				System.setProperty("java.rmi.server.hostname", originalHost);
 			}
 		}
+	}
+
+	@Test
+	void compatibilityWorkerFailsClosedWhenItCannotEnforceTheControllerDeadline() {
+		final LoadStep compatibilityWorker = mock(LoadStep.class, CALLS_REAL_METHODS);
+
+		final RemoteException failure = assertThrows(
+						RemoteException.class,
+						() -> compatibilityWorker.enforceDispatchedOperationsDeadlineForStepStop(1L));
+
+		assertTrue(failure.getMessage().contains("does not support"));
 	}
 
 	@Test
@@ -516,6 +559,7 @@ class LoadStepClientBaseTest {
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
 		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 		doAnswer(invocation -> {
 			if (admissionAttempts.incrementAndGet() == 1) {
 				throw new RemoteException("transient admission failure");
@@ -1105,6 +1149,1079 @@ class LoadStepClientBaseTest {
 						"duration verdict collection received time outside the one step-wide drain budget");
 	}
 
+	@Test
+	void fixedObjectBudgetBreachStopsSchedulingDrainsAndReportsFinalOvershoot() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicBoolean admissionClosed = new AtomicBoolean();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(
+						invocation -> admissionClosed.get());
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> admissionClosed.get()
+						? new DeleteObjectLifecycleSnapshot(4, 4, 1, 3, 0, 0, 0, 1, true)
+						: new DeleteObjectLifecycleSnapshot(2, 2, 1, 1, 0, 0, 0, 1, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.set(true);
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(3, TimeUnit.SECONDS));
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class, client::close);
+
+		assertTrue(failure.getMessage().contains("operational failed objects=3"));
+		assertTrue(failure.getMessage().contains("not a hard cap"));
+		verify(slice).closeOperationAdmissionForStepStop();
+		verify(slice).recoverQueuedOperationsForStepStop();
+		verify(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(slice).shutdown();
+		assertNoLiveThreads("spt-delete-failure-budget-");
+	}
+
+	@Test
+	void countBudgetFailureCancelsTimedOutRetainedStopPhase() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch admissionEntered = new CountDownLatch(1);
+		final CountDownLatch releaseAdmission = new CountDownLatch(1);
+		final AtomicBoolean admissionClosed = new AtomicBoolean();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(
+						invocation -> admissionClosed.get());
+		when(slice.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true));
+		doAnswer(invocation -> {
+			admissionClosed.set(true);
+			admissionEntered.countDown();
+			releaseAdmission.await();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		try {
+			assertTrue(client.await(3, TimeUnit.SECONDS));
+			assertTrue(admissionEntered.await(1, TimeUnit.SECONDS));
+			assertThrows(IntegrityTerminalException.class, client::close);
+
+			assertNoLiveThreads("spt-delete-admission-close-");
+		} finally {
+			releaseAdmission.countDown();
+		}
+	}
+
+	@Test
+	void countStartPublishesUnslicedBudgetsAndReleasesEverySliceAsOnePublicBarrier() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-limit-fail-count", 1L);
+		config.val("load-op-failureBudget-maxFailedObjects", 10L);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final CountDownLatch releasesEntered = new CountDownLatch(2);
+		final LoadStep first = mock(LoadStep.class);
+		final LoadStep second = mock(LoadStep.class);
+		final List<Config> publishedConfigs = Collections.synchronizedList(new ArrayList<>());
+		final AtomicInteger createdSlices = new AtomicInteger();
+		for (final LoadStep slice : List.of(first, second)) {
+			when(slice.loadStepId()).thenReturn("public-count-budget-slice");
+			when(slice.metricsSnapshots()).thenAnswer(invocation -> new ArrayList<>());
+			when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+			doAnswer(invocation -> {
+				releasesEntered.countDown();
+				assertTrue(
+								releasesEntered.await(1, TimeUnit.SECONDS),
+								"a slice was released before every prepared participant entered the barrier");
+				return null;
+			}).when(slice).releaseObjectFailureBudgetAdmission();
+		}
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(TestLoadStepExtension.TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenAnswer(invocation -> {
+			publishedConfigs.add(invocation.getArgument(0));
+			return createdSlices.getAndIncrement() == 0 ? first : second;
+		});
+		final int port;
+		try (ServerSocket socket = new ServerSocket(0)) {
+			socket.setReuseAddress(true);
+			port = socket.getLocalPort();
+		}
+		config.val("load-step-node-addrs", List.of("127.0.0.1:" + port));
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		final FileManagerServiceImpl fileService = new FileManagerServiceImpl(port);
+		final LoadStepManagerServiceImpl stepManager = new LoadStepManagerServiceImpl(
+						port, List.of(factory), mockMetricsManager);
+		TestLoadStepClient client = null;
+		try {
+			fileService.start();
+			stepManager.start();
+			client = new TestLoadStepClient(
+							config, List.of(factory), ctxConfigs, mockMetricsManager);
+
+			client.start();
+
+			assertEquals(2, publishedConfigs.size());
+			assertEquals(
+							List.of(1L, 1L),
+							publishedConfigs.stream()
+											.map(slice -> slice.longVal("load-op-limit-fail-count"))
+											.toList());
+			assertEquals(
+							List.of(10L, 10L),
+							publishedConfigs.stream()
+											.map(slice -> slice.longVal("load-op-failureBudget-maxFailedObjects"))
+											.toList());
+			verify(first).releaseObjectFailureBudgetAdmission();
+			verify(second).releaseObjectFailureBudgetAdmission();
+		} finally {
+			if (client != null && !client.isClosed()) {
+				client.close();
+			}
+			if (!stepManager.isClosed()) {
+				stepManager.close();
+			}
+			if (!fileService.isClosed()) {
+				fileService.close();
+			}
+			ServiceUtil.shutdown();
+			if (originalHost == null) {
+				System.clearProperty("java.rmi.server.hostname");
+			} else {
+				System.setProperty("java.rmi.server.hostname", originalHost);
+			}
+		}
+	}
+
+	@Test
+	void interruptionResistantCounterProbeDoesNotRetainPlatformThreadsAcrossCloseAndRestart()
+					throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final AtomicInteger snapshotCalls = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotCalls.incrementAndGet();
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(client, slice);
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(2, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+
+		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+		Thread closeThread = null;
+		try {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			Thread.sleep(350);
+			assertEquals(1, snapshotCalls.get(), "a blocked worker must have only one retained probe");
+			awaitThread.join(TimeUnit.SECONDS.toMillis(1));
+			assertFalse(awaitThread.isAlive(), "a blocked counter RPC pinned budget monitor shutdown");
+			assertNull(awaitFailure.get());
+
+			closeThread = Thread.ofPlatform().start(() -> {
+				try {
+					client.close();
+				} catch (final Throwable failure) {
+					closeFailure.set(failure);
+				}
+			});
+			closeThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(closeThread.isAlive(), "terminal counter collection exceeded its step-wide bound");
+			assertInstanceOf(IntegrityTerminalException.class, closeFailure.get());
+			assertNoLiveThreads("spt-delete-failure-budget-snapshot-");
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount());
+
+			final TestLoadStepClient restarted = new TestLoadStepClient(
+							config, extensions, ctxConfigs, mockMetricsManager);
+			final LoadStep restartedSlice = mock(LoadStep.class);
+			when(restartedSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+			when(restartedSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+			addRawStepSlice(restarted, restartedSlice);
+			assertTrue(restarted.await(1, TimeUnit.SECONDS));
+			final IntegrityTerminalException restartedFailure = assertThrows(
+							IntegrityTerminalException.class, restarted::close);
+			assertTrue(restartedFailure.getMessage().contains("counters are missing"));
+			verify(restartedSlice, never()).deleteObjectLifecycle();
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount());
+			assertNoLiveThreads("spt-delete-failure-budget-snapshot-");
+		} finally {
+			releaseSnapshot.countDown();
+			awaitThread.interrupt();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			if (closeThread != null) {
+				closeThread.interrupt();
+				closeThread.join(TimeUnit.SECONDS.toMillis(2));
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+		final TestLoadStepClient recovered = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep recoveredSlice = mock(LoadStep.class);
+		when(recoveredSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(recoveredSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		addRawStepSlice(recovered, recoveredSlice);
+		assertTrue(recovered.await(1, TimeUnit.SECONDS));
+		assertDoesNotThrow(recovered::close);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void countStartFailsBeforeAdmissionWhenPriorCounterFlightIsUnavailable() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final TestLoadStepClient first = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch firstProbeEntered = new CountDownLatch(1);
+		final CountDownLatch releaseFirstProbe = new CountDownLatch(1);
+		final LoadStep firstSlice = mock(LoadStep.class);
+		when(firstSlice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(firstProbeEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(firstSlice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			firstProbeEntered.countDown();
+			awaitIgnoringInterrupt(releaseFirstProbe);
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(first, firstSlice);
+		assertTrue(first.await(2, TimeUnit.SECONDS));
+		assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+
+		final LoadStep nextSlice = mock(LoadStep.class);
+		when(nextSlice.loadStepId()).thenReturn("count-readiness-slice");
+		when(nextSlice.metricsSnapshots()).thenReturn(new ArrayList<>());
+		when(nextSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(nextSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(TestLoadStepExtension.TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(nextSlice);
+		final TestLoadStepClient next = new TestLoadStepClient(
+						config, List.of(factory), ctxConfigs, mockMetricsManager);
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class, next::start);
+			assertTrue(failure.getMessage().contains("counter monitoring is not ready"));
+			verify(nextSlice, never()).releaseObjectFailureBudgetAdmission();
+			releaseFirstProbe.countDown();
+			awaitFailureBudgetSnapshotProbeCount(0);
+			final IntegrityTerminalException terminalFailure = assertThrows(
+							IntegrityTerminalException.class, next::close);
+			assertTrue(terminalFailure.getMessage().contains("counter monitoring was not ready"));
+			assertFalse(terminalFailure.getMessage().contains("budget was exceeded earlier"));
+		} finally {
+			releaseFirstProbe.countDown();
+			if (!next.isClosed()) {
+				try {
+					next.close();
+				} catch (final RuntimeException ignored) {
+					// The asserted startup failure is sticky during cleanup.
+				}
+			}
+			if (!first.isClosed()) {
+				first.close();
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void countPercentageGraceBeginsAfterCounterReadinessAtAdmissionRelease() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-mode", "percentage");
+		config.val("load-op-failureBudget-maxFailurePercent", 50.0);
+		config.val("load-op-failureBudget-graceSeconds", 1L);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final AtomicReference<TestLoadStepClient> clientRef = new AtomicReference<>();
+		final AtomicInteger snapshotCalls = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.loadStepId()).thenReturn("count-grace-release-slice");
+		when(slice.metricsSnapshots()).thenReturn(new ArrayList<>());
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			if (snapshotCalls.incrementAndGet() == 1) {
+				assertEquals(
+								Long.MIN_VALUE,
+								clientRef.get().failureBudgetEpochNanos(),
+								"count percentage grace began during pre-admission counter readiness");
+			}
+			return new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true);
+		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			assertNotEquals(
+							Long.MIN_VALUE,
+							clientRef.get().failureBudgetEpochNanos(),
+							"count percentage grace was not armed at admission release");
+			return null;
+		}).when(slice).releaseObjectFailureBudgetAdmission();
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(TestLoadStepExtension.TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, List.of(factory), ctxConfigs, mockMetricsManager);
+		clientRef.set(client);
+
+		try {
+			assertDoesNotThrow(client::start);
+			verify(slice).releaseObjectFailureBudgetAdmission();
+			assertThrows(IntegrityTerminalException.class, client::close);
+		} finally {
+			if (!client.isClosed()) {
+				try {
+					client.close();
+				} catch (final RuntimeException ignored) {
+					// Completion must still enforce the percentage policy after grace-free startup.
+				}
+			}
+		}
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void malformedCountCountersFailBeforeAdmissionAndRemainUnreleased() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.loadStepId()).thenReturn("malformed-count-readiness-slice");
+		when(slice.metricsSnapshots()).thenReturn(new ArrayList<>());
+		when(slice.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(1, 1, -1, 0, 2, 0, 0, 1, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(TestLoadStepExtension.TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, List.of(factory), ctxConfigs, mockMetricsManager);
+
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class, client::start);
+			assertTrue(failure.getMessage().contains("counters are invalid"));
+			verify(slice, never()).releaseObjectFailureBudgetAdmission();
+		} finally {
+			if (!client.isClosed()) {
+				try {
+					client.close();
+				} catch (final RuntimeException ignored) {
+					// The asserted malformed-counter failure remains sticky during cleanup.
+				}
+			}
+		}
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void malformedLiveCountersStopSchedulingAfterCountAdmission() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		final AtomicInteger snapshotCalls = new AtomicInteger();
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.loadStepId()).thenReturn("malformed-count-live-slice");
+		when(slice.metricsSnapshots()).thenReturn(new ArrayList<>());
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> snapshotCalls.incrementAndGet() == 1
+						? cleanDeleteLifecycle()
+						: new DeleteObjectLifecycleSnapshot(1, 1, -1, 0, 2, 0, 0, 1, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.countDown();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(TestLoadStepExtension.TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, List.of(factory), ctxConfigs, mockMetricsManager);
+
+		try {
+			client.start();
+			verify(slice).releaseObjectFailureBudgetAdmission();
+			assertTrue(
+							admissionClosed.await(1, TimeUnit.SECONDS),
+							"malformed live counters did not close scheduling");
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class, client::close);
+			assertTrue(failure.getMessage().contains("counters are invalid"));
+		} finally {
+			if (!client.isClosed()) {
+				try {
+					client.close();
+				} catch (final RuntimeException ignored) {
+					// The asserted malformed-counter failure remains sticky during cleanup.
+				}
+			}
+		}
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void nextRunWaitsWithinTerminalDeadlineForPriorFlightToExitBeforeSpawning() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient first = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch firstProbeEntered = new CountDownLatch(1);
+		final CountDownLatch releaseFirstProbe = new CountDownLatch(1);
+		final LoadStep firstSlice = mock(LoadStep.class);
+		when(firstSlice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			firstProbeEntered.countDown();
+			awaitIgnoringInterrupt(releaseFirstProbe);
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(first, firstSlice);
+		final AtomicReference<Throwable> firstCloseFailure = new AtomicReference<>();
+		final Thread firstCloseThread = Thread.ofPlatform().start(() -> {
+			try {
+				first.close();
+			} catch (final Throwable failure) {
+				firstCloseFailure.set(failure);
+			}
+		});
+
+		final Thread releaseThread = Thread.ofPlatform().unstarted(() -> {
+			try {
+				Thread.sleep(100);
+			} catch (final InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			} finally {
+				releaseFirstProbe.countDown();
+			}
+		});
+		try {
+			assertTrue(firstProbeEntered.await(1, TimeUnit.SECONDS));
+			final TestLoadStepClient next = new TestLoadStepClient(
+							config, extensions, ctxConfigs, mockMetricsManager);
+			final LoadStep nextSlice = mock(LoadStep.class);
+			when(nextSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+			addRawStepSlice(next, nextSlice);
+			releaseThread.start();
+
+			assertDoesNotThrow(next::close);
+			verify(nextSlice).deleteObjectLifecycle();
+		} finally {
+			releaseFirstProbe.countDown();
+			if (releaseThread.isAlive()) {
+				releaseThread.interrupt();
+				releaseThread.join(TimeUnit.SECONDS.toMillis(2));
+			}
+			firstCloseThread.interrupt();
+			firstCloseThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+		assertNull(firstCloseFailure.get());
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void liveBlockedCounterProbeIsRetainedThroughTerminalEvaluationWithoutDuplication() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final AtomicInteger snapshotCalls = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotCalls.incrementAndGet();
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(2, TimeUnit.SECONDS));
+		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+		final Thread closeThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.close();
+			} catch (final Throwable failure) {
+				closeFailure.set(failure);
+			}
+		});
+		try {
+			closeThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(closeThread.isAlive(), "terminal counter collection exceeded its step-wide bound");
+			assertEquals(1, snapshotCalls.get(), "terminal evaluation duplicated the live blocked RPC");
+			assertInstanceOf(IntegrityTerminalException.class, closeFailure.get());
+			assertTrue(closeFailure.get().getMessage().contains("counters are missing"));
+		} finally {
+			releaseSnapshot.countDown();
+			closeThread.interrupt();
+			closeThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+		assertNoLiveThreads("spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void terminalCollectionReprobesEverySliceAfterAPartialLiveFlight() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch blockedProbeEntered = new CountDownLatch(1);
+		final CountDownLatch releaseBlockedProbe = new CountDownLatch(1);
+		final AtomicInteger completedProbeCalls = new AtomicInteger();
+		final AtomicInteger blockedProbeCalls = new AtomicInteger();
+		final LoadStep completedSlice = mock(LoadStep.class);
+		final LoadStep blockedSlice = mock(LoadStep.class);
+		when(completedSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(blockedSlice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(blockedProbeEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(completedSlice.deleteObjectLifecycle()).thenAnswer(invocation -> completedProbeCalls.incrementAndGet() == 1
+						? cleanDeleteLifecycle()
+						: new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true));
+		when(blockedSlice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			if (blockedProbeCalls.incrementAndGet() == 1) {
+				blockedProbeEntered.countDown();
+				awaitIgnoringInterrupt(releaseBlockedProbe);
+			}
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(client, completedSlice);
+		addRawStepSlice(client, blockedSlice);
+		final Thread releaseThread = Thread.ofPlatform().unstarted(() -> {
+			try {
+				Thread.sleep(100);
+			} catch (final InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			} finally {
+				releaseBlockedProbe.countDown();
+			}
+		});
+
+		try {
+			assertTrue(client.await(2, TimeUnit.SECONDS));
+			releaseThread.start();
+
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class, client::close);
+			assertTrue(failure.getMessage().contains("operational failed objects=1"));
+			verify(completedSlice, times(2)).deleteObjectLifecycle();
+			verify(blockedSlice, times(2)).deleteObjectLifecycle();
+		} finally {
+			releaseBlockedProbe.countDown();
+			if (releaseThread.isAlive()) {
+				releaseThread.interrupt();
+				releaseThread.join(TimeUnit.SECONDS.toMillis(2));
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void workerCounterSnapshotsRunConcurrentlyUnderOneTerminalDeadline() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch probesEntered = new CountDownLatch(2);
+		final CountDownLatch releaseProbes = new CountDownLatch(1);
+		final List<LoadStep> slices = List.of(mock(LoadStep.class), mock(LoadStep.class));
+		for (final LoadStep slice : slices) {
+			when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+				probesEntered.countDown();
+				assertTrue(
+								probesEntered.await(1, TimeUnit.SECONDS),
+								"worker counter probes did not enter the shared collection phase concurrently");
+				awaitIgnoringInterrupt(releaseProbes);
+				return cleanDeleteLifecycle();
+			});
+			addRawStepSlice(client, slice);
+		}
+		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+		final Thread closeThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.close();
+			} catch (final Throwable failure) {
+				closeFailure.set(failure);
+			}
+		});
+
+		try {
+			assertTrue(probesEntered.await(1, TimeUnit.SECONDS));
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+			assertEquals(2, LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount());
+			closeThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(closeThread.isAlive(), "worker counter probes exceeded one shared terminal deadline");
+			assertInstanceOf(IntegrityTerminalException.class, closeFailure.get());
+			assertTrue(closeFailure.get().getMessage().contains("counters are missing"));
+			assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+			assertEquals(2, LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount());
+			for (final LoadStep slice : slices) {
+				verify(slice).deleteObjectLifecycle();
+			}
+		} finally {
+			releaseProbes.countDown();
+			closeThread.interrupt();
+			closeThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void durationPercentageGraceStartsBeforeEveryWorkerAcknowledgesScheduling() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-mode", "percentage");
+		config.val("load-op-failureBudget-maxFailurePercent", 10.0);
+		config.val("load-op-failureBudget-graceSeconds", 1L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch delayedStartEntered = new CountDownLatch(1);
+		final CountDownLatch releaseDelayedStart = new CountDownLatch(1);
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final LoadStep failedSlice = mock(LoadStep.class);
+		final LoadStep delayedSlice = mock(LoadStep.class);
+		when(failedSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(delayedSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(failedSlice.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true));
+		when(delayedSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(failedSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		when(delayedSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			delayedStartEntered.countDown();
+			assertTrue(releaseDelayedStart.await(3, TimeUnit.SECONDS));
+			return null;
+		}).when(delayedSlice).startDurationInterval(anyLong());
+		doAnswer(invocation -> {
+			admissionClosed.countDown();
+			return null;
+		}).when(failedSlice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, failedSlice);
+		addRawStepSlice(client, delayedSlice);
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(5, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+
+		try {
+			assertTrue(delayedStartEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(
+							admissionClosed.await(1500, TimeUnit.MILLISECONDS),
+							"positive percentage grace started only after the delayed worker acknowledged scheduling");
+		} finally {
+			releaseDelayedStart.countDown();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(3));
+			if (awaitThread.isAlive()) {
+				awaitThread.interrupt();
+				awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			}
+		}
+
+		assertFalse(awaitThread.isAlive());
+		if (awaitFailure.get() != null) {
+			assertInstanceOf(IntegrityTerminalException.class, awaitFailure.get());
+		}
+		assertThrows(IntegrityTerminalException.class, client::close);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void durationBudgetStopReportsPolicyInsteadOfInventoryExhaustion() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(admissionClosed.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.countDown();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(5, TimeUnit.SECONDS));
+		assertTrue(failure.getMessage().contains("failed-object budget exceeded"));
+		assertFalse(failure.getMessage().contains("inventory slice exhausted"));
+		assertThrows(IntegrityTerminalException.class, client::close);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void earlyDurationBudgetBreachTightensDistributedDrainForNonterminalDispatch() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch durationAwaitEntered = new CountDownLatch(1);
+		final CountDownLatch drainsStarted = new CountDownLatch(2);
+		final CountDownLatch nonterminalDrainsObserved = new CountDownLatch(2);
+		final CountDownLatch releaseDrains = new CountDownLatch(1);
+		final CountDownLatch terminalValidationCompleted = new CountDownLatch(2);
+		final CountDownLatch shutdownCompleted = new CountDownLatch(2);
+		final AtomicBoolean admissionClosed = new AtomicBoolean();
+		final List<Long> drainBudgets = Collections.synchronizedList(new ArrayList<>());
+		final LoadStep failedSlice = mock(LoadStep.class);
+		final LoadStep dispatchedSlice = mock(LoadStep.class);
+		for (final LoadStep slice : List.of(failedSlice, dispatchedSlice)) {
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+				durationAwaitEntered.countDown();
+				if (!admissionClosed.get()) {
+					Thread.sleep(10);
+				}
+				return admissionClosed.get();
+			});
+			doAnswer(invocation -> {
+				admissionClosed.set(true);
+				return null;
+			}).when(slice).closeOperationAdmissionForStepStop();
+			doAnswer(invocation -> {
+				drainBudgets.add(invocation.getArgument(0));
+				drainsStarted.countDown();
+				return null;
+			}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenAnswer(invocation -> {
+				final boolean complete = releaseDrains.getCount() == 0;
+				if (!complete) {
+					nonterminalDrainsObserved.countDown();
+				}
+				return complete;
+			});
+			doAnswer(invocation -> {
+				terminalValidationCompleted.countDown();
+				return null;
+			}).when(slice).validateTerminalStateForStepStop();
+			doAnswer(invocation -> {
+				shutdownCompleted.countDown();
+				return null;
+			}).when(slice).shutdown();
+			addRawStepSlice(client, slice);
+		}
+		when(failedSlice.deleteObjectLifecycle()).thenAnswer(invocation -> durationAwaitEntered.getCount() == 0
+						? new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true)
+						: DeleteObjectLifecycleSnapshot.empty());
+		when(dispatchedSlice.deleteObjectLifecycle()).thenAnswer(invocation -> releaseDrains.getCount() == 0
+						? new DeleteObjectLifecycleSnapshot(1, 1, 0, 0, 0, 1, 0, 0, true)
+						: new DeleteObjectLifecycleSnapshot(1, 0, 0, 0, 0, 0, 0, 0, false));
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(10, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+
+		boolean breachRelativeDrain = false;
+		boolean terminalValidationReached = false;
+		boolean shutdownReached = false;
+		try {
+			assertTrue(durationAwaitEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(drainsStarted.await(3, TimeUnit.SECONDS));
+			assertTrue(nonterminalDrainsObserved.await(1, TimeUnit.SECONDS));
+			synchronized (drainBudgets) {
+				breachRelativeDrain = drainBudgets.size() == 2
+								&& drainBudgets.stream().allMatch(
+												budget -> budget >= 0 && budget <= TimeUnit.SECONDS.toNanos(1));
+			}
+		} finally {
+			releaseDrains.countDown();
+			terminalValidationReached = terminalValidationCompleted.await(3, TimeUnit.SECONDS);
+			shutdownReached = shutdownCompleted.await(3, TimeUnit.SECONDS);
+			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			if (awaitThread.isAlive()) {
+				awaitThread.interrupt();
+				awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			}
+		}
+
+		assertTrue(
+						breachRelativeDrain,
+						"an early budget breach retained the original duration deadline instead of the breach-relative drain bound");
+		assertTrue(terminalValidationReached, "the distributed stop skipped terminal validation after the bounded drain");
+		assertTrue(shutdownReached, "the distributed stop skipped worker shutdown after the bounded drain");
+		assertFalse(awaitThread.isAlive());
+		assertInstanceOf(IntegrityTerminalException.class, awaitFailure.get());
+		verify(failedSlice).validateTerminalStateForStepStop();
+		verify(dispatchedSlice).validateTerminalStateForStepStop();
+		verify(failedSlice).shutdown();
+		verify(dispatchedSlice).shutdown();
+		assertThrows(IntegrityTerminalException.class, client::close);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-",
+						"spt-delete-drain-");
+	}
+
+	@Test
+	void durationDeadlineStopAndBudgetBreachCoordinateOnlyOnceWithoutResettingDrain() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 1);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch admissionEntered = new CountDownLatch(1);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseAdmission = new CountDownLatch(1);
+		final CountDownLatch breachedSnapshotReturned = new CountDownLatch(1);
+		final CountDownLatch breachDeadlinePropagated = new CountDownLatch(1);
+		final List<Long> drainBudgets = Collections.synchronizedList(new ArrayList<>());
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(slice.durationAwaitStatus()).thenAnswer(invocation -> admissionEntered.getCount() == 0
+						? DurationAwaitStatus.REACHED_DEADLINE
+						: null);
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotEntered.countDown();
+			assertTrue(admissionEntered.await(1, TimeUnit.SECONDS));
+			breachedSnapshotReturned.countDown();
+			return new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true);
+		});
+		doAnswer(invocation -> {
+			admissionEntered.countDown();
+			assertTrue(releaseAdmission.await(2, TimeUnit.SECONDS));
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		doAnswer(invocation -> {
+			final long remainingNanos = invocation.getArgument(0);
+			if (remainingNanos <= TimeUnit.SECONDS.toNanos(1)) {
+				breachDeadlinePropagated.countDown();
+			}
+			return null;
+		}).when(slice).enforceDispatchedOperationsDeadlineForStepStop(anyLong());
+		doAnswer(invocation -> {
+			drainBudgets.add(invocation.getArgument(0));
+			return null;
+		}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		addRawStepSlice(client, slice);
+		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
+		final Thread awaitThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.await(5, TimeUnit.SECONDS);
+			} catch (final Throwable failure) {
+				awaitFailure.set(failure);
+			}
+		});
+		final AtomicReference<Throwable> stopFailure = new AtomicReference<>();
+		Thread stopThread = null;
+
+		try {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			stopThread = Thread.ofPlatform().start(() -> {
+				try {
+					client.stop();
+				} catch (final Throwable failure) {
+					stopFailure.set(failure);
+				}
+			});
+			assertTrue(admissionEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(breachedSnapshotReturned.await(1, TimeUnit.SECONDS));
+			assertTrue(
+							breachDeadlinePropagated.await(1, TimeUnit.SECONDS),
+							"the worker cutoff was not tightened while admission closure was still blocked");
+		} finally {
+			releaseAdmission.countDown();
+			if (stopThread != null) {
+				stopThread.join(TimeUnit.SECONDS.toMillis(3));
+			}
+			awaitThread.interrupt();
+			awaitThread.join(TimeUnit.SECONDS.toMillis(3));
+		}
+
+		assertFalse(stopThread.isAlive());
+		assertNull(stopFailure.get());
+		assertFalse(awaitThread.isAlive());
+		assertEquals(1, drainBudgets.size(), "the stop race repeated the distributed drain phase");
+		assertTrue(
+						drainBudgets.get(0) >= 0
+										&& drainBudgets.get(0) <= TimeUnit.SECONDS.toNanos(1),
+						"the concurrent failure-budget breach did not tighten the distributed drain deadline");
+		verify(slice).closeOperationAdmissionForStepStop();
+		verify(slice, atLeastOnce()).enforceDispatchedOperationsDeadlineForStepStop(anyLong());
+		verify(slice).recoverQueuedOperationsForStepStop();
+		verify(slice).shutdown();
+		assertThrows(IntegrityTerminalException.class, client::close);
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void budgetMonitorMayStopAndStartAgainWithoutLeaking() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(1, TimeUnit.SECONDS));
+		assertTrue(client.await(1, TimeUnit.SECONDS));
+		assertDoesNotThrow(client::close);
+
+		assertNoLiveThreads(
+						"spt-delete-failure-budget-",
+						"spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void terminalCounterProbeTimesOutOnceAndFailsClosed() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final AtomicInteger snapshotCalls = new AtomicInteger();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotCalls.incrementAndGet();
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		addRawStepSlice(client, slice);
+		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+		final Thread closeThread = Thread.ofPlatform().start(() -> {
+			try {
+				client.close();
+			} catch (final Throwable failure) {
+				closeFailure.set(failure);
+			}
+		});
+
+		try {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			closeThread.join(TimeUnit.SECONDS.toMillis(3));
+			assertFalse(closeThread.isAlive(), "terminal counter collection exceeded its step-wide bound");
+			assertEquals(1, snapshotCalls.get(), "terminal collection duplicated a blocked worker RPC");
+			assertInstanceOf(IntegrityTerminalException.class, closeFailure.get());
+			assertTrue(closeFailure.get().getMessage().contains("counters are missing"));
+		} finally {
+			releaseSnapshot.countDown();
+			closeThread.interrupt();
+			closeThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+		assertNoLiveThreads("spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void percentageBudgetBreachRemainsFailedWhenFinalPercentageFallsBelowLimit() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-failureBudget-mode", "percentage");
+		config.val("load-op-failureBudget-maxFailurePercent", 10.0);
+		config.val("load-op-failureBudget-graceSeconds", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final AtomicBoolean admissionClosed = new AtomicBoolean();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(
+						invocation -> admissionClosed.get());
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> admissionClosed.get()
+						? new DeleteObjectLifecycleSnapshot(102, 102, 100, 2, 0, 0, 0, 1, true)
+						: new DeleteObjectLifecycleSnapshot(4, 4, 2, 2, 0, 0, 0, 1, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.set(true);
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(3, TimeUnit.SECONDS));
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class, client::close);
+
+		assertTrue(failure.getMessage().contains("operational failed objects=2"));
+		assertTrue(failure.getMessage().contains("accepted objects=100"));
+		assertTrue(failure.getMessage().contains("outcome=FAILED"));
+		assertTrue(failure.getMessage().contains("remains sticky"));
+	}
+
+	@Test
+	void missingTerminalObjectCountersFailClosed() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(1, TimeUnit.SECONDS));
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class, client::close);
+
+		assertTrue(failure.getMessage().contains("counters are missing"));
+	}
+
 	private static Config durationConfig() {
 		final Config config = TestConfigBuilder.config();
 		config.val("load-step-id", "distributed-duration");
@@ -1112,6 +2229,17 @@ class LoadStepClientBaseTest {
 		config.val("load-op-delete-standalone", true);
 		config.val("load-op-delete-duration", true);
 		config.val("load-step-limit-time", "60s");
+		return config;
+	}
+
+	private static Config countDeleteConfig() {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "distributed-count-budget");
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-op-limit-count", 10L);
+		config.val("load-step-limit-time", "0s");
 		return config;
 	}
 
@@ -2051,10 +3179,43 @@ class LoadStepClientBaseTest {
 		try {
 			when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
 			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+			when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 			addRawStepSlice(client, slice);
 		} catch (final RemoteException e) {
 			throw new LinkageError(e.getMessage(), e);
 		}
+	}
+
+	private static DeleteObjectLifecycleSnapshot cleanDeleteLifecycle() {
+		return new DeleteObjectLifecycleSnapshot(1, 1, 1, 0, 0, 0, 0, 1, true);
+	}
+
+	private static void awaitIgnoringInterrupt(final CountDownLatch release) {
+		boolean interrupted = false;
+		while (release.getCount() > 0) {
+			try {
+				release.await();
+			} catch (final InterruptedException ignored) {
+				interrupted = true;
+			}
+		}
+		if (interrupted) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private static void awaitFailureBudgetSnapshotProbeCount(final int expected)
+					throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		do {
+			if (LoadStepClientBase.activeFailureBudgetSnapshotFlightCount() == expected
+							&& LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount() == expected) {
+				return;
+			}
+			Thread.sleep(10);
+		} while (System.nanoTime() < deadlineNanos);
+		assertEquals(expected, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
+		assertEquals(expected, LoadStepClientBase.activeFailureBudgetSnapshotProbeTaskCount());
 	}
 
 	@SuppressWarnings("unchecked")
@@ -2083,6 +3244,36 @@ class LoadStepClientBaseTest {
 						serviceConfig,
 						List.of(),
 						mock(MetricsManager.class));
+	}
+
+	private static final class CapturingMessageAppender extends AbstractAppender {
+		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
+		private final CountDownLatch targetCaptured = new CountDownLatch(1);
+		private final String target;
+
+		private CapturingMessageAppender(final String target) {
+			super("testLoadStepClientMessageCapture", null, null, true, Property.EMPTY_ARRAY);
+			this.target = target;
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final String message = event.getMessage().getFormattedMessage();
+			captured.add(message);
+			if (message.contains(target)) {
+				targetCaptured.countDown();
+			}
+		}
+
+		private boolean awaitTarget(final long timeout, final TimeUnit timeUnit) throws InterruptedException {
+			return targetCaptured.await(timeout, timeUnit);
+		}
+
+		private List<String> messages() {
+			synchronized (captured) {
+				return List.copyOf(captured);
+			}
+		}
 	}
 
 	private enum RemoteCleanupFailurePhase {

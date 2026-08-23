@@ -1,5 +1,7 @@
 package scenario
 
+import "time"
+
 // Params holds all parameters needed to generate a Spt scenario.
 type Params struct {
 	WorkloadType string
@@ -43,6 +45,10 @@ type Params struct {
 	SelectionSelectedCount int
 	SelectionSHA256        string
 	SelectionOrder         string
+	FailureBudgetMode      string
+	MaxFailedObjects       int64
+	MaxFailurePercent      float64
+	FailureBudgetGrace     time.Duration
 
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts  []FileMount

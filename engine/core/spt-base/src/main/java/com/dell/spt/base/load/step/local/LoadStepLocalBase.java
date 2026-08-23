@@ -9,6 +9,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
@@ -36,6 +37,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
 	protected final List<LoadStepContext> stepContexts = new ArrayList<>();
+	private volatile List<LoadStepContext> expectedDeleteObjectLifecycleContexts;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -50,7 +52,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private volatile DurationAwaitStatus durationAwaitStatus = DurationAwaitStatus.NOT_STARTED;
 	private volatile Thread durationDeadlineGuard;
 	private volatile Thread durationDrainDeadlineGuard;
-	private boolean durationAdmissionClosedLocally;
+	private final Object durationAdmissionClose = new Object();
+	private final Object durationDeadlineEnforcement = new Object();
+	private volatile boolean durationAdmissionClosedLocally;
 
 	protected IntSupplier actualConcurrencyGauge(final int index, final OpType opType) {
 		return () -> stepContexts.get(index).activeOpCount();
@@ -65,8 +69,68 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	@Override
+	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
+		if (!standaloneDeleteEnabled()) {
+			return null;
+		}
+		final List<LoadStepContext> currentContexts = List.copyOf(stepContexts);
+		final List<LoadStepContext> expectedContexts = expectedDeleteObjectLifecycleContexts;
+		if (expectedContexts != null && !expectedContexts.equals(currentContexts)) {
+			return null;
+		}
+		long selected = 0;
+		long attempted = 0;
+		long accepted = 0;
+		long failed = 0;
+		long unattempted = 0;
+		long unresolved = 0;
+		long protocolFailed = 0;
+		long fullSuccessfulRequests = 0;
+		boolean reconciled = true;
+		for (final LoadStepContext context : currentContexts) {
+			if (context == null) {
+				continue;
+			}
+			final DeleteObjectLifecycleSnapshot snapshot = context.deleteObjectLifecycle();
+			if (snapshot == null) {
+				return null;
+			}
+			selected = Math.addExact(selected, snapshot.selected());
+			attempted = Math.addExact(attempted, snapshot.attempted());
+			accepted = Math.addExact(accepted, snapshot.accepted());
+			failed = Math.addExact(failed, snapshot.failed());
+			unattempted = Math.addExact(unattempted, snapshot.unattempted());
+			unresolved = Math.addExact(unresolved, snapshot.unresolved());
+			protocolFailed = Math.addExact(protocolFailed, snapshot.protocolFailed());
+			fullSuccessfulRequests = Math.addExact(
+							fullSuccessfulRequests, snapshot.fullSuccessfulRequests());
+			reconciled &= snapshot.reconciled();
+		}
+		return new DeleteObjectLifecycleSnapshot(
+						selected,
+						attempted,
+						accepted,
+						failed,
+						unattempted,
+						unresolved,
+						protocolFailed,
+						fullSuccessfulRequests,
+						reconciled);
+	}
+
+	@Override
 	protected void doStartWrapped() {
 		resetDurationLifecycleForStart();
+		if (standaloneDeleteEnabled()) {
+			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
+		}
+		if (standaloneDeleteEnabled() && !standaloneDeleteDurationMode()) {
+			for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+				if (stepContext != null) {
+					stepContext.holdObjectFailureBudgetAdmission();
+				}
+			}
+		}
 		boolean anyStarted = false;
 		final var iterator = stepContexts.iterator();
 		while (iterator.hasNext()) {
@@ -91,6 +155,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (!anyStarted) {
 			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
 		}
+	}
+
+	@Override
+	public final void releaseObjectFailureBudgetAdmission() {
+		if (!standaloneDeleteEnabled() || standaloneDeleteDurationMode()) {
+			return;
+		}
+		invokeDurationContextPhase(
+						"release object failure-budget admission",
+						LoadStepContext::releaseObjectFailureBudgetAdmission,
+						true);
 	}
 
 	private void resetDurationLifecycleForStart() {
@@ -190,9 +265,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		deadlineGuard.start();
 	}
 
-	private synchronized void closeOperationAdmissionAtWorkerDeadline() {
-		if (durationDeadlineGuard != Thread.currentThread()) {
-			return;
+	private void closeOperationAdmissionAtWorkerDeadline() {
+		synchronized (this) {
+			if (durationDeadlineGuard != Thread.currentThread()) {
+				return;
+			}
 		}
 		closeOperationAdmissionForStepStop();
 	}
@@ -566,25 +643,63 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	@Override
-	public final synchronized void closeOperationAdmissionForStepStop() {
-		if (durationAdmissionClosedLocally) {
-			return;
+	public final void closeOperationAdmissionForStepStop() {
+		synchronized (durationAdmissionClose) {
+			if (durationAdmissionClosedLocally) {
+				return;
+			}
+			invokeDurationContextPhase(
+							"close operation admission",
+							LoadStepContext::closeOperationAdmissionForStepStop,
+							true);
+			cancelDurationDeadlineGuard();
+			final long drainDeadlineNanos;
+			synchronized (this) {
+				if (!durationDrainDeadlineSet) {
+					durationDrainDeadlineNanos = durationDeadlineNanos(durationDrainBudgetNanos());
+					durationDrainDeadlineSet = true;
+				}
+				drainDeadlineNanos = durationDrainDeadlineNanos;
+				startDurationDrainDeadlineGuard(drainDeadlineNanos);
+			}
+			enforceDispatchedOperationsDeadlineForStepStop(drainDeadlineNanos, false);
+			durationAdmissionClosedLocally = true;
 		}
-		invokeDurationContextPhase(
-						"close operation admission",
-						LoadStepContext::closeOperationAdmissionForStepStop,
-						true);
-		cancelDurationDeadlineGuard();
-		if (!durationDrainDeadlineSet) {
-			durationDrainDeadlineNanos = durationDeadlineNanos(durationDrainBudgetNanos());
-			durationDrainDeadlineSet = true;
+	}
+
+	@Override
+	public final void enforceDispatchedOperationsDeadlineForStepStop(
+					final long remainingNanos) {
+		final long selectedDeadlineNanos;
+		synchronized (this) {
+			final long observedNanos = System.nanoTime();
+			final long requestedDeadlineNanos = durationDeadlineNanos(observedNanos, remainingNanos);
+			final long previousDeadlineNanos = durationDrainDeadlineNanos;
+			selectedDeadlineNanos = !durationDrainDeadlineSet
+							? requestedDeadlineNanos
+							: DurationTime.earlierDeadline(
+											previousDeadlineNanos,
+											requestedDeadlineNanos,
+											observedNanos);
+			if (!durationDrainDeadlineSet || selectedDeadlineNanos != previousDeadlineNanos) {
+				cancelDurationDrainDeadlineGuard();
+				durationDrainDeadlineNanos = selectedDeadlineNanos;
+				durationDrainDeadlineSet = true;
+			}
+			startDurationDrainDeadlineGuard(durationDrainDeadlineNanos);
 		}
-		startDurationDrainDeadlineGuard(durationDrainDeadlineNanos);
-		invokeDurationContextPhase(
-						"arm dispatched operation deadline",
-						context -> context.enforceDispatchedOperationsDeadlineForStepStop(
-										durationDrainDeadlineNanos));
-		durationAdmissionClosedLocally = true;
+		enforceDispatchedOperationsDeadlineForStepStop(selectedDeadlineNanos, true);
+	}
+
+	private void enforceDispatchedOperationsDeadlineForStepStop(
+					final long deadlineNanos, final boolean controllerSupplied) {
+		synchronized (durationDeadlineEnforcement) {
+			invokeDurationContextPhase(
+							controllerSupplied
+											? "tighten dispatched operation deadline"
+											: "arm dispatched operation deadline",
+							context -> context.enforceDispatchedOperationsDeadlineForStepStop(deadlineNanos));
+		}
 	}
 
 	@Override

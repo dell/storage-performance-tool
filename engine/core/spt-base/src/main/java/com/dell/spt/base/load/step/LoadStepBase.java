@@ -54,6 +54,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
 	private final boolean integrityModeEnabled;
 	private final boolean standaloneDeleteDurationMode;
+	private final boolean standaloneDeleteEnabled;
 	private final Map<String, RetainedDurationPhase<?>> retainedDurationPhases = new HashMap<>();
 	private volatile long startTimeSec = -1;
 
@@ -75,8 +76,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 							"invalid storage.integrity configuration",
 							e);
 		}
-		this.standaloneDeleteDurationMode = StandaloneDeleteConfig.from(
-						this.config.configVal("load")).durationMode();
+		final StandaloneDeleteConfig standaloneDelete = StandaloneDeleteConfig.from(
+						this.config.configVal("load"));
+		this.standaloneDeleteEnabled = standaloneDelete.enabled();
+		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
 		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
@@ -207,6 +210,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			} finally {
 				closeRetainedDurationPhases();
 			}
+		} else {
+			closeRetainedDurationPhases();
 		}
 		return firstFailure;
 	}
@@ -353,6 +358,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	protected final boolean standaloneDeleteDurationMode() {
 		return standaloneDeleteDurationMode;
+	}
+
+	protected final boolean standaloneDeleteEnabled() {
+		return standaloneDeleteEnabled;
 	}
 
 	@FunctionalInterface

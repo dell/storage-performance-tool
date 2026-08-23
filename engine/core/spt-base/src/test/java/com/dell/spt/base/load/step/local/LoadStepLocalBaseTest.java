@@ -7,8 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
@@ -22,7 +25,9 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
+import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -41,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 /**
  * Focused tests for LoadStepLocalBase.initMetrics to ensure we surface configuration issues without
@@ -100,6 +106,141 @@ class LoadStepLocalBaseTest {
 		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), mockContext());
 		assertTrue(loadStep.effectiveVerifyFlagForTest(true, true, "step-verify-ok"));
 		assertFalse(loadStep.effectiveVerifyFlagForTest(false, false, "step-verify-ok"));
+	}
+
+	@Test
+	void standaloneDeletePublishesAggregatedWorkerObjectCounters() {
+		final Config config = baseConfig();
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-op-limit-count", 10L);
+		config.val("load-step-limit-time", "0s");
+		final LoadStepContext first = mockContext();
+		final LoadStepContext second = mockContext();
+		when(first.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(3, 2, 1, 1, 1, 0, 0, 1, true));
+		when(second.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(4, 4, 2, 2, 0, 0, 1, 1, true));
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), first, second);
+
+		assertEquals(
+						new DeleteObjectLifecycleSnapshot(7, 6, 3, 3, 1, 0, 1, 2, true),
+						loadStep.deleteObjectLifecycle());
+	}
+
+	@Test
+	void countDeleteHoldsEveryContextBeforeStartAndReleasesEveryContextTogether() throws Exception {
+		final Config config = baseConfig();
+		config.val("load-step-id", "count-admission-barrier");
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-op-limit-count", 10L);
+		config.val("load-step-limit-time", "0s");
+		final LoadStepContext first = mockContext();
+		final LoadStepContext second = mockContext();
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), first, second);
+
+		loadStep.startContextsForTest();
+		final InOrder preparationOrder = inOrder(first, second);
+		preparationOrder.verify(first).holdObjectFailureBudgetAdmission();
+		preparationOrder.verify(second).holdObjectFailureBudgetAdmission();
+		preparationOrder.verify(first).start();
+		preparationOrder.verify(second).start();
+
+		loadStep.releaseObjectFailureBudgetAdmission();
+		verify(first).releaseObjectFailureBudgetAdmission();
+		verify(second).releaseObjectFailureBudgetAdmission();
+	}
+
+	@Test
+	void countDeleteFailsClosedWhenOneExpectedContextFailsToStart() throws Exception {
+		final Config config = countDeleteConfig("count-start-failure");
+		final LoadStepContext failing = mockContext();
+		final LoadStepContext healthy = mockContext();
+		when(failing.start()).thenThrow(new RemoteException("boom"));
+		when(failing.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(healthy.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), failing, healthy);
+
+		assertDoesNotThrow(loadStep::startContextsForTest);
+
+		assertNull(loadStep.deleteObjectLifecycle());
+	}
+
+	@Test
+	void countDeleteFailsClosedWhenOneExpectedContextFailsToShutdown() throws Exception {
+		final Config config = countDeleteConfig("count-shutdown-failure");
+		final LoadStepContext failing = mockContext();
+		final LoadStepContext healthy = mockContext();
+		doThrow(new RemoteException("boom")).when(failing).shutdown();
+		when(failing.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(healthy.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), failing, healthy);
+		loadStep.startContextsForTest();
+
+		loadStep.shutdownContextsForTest();
+
+		assertNull(loadStep.deleteObjectLifecycle());
+	}
+
+	@Test
+	void countDeleteFailsClosedOnMissingCompatibilityContextObjectEvidence() {
+		final Config config = countDeleteConfig("count-compatibility-evidence");
+		final LoadStepContext modern = mockContext();
+		final LoadStepContext compatibility = compatibilityContext();
+		when(modern.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), modern, compatibility);
+
+		assertNull(loadStep.deleteObjectLifecycle());
+	}
+
+	@Test
+	void countDeleteRejectsCompatibilityContextBeforeAnyContextStarts() throws Exception {
+		final Config config = countDeleteConfig("count-compatibility-admission");
+		final LoadStepContext modern = mockContext();
+		final LoadStepContext compatibility = compatibilityContext();
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), modern, compatibility);
+
+		assertThrows(UnsupportedOperationException.class, loadStep::startContextsForTest);
+
+		verify(modern).holdObjectFailureBudgetAdmission();
+		verify(modern, never()).start();
+	}
+
+	@Test
+	void countDeleteCompatibilityContextRejectsAdmissionRelease() {
+		final LoadStepContext compatibility = compatibilityContext();
+
+		assertThrows(
+						UnsupportedOperationException.class,
+						compatibility::releaseObjectFailureBudgetAdmission);
+	}
+
+	private static Config countDeleteConfig(final String stepId) {
+		final Config config = baseConfig();
+		config.val("load-step-id", stepId);
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-op-limit-count", 10L);
+		config.val("load-step-limit-time", "0s");
+		return config;
+	}
+
+	private static DeleteObjectLifecycleSnapshot cleanDeleteLifecycle() {
+		return new DeleteObjectLifecycleSnapshot(1, 1, 1, 0, 0, 0, 0, 1, true);
+	}
+
+	private static LoadStepContext compatibilityContext() {
+		return mock(LoadStepContext.class, CALLS_REAL_METHODS);
 	}
 
 	private static Config baseConfig() {
@@ -424,6 +565,88 @@ class LoadStepLocalBaseTest {
 		assertTrue(
 						remainingNanos < TimeUnit.MILLISECONDS.toNanos(600),
 						"admission closure received time outside the worker deadline drain budget");
+		assertDoesNotThrow(loadStep::close);
+	}
+
+	@Test
+	void controllerSuppliedDrainBudgetTightensTheArmedWorkerDeadline() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 5);
+		final AtomicLong drainDeadlineNanos = new AtomicLong(Long.MAX_VALUE);
+		final AtomicLong drainReceivedNanos = new AtomicLong(Long.MIN_VALUE);
+		final LoadStepContext context = mock(LoadStepContext.class);
+		doAnswer(invocation -> {
+			drainReceivedNanos.set(System.nanoTime());
+			drainDeadlineNanos.set(invocation.getArgument(0));
+			return null;
+		}).when(context).drainDispatchedOperationsForStepStop(anyLong());
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), context);
+		final long controllerDrainBudgetNanos = TimeUnit.MILLISECONDS.toNanos(100);
+
+		loadStep.startDurationInterval(TimeUnit.SECONDS.toNanos(10));
+		loadStep.enforceDispatchedOperationsDeadlineForStepStop(controllerDrainBudgetNanos);
+		loadStep.closeOperationAdmissionForStepStop();
+		loadStep.recoverQueuedOperationsForStepStop();
+		loadStep.drainDispatchedOperationsForStepStop(controllerDrainBudgetNanos);
+
+		final long propagatedBudgetNanos = DurationTime.remainingNanos(
+						drainDeadlineNanos.get(), drainReceivedNanos.get());
+		assertTrue(propagatedBudgetNanos > 0);
+		assertTrue(
+						propagatedBudgetNanos <= controllerDrainBudgetNanos,
+						"the worker retained its original duration deadline instead of the controller's earlier cutoff");
+		assertDoesNotThrow(loadStep::close);
+	}
+
+	@Test
+	void controllerDeadlineExpiresDispatchWhileRecoveryIsStillBlocked() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 5);
+		final CountDownLatch recoveryEntered = new CountDownLatch(1);
+		final CountDownLatch releaseRecovery = new CountDownLatch(1);
+		final CountDownLatch dispatchExpired = new CountDownLatch(1);
+		final LoadStepContext context = mock(LoadStepContext.class);
+		doAnswer(invocation -> {
+			recoveryEntered.countDown();
+			assertTrue(releaseRecovery.await(2, TimeUnit.SECONDS));
+			return null;
+		}).when(context).recoverQueuedOperationsForStepStop();
+		doAnswer(invocation -> {
+			dispatchExpired.countDown();
+			return null;
+		}).when(context).expireDispatchedOperationsDeadlineForStepStop();
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), context);
+		final AtomicReference<Throwable> recoveryFailure = new AtomicReference<>();
+
+		loadStep.startDurationInterval(TimeUnit.SECONDS.toNanos(10));
+		loadStep.enforceDispatchedOperationsDeadlineForStepStop(
+						TimeUnit.MILLISECONDS.toNanos(100));
+		loadStep.closeOperationAdmissionForStepStop();
+		final Thread recoveryThread = Thread.ofPlatform().start(() -> {
+			try {
+				loadStep.recoverQueuedOperationsForStepStop();
+			} catch (final Throwable failure) {
+				recoveryFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(recoveryEntered.await(1, TimeUnit.SECONDS));
+			assertTrue(
+							dispatchExpired.await(1, TimeUnit.SECONDS),
+							"the worker terminal cutoff waited for queue recovery to complete");
+		} finally {
+			releaseRecovery.countDown();
+			recoveryThread.join(TimeUnit.SECONDS.toMillis(2));
+		}
+
+		assertFalse(recoveryThread.isAlive());
+		assertNull(recoveryFailure.get());
+		verify(context, atLeastOnce())
+						.enforceDispatchedOperationsDeadlineForStepStop(anyLong());
+		verify(context).expireDispatchedOperationsDeadlineForStepStop();
+		loadStep.drainDispatchedOperationsForStepStop(0);
 		assertDoesNotThrow(loadStep::close);
 	}
 

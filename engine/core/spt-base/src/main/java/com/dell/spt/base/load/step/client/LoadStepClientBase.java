@@ -19,6 +19,11 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetConfig;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetController;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetDecision;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetOutcome;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
@@ -58,12 +63,20 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.Level;
@@ -73,6 +86,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				implements LoadStepClient<T> {
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
+	private static final long FAILURE_BUDGET_POLL_MILLIS = 100;
+	private static final long FAILURE_BUDGET_LIVE_SNAPSHOT_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
+	private static final int FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS = 1;
+	private static final int FAILURE_BUDGET_STOP_PHASE_COUNT = 6;
+	private static final long FAILURE_BUDGET_MONITOR_JOIN_BUFFER_MILLIS = 250;
+	// An arbitrary RMI invocation cannot be force-stopped safely. Admit one JVM-wide
+	// virtual probe flight so an interruption-resistant peer cannot accumulate retained
+	// tasks across runs; the shipped RMI response timeout bounds the real transport call.
+	private static final Semaphore FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION = new Semaphore(FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS);
+	private static final AtomicInteger ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS = new AtomicInteger();
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
 	private final List<FileManager> fileMgrs = new ArrayList<>();
@@ -89,16 +112,44 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
 	private boolean durationCleanupRetryPending;
-	private long durationDrainDeadlineNanos = Long.MIN_VALUE;
-	private boolean durationDrainDeadlineSet;
+	private volatile long durationDrainDeadlineNanos = Long.MIN_VALUE;
+	private volatile boolean durationDrainDeadlineSet;
 	private final Map<LoadStep, DurationAwaitStatus> durationAwaitStatuses = synchronizedIdentityMap();
 	private final Set<LoadStep> durationAwaitStatusProbes = Collections.synchronizedSet(
 					Collections.newSetFromMap(new IdentityHashMap<>()));
+	private final ObjectFailureBudgetController failureBudgetController;
+	private volatile IntegrityTerminalException failureBudgetFailure;
+	private volatile String failureBudgetFailureReason;
+	private volatile long failureBudgetStartedNanos = Long.MIN_VALUE;
+	private volatile Thread failureBudgetMonitor;
+	private FailureBudgetSnapshotCollector failureBudgetSnapshotCollector;
+	private final Object standaloneDeleteStopCoordination = new Object();
+	private volatile boolean standaloneDeleteStopInProgress;
+	private volatile boolean standaloneDeleteStopCoordinated;
+	private boolean failureBudgetFinalized;
+	private IntegrityTerminalException failureBudgetTerminalFailure;
+
+	static int activeFailureBudgetSnapshotFlightCount() {
+		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
+						- FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION.availablePermits();
+	}
+
+	static int activeFailureBudgetSnapshotProbeTaskCount() {
+		return ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS.get();
+	}
+
+	final long failureBudgetEpochNanos() {
+		return failureBudgetStartedNanos;
+	}
 
 	public LoadStepClientBase(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
 		super(config, extensions, ctxConfigs, metricsMgr);
+		this.failureBudgetController = standaloneDeleteEnabled()
+						? new ObjectFailureBudgetController(
+										ObjectFailureBudgetConfig.from(this.config.configVal("load")))
+						: null;
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {
@@ -149,6 +200,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr);
 			initAndStartMetricsAggregator(config.configVal("output-metrics"));
+			if (standaloneDeleteEnabled() && !standaloneDeleteDurationMode()) {
+				prepareCountFailureBudgetMonitoring();
+				failureBudgetStartedNanos = System.nanoTime();
+				releaseCountFailureBudgetAdmission();
+			}
 			Loggers.MSG.info(
 							"{}: load step client started, additional nodes: {}", loadStepId(),
 							Arrays.toString(nodeAddrs.toArray()));
@@ -156,13 +212,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void resetDurationLifecycleForStart() {
-		if (standaloneDeleteDurationMode()) {
+		if (standaloneDeleteEnabled()) {
+			stopFailureBudgetMonitor();
+			closeFailureBudgetSnapshotCollector();
+			failureBudgetFailure = null;
+			failureBudgetFailureReason = null;
+			failureBudgetStartedNanos = Long.MIN_VALUE;
+			standaloneDeleteStopInProgress = false;
+			standaloneDeleteStopCoordinated = false;
+			failureBudgetFinalized = false;
+			failureBudgetTerminalFailure = null;
 			durationStopFailure = null;
-			durationValidityFailure = null;
 			durationAdmissionBarrierSatisfied = false;
 			durationCleanupRetryPending = false;
 			durationDrainDeadlineNanos = Long.MIN_VALUE;
 			durationDrainDeadlineSet = false;
+			durationValidityFailure = null;
 			durationAwaitStatuses.clear();
 		}
 	}
@@ -545,7 +610,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			//
 			final var countFailLimit = config.longVal("load-op-limit-fail-count");
-			if (countFailLimit > 0) {
+			if (!standaloneDeleteEnabled() && countFailLimit > 0) {
 				ConfigSliceUtil.sliceLongValue(countFailLimit, configSlices, "load-op-limit-fail-count");
 				configSlices
 								.stream()
@@ -725,6 +790,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doShutdown() {
+		if (failureBudgetFailure != null) {
+			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+				coordinateFailureBudgetStop();
+			}
+			return;
+		}
 		if (standaloneDeleteDurationMode()) {
 			coordinateDurationStop();
 			return;
@@ -739,6 +810,26 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void coordinateDurationStop() {
+		synchronized (standaloneDeleteStopCoordination) {
+			coordinateStandaloneDeleteStopOnce(failureBudgetFailure == null);
+		}
+	}
+
+	private void coordinateStandaloneDeleteStopOnce(final boolean requireDurationVerdict) {
+		if (standaloneDeleteStopCoordinated) {
+			return;
+		}
+		standaloneDeleteStopInProgress = true;
+		try {
+			coordinateStandaloneDeleteStop(requireDurationVerdict);
+			standaloneDeleteStopCoordinated = durationAdmissionBarrierSatisfied
+							&& durationStopFailure == null;
+		} finally {
+			standaloneDeleteStopInProgress = false;
+		}
+	}
+
+	private void coordinateStandaloneDeleteStop(final boolean requireDurationVerdict) {
 		final List<LoadStep> activeSlices = stepSlices.stream()
 						.filter(slice -> slice != null)
 						.collect(Collectors.toList());
@@ -747,11 +838,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			return;
 		}
 		durationAdmissionBarrierSatisfied = false;
+		setDurationDrainDeadlineIfAbsent(durationDrainDeadlineNanos(System.nanoTime()));
 		boolean interrupted = false;
 		final DurationPhaseAttempt admissionResult = invokeRetainedDurationPhase(
 						"distributed-admission",
 						activeSlices,
-						LoadStep::closeOperationAdmissionForStepStop,
+						slice -> {
+							slice.enforceDispatchedOperationsDeadlineForStepStop(
+											DurationTime.remainingNanos(
+															durationDrainDeadlineNanos, System.nanoTime()));
+							slice.closeOperationAdmissionForStepStop();
+						},
 						durationStopPhaseDeadlineNanos(),
 						"spt-delete-admission-close-");
 		interrupted |= recordDurationPhaseResult("close operation admission", admissionResult);
@@ -762,42 +859,39 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			return;
 		}
 		durationAdmissionBarrierSatisfied = true;
-		if (!durationDrainDeadlineSet) {
-			// Compatibility for an explicit stop before await() established a scheduled boundary.
-			durationDrainDeadlineNanos = durationDrainDeadlineNanos(System.nanoTime());
-			durationDrainDeadlineSet = true;
-		}
-		final DurationPhaseAttempt verdictResult = invokeRetainedDurationPhase(
-						"distributed-duration-verdict",
-						activeSlices,
-						this::probeDurationAwaitStatus,
-						durationStopPhaseDeadlineNanos(),
-						"spt-delete-duration-verdict-");
-		interrupted |= verdictResult.interrupted();
-		if (!verdictResult.succeeded()) {
-			if (verdictResult.failures().isEmpty()) {
-				recordDurationValidityFailure(
-								"Standalone DELETE could not confirm duration validity for every distributed input slice",
-								null);
-			} else {
-				for (final Throwable failure : verdictResult.failures()) {
+		if (requireDurationVerdict) {
+			final DurationPhaseAttempt verdictResult = invokeRetainedDurationPhase(
+							"distributed-duration-verdict",
+							activeSlices,
+							this::probeDurationAwaitStatus,
+							durationStopPhaseDeadlineNanos(),
+							"spt-delete-duration-verdict-");
+			interrupted |= verdictResult.interrupted();
+			if (!verdictResult.succeeded()) {
+				if (verdictResult.failures().isEmpty()) {
 					recordDurationValidityFailure(
 									"Standalone DELETE could not confirm duration validity for every distributed input slice",
-									failure);
+									null);
+				} else {
+					for (final Throwable failure : verdictResult.failures()) {
+						recordDurationValidityFailure(
+										"Standalone DELETE could not confirm duration validity for every distributed input slice",
+										failure);
+					}
 				}
 			}
-		}
-		for (final LoadStep slice : activeSlices) {
-			final DurationAwaitStatus status = durationAwaitStatuses.get(slice);
-			if (status == DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE) {
-				recordDurationValidityFailure(
-								"Standalone DELETE inventory slice exhausted before the requested duration; "
-												+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
-								null);
-			} else if (status != DurationAwaitStatus.REACHED_DEADLINE) {
-				recordDurationValidityFailure(
-								"Standalone DELETE could not confirm that every distributed input slice reached its duration deadline",
-								null);
+			for (final LoadStep slice : activeSlices) {
+				final DurationAwaitStatus status = durationAwaitStatuses.get(slice);
+				if (status == DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE) {
+					recordDurationValidityFailure(
+									"Standalone DELETE inventory slice exhausted before the requested duration; "
+													+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
+									null);
+				} else if (status != DurationAwaitStatus.REACHED_DEADLINE) {
+					recordDurationValidityFailure(
+									"Standalone DELETE could not confirm that every distributed input slice reached its duration deadline",
+									null);
+				}
 			}
 		}
 		final DurationPhaseAttempt recoveryResult = invokeRetainedDurationPhase(
@@ -925,6 +1019,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						cause);
 	}
 
+	private synchronized IntegrityTerminalException recordDurationValidityFailure(
+					final IntegrityTerminalException failure) {
+		durationValidityFailure = appendExistingFailure(durationValidityFailure, failure);
+		return failure;
+	}
+
 	@FunctionalInterface
 	private interface StepSlicePhase {
 		void execute(LoadStep slice) throws Exception;
@@ -941,8 +1041,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.debug(
 							"{}: await for {} step slices for at most {} {}...", loadStepId(), stepSliceCount,
 							timeout, timeUnit.name().toLowerCase(Locale.ROOT));
+			if (standaloneDeleteEnabled()) {
+				if (!standaloneDeleteDurationMode()
+								&& failureBudgetStartedNanos == Long.MIN_VALUE) {
+					failureBudgetStartedNanos = System.nanoTime();
+				}
+				startFailureBudgetMonitor();
+			}
 			if (standaloneDeleteDurationMode()) {
-				return awaitDurationSlicesAndStop(timeout, timeUnit, stepSliceCount);
+				try {
+					return awaitDurationSlicesAndStop(timeout, timeUnit, stepSliceCount);
+				} finally {
+					stopFailureBudgetMonitor();
+				}
 			}
 			try {
 				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
@@ -968,10 +1079,382 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					return false;
 				}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
 			} finally {
+				stopFailureBudgetMonitor();
 				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
 				doStop();
 			}
 		}
+	}
+
+	private synchronized void startFailureBudgetMonitor() {
+		if (failureBudgetController == null || failureBudgetMonitor != null) {
+			return;
+		}
+		final Thread monitor = Thread.ofPlatform()
+						.daemon(true)
+						.name("spt-delete-failure-budget-" + loadStepId())
+						.unstarted(this::monitorFailureBudget);
+		failureBudgetMonitor = monitor;
+		monitor.start();
+	}
+
+	private void prepareCountFailureBudgetMonitoring() {
+		try {
+			final ObjectFailureBudgetDecision decision = evaluateFailureBudgetWithRequiredCounters();
+			if (decision.stopScheduling()) {
+				recordFailureBudgetFailure(failureBudgetException(decision), decision.reason());
+			}
+		} catch (final Throwable failure) {
+			throwUncheckedIfInterrupted(failure);
+			recordFailureBudgetFailure(
+							terminalFailure(
+											IntegrityTerminalException.Category.EXECUTION,
+											"Standalone DELETE failed-object counter monitoring is not ready before count admission",
+											failure),
+							"failed-object counter monitoring was not ready before count admission");
+		}
+		if (failureBudgetFailure != null) {
+			coordinateFailureBudgetStop();
+			throw failureBudgetFailure;
+		}
+		startFailureBudgetMonitor();
+	}
+
+	private void releaseCountFailureBudgetAdmission() {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final DurationPhaseAttempt result = invokeRetainedDurationPhase(
+						"distributed-failure-budget-admission",
+						activeSlices,
+						LoadStep::releaseObjectFailureBudgetAdmission,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-failure-budget-admission-");
+		if (result.succeeded()) {
+			return;
+		}
+		IntegrityTerminalException failure = null;
+		for (final Throwable cause : result.failures()) {
+			failure = appendTerminalFailure(
+							failure,
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE failed to release the object failure-budget admission barrier",
+							cause);
+		}
+		if (!result.completedAll() && failure == null) {
+			failure = terminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE timed out while releasing the object failure-budget admission barrier",
+							new java.util.concurrent.TimeoutException(
+											"distributed failure-budget admission phase exceeded its deadline"));
+		}
+		recordFailureBudgetFailure(
+						failure, "object failure-budget admission barrier failed");
+		coordinateFailureBudgetStop();
+		if (result.interrupted()) {
+			Thread.currentThread().interrupt();
+		}
+		throw failure;
+	}
+
+	private void monitorFailureBudget() {
+		try {
+			while (!Thread.currentThread().isInterrupted() && failureBudgetFailure == null) {
+				if (failureBudgetStartedNanos != Long.MIN_VALUE) {
+					final ObjectFailureBudgetDecision decision = evaluateFailureBudget(false);
+					if (decision.stopScheduling()) {
+						recordFailureBudgetFailure(failureBudgetException(decision), decision.reason());
+						coordinateFailureBudgetStop();
+						return;
+					}
+				}
+				Thread.sleep(FAILURE_BUDGET_POLL_MILLIS);
+			}
+		} catch (final InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+		} catch (final Throwable failure) {
+			throwUncheckedIfInterrupted(failure);
+			recordFailureBudgetFailure(
+							terminalFailure(
+											IntegrityTerminalException.Category.EXECUTION,
+											"Standalone DELETE failed to evaluate the failed-object budget",
+											failure),
+							"failed-object budget evaluation failed");
+			coordinateFailureBudgetStop();
+		}
+	}
+
+	private synchronized void recordFailureBudgetFailure(
+					final IntegrityTerminalException failure, final String reason) {
+		if (failureBudgetFailure == null) {
+			failureBudgetFailureReason = reason;
+			failureBudgetFailure = failure;
+		} else if (failure != null && failure != failureBudgetFailure) {
+			failureBudgetFailure.addSuppressed(failure);
+		}
+	}
+
+	private void coordinateFailureBudgetStop() {
+		if (standaloneDeleteStopCoordinated) {
+			return;
+		}
+		final long breachObservedNanos = System.nanoTime();
+		final long breachDrainDeadlineNanos = durationDrainDeadlineNanos(breachObservedNanos);
+		synchronized (this) {
+			if (!durationDrainDeadlineSet) {
+				durationDrainDeadlineNanos = breachDrainDeadlineNanos;
+				durationDrainDeadlineSet = true;
+			} else {
+				durationDrainDeadlineNanos = DurationTime.earlierDeadline(
+								durationDrainDeadlineNanos,
+								breachDrainDeadlineNanos,
+								breachObservedNanos);
+			}
+		}
+		if (standaloneDeleteStopInProgress) {
+			propagateFailureBudgetDrainDeadline();
+		}
+		synchronized (standaloneDeleteStopCoordination) {
+			coordinateStandaloneDeleteStopOnce(false);
+		}
+	}
+
+	private void propagateFailureBudgetDrainDeadline() {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final DurationPhaseAttempt result = invokeRetainedDurationPhase(
+						"distributed-budget-deadline",
+						activeSlices,
+						slice -> slice.enforceDispatchedOperationsDeadlineForStepStop(
+										DurationTime.remainingNanos(
+														durationDrainDeadlineNanos, System.nanoTime())),
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-budget-deadline-");
+		if (recordDurationPhaseResult("propagate failed-object drain deadline", result)) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private void stopFailureBudgetMonitor() {
+		final Thread monitor;
+		synchronized (this) {
+			monitor = failureBudgetMonitor;
+			if (monitor == null || monitor == Thread.currentThread()) {
+				return;
+			}
+			if (failureBudgetFailure == null) {
+				monitor.interrupt();
+			}
+		}
+		try {
+			monitor.join(failureBudgetMonitorJoinMillis());
+		} catch (final InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+		}
+		if (monitor.isAlive()) {
+			monitor.interrupt();
+			try {
+				monitor.join(FAILURE_BUDGET_MONITOR_JOIN_BUFFER_MILLIS);
+			} catch (final InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+		synchronized (this) {
+			if (failureBudgetMonitor == monitor && !monitor.isAlive()) {
+				failureBudgetMonitor = null;
+			}
+		}
+		closeFailureBudgetSnapshotCollectorIfIdle();
+	}
+
+	private long failureBudgetMonitorJoinMillis() {
+		final long phaseMillis = Math.max(
+						1,
+						TimeUnit.NANOSECONDS.toMillis(DurationTime.remainingNanos(
+										durationStopPhaseDeadlineNanos(), System.nanoTime())));
+		return Math.addExact(
+						Math.multiplyExact(phaseMillis, FAILURE_BUDGET_STOP_PHASE_COUNT),
+						FAILURE_BUDGET_MONITOR_JOIN_BUFFER_MILLIS);
+	}
+
+	private ObjectFailureBudgetDecision evaluateFailureBudget(final boolean completion)
+					throws InterruptedException {
+		final List<DeleteObjectLifecycleSnapshot> counters = collectFailureBudgetSnapshots(completion);
+		return evaluateFailureBudget(counters, completion);
+	}
+
+	private ObjectFailureBudgetDecision evaluateFailureBudgetWithRequiredCounters()
+					throws InterruptedException {
+		final List<DeleteObjectLifecycleSnapshot> counters = collectFailureBudgetSnapshots(false);
+		if (counters.isEmpty() || counters.stream().anyMatch(snapshot -> snapshot == null)) {
+			throw new IllegalStateException("failed-object counters are unavailable from a participant");
+		}
+		return evaluateFailureBudget(counters, false);
+	}
+
+	private ObjectFailureBudgetDecision evaluateFailureBudget(
+					final List<DeleteObjectLifecycleSnapshot> counters, final boolean completion) {
+		final long startedNanos = failureBudgetStartedNanos;
+		final Duration elapsed = startedNanos == Long.MIN_VALUE
+						? Duration.ZERO
+						: Duration.ofNanos(Math.max(0, System.nanoTime() - startedNanos));
+		return failureBudgetController.evaluate(counters, elapsed, completion);
+	}
+
+	private List<DeleteObjectLifecycleSnapshot> collectFailureBudgetSnapshots(
+					final boolean completion) throws InterruptedException {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final FailureBudgetSnapshotCollector collector;
+		synchronized (this) {
+			if (failureBudgetSnapshotCollector == null) {
+				failureBudgetSnapshotCollector = new FailureBudgetSnapshotCollector(activeSlices);
+			} else {
+				failureBudgetSnapshotCollector.requireSameSlices(activeSlices);
+			}
+			collector = failureBudgetSnapshotCollector;
+		}
+		final long deadlineNanos = completion
+						? durationStopPhaseDeadlineNanos()
+						: durationDeadlineNanos(FAILURE_BUDGET_LIVE_SNAPSHOT_TIMEOUT_NANOS);
+		return collector.collect(deadlineNanos, completion);
+	}
+
+	private void closeFailureBudgetSnapshotCollector() {
+		final FailureBudgetSnapshotCollector collector;
+		synchronized (this) {
+			collector = failureBudgetSnapshotCollector;
+			failureBudgetSnapshotCollector = null;
+		}
+		if (collector != null) {
+			collector.close();
+		}
+	}
+
+	private void closeFailureBudgetSnapshotCollectorIfIdle() {
+		final FailureBudgetSnapshotCollector collector;
+		synchronized (this) {
+			collector = failureBudgetSnapshotCollector;
+			if (collector == null || collector.hasActiveProbe()) {
+				return;
+			}
+			failureBudgetSnapshotCollector = null;
+		}
+		collector.close();
+	}
+
+	private synchronized IntegrityTerminalException finalizeFailureBudget() {
+		if (failureBudgetController == null) {
+			return null;
+		}
+		if (failureBudgetFinalized) {
+			return failureBudgetTerminalFailure;
+		}
+		final ObjectFailureBudgetDecision terminalDecision;
+		try {
+			terminalDecision = evaluateFailureBudget(true);
+		} catch (final Throwable failure) {
+			throwUncheckedIfInterrupted(failure);
+			failureBudgetTerminalFailure = appendTerminalFailure(
+							appendExistingFailure(failureBudgetFailure, durationValidityFailure),
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE failed to capture terminal failed-object counters",
+							failure);
+			failureBudgetFinalized = true;
+			return failureBudgetTerminalFailure;
+		}
+		if (durationValidityFailure != null
+						&& failureBudgetFailure == null
+						&& terminalDecision.outcome() != ObjectFailureBudgetOutcome.FAILED) {
+			failureBudgetFinalized = true;
+			Loggers.MSG.error(
+							"{}: Standalone DELETE overall run already failed duration validity; "
+											+ "failure-budget status only: {}",
+							loadStepId(),
+							failureBudgetSummary(terminalDecision));
+			return null;
+		}
+		final boolean priorFailure = failureBudgetFailure != null;
+		final boolean stickyFailure = priorFailure
+						&& terminalDecision.outcome() != ObjectFailureBudgetOutcome.FAILED;
+		final String summary = stickyFailure
+						? failureBudgetSummary(
+										terminalDecision,
+										ObjectFailureBudgetOutcome.FAILED,
+										(failureBudgetFailure != null
+														? (failureBudgetFailureReason == null
+																		? "failed-object budget enforcement failed earlier"
+																		: failureBudgetFailureReason)
+														: "duration validity failed; operational failure-budget room cannot validate the run")
+														+ "; the failure remains sticky; "
+														+ "final counters were captured after the coordinated drain")
+						: failureBudgetSummary(terminalDecision);
+		if (priorFailure || terminalDecision.outcome() == ObjectFailureBudgetOutcome.FAILED) {
+			failureBudgetTerminalFailure = terminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE failed-object budget: " + summary,
+							null);
+			if (failureBudgetFailure != null && failureBudgetFailure != failureBudgetTerminalFailure) {
+				failureBudgetTerminalFailure.addSuppressed(failureBudgetFailure);
+			}
+			if (durationValidityFailure != null
+							&& durationValidityFailure != failureBudgetTerminalFailure
+							&& durationValidityFailure != failureBudgetFailure) {
+				failureBudgetTerminalFailure.addSuppressed(durationValidityFailure);
+			}
+			failureBudgetFinalized = true;
+			Loggers.MSG.error("{}: Standalone DELETE failed: {}", loadStepId(), summary);
+			return failureBudgetTerminalFailure;
+		}
+		failureBudgetFinalized = true;
+		if (terminalDecision.outcome() == ObjectFailureBudgetOutcome.COMPLETED_WITHIN_BUDGET) {
+			Loggers.MSG.warn("{}: Standalone DELETE completed within failure budget: {}", loadStepId(), summary);
+		} else {
+			Loggers.MSG.info("{}: Standalone DELETE completed cleanly: {}", loadStepId(), summary);
+		}
+		return null;
+	}
+
+	private IntegrityTerminalException failureBudgetException(
+					final ObjectFailureBudgetDecision decision) {
+		return terminalFailure(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE failed-object budget: " + failureBudgetSummary(decision),
+						null);
+	}
+
+	private static String failureBudgetSummary(final ObjectFailureBudgetDecision decision) {
+		return failureBudgetSummary(decision, decision.outcome(), decision.reason());
+	}
+
+	private static String failureBudgetSummary(
+					final ObjectFailureBudgetDecision decision,
+					final ObjectFailureBudgetOutcome outcome,
+					final String reason) {
+		final String hardCapNote = reason.contains("not a hard cap")
+						? ""
+						: "; the threshold is a stop trigger, not a hard cap";
+		return decision.policy().description()
+						+ ", operational failed objects=" + decision.counters().operationalFailedObjects()
+						+ ", accepted objects=" + decision.counters().acceptedObjects()
+						+ ", observed failure percent=" + decision.observedFailurePercent()
+						+ "%, outcome=" + outcome
+						+ ", reason=" + reason
+						+ hardCapNote;
+	}
+
+	private static IntegrityTerminalException appendExistingFailure(
+					final IntegrityTerminalException current,
+					final IntegrityTerminalException additional) {
+		if (current == null) {
+			return additional;
+		}
+		if (additional != null && additional != current) {
+			current.addSuppressed(additional);
+		}
+		return current;
 	}
 
 	private boolean awaitDurationSlicesAndStop(
@@ -1023,6 +1506,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean startAndAwaitDurationSlices(
 					final List<LoadStep> activeSlices, final long timeoutNanos)
 					throws InterruptedException {
+		failureBudgetStartedNanos = System.nanoTime();
 		final DurationPhaseAttempt startResult = invokeRetainedDurationPhase(
 						"distributed-duration-start",
 						activeSlices,
@@ -1036,9 +1520,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// controller deadline only after every worker acknowledged its own duration arm, so the
 		// controller never closes admission before a successfully armed worker reaches its boundary.
 		final long deadlineNanos = durationDeadlineNanos(timeoutNanos);
-		durationDrainDeadlineNanos = durationDrainDeadlineNanos(deadlineNanos);
-		durationDrainDeadlineSet = true;
+		setDurationDrainDeadlineIfAbsent(durationDrainDeadlineNanos(deadlineNanos));
+		if (failureBudgetFailure != null) {
+			return false;
+		}
 		return awaitDurationSlices(activeSlices, deadlineNanos);
+	}
+
+	private synchronized void setDurationDrainDeadlineIfAbsent(final long deadlineNanos) {
+		if (!durationDrainDeadlineSet) {
+			durationDrainDeadlineNanos = deadlineNanos;
+			durationDrainDeadlineSet = true;
+		}
 	}
 
 	private void failDurationStartPhase(
@@ -1097,7 +1590,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						throwUnchecked(probe.failure());
 					}
 					if (probe.exhausted()) {
-						throw standaloneDeleteEarlyExhaustionFailure();
+						if (failureBudgetFailure != null) {
+							throw failureBudgetFailure;
+						}
+						throw recordDurationValidityFailure(
+										standaloneDeleteEarlyExhaustionFailure());
 					}
 				} catch (final ExecutionException e) {
 					if (DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
@@ -1240,7 +1737,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doClose()
 					throws IOException {
+		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
+		if (durationMode) {
+			closeForStandaloneDeleteMode(true);
+			return;
+		}
+		try {
+			closeForStandaloneDeleteMode(false);
+		} finally {
+			closeRetainedDurationPhases();
+		}
+	}
+
+	private void closeForStandaloneDeleteMode(final boolean durationMode) throws IOException {
 		boolean durationStopRecoordinated = false;
 		if (durationMode) {
 			if (durationCleanupRetryPending) {
@@ -1248,6 +1758,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				// attempt without duplicating any still-running retained phase invocation.
 				durationStopFailure = null;
 				durationAdmissionBarrierSatisfied = false;
+				standaloneDeleteStopCoordinated = false;
 			} else if (durationStopFailure != null || !durationAdmissionBarrierSatisfied) {
 				durationCleanupRetryPending = true;
 				if (durationStopFailure == null) {
@@ -1273,8 +1784,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 		}
+		final IntegrityTerminalException budgetTerminal;
+		try {
+			budgetTerminal = finalizeFailureBudget();
+		} finally {
+			closeFailureBudgetSnapshotCollector();
+		}
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			IntegrityTerminalException terminalCause = durationStopFailure;
+			IntegrityTerminalException terminalCause = appendExistingFailure(
+							durationStopFailure, budgetTerminal);
 			durationStopFailure = null;
 			boolean durationSlicesClosed = true;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
@@ -1502,6 +2020,193 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			throw (Error) cause;
 		}
 		throw new IOException(cause);
+	}
+
+	private static final class FailureBudgetSnapshotCollector implements AutoCloseable {
+		private final List<LoadStep> slices;
+		private final ExecutorService executor;
+		private final List<Future<DeleteObjectLifecycleSnapshot>> inFlight;
+		private final List<DeleteObjectLifecycleSnapshot> completedSnapshots;
+		private boolean terminalCollectionStarted;
+
+		private FailureBudgetSnapshotCollector(final List<LoadStep> slices) {
+			this.slices = List.copyOf(slices);
+			this.inFlight = new ArrayList<>(Collections.nCopies(slices.size(), null));
+			this.completedSnapshots = new ArrayList<>(Collections.nCopies(slices.size(), null));
+			executor = Executors.newThreadPerTaskExecutor(
+							Thread.ofVirtual()
+											.name("spt-delete-failure-budget-snapshot-", 0)
+											.factory());
+		}
+
+		private void requireSameSlices(final List<LoadStep> candidates) {
+			if (slices.size() != candidates.size()) {
+				throw new IllegalStateException("failure-budget worker set changed during collection");
+			}
+			for (int i = 0; i < slices.size(); i++) {
+				if (slices.get(i) != candidates.get(i)) {
+					throw new IllegalStateException("failure-budget worker identity changed during collection");
+				}
+			}
+		}
+
+		private synchronized List<DeleteObjectLifecycleSnapshot> collect(
+						final long deadlineNanos, final boolean completion) throws InterruptedException {
+			if (completion && !terminalCollectionStarted) {
+				terminalCollectionStarted = true;
+				resetForTerminalCollection();
+			}
+			if (inFlight.stream().allMatch(probe -> probe == null)
+							&& awaitProbeFlightAdmission(deadlineNanos)) {
+				startProbeFlight();
+			}
+			final List<DeleteObjectLifecycleSnapshot> snapshots = new ArrayList<>(slices.size());
+			for (int i = 0; i < slices.size(); i++) {
+				final Future<DeleteObjectLifecycleSnapshot> probe = inFlight.get(i);
+				if (probe == null) {
+					snapshots.add(completedSnapshots.get(i));
+					continue;
+				}
+				try {
+					final long remainingNanos = DurationTime.remainingNanos(
+									deadlineNanos, System.nanoTime());
+					if (remainingNanos == 0 && !probe.isDone()) {
+						snapshots.add(null);
+						continue;
+					}
+					final DeleteObjectLifecycleSnapshot snapshot = probe.get(
+									remainingNanos, TimeUnit.NANOSECONDS);
+					completedSnapshots.set(i, snapshot);
+					snapshots.add(snapshot);
+					inFlight.set(i, null);
+				} catch (final TimeoutException unavailable) {
+					snapshots.add(null);
+				} catch (final ExecutionException | CancellationException unavailable) {
+					inFlight.set(i, null);
+					snapshots.add(null);
+				}
+			}
+			return Collections.unmodifiableList(snapshots);
+		}
+
+		private void resetForTerminalCollection() {
+			inFlight.stream()
+							.filter(probe -> probe != null)
+							.forEach(probe -> probe.cancel(true));
+			Collections.fill(inFlight, null);
+			Collections.fill(completedSnapshots, null);
+		}
+
+		private static boolean awaitProbeFlightAdmission(final long deadlineNanos)
+						throws InterruptedException {
+			final long remainingNanos = DurationTime.remainingNanos(
+							deadlineNanos, System.nanoTime());
+			return remainingNanos > 0
+							&& FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION.tryAcquire(
+											remainingNanos, TimeUnit.NANOSECONDS);
+		}
+
+		private void startProbeFlight() {
+			if (slices.isEmpty()) {
+				FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION.release();
+				return;
+			}
+			Collections.fill(completedSnapshots, null);
+			final SnapshotProbeFlight flight = new SnapshotProbeFlight(slices.size());
+			for (int i = 0; i < slices.size(); i++) {
+				final SnapshotProbeTask task = new SnapshotProbeTask(
+								slices.get(i)::deleteObjectLifecycle, flight);
+				inFlight.set(i, task);
+				try {
+					executor.execute(task);
+				} catch (final RuntimeException submissionFailure) {
+					task.cancel(false);
+				}
+			}
+		}
+
+		private synchronized boolean hasActiveProbe() {
+			return inFlight.stream().anyMatch(probe -> probe != null && !probe.isDone());
+		}
+
+		@Override
+		public synchronized void close() {
+			inFlight.stream()
+							.filter(probe -> probe != null)
+							.forEach(probe -> probe.cancel(true));
+			executor.shutdownNow();
+		}
+	}
+
+	private static final class SnapshotProbeFlight {
+		private final AtomicInteger unfinishedTasks;
+
+		private SnapshotProbeFlight(final int taskCount) {
+			unfinishedTasks = new AtomicInteger(taskCount);
+		}
+
+		private void taskFinished() {
+			if (unfinishedTasks.decrementAndGet() == 0) {
+				FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION.release();
+			}
+		}
+	}
+
+	private static final class SnapshotProbeTask extends FutureTask<DeleteObjectLifecycleSnapshot> {
+		private final SnapshotProbeExecution execution;
+
+		private SnapshotProbeTask(
+						final Callable<DeleteObjectLifecycleSnapshot> callable,
+						final SnapshotProbeFlight flight) {
+			this(new SnapshotProbeExecution(callable, flight));
+		}
+
+		private SnapshotProbeTask(final SnapshotProbeExecution execution) {
+			super(execution);
+			this.execution = execution;
+		}
+
+		@Override
+		public boolean cancel(final boolean mayInterruptIfRunning) {
+			final boolean cancelled = super.cancel(mayInterruptIfRunning);
+			if (cancelled) {
+				execution.finishIfNotStarted();
+			}
+			return cancelled;
+		}
+	}
+
+	private static final class SnapshotProbeExecution implements Callable<DeleteObjectLifecycleSnapshot> {
+		private final Callable<DeleteObjectLifecycleSnapshot> probe;
+		private final SnapshotProbeFlight flight;
+		private final AtomicBoolean executionClaimed = new AtomicBoolean();
+
+		private SnapshotProbeExecution(
+						final Callable<DeleteObjectLifecycleSnapshot> probe,
+						final SnapshotProbeFlight flight) {
+			this.probe = probe;
+			this.flight = flight;
+		}
+
+		@Override
+		public DeleteObjectLifecycleSnapshot call() throws Exception {
+			if (!executionClaimed.compareAndSet(false, true)) {
+				throw new IllegalStateException("snapshot probe execution was already claimed");
+			}
+			ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS.incrementAndGet();
+			try {
+				return probe.call();
+			} finally {
+				ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS.decrementAndGet();
+				flight.taskFinished();
+			}
+		}
+
+		private void finishIfNotStarted() {
+			if (executionClaimed.compareAndSet(false, true)) {
+				flight.taskFinished();
+			}
+		}
 	}
 
 	@Override

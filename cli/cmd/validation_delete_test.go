@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
@@ -23,6 +24,56 @@ type deleteValidationCase struct {
 	seedObjects      int
 	autoTerminate    int
 	wantDetail       string
+}
+
+func TestDeleteFailureBudgetValidation(t *testing.T) {
+	newCommand := func() *cobra.Command {
+		return deleteValidationCommand(deleteValidationCase{bucket: "owned", batchSize: 100})
+	}
+	for _, test := range []struct {
+		name       string
+		flags      map[string]string
+		workload   string
+		wantDetail string
+	}{
+		{name: "default fixed object policy", workload: WorkloadTypeDelete},
+		{name: "strict fixed zero", workload: WorkloadTypeDelete, flags: map[string]string{"max-failed-objects": "0"}},
+		{name: "strict percentage zero", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "0"}},
+		{name: "percentage inclusive hundred", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "100"}},
+		{name: "mutually exclusive", workload: WorkloadTypeDelete, flags: map[string]string{"max-failed-objects": "1", "max-failure-percent": "1"}, wantDetail: "mutually exclusive"},
+		{name: "negative fixed", workload: WorkloadTypeDelete, flags: map[string]string{"max-failed-objects": "-1"}, wantDetail: "greater than or equal to zero"},
+		{name: "negative percentage", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "-0.1"}, wantDetail: "between 0 and 100"},
+		{name: "percentage above hundred", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "100.1"}, wantDetail: "between 0 and 100"},
+		{name: "percentage rejects nan", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "NaN"}, wantDetail: "between 0 and 100"},
+		{name: "grace with positive percentage", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "5", "failure-budget-grace": "45s"}},
+		{name: "grace rejects subsecond precision", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "5", "failure-budget-grace": "500ms"}, wantDetail: "whole number of seconds"},
+		{name: "grace rejects fixed", workload: WorkloadTypeDelete, flags: map[string]string{"failure-budget-grace": "45s"}, wantDetail: "positive --max-failure-percent"},
+		{name: "grace rejects zero percentage", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "0", "failure-budget-grace": "45s"}, wantDetail: "positive --max-failure-percent"},
+		{name: "grace rejects negative duration", workload: WorkloadTypeDelete, flags: map[string]string{"max-failure-percent": "5", "failure-budget-grace": "-1s"}, wantDetail: "greater than or equal to zero"},
+		{name: "fixed budget is delete only", workload: WorkloadTypeRead, flags: map[string]string{"max-failed-objects": "1"}, wantDetail: "not supported for read"},
+		{name: "percentage budget is delete only", workload: WorkloadTypeRead, flags: map[string]string{"max-failure-percent": "1"}, wantDetail: "not supported for read"},
+		{name: "grace is delete only", workload: WorkloadTypeRead, flags: map[string]string{"failure-budget-grace": "45s"}, wantDetail: "not supported for read"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newCommand()
+			for flag, value := range test.flags {
+				if err := cmd.Flags().Set(flag, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ValidateRunCommand(cmd, []string{test.workload})
+			if test.wantDetail == "" && err != nil {
+				t.Fatalf("ValidateRunCommand() error = %v", err)
+			}
+			if test.wantDetail != "" && (err == nil || !strings.Contains(err.Error(), test.wantDetail)) {
+				t.Fatalf("ValidateRunCommand() error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
+
+	if scenario.DefaultFailureBudgetGrace != 30*time.Second {
+		t.Fatalf("default failure budget grace = %s, want 30s", scenario.DefaultFailureBudgetGrace)
+	}
 }
 
 func TestValidateDeleteManifestFlags(t *testing.T) {
@@ -162,6 +213,9 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	}
 	cmd.Flags().Bool("delete-existing", false, "")
 	cmd.Flags().Bool("allow-empty-prefix", false, "")
+	cmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "")
+	cmd.Flags().Float64(flagMaxFailurePercent, 0, "")
+	cmd.Flags().Duration(flagFailureBudgetGrace, scenario.DefaultFailureBudgetGrace, "")
 	if test.deleteExisting {
 		_ = cmd.Flags().Set("delete-existing", "true")
 	}

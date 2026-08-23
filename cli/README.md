@@ -138,6 +138,26 @@ run. The scheduled interval and subsequent drain interval are reported separatel
 bounds concurrent logical DELETE requests, so a request may contain as many as
 `--delete-batch-size` object targets.
 
+Standalone DELETE uses a controller-owned failed-object budget. The default is a new
+object-unit policy permitting 100,000 operationally failed DELETE targets; it is not the legacy
+failed-operation limit. `--max-failed-objects N` permits exactly N failures and stops only after
+the global count becomes greater than N. Alternatively, `--max-failure-percent P` uses cumulative
+accepted-plus-operationally-failed object outcomes (0 through 100 inclusive). Zero is enforced
+immediately; a positive percentage is evaluated after `--failure-budget-grace` (30 seconds by
+default) and always again at completion. The flags are mutually exclusive, and an explicit grace
+is accepted only with a positive percentage and must be a whole number of seconds.
+
+Workers publish counters; the controller alone aggregates all local and distributed slices and
+makes the stop decision. A breach closes admission, recovers undispatched objects, and drains
+already-dispatched requests, so the final failed count may exceed the trigger—the budget is not a
+hard cap. Protocol/correctness failures, unresolved targets, setup/discovery/manifest failures,
+and verification failures remain fatal outside this operational budget. Cleanup failures are
+reported separately and never change the standalone DELETE benchmark verdict or exit code. Missing
+terminal counters also fail closed. Successful runs report either completed cleanly or completed
+within budget and exit 0; a breach or invalid terminal result reports the policy, threshold, failed
+objects, observed percentage, and exits nonzero. Even a 100% budget cannot validate a run with no
+fully successful request or no accepted object.
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
@@ -471,6 +491,9 @@ Executes a benchmark test with the specified workload type.
 - `--delete-batch-size`: Internal standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
 - `--delete-existing`: Destructive internal DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
 - `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection
+- `--max-failed-objects`: Operational DELETE object failures permitted before the controller stops scheduling (default 100,000; zero is strict; mutually exclusive with `--max-failure-percent`)
+- `--max-failure-percent`: Cumulative operational DELETE object failure percentage from 0 through 100; zero is strict and positive values use the grace period
+- `--failure-budget-grace`: Delay before evaluating a positive percentage budget (default 30s; whole seconds only; accepted only with a positive `--max-failure-percent`)
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
