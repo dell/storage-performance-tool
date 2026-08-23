@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -40,6 +42,7 @@ type TestOrchestrator struct {
 	resultsRoot        string
 	mu                 sync.Mutex
 	compatOnce         sync.Once
+	duplicateFleetOnce sync.Once
 	stopOnce           sync.Once
 	stoppedOnce        sync.Once
 	finalizeMu         sync.Mutex
@@ -67,6 +70,11 @@ type TestOrchestrator struct {
 	randMu            sync.Mutex
 	randSource        *rand.Rand
 	logJSONBodies     bool
+
+	terminalMetricsMu       sync.Mutex
+	terminalMetricsAttempts int
+	detailedDeleteObserved  bool
+	completionErr           error
 }
 
 type containerDiagnosticTailer interface {
@@ -422,6 +430,23 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 					continue
 				}
 				logging.LogInfo("orchestrator", "test finished", "state", status.State)
+				ready, terminalErr, captureErr := o.publishTerminalMetrics()
+				if captureErr != nil {
+					o.failTerminalMetricsCapture(captureErr)
+					o.signalCompletion()
+					return
+				}
+				if !ready {
+					continue
+				}
+				terminalErr = errors.Join(terminalErr, ownedTerminalStatusFailure(status))
+				if terminalErr != nil {
+					o.failOwnedTerminalRun(terminalErr)
+				}
+				if o.CompletionError() != nil {
+					o.signalCompletion()
+					return
+				}
 				if o.onOutput != nil {
 					o.onOutput(fmt.Sprintf("Test %s", status.State))
 				}
@@ -429,6 +454,147 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+func ownedTerminalStatusFailure(status *TestStatus) error {
+	if status == nil || status.State != constants.StateFailed {
+		return nil
+	}
+	detail := strings.TrimSpace(status.Message)
+	if detail == "" {
+		detail = "engine reported FAILED"
+	}
+	return fmt.Errorf("owned engine run failed: %s", detail)
+}
+
+func (o *TestOrchestrator) publishTerminalMetrics() (bool, error, error) {
+	update, _, err := o.collectMetricsUpdate()
+	if err != nil {
+		if o.terminalMetricsCompatibilityFallback(err) {
+			return true, nil, nil
+		}
+		logging.LogWarn(
+			"orchestrator",
+			"terminal metrics fetch failed before completion",
+			"error",
+			err.Error())
+		ready, captureErr := o.recordTerminalMetricsRetry(err)
+		return ready, nil, captureErr
+	}
+	o.observeDetailedDeleteMetrics(update)
+	if !terminalMetricsReady(update) {
+		logging.LogDebug(
+			"orchestrator",
+			"waiting for controller-authoritative terminal DELETE metrics")
+		ready, captureErr := o.recordTerminalMetricsRetry(
+			fmt.Errorf("controller-authoritative terminal DELETE metrics are unavailable"))
+		return ready, nil, captureErr
+	}
+	o.resetTerminalMetricsRetries()
+	if o.onMetrics != nil {
+		o.onMetrics(update)
+	}
+	return true, terminalDeletePolicyFailure(update), nil
+}
+
+func terminalDeletePolicyFailure(update *MultiNodeMetricsUpdate) error {
+	if update == nil {
+		return nil
+	}
+	metric := update.Aggregated
+	if metric == nil || metric.Delete == nil {
+		metric = update.PerOpType["DELETE"]
+	}
+	if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion ||
+		!metric.DeleteDetailExpected || metric.Delete == nil ||
+		metric.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeFailed {
+		return nil
+	}
+	return fmt.Errorf(
+		"DELETE failure policy rejected the terminal outcome for step %q",
+		metric.StepID)
+}
+
+func (o *TestOrchestrator) observeDetailedDeleteMetrics(update *MultiNodeMetricsUpdate) {
+	metric := detailedDeleteMetric(update)
+	if metric == nil {
+		return
+	}
+	o.terminalMetricsMu.Lock()
+	o.detailedDeleteObserved = true
+	o.terminalMetricsMu.Unlock()
+}
+
+func detailedDeleteMetric(update *MultiNodeMetricsUpdate) *PerformanceMetric {
+	if update == nil {
+		return nil
+	}
+	metric := update.Aggregated
+	if metric == nil || !strings.EqualFold(metric.OpType, "DELETE") {
+		metric = update.PerOpType["DELETE"]
+	}
+	if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion ||
+		!metric.DeleteDetailExpected || !strings.EqualFold(metric.OpType, "DELETE") {
+		return nil
+	}
+	return metric
+}
+
+func (o *TestOrchestrator) terminalMetricsCompatibilityFallback(err error) bool {
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		return false
+	}
+	o.terminalMetricsMu.Lock()
+	defer o.terminalMetricsMu.Unlock()
+	return !o.detailedDeleteObserved
+}
+
+func (o *TestOrchestrator) recordTerminalMetricsRetry(cause error) (bool, error) {
+	o.terminalMetricsMu.Lock()
+	defer o.terminalMetricsMu.Unlock()
+	o.terminalMetricsAttempts++
+	if o.terminalMetricsAttempts < constants.TerminalMetricsCaptureAttempts {
+		return false, nil
+	}
+	return false, fmt.Errorf(
+		"terminal DELETE metrics capture failed after %d attempts: %w",
+		o.terminalMetricsAttempts,
+		cause)
+}
+
+func (o *TestOrchestrator) resetTerminalMetricsRetries() {
+	o.terminalMetricsMu.Lock()
+	o.terminalMetricsAttempts = 0
+	o.terminalMetricsMu.Unlock()
+}
+
+func (o *TestOrchestrator) failTerminalMetricsCapture(cause error) {
+	logging.LogError("orchestrator", "terminal DELETE metrics capture failed", cause)
+	o.recordCompletionFailure(cause)
+}
+
+func (o *TestOrchestrator) failOwnedTerminalRun(cause error) {
+	logging.LogError("orchestrator", "owned engine run failed", cause)
+	o.recordCompletionFailure(cause)
+}
+
+func (o *TestOrchestrator) recordCompletionFailure(cause error) {
+	message := fmt.Sprintf("Test FAILED: %v", cause)
+	o.terminalMetricsMu.Lock()
+	recorded := o.completionErr == nil
+	if o.completionErr == nil {
+		o.completionErr = cause
+	}
+	o.terminalMetricsMu.Unlock()
+	if !recorded {
+		return
+	}
+	if o.onError != nil {
+		o.onError(message)
+	} else if o.onOutput != nil {
+		o.onOutput(message)
 	}
 }
 
@@ -446,37 +612,17 @@ func (o *TestOrchestrator) monitorMetrics(ctx context.Context) {
 			return
 		case <-timer.C:
 			now := time.Now()
-			allMetrics, source, err := o.getMetricsWithOptimizedFallback()
+			update, source, err := o.collectMetricsUpdate()
 
-			if err == nil && len(allMetrics) > 0 {
+			if err == nil {
 				o.metricsState.recordSuccess(now)
 				o.updateMetricsSuccess(source)
-
+				o.observeDetailedDeleteMetrics(update)
 				if o.onMetrics != nil {
-					// Aggregate all op-type metrics into a combined view.
-					aggregated, perOpType := AggregateByOpType(allMetrics)
-					isActive := aggregated.TestState == constants.TestStateRunning
-					update := &MultiNodeMetricsUpdate{
-						Aggregated: aggregated,
-						PerNode: map[string]*PerformanceMetric{
-							"node-0": aggregated,
-						},
-						PerOpType: perOpType,
-						NodeStatus: map[string]NodeConnectionStatus{
-							"node-0": {
-								LastSeen:    aggregated.Timestamp,
-								IsConnected: true,
-								IsActive:    isActive,
-								Error:       nil,
-								Phase:       NodePhaseMetricsFlowing,
-							},
-						},
-					}
 					o.onMetrics(update)
 				}
-
-				interval = o.metricsBackoffCfg.Base
-			} else if err != nil {
+			}
+			if err != nil {
 				kind := classifyPollError(err)
 				delay, warn := o.metricsState.recordFailure(now, err, kind, o.metricsBackoffCfg, o.randomJitter)
 				if warn {
@@ -502,6 +648,87 @@ func (o *TestOrchestrator) monitorMetrics(ctx context.Context) {
 			timer.Reset(interval)
 		}
 	}
+}
+
+func (o *TestOrchestrator) collectMetricsUpdate() (*MultiNodeMetricsUpdate, string, error) {
+	allMetrics, source, err := o.getMetricsWithOptimizedFallback()
+	if err != nil {
+		return nil, source, err
+	}
+	if len(allMetrics) == 0 {
+		return nil, source, fmt.Errorf("%w: local metrics are empty", ErrMetricsIncompatible)
+	}
+	update, err := buildLocalMetricsUpdateForRun(allMetrics, o.apiClient.getRunID())
+	if err != nil {
+		return nil, source, err
+	}
+	if fleetDelete := fetchAuthoritativeFleetDelete(
+		o.apiClient, update.Aggregated, update.PerOpType,
+		&o.duplicateFleetOnce); fleetDelete != nil {
+		update.Aggregated = applyAuthoritativeFleetDelete(
+			update.Aggregated, update.PerOpType, fleetDelete)
+	}
+	return update, source, nil
+}
+
+func terminalMetricsReady(update *MultiNodeMetricsUpdate) bool {
+	if update == nil {
+		return true
+	}
+	metric := update.Aggregated
+	if metric == nil || !strings.EqualFold(metric.OpType, "DELETE") {
+		metric = update.PerOpType["DELETE"]
+	}
+	if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion ||
+		!metric.DeleteDetailExpected || !strings.EqualFold(metric.OpType, "DELETE") {
+		return true
+	}
+	return !metric.Partial && deletemetrics.ValidateTerminal(metric.Delete) == nil
+}
+
+func buildLocalMetricsUpdateForRun(
+	allMetrics []*PerformanceMetric, ownedRunID string,
+) (*MultiNodeMetricsUpdate, error) {
+	currentMetrics, err := selectCurrentMetricSetForRun(allMetrics, nil, ownedRunID)
+	if err != nil {
+		return nil, err
+	}
+	currentMetrics = normalizeLocalContributorIdentity(currentMetrics)
+	aggregated, perOpType := AggregateByOpType(currentMetrics)
+	if aggregated == nil {
+		return nil, fmt.Errorf("%w: current local metrics cannot be aggregated", ErrMetricsIncompatible)
+	}
+	isActive := aggregated.TestState == constants.TestStateRunning
+	return &MultiNodeMetricsUpdate{
+		Aggregated: aggregated,
+		PerNode: map[string]*PerformanceMetric{
+			"node-0": aggregated,
+		},
+		PerOpType: perOpType,
+		NodeStatus: map[string]NodeConnectionStatus{
+			"node-0": {
+				LastSeen: aggregated.Timestamp, IsConnected: true, IsActive: isActive,
+				Phase: NodePhaseMetricsFlowing,
+			},
+		},
+	}, nil
+}
+
+func normalizeLocalContributorIdentity(metrics []*PerformanceMetric) []*PerformanceMetric {
+	result := make([]*PerformanceMetric, len(metrics))
+	for index, metric := range metrics {
+		result[index] = metric
+		if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion ||
+			!metric.DeleteDetailExpected || !strings.EqualFold(metric.OpType, "DELETE") {
+			continue
+		}
+		copyMetric := *metric
+		copyMetric.NodesCount = 1
+		copyMetric.NodesPresent = []string{constants.MetricsLocalContributorID}
+		copyMetric.ContributorsPresent = []string{constants.MetricsLocalContributorID}
+		result[index] = &copyMetric
+	}
+	return result
 }
 
 // getMetricsWithOptimizedFallback gets metrics from JSON endpoint only
@@ -626,6 +853,13 @@ func (o *TestOrchestrator) signalCompletion() {
 // CompletionCh returns a channel that is closed when the run reaches a terminal state.
 func (o *TestOrchestrator) CompletionCh() <-chan struct{} {
 	return o.completionCh
+}
+
+// CompletionError returns a terminal presentation failure, if one prevented a valid final result.
+func (o *TestOrchestrator) CompletionError() error {
+	o.terminalMetricsMu.Lock()
+	defer o.terminalMetricsMu.Unlock()
+	return o.completionErr
 }
 
 // StopTest gracefully stops the test and cleans up

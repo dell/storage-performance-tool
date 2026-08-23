@@ -103,6 +103,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private final boolean enabled;
 	private final Consumer<O> dispatchPublicationObserver;
+	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
 	private final Set<IdentityKey<O>> inFlightOperations = ConcurrentHashMap.newKeySet();
@@ -159,6 +160,14 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	 */
 	public void terminalObserver(final Consumer<O> observer) {
 		terminalObserver = observer;
+	}
+
+	/**
+	 * Installs additive accounting at the exact successful dispatch-publication boundary.
+	 * The observer must be bounded, non-blocking, and non-throwing.
+	 */
+	public void dispatchObserver(final Consumer<O> observer) {
+		dispatchObserver = observer;
 	}
 
 	/** Clears completed-run counters before a representative lifecycle restart. */
@@ -373,6 +382,10 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private void observeDispatchPublication(final O op) {
 		if (dispatchPublicationObserver != null) {
 			dispatchPublicationObserver.accept(op);
+		}
+		final var observer = dispatchObserver;
+		if (observer != null) {
+			observer.accept(op);
 		}
 	}
 

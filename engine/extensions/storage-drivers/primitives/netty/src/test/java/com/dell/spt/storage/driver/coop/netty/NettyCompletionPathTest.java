@@ -6,17 +6,24 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayList;
@@ -337,6 +344,45 @@ class NettyCompletionPathTest {
 		assertTrue(realOp.duration() > 0,
 						"duration (respTimeDone - reqTimeStart) should be positive");
 		channel.close();
+	}
+
+	@Test
+	void prematureDeleteCloseAfterHeadersDoesNotCreateAResponseDuration() throws Exception {
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		final var warnedField = NettyStorageDriverBase.class.getDeclaredField("channelFailureWarned");
+		warnedField.setAccessible(true);
+		warnedField.set(driver, new java.util.concurrent.atomic.AtomicBoolean(true));
+		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
+			@Override
+			protected void handle(
+						final io.netty.channel.Channel channel,
+						final Operation<Item> op,
+						final Object msg) {}
+		};
+		final var channel = new EmbeddedChannel(handler);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
+		final var item = new IntegrityManifestDataItem("bucket", "key", 0, null);
+		final DeleteRequestOperation operation = new DeleteRequestOperationImpl(
+						0,
+						new DeleteRequest(
+									"bucket",
+									Credential.getInstance("access", "secret"),
+									List.of(new DeleteTarget(item))));
+		operation.startRequest();
+		operation.finishRequest();
+		operation.markResponseFirstByteReceived();
+		channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION)
+						.set((Operation<Item>) (Operation<?>) operation);
+
+		channel.pipeline().fireExceptionCaught(
+						new PrematureChannelClosureException("closed after response headers"));
+
+		assertEquals(Operation.Status.FAIL_IO, operation.status());
+		assertEquals(0, operation.respTimeStart());
+		assertEquals(0, operation.respTimeDone(),
+						"generic completion must not manufacture a DELETE last-byte marker");
+		channel.finishAndReleaseAll();
 	}
 
 	@Test

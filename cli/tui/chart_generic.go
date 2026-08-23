@@ -363,6 +363,9 @@ func FormatOpsValue(value int64) string {
 
 // FormatLatencyValue formats latency values in microseconds
 func FormatLatencyValue(value int64) string {
+	if value < 0 {
+		return notAvailableValue
+	}
 	if value >= 1000000 {
 		return fmt.Sprintf("%.1fs", float64(value)/1000000)
 	} else if value >= 1000 {
@@ -380,7 +383,22 @@ func ExtractOpsPerSec(m PerformanceMetric) int64 {
 
 // ExtractDisplayLatency extracts the latency value selected for UI display.
 func ExtractDisplayLatency(m PerformanceMetric) int64 {
+	if !timingDisplayAvailable(m.HasLatency, m.MeanLatency) {
+		return -1
+	}
 	return m.MeanLatency
+}
+
+// ExtractDisplayDuration extracts the duration value selected for UI display.
+func ExtractDisplayDuration(m PerformanceMetric) int64 {
+	if !timingDisplayAvailable(m.HasDuration, m.MeanDuration) {
+		return -1
+	}
+	return m.MeanDuration
+}
+
+func timingDisplayAvailable(explicit bool, value int64) bool {
+	return explicit || value > 0
 }
 
 // ExtractMeanLatency is kept for older tests/helpers that still refer to the legacy name.

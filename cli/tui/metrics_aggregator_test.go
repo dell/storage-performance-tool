@@ -5,8 +5,13 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 func newNodeMetric(ops, mb, success, failed int64, latency, duration int64, current int, mean float64) *PerformanceMetric {
@@ -39,6 +44,29 @@ func TestMetricsAggregatorIgnoresNonNodeMetrics(t *testing.T) {
 	result := aggregator.Aggregate(map[string]*PerformanceMetric{"fleet": fleetMetric})
 	if result != nil {
 		t.Fatalf("expected nil aggregate when only fleet metrics provided, got %+v", result)
+	}
+}
+
+func TestMetricsAggregatorWarnsOnceForPersistentIncompatibleDeleteIdentity(t *testing.T) {
+	var output bytes.Buffer
+	previousLogger := logging.GetLogger()
+	logging.SetLogger(slog.New(slog.NewTextHandler(&output, nil)))
+	defer logging.SetLogger(previousLogger)
+
+	nodeA := deleteNodeMetric("single", 1, 1, 1)
+	nodeB := deleteNodeMetric("batch", 2, 1, 1)
+	aggregator := NewMetricsAggregator()
+	for range 3 {
+		if got := aggregator.Aggregate(map[string]*PerformanceMetric{
+			"node-a": nodeA,
+			"node-b": nodeB,
+		}); got != nil {
+			t.Fatalf("incompatible DELETE identities were aggregated: %+v", got)
+		}
+	}
+
+	if count := strings.Count(output.String(), "refusing to merge incompatible DELETE result identities"); count != 1 {
+		t.Fatalf("incompatible DELETE identity warnings = %d, want 1:\n%s", count, output.String())
 	}
 }
 

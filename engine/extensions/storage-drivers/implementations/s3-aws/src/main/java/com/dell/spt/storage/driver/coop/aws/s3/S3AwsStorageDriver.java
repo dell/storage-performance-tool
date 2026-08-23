@@ -57,6 +57,9 @@ import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
+import software.amazon.awssdk.http.SdkHttpExecutionAttributes;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
@@ -88,6 +91,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	static final ExecutionAttribute<ListOperation<? extends PathItem>> LIST_TTFB_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptListTtfbOperation");
 	static final ExecutionInterceptor LIST_TTFB_INTERCEPTOR = new ListTtfbExecutionInterceptor();
 	private static final SdkPlugin LIST_TTFB_SDK_PLUGIN = new ListTtfbSdkPlugin();
+	static final ExecutionAttribute<DeleteRequestOperation> DELETE_TIMING_OPERATION_ATTRIBUTE = new ExecutionAttribute<>("sptDeleteTimingOperation");
+	static final ExecutionInterceptor DELETE_TIMING_INTERCEPTOR = new DeleteTimingExecutionInterceptor();
+	private static final SdkPlugin DELETE_TIMING_SDK_PLUGIN = new DeleteTimingSdkPlugin();
 
 	// S3 API constants for multipart upload
 	private static final String KEY_UPLOAD_ID = "uploadId";
@@ -98,6 +104,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final S3AsyncClient s3AsyncClient;
 	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
 	private volatile S3AsyncClient exactVersionS3Client;
+	private final S3AsyncClient standaloneDeleteS3Client;
+	private final SdkAsyncHttpClient standaloneDeleteHttpClient;
 	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
@@ -135,7 +143,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
-						exactVersionS3Client, null, smallObjectThresholdBytes, partSizeBytes);
+						exactVersionS3Client, null, null, null,
+						smallObjectThresholdBytes, partSizeBytes);
 	}
 
 	S3AwsStorageDriver(
@@ -150,7 +159,27 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null,
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final S3AsyncClient standaloneDeleteS3Client,
+					final SdkAsyncHttpClient standaloneDeleteHttpClient,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier),
+						Objects.requireNonNull(standaloneDeleteS3Client),
+						Objects.requireNonNull(standaloneDeleteHttpClient),
 						smallObjectThresholdBytes, partSizeBytes);
 	}
 
@@ -163,6 +192,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final S3AsyncClient s3AsyncClient,
 					final S3AsyncClient exactVersionS3Client,
 					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final S3AsyncClient standaloneDeleteS3Client,
+					final SdkAsyncHttpClient standaloneDeleteHttpClient,
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
@@ -175,6 +206,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.s3AsyncClient = s3AsyncClient;
 		this.exactVersionS3Client = exactVersionS3Client;
 		this.exactVersionS3ClientSupplier = exactVersionS3ClientSupplier;
+		this.standaloneDeleteS3Client = standaloneDeleteS3Client;
+		this.standaloneDeleteHttpClient = standaloneDeleteHttpClient;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
 
@@ -424,11 +457,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 								originalStatus, failure);
 				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			}
-			try {
-				op.startResponse();
-				op.finishResponse();
-			} catch (final Exception responseEx) {
-				LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
+			if (!(op instanceof DeleteRequestOperation)) {
+				try {
+					op.startResponse();
+					op.finishResponse();
+				} catch (final Exception responseEx) {
+					LOG.debug("{} {} response finalization failed", op.type(), op.item().name(), responseEx);
+				}
 			}
 		}
 	}
@@ -436,13 +471,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private void finishStandaloneDeleteOperation(final O op) {
 		final var deleteOperation = (DeleteRequestOperation) op;
 		try {
-			op.startResponse();
-			op.finishResponse();
 			if (deleteOperation.deleteResult() == null) {
 				deleteOperation.completeDelete(null);
 			}
 		} catch (final IllegalStateException e) {
-			LOG.debug("Standalone DELETE response timing finalization failed", e);
+			LOG.debug("Standalone DELETE result finalization failed", e);
 			if (deleteOperation.deleteResult() == null) {
 				deleteOperation.completeDelete(DeleteTransportResult.failure(
 								Status.FAIL_UNKNOWN, DELETE_TRANSPORT_FAILURE));
@@ -970,12 +1003,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			final var target = request.targets().get(0);
 			final var sdkRequest = DeleteObjectRequest.builder()
 							.bucket(request.bucket())
-							.key(target.key());
+							.key(target.key())
+							.overrideConfiguration(b -> b
+											.putExecutionAttribute(DELETE_TIMING_OPERATION_ATTRIBUTE, operation)
+											.addPlugin(DELETE_TIMING_SDK_PLUGIN));
 			if (target.versionId() != null) {
 				sdkRequest.versionId(target.versionId());
 			}
-			return deleteClient(target.versionId() != null)
-							.deleteObject(sdkRequest.build())
+			final DeleteObjectRequest builtRequest = sdkRequest.build();
+			final S3AsyncClient client = standaloneDeleteClient(target.versionId() != null);
+			return client.deleteObject(builtRequest)
 							.handle((response, failure) -> {
 								completeDelete(
 												operation,
@@ -990,6 +1027,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.toList();
 		final var sdkRequest = DeleteObjectsRequest.builder()
 						.bucket(request.bucket())
+						.overrideConfiguration(b -> b
+										.putExecutionAttribute(DELETE_TIMING_OPERATION_ATTRIBUTE, operation)
+										.addPlugin(DELETE_TIMING_SDK_PLUGIN))
 						.delete(Delete.builder()
 										.objects(objectIdentifiers)
 										.quiet(false)
@@ -997,8 +1037,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.build();
 		final boolean exactVersion = request.targets().stream()
 						.anyMatch(target -> target.versionId() != null);
-		return deleteClient(exactVersion)
-						.deleteObjects(sdkRequest)
+		final S3AsyncClient client = standaloneDeleteClient(exactVersion);
+		return client.deleteObjects(sdkRequest)
 						.handle((response, failure) -> {
 							completeDelete(operation, failure, deleteTransportResult(response));
 							return null;
@@ -1061,6 +1101,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private S3AsyncClient deleteClient(final boolean exactVersion) {
 		return exactVersion ? exactVersionS3Client() : s3AsyncClient;
+	}
+
+	private S3AsyncClient standaloneDeleteClient(final boolean exactVersion) {
+		return standaloneDeleteS3Client == null
+						? deleteClient(exactVersion)
+						: standaloneDeleteS3Client;
 	}
 
 	private CompletableFuture<Void> headObject(final O op) {
@@ -1330,10 +1376,38 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
+	static final class DeleteTimingExecutionInterceptor implements ExecutionInterceptor {
+		@Override
+		public void beforeTransmission(
+						final Context.BeforeTransmission context,
+						final ExecutionAttributes executionAttributes) {
+			final DeleteRequestOperation op = executionAttributes.getAttribute(
+							DELETE_TIMING_OPERATION_ATTRIBUTE);
+			if (op != null) {
+				final SdkHttpExecutionAttributes current = executionAttributes.getAttribute(
+								SdkInternalExecutionAttribute.SDK_HTTP_EXECUTION_ATTRIBUTES);
+				final var transportAttributes = current == null
+								? SdkHttpExecutionAttributes.builder()
+								: current.toBuilder();
+				transportAttributes.put(DeleteTimingAsyncHttpClient.DELETE_OPERATION, op);
+				executionAttributes.putAttribute(
+								SdkInternalExecutionAttribute.SDK_HTTP_EXECUTION_ATTRIBUTES,
+								transportAttributes.build());
+			}
+		}
+	}
+
 	static final class ListTtfbSdkPlugin implements SdkPlugin {
 		@Override
 		public void configureClient(final SdkServiceClientConfiguration.Builder builder) {
 			builder.overrideConfiguration(b -> b.addExecutionInterceptor(LIST_TTFB_INTERCEPTOR));
+		}
+	}
+
+	static final class DeleteTimingSdkPlugin implements SdkPlugin {
+		@Override
+		public void configureClient(final SdkServiceClientConfiguration.Builder builder) {
+			builder.overrideConfiguration(b -> b.addExecutionInterceptor(DELETE_TIMING_INTERCEPTOR));
 		}
 	}
 
@@ -1747,6 +1821,24 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		} catch (Exception e) {
 			LOG.warn("Failed to close exact-version S3AsyncClient: {}", e.getMessage());
+		}
+		try {
+			if (standaloneDeleteS3Client != null
+							&& standaloneDeleteS3Client != s3AsyncClient
+							&& standaloneDeleteS3Client != exactVersionS3Client) {
+				standaloneDeleteS3Client.close();
+				LOG.info("Standalone DELETE S3AsyncClient closed successfully");
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to close standalone DELETE S3AsyncClient: {}", e.getMessage());
+		}
+		try {
+			if (standaloneDeleteHttpClient != null) {
+				standaloneDeleteHttpClient.close();
+				LOG.info("Standalone DELETE HTTP client closed successfully");
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to close standalone DELETE HTTP client: {}", e.getMessage());
 		}
 
 		try {

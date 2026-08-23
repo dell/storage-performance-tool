@@ -45,6 +45,7 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 			failedBeforeFlag = false;
 		} catch (final Exception e) {
 			throwUncheckedIfInterrupted(e);
+			snapshotsByOrigin = null;
 			LogUtil.exception(Level.INFO, e, "Failed to fetch the metrics snapshots from \"{}\"", loadStep);
 			if (failedBeforeFlag) {
 				LogUtil.exception(
@@ -64,6 +65,7 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 			snapshotsByOrigin = loadStep.metricsSnapshots();
 		} catch (final Exception e) {
 			throwUncheckedIfInterrupted(e);
+			snapshotsByOrigin = null;
 			LogUtil.exception(Level.INFO, e, "Failed to fetch the metrics snapshots from \"{}\"", loadStep);
 		}
 		return snapshotsByOrigin;

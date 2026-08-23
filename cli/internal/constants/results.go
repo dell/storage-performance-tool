@@ -13,6 +13,8 @@ const (
 	ResultsSummaryFilePrefix        = "spt_"
 	ResultsSummaryFileSuffix        = "_results_summary.txt"
 	ResultsSummaryFilePattern       = ResultsSummaryFilePrefix + "%s" + ResultsSummaryFileSuffix
+	// MetricsLocalContributorID is the engine's canonical identity for the entry JVM slice.
+	MetricsLocalContributorID = "local"
 )
 
 // Results artifact suffixes.

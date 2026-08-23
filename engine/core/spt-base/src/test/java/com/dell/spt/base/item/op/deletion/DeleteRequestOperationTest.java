@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.Operation.Status;
@@ -26,6 +27,11 @@ class DeleteRequestOperationTest {
 		source.clear();
 
 		final var operation = new DeleteRequestOperationImpl(7, request);
+		operation.startRequest();
+		operation.markRequestFirstByteSent();
+		operation.finishRequest();
+		operation.markResponseFirstByteReceived();
+		operation.finishResponse();
 		operation.completeDelete(DeleteTransportResult.success(request.targets()));
 		final var snapshot = operation.result();
 
@@ -38,12 +44,46 @@ class DeleteRequestOperationTest {
 		assertFalse((Object) operation instanceof DataOperation, "standalone DELETE is not a data-transfer operation");
 		assertNotSame(operation, snapshot);
 		assertSame(request, snapshot.deleteRequest());
+		assertTrue(operation.requestFirstByteTime() >= operation.reqTimeStart());
+		assertEquals(operation.requestFirstByteTime(), snapshot.requestFirstByteTime());
+		assertEquals(operation.respTimeStart(), operation.responseFirstByteTime());
+		assertEquals(operation.responseFirstByteTime(), snapshot.responseFirstByteTime());
 		assertEquals(DeleteRequestOutcome.FULL_SUCCESS, snapshot.deleteResult().outcome());
 		assertEquals(List.of("key-a", "key-b"), snapshot.deleteResult().targetResults().stream()
 						.map(result -> result.target().key()).toList());
 		assertThrows(
 						IllegalStateException.class,
 						() -> operation.completeDelete(DeleteTransportResult.success(request.targets())));
+		operation.reset();
+		assertEquals(0, operation.requestFirstByteTime());
+		assertEquals(0, operation.responseFirstByteTime());
+	}
+
+	@Test
+	void nativeTransportTimingRetainsFirstSendAcrossTransparentRetries() {
+		final var request = new DeleteRequest(
+						"bucket",
+						Credential.getInstance("uid", "secret"),
+						List.of(new DeleteTarget(
+										new IntegrityManifestDataItem("bucket", "key", 1, null))));
+		final var operation = new DeleteRequestOperationImpl(0, request);
+
+		operation.beginTransportAttempt();
+		operation.recordTransportRequestTiming(1_000_000L, 4_000_000L);
+		assertEquals(3_000L, operation.transportRequestLatency());
+
+		operation.beginTransportAttempt();
+		assertEquals(0L, operation.transportRequestLatency());
+		operation.recordTransportRequestTiming(9_000_000L, 11_000_000L);
+		assertEquals(10_000L, operation.transportRequestLatency(),
+						"the terminal response must remain measured from the first provider send");
+		assertEquals(10_000L, operation.result().transportRequestLatency());
+
+		operation.reset();
+		assertEquals(0L, operation.transportRequestLatency());
+		operation.recordTransportRequestTiming(20_000_000L, 19_000_000L);
+		assertEquals(0L, operation.transportRequestLatency(),
+						"invalid transport-clock ordering must fail closed");
 	}
 
 	@Test

@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http;
 
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.token.TokenOperation;
 import com.dell.spt.base.item.Item;
@@ -154,7 +155,9 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 
 		if (msg instanceof HttpResponse) {
 			try {
-				op.startResponse();
+				if (!(op instanceof DeleteRequestOperation)) {
+					op.startResponse();
+				}
 			} catch (final IllegalStateException e) {
 				LogUtil.exception(Level.DEBUG, e, "{}", op.toString());
 			}

@@ -55,6 +55,11 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 
 	void markFail();
 
+	/** Records a failed logical request together with its request-scoped timings. */
+	default void markFail(final long duration, final long latency) {
+		markFail();
+	}
+
 	void markFail(final long count);
 
 	/** Marks one terminal corruption, which is also a failed operation. */

@@ -7,9 +7,14 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.naming.ItemNameInput;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -17,6 +22,7 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -121,6 +127,14 @@ class HttpStorageDriverBaseTest {
 			sendRequest(ch, op);
 		}
 
+		void exposeAppendHandlers(final io.netty.channel.Channel channel) {
+			appendHandlers(channel);
+		}
+
+		void bindOperation(final io.netty.channel.Channel channel, final Operation<?> operation) {
+			channel.attr(ATTR_KEY_OPERATION).set(operation);
+		}
+
 		HttpMethod exposeDataHttpMethod(final OpType opType) {
 			return dataHttpMethod(opType);
 		}
@@ -183,6 +197,38 @@ class HttpStorageDriverBaseTest {
 						final int count) {
 			return java.util.List.of();
 		}
+	}
+
+	@Test
+	void deleteResponseFirstByteIsMarkedBeforeSplitHeadersCanBeDecoded() throws Exception {
+		final var driver = new TestHttpDriver(baseConfig());
+		final var channel = new EmbeddedChannel();
+		driver.exposeAppendHandlers(channel);
+		final var operation = new DeleteRequestOperationImpl(
+						0,
+						new DeleteRequest(
+										"bucket",
+										Credential.getInstance("uid", "secret"),
+										List.of(new DeleteTarget(
+														new IntegrityManifestDataItem("bucket", "key", 0, null)))));
+		operation.startRequest();
+		operation.markRequestFirstByteSent();
+		operation.finishRequest();
+		driver.bindOperation(channel, operation);
+
+		assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(new byte[]{'H'
+		})),
+						"one raw byte must not complete HTTP header decoding");
+		final long firstByteMarker = operation.responseFirstByteTime();
+		assertTrue(firstByteMarker > 0,
+						"the raw transport byte must mark latency before an HttpResponse exists");
+
+		assertTrue(channel.writeInbound(Unpooled.copiedBuffer(
+						"TTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+						java.nio.charset.StandardCharsets.US_ASCII)));
+		assertEquals(firstByteMarker, operation.responseFirstByteTime(),
+						"decoded headers must not replace the raw first-byte boundary");
+		channel.finishAndReleaseAll();
 	}
 
 	@Test

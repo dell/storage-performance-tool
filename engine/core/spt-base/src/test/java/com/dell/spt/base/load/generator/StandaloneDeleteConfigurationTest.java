@@ -69,6 +69,18 @@ class StandaloneDeleteConfigurationTest {
 	}
 
 	@Test
+	void standaloneDeleteRejectsNoncanonicalSelectionOrder() {
+		final var config = standaloneConfig();
+		config.val("load-op-delete-selectionOrder", "reverse");
+
+		final var failure = assertThrows(
+						IllegalConfigurationException.class,
+						() -> StandaloneDeleteConfig.from(config.configVal("load")));
+
+		assertTrue(failure.getMessage().contains("selectionOrder"));
+	}
+
+	@Test
 	void durationModeRejectsMissingDeadlineAndRequestCountWhileCountModeRemainsCompatible() {
 		final var missingDeadline = standaloneConfig();
 		missingDeadline.val("load-op-delete-duration", true);

@@ -75,11 +75,13 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerConfig.val("run-comment", "worker-node");
 		workerConfig.val("run-port", WORKER_JSON_PORT);
 		workerConfig.val("run-id", 77L);
+		workerConfig.val("run-cluster-id", "spt-run-77");
 		workerConfig.val("server-metrics-expose_fleet", true);
 		entryConfig = TestConfigBuilder.config();
 		entryConfig.val("run-comment", "entry-node");
 		entryConfig.val("run-port", ENTRY_JSON_PORT);
 		entryConfig.val("run-id", 77L);
+		entryConfig.val("run-cluster-id", "spt-run-77");
 		entryConfig.val("run-node", true);
 		entryConfig.val("server-metrics-expose_fleet", true);
 
@@ -182,22 +184,26 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		final JsonNode arrFleet = om.readTree(fetch(ENTRY_FLEET_URL));
 		assertTrue(arrWorker.size() > 0, "Worker /metrics/json should be non-empty");
 		final JsonNode workerObj = arrWorker.get(0);
-		assertEquals(3, workerObj.get("metrics_schema").asInt());
+		assertEquals(4, workerObj.get("metrics_schema").asInt());
 		assertEquals("node", workerObj.get("scope").asText());
 		assertEquals("worker", workerObj.get("role").asText());
 		assertEquals("worker-node", workerObj.get("node_id").asText());
 		assertEquals("77", workerObj.get("run_id").asText());
+		assertEquals("spt-run-77", workerObj.get("cluster_id").asText());
 		assertTrue(workerObj.hasNonNull("sample_ts"));
 		assertEquals(1, arrEntry.size(), "Entry /metrics/json should return a single idle sample when no local contexts exist");
 		assertTrue(arrCluster.size() > 0, "Entry /metrics/cluster/json should contain aggregated metrics");
 		final JsonNode clusterObj = arrCluster.get(0);
-		assertEquals(3, clusterObj.get("metrics_schema").asInt());
+		assertEquals(4, clusterObj.get("metrics_schema").asInt());
 		assertEquals("fleet", clusterObj.get("scope").asText());
 		assertEquals("aggregate", clusterObj.get("role").asText());
 		assertEquals("entry-node", clusterObj.get("node_id").asText());
 		assertEquals("77", clusterObj.get("run_id").asText());
+		assertEquals(workerObj.get("cluster_id").asText(), clusterObj.get("cluster_id").asText());
 		assertEquals(1, clusterObj.get("nodes_count").asInt());
 		assertEquals(1, clusterObj.get("nodes_present").size());
+		assertEquals(0, clusterObj.get("contributors_present").size(),
+						"legacy contexts must not fabricate contributor identity evidence");
 		assertFalse(clusterObj.get("partial").asBoolean());
 		assertTrue(clusterObj.hasNonNull("sample_ts"));
 		assertTrue(arrFleet.size() > 0, "Legacy /metrics/fleet/json should remain available");

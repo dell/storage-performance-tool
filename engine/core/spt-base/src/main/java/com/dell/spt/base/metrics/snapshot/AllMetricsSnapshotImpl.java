@@ -12,6 +12,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	private final RateMetricSnapshot corruptSnapshot;
 	private final RateMetricSnapshot successSnapshot;
 	private final RateMetricSnapshot bytesSnapshot;
+	private final DeleteMetricsSnapshot deleteMetrics;
 	protected final long elapsedTimeMillis;
 
 	public AllMetricsSnapshotImpl(
@@ -65,6 +66,44 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final RateMetricSnapshot successSnapshot,
 					final RateMetricSnapshot bytesSnapshot,
 					final long elapsedTimeMillis) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis,
+						null);
+	}
+
+	/**
+	 * Creates a complete snapshot including optional detailed DELETE measurements.
+	 *
+	 * @param durSnapshot request-duration distribution
+	 * @param latSnapshot request-latency distribution
+	 * @param ttfbSnapshot time-to-first-byte distribution
+	 * @param actualConcurrencySnapshot observed concurrency
+	 * @param failsSnapshot failed-operation rate
+	 * @param corruptSnapshot corrupt-operation rate
+	 * @param successSnapshot successful-operation rate
+	 * @param bytesSnapshot transferred-byte rate
+	 * @param elapsedTimeMillis elapsed step time in milliseconds
+	 * @param deleteMetrics optional detailed DELETE metrics
+	 */
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics) {
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
 		this.ttfbSnapshot = ttfbSnapshot;
@@ -74,6 +113,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 		this.successSnapshot = successSnapshot;
 		this.bytesSnapshot = bytesSnapshot;
 		this.elapsedTimeMillis = elapsedTimeMillis;
+		this.deleteMetrics = deleteMetrics;
 	}
 
 	@Override
@@ -114,6 +154,11 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	@Override
 	public RateMetricSnapshot corruptSnapshot() {
 		return corruptSnapshot;
+	}
+
+	@Override
+	public DeleteMetricsSnapshot deleteMetrics() {
+		return deleteMetrics;
 	}
 
 	@Override

@@ -35,6 +35,7 @@ import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
@@ -128,6 +129,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private volatile boolean standaloneDeleteStopCoordinated;
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
+	private volatile boolean failureBudgetMetricsOutputDeferred;
 
 	static int activeFailureBudgetSnapshotFlightCount() {
 		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
@@ -222,6 +224,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			standaloneDeleteStopCoordinated = false;
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
+			failureBudgetMetricsOutputDeferred = false;
 			durationStopFailure = null;
 			durationAdmissionBarrierSatisfied = false;
 			durationCleanupRetryPending = false;
@@ -252,6 +255,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		final int activeRemoteCount = (int) countLimit - 1;
 		return List.copyOf(configuredRemoteNodeAddrs.subList(0, activeRemoteCount));
+	}
+
+	static List<String> distributedContributorIds(
+					final Config config, final List<String> configuredRemoteNodeAddrs) {
+		final List<String> participatingRemotes = participatingRemoteNodeAddrs(
+						config, configuredRemoteNodeAddrs);
+		final List<String> contributors = new ArrayList<>(1 + participatingRemotes.size());
+		contributors.add(MetricsConstants.FLEET_LOCAL_CONTRIBUTOR_ID);
+		contributors.addAll(participatingRemotes);
+		return List.copyOf(contributors);
 	}
 
 	private static void initFileManagers(final List<String> nodeAddrs, final List<FileManager> fileMgrsDst) {
@@ -739,6 +752,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.snapshotsSupplier(() -> metricsSnapshotsByIndex(originIndex))
 						.quantileValues(quantiles(metricsConfig))
 						.nodeAddrs(remoteNodeAddrs(config))
+						.contributorIds(distributedContributorIds(config, remoteNodeAddrs(config)))
+						.deleteDetailsExpected(standaloneDeleteEnabled())
 						.comment(config.stringVal("run-comment"))
 						.runId(runId())
 						.opCountLimit(opCountLimit)
@@ -1106,6 +1121,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		} catch (final Throwable failure) {
 			throwUncheckedIfInterrupted(failure);
+			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
 			recordFailureBudgetFailure(
 							terminalFailure(
 											IntegrityTerminalException.Category.EXECUTION,
@@ -1357,6 +1373,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			terminalDecision = evaluateFailureBudget(true);
 		} catch (final Throwable failure) {
 			throwUncheckedIfInterrupted(failure);
+			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
 			failureBudgetTerminalFailure = appendTerminalFailure(
 							appendExistingFailure(failureBudgetFailure, durationValidityFailure),
 							IntegrityTerminalException.Category.EXECUTION,
@@ -1365,6 +1382,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			failureBudgetFinalized = true;
 			return failureBudgetTerminalFailure;
 		}
+		publishFailureBudgetOutcome(
+						durationValidityFailure != null || failureBudgetFailure != null
+										? ObjectFailureBudgetOutcome.FAILED
+										: terminalDecision.outcome());
 		if (durationValidityFailure != null
 						&& failureBudgetFailure == null
 						&& terminalDecision.outcome() != ObjectFailureBudgetOutcome.FAILED) {
@@ -1415,6 +1436,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.info("{}: Standalone DELETE completed cleanly: {}", loadStepId(), summary);
 		}
 		return null;
+	}
+
+	private void publishFailureBudgetOutcome(final ObjectFailureBudgetOutcome outcome) {
+		final String published = switch (outcome) {
+		case RUNNING -> MetricsConstants.DELETE_FAILURE_OUTCOME_RUNNING;
+		case COMPLETED_CLEANLY -> MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY;
+		case COMPLETED_WITHIN_BUDGET -> MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_WITHIN_BUDGET;
+		case FAILED -> MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED;
+		};
+		metricsContexts.forEach(context -> context.metadata().put(
+						MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME, published));
+		metricsMgr.updateTerminalDeleteFailureOutcome(loadStepId(), published);
 	}
 
 	private IntegrityTerminalException failureBudgetException(
@@ -1677,6 +1710,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	protected final void doStop() {
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+				publishFailedOutcomeBeforeIncompleteDurationMetricsOutput();
 				super.doStop();
 				return;
 			}
@@ -1731,7 +1765,36 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		});
 		itemTimingMetricsOutputFileAggregators.clear();
+		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
+			failureBudgetMetricsOutputDeferred = true;
+			return;
+		}
+		finalizeFailureBudgetBeforeMetricsOutput();
 		super.doStop();
+	}
+
+	private boolean deferMetricsOutputForActiveFailureBudgetProbe() {
+		if (failureBudgetController == null) {
+			return false;
+		}
+		synchronized (this) {
+			return failureBudgetSnapshotCollector != null
+							&& failureBudgetSnapshotCollector.hasActiveProbe();
+		}
+	}
+
+	private void publishFailedOutcomeBeforeIncompleteDurationMetricsOutput() {
+		if (failureBudgetController != null) {
+			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
+		}
+	}
+
+	private void finalizeFailureBudgetBeforeMetricsOutput() {
+		if (failureBudgetController == null) {
+			return;
+		}
+		stopFailureBudgetMonitor();
+		finalizeFailureBudget();
 	}
 
 	@Override
@@ -1790,6 +1853,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		} finally {
 			closeFailureBudgetSnapshotCollector();
 		}
+		emitDeferredFailureBudgetMetricsOutput();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			IntegrityTerminalException terminalCause = appendExistingFailure(
 							durationStopFailure, budgetTerminal);
@@ -2007,6 +2071,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			closeRetainedDurationPhases();
 		}
+	}
+
+	private void emitDeferredFailureBudgetMetricsOutput() {
+		if (!failureBudgetMetricsOutputDeferred) {
+			return;
+		}
+		failureBudgetMetricsOutputDeferred = false;
+		super.doStop();
 	}
 
 	private static void rethrowCloseFailure(final Throwable cause) throws IOException {

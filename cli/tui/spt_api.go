@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
@@ -130,30 +131,33 @@ type TestStatus struct {
 
 // JSONMetricsStep represents a single load step's metrics from the JSON endpoint
 type JSONMetricsStep struct {
-	MetricsSchema      int                    `json:"metrics_schema"`
-	Scope              string                 `json:"scope"`
-	Role               string                 `json:"role"`
-	ClusterID          string                 `json:"cluster_id,omitempty"`
-	NodeID             string                 `json:"node_id"`
-	RunID              string                 `json:"run_id"`
-	SampleTimestampRaw string                 `json:"sample_ts"`
-	StepID             string                 `json:"step_id"`
-	OpType             string                 `json:"op_type"`
-	Timestamp          int64                  `json:"timestamp"`
-	ElapsedTimeSeconds float64                `json:"elapsed_time_seconds"`
-	TestState          int                    `json:"test_state"`
-	CompletionPercent  int                    `json:"completion_percent"`
-	OverallCompletion  int                    `json:"overall_completion_percent"`
-	Unbounded          bool                   `json:"unbounded"`
-	OverallUnbounded   bool                   `json:"overall_unbounded"`
-	Operations         JSONMetricsOperations  `json:"operations"`
-	Bandwidth          JSONMetricsBandwidth   `json:"bandwidth"`
-	Timing             JSONMetricsTiming      `json:"timing"`
-	Concurrency        JSONMetricsConcurrency `json:"concurrency"`
-	Limit              *JSONMetricsLimit      `json:"limit,omitempty"`
-	NodesCount         int                    `json:"nodes_count,omitempty"`
-	NodesPresent       []string               `json:"nodes_present,omitempty"`
-	Partial            bool                   `json:"partial,omitempty"`
+	MetricsSchema        int                    `json:"metrics_schema"`
+	Scope                string                 `json:"scope"`
+	Role                 string                 `json:"role"`
+	ClusterID            string                 `json:"cluster_id,omitempty"`
+	NodeID               string                 `json:"node_id"`
+	RunID                string                 `json:"run_id"`
+	SampleTimestampRaw   string                 `json:"sample_ts"`
+	StepID               string                 `json:"step_id"`
+	OpType               string                 `json:"op_type"`
+	Timestamp            int64                  `json:"timestamp"`
+	ElapsedTimeSeconds   float64                `json:"elapsed_time_seconds"`
+	TestState            int                    `json:"test_state"`
+	CompletionPercent    int                    `json:"completion_percent"`
+	OverallCompletion    int                    `json:"overall_completion_percent"`
+	Unbounded            bool                   `json:"unbounded"`
+	OverallUnbounded     bool                   `json:"overall_unbounded"`
+	Operations           JSONMetricsOperations  `json:"operations"`
+	Bandwidth            JSONMetricsBandwidth   `json:"bandwidth"`
+	Timing               JSONMetricsTiming      `json:"timing"`
+	Concurrency          JSONMetricsConcurrency `json:"concurrency"`
+	Limit                *JSONMetricsLimit      `json:"limit,omitempty"`
+	NodesCount           int                    `json:"nodes_count,omitempty"`
+	NodesPresent         []string               `json:"nodes_present,omitempty"`
+	ContributorsPresent  []string               `json:"contributors_present,omitempty"`
+	Partial              bool                   `json:"partial,omitempty"`
+	DeleteDetailExpected bool                   `json:"delete_detail_expected,omitempty"`
+	Delete               *DeleteMetrics         `json:"delete,omitempty"`
 }
 
 // JSONMetricsOperations contains operation-related metrics
@@ -180,18 +184,8 @@ type JSONMetricsTiming struct {
 	TTFB           *JSONTimingStat `json:"ttfb,omitempty"`
 }
 
-// JSONTimingStat contains schema 3 timing distribution fields.
-type JSONTimingStat struct {
-	Count         int64   `json:"count"`
-	MeanUs        float64 `json:"mean_us"`
-	MinUs         int64   `json:"min_us"`
-	P50Us         int64   `json:"p50_us"`
-	P90Us         int64   `json:"p90_us"`
-	P99Us         int64   `json:"p99_us"`
-	P999Us        int64   `json:"p999_us"`
-	MaxUs         int64   `json:"max_us"`
-	OverflowCount int64   `json:"overflow_count"`
-}
+// JSONTimingStat contains schema 3+ timing distribution fields.
+type JSONTimingStat = deletemetrics.TimingStat
 
 // JSONMetricsConcurrency contains concurrency-related metrics
 type JSONMetricsConcurrency struct {
@@ -816,13 +810,22 @@ func (c *SptAPIClient) GetJSONMetrics() (string, error) {
 	return c.getJSONMetrics(false)
 }
 
+// GetFleetJSONMetrics fetches the engine's authoritative merged histograms.
+func (c *SptAPIClient) GetFleetJSONMetrics() (string, error) {
+	return c.getJSONMetricsAt(constants.SptFleetMetricsEndpoint, false)
+}
+
 // GetJSONMetricsVerbose fetches the metrics payload with verbose diagnostics enabled.
 func (c *SptAPIClient) GetJSONMetricsVerbose() (string, error) {
 	return c.getJSONMetrics(true)
 }
 
 func (c *SptAPIClient) getJSONMetrics(verbose bool) (string, error) {
-	url := c.baseURL + constants.SptMetricsEndpoint
+	return c.getJSONMetricsAt(constants.SptMetricsEndpoint, verbose)
+}
+
+func (c *SptAPIClient) getJSONMetricsAt(endpoint string, verbose bool) (string, error) {
+	url := c.baseURL + endpoint
 	if verbose {
 		url += "?verbose=1"
 	}
@@ -855,6 +858,15 @@ func (c *SptAPIClient) getJSONMetrics(verbose bool) (string, error) {
 // same step_id; all valid entries are returned. The slice is sorted by timestamp
 // descending so callers that only need a single metric can use [0].
 func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, error) {
+	return c.parseJSONMetricsScope(data, "node")
+}
+
+// ParseFleetJSONMetrics parses authoritative fleet-scoped aggregate samples.
+func (c *SptAPIClient) ParseFleetJSONMetrics(data string) ([]*PerformanceMetric, error) {
+	return c.parseJSONMetricsScope(data, "fleet")
+}
+
+func (c *SptAPIClient) parseJSONMetricsScope(data, expectedScope string) ([]*PerformanceMetric, error) {
 	var steps []JSONMetricsStep
 
 	if err := json.Unmarshal([]byte(data), &steps); err != nil {
@@ -889,11 +901,15 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 		}
 
 		scope := strings.ToLower(step.Scope)
-		if scope != "node" {
+		if scope != expectedScope {
 			continue
 		}
 		if strings.TrimSpace(step.Role) == "" {
 			lastErr = fmt.Errorf("%w: metrics role missing", ErrMetricsIncompatible)
+			continue
+		}
+		if expectedScope == "fleet" && !strings.EqualFold(step.Role, aggregateLabel) {
+			lastErr = fmt.Errorf("%w: fleet metrics role=%q is not aggregate", ErrMetricsIncompatible, step.Role)
 			continue
 		}
 		if strings.TrimSpace(step.SampleTimestampRaw) == "" {
@@ -919,7 +935,7 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 		if lastErr != nil {
 			return nil, lastErr
 		}
-		return nil, fmt.Errorf("%w: no compatible node metrics", ErrMetricsIncompatible)
+		return nil, fmt.Errorf("%w: no compatible %s metrics", ErrMetricsIncompatible, expectedScope)
 	}
 
 	// Sort by timestamp descending, break ties by sample timestamp descending.
@@ -939,8 +955,10 @@ func (c *SptAPIClient) ParseJSONMetrics(data string) ([]*PerformanceMetric, erro
 
 // stepToMetric converts a validated JSONMetricsStep into a PerformanceMetric.
 func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time) *PerformanceMetric {
-	latencyUs := displayTimingUs(step.MetricsSchema, step.Timing.LatencyMeanUs, step.Timing.Latency)
-	durationUs := displayTimingUs(step.MetricsSchema, step.Timing.DurationMeanUs, step.Timing.Duration)
+	latencyUs, hasLatency := displayTimingUs(
+		step.MetricsSchema, step.Timing.LatencyMeanUs, step.Timing.Latency)
+	durationUs, hasDuration := displayTimingUs(
+		step.MetricsSchema, step.Timing.DurationMeanUs, step.Timing.Duration)
 	hasTTFB := step.Timing.TTFB != nil && step.Timing.TTFB.Count > 0
 	ttfbUs := float64(0)
 	if hasTTFB {
@@ -951,6 +969,7 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 	if hasCorruptCount {
 		corruptCount = *step.Operations.CorruptCount
 	}
+	partial := deleteMetricPartial(step, scope)
 	metric := &PerformanceMetric{
 		Timestamp:                time.UnixMilli(step.Timestamp),
 		SampleTimestamp:          sampleTimestamp,
@@ -969,6 +988,8 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		MiBPerSec:                int64(step.Bandwidth.BytesRateLast / float64(constants.BytesPerMiB)),
 		MeanLatency:              int64(math.Round(latencyUs)), // Schema 3 prefers p50.
 		MeanDuration:             int64(math.Round(durationUs)),
+		HasLatency:               hasLatency,
+		HasDuration:              hasDuration,
 		MeanTTFB:                 int64(math.Round(ttfbUs)),
 		HasTTFB:                  hasTTFB,
 		CompletionPercent:        float64(step.CompletionPercent),
@@ -983,7 +1004,10 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 		RunID:                    step.RunID,
 		NodesCount:               step.NodesCount,
 		NodesPresent:             append([]string(nil), step.NodesPresent...),
-		Partial:                  step.Partial,
+		ContributorsPresent:      append([]string(nil), step.ContributorsPresent...),
+		Partial:                  partial,
+		DeleteDetailExpected:     step.DeleteDetailExpected,
+		Delete:                   step.Delete,
 	}
 
 	if step.Limit != nil {
@@ -996,11 +1020,31 @@ func stepToMetric(step *JSONMetricsStep, scope string, sampleTimestamp time.Time
 	return metric
 }
 
-func displayTimingUs(schema int, legacyMeanUs float64, stat *JSONTimingStat) float64 {
-	if schema >= 3 && stat != nil && stat.P50Us > 0 {
-		return float64(stat.P50Us)
+func deleteMetricPartial(step *JSONMetricsStep, scope string) bool {
+	if step.MetricsSchema < deletemetrics.SchemaVersion || !step.DeleteDetailExpected ||
+		!strings.EqualFold(step.OpType, "DELETE") {
+		return step.Partial
 	}
-	return legacyMeanUs
+	if step.Delete == nil {
+		return true
+	}
+	if step.TestState < constants.TestStateCompleted {
+		return step.Partial
+	}
+	if strings.EqualFold(scope, "fleet") {
+		return step.Partial || deletemetrics.ValidateTerminal(step.Delete) != nil
+	}
+	return step.Partial || deletemetrics.ValidateTerminalContributor(step.Delete) != nil
+}
+
+func displayTimingUs(schema int, legacyMeanUs float64, stat *JSONTimingStat) (float64, bool) {
+	if schema >= 3 && stat != nil {
+		if stat.Count <= 0 {
+			return 0, false
+		}
+		return displayStatTimingUs(stat), true
+	}
+	return legacyMeanUs, legacyMeanUs > 0
 }
 
 func displayStatTimingUs(stat *JSONTimingStat) float64 {

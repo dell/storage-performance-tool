@@ -1,5 +1,13 @@
 package com.dell.spt.base.control;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_DURATION_DEFINITION;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_LATENCY_DEFINITION;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_NOT_APPLICABLE;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OBJECT_UNIT;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OUTCOME_ACCEPTED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_VERIFICATION_NOTICE;
+
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.ShardSnapshot;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.Snapshot;
@@ -9,6 +17,7 @@ import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -25,7 +34,7 @@ import com.dell.spt.base.logging.Loggers;
 
 final class MetricsJsonResponder {
 
-	private static final int METRICS_SCHEMA_VERSION = 3;
+	private static final int METRICS_SCHEMA_VERSION = 4;
 
 	private final MetricsManager metricsManager;
 	private final ObjectMapper objectMapper = new ObjectMapper();
@@ -153,6 +162,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addDeleteDetailExpectation(jsonObj, ctx.metadata());
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -223,6 +233,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addDeleteDetailExpectation(jsonObj, ctx.metadata());
 		addListShardMetrics(jsonObj, ctx.metadata());
 
 		jsonObj.put(
@@ -232,13 +243,18 @@ final class MetricsJsonResponder {
 
 		jsonObj.put("nodes_count", ctx.nodeCount());
 		final ArrayNode nodesPresent = objectMapper.createArrayNode();
-		final List<String> addrs = ctx.nodeAddrs();
+		final List<String> addrs = ctx.nodesPresent();
 		if (addrs != null) {
 			addrs.forEach(nodesPresent::add);
 		}
 		jsonObj.set("nodes_present", nodesPresent);
-		final boolean partial = addrs != null && ctx.nodeCount() > addrs.size();
-		jsonObj.put("partial", partial);
+		final ArrayNode contributorsPresent = objectMapper.createArrayNode();
+		final List<String> contributors = ctx.contributorsPresent();
+		if (contributors != null) {
+			contributors.forEach(contributorsPresent::add);
+		}
+		jsonObj.set(MetricsConstants.METRIC_NAME_CONTRIBUTORS_PRESENT, contributorsPresent);
+		jsonObj.put("partial", ctx.partial());
 
 		if (verbose && cachedProgress) {
 			jsonObj.put("diag_cached_progress", true);
@@ -311,6 +327,159 @@ final class MetricsJsonResponder {
 		concurrency.put("current", snapshot.concurrencySnapshot().last());
 		concurrency.put("mean", snapshot.concurrencySnapshot().mean());
 		jsonObj.set("concurrency", concurrency);
+		addDeleteMetrics(jsonObj, snapshot.deleteMetrics(), snapshot.latencySnapshot(), snapshot.durationSnapshot());
+	}
+
+	private static void addDeleteDetailExpectation(
+					final ObjectNode jsonObj, final java.util.Map metadata) {
+		jsonObj.put(
+						MetricsConstants.METRIC_NAME_DELETE_DETAIL_EXPECTED,
+						metadata != null && metadata.containsKey(MetricsConstants.METADATA_DELETE_METRICS));
+	}
+
+	private void addDeleteMetrics(
+					final ObjectNode jsonObj,
+					final DeleteMetricsSnapshot snapshot,
+					final TimingMetricSnapshot latencySnapshot,
+					final TimingMetricSnapshot durationSnapshot) {
+		if (snapshot == null) {
+			return;
+		}
+		final ObjectNode delete = objectMapper.createObjectNode();
+		final ObjectNode units = objectMapper.createObjectNode();
+		units.put("requests", DELETE_REQUEST_UNIT);
+		units.put("objects", DELETE_OBJECT_UNIT);
+		units.put("batches", DELETE_REQUEST_UNIT);
+		delete.set("units", units);
+
+		final ObjectNode requests = objectMapper.createObjectNode();
+		requests.put("attempted", snapshot.requestAttempted());
+		requests.put("full_success", snapshot.requestFullSuccess());
+		requests.put("partial", snapshot.requestPartial());
+		requests.put("failed", snapshot.requestFailed());
+		requests.put("unresolved", snapshot.requestUnresolved());
+		requests.put("per_second", snapshot.requestsPerSecond());
+		delete.set("requests", requests);
+
+		final ObjectNode objects = objectMapper.createObjectNode();
+		objects.put("selected", snapshot.objectSelected());
+		objects.put("attempted", snapshot.objectAttempted());
+		objects.put("accepted", snapshot.objectAccepted());
+		objects.put("failed", snapshot.objectFailed());
+		objects.put("unattempted", snapshot.objectUnattempted());
+		objects.put("unresolved", snapshot.objectUnresolved());
+		objects.put("per_second", snapshot.objectsPerSecond());
+		delete.set("objects", objects);
+
+		final ObjectNode batches = objectMapper.createObjectNode();
+		batches.put("configured_size", snapshot.configuredBatchSize());
+		batches.put("actual_request_count", snapshot.actualRequestCount());
+		batches.put("actual_object_count", snapshot.actualObjectCount());
+		batches.put("mean_objects_per_request", snapshot.actualRequestCount() == 0
+						? 0.0
+						: (double) snapshot.actualObjectCount() / snapshot.actualRequestCount());
+		batches.put("full_batch_count", snapshot.fullBatchCount());
+		batches.put("partial_batch_count", snapshot.partialBatchCount());
+		batches.put("full_batch_percent", snapshot.actualRequestCount() == 0
+						? 0.0
+						: snapshot.fullBatchCount() * 100.0 / snapshot.actualRequestCount());
+		delete.set("batches", batches);
+
+		final long terminalRequests = snapshot.requestFullSuccess()
+						+ snapshot.requestPartial() + snapshot.requestFailed() + snapshot.requestUnresolved();
+		final long accountedObjects = snapshot.objectAccepted() + snapshot.objectFailed()
+						+ snapshot.objectUnattempted() + snapshot.objectUnresolved();
+		final ObjectNode completion = objectMapper.createObjectNode();
+		completion.put("request_percent", snapshot.requestAttempted() == 0
+						? 0.0
+						: terminalRequests * 100.0 / snapshot.requestAttempted());
+		completion.put("object_percent", snapshot.objectSelected() == 0
+						? 0.0
+						: accountedObjects * 100.0 / snapshot.objectSelected());
+		completion.put("terminal_reconciled", snapshot.reconciled());
+		delete.set("completion", completion);
+
+		final ObjectNode versions = objectMapper.createObjectNode();
+		versions.put("current_key", snapshot.currentKeyCount());
+		versions.put("exact_version", snapshot.exactVersionCount());
+		delete.set("versions", versions);
+
+		final ArrayNode bucketsArray = objectMapper.createArrayNode();
+		for (final DeleteMetricsSnapshot.Bucket bucket : snapshot.buckets()) {
+			final ObjectNode bucketNode = objectMapper.createObjectNode();
+			bucketNode.put("bucket", bucket.bucket());
+			bucketNode.put("selected", bucket.selected());
+			bucketNode.put("attempted", bucket.attempted());
+			bucketNode.put("accepted", bucket.accepted());
+			bucketNode.put("failed", bucket.failed());
+			bucketsArray.add(bucketNode);
+		}
+		delete.set("buckets", bucketsArray);
+
+		final ObjectNode phases = objectMapper.createObjectNode();
+		putOptionalSeconds(phases, "seed", snapshot.seedNanos());
+		putOptionalSeconds(phases, "discovery", snapshot.discoveryNanos());
+		putOptionalSeconds(phases, "pre_validation", snapshot.preValidationNanos());
+		putOptionalSeconds(phases, "scheduled_delete_seconds", snapshot.scheduledDeleteNanos());
+		putOptionalSeconds(phases, "drain_seconds", snapshot.drainNanos());
+		putOptionalSeconds(phases, "post_verification", snapshot.postVerificationNanos());
+		putOptionalSeconds(phases, "cleanup", snapshot.cleanupNanos());
+		putOptionalSeconds(phases, "total_wall_seconds", snapshot.totalWallNanos());
+		delete.set("phases", phases);
+
+		final ObjectNode identity = objectMapper.createObjectNode();
+		identity.put("mode", snapshot.mode());
+		identity.put("configured_batch_size", snapshot.configuredBatchSize());
+		identity.put("selection_order", snapshot.selectionOrder());
+		delete.set("identity", identity);
+
+		final ObjectNode failurePolicy = objectMapper.createObjectNode();
+		failurePolicy.put("mode", snapshot.failurePolicyMode());
+		failurePolicy.put("outcome", snapshot.failureOutcome());
+		failurePolicy.put("max_failed_objects", snapshot.maxFailedObjects());
+		failurePolicy.put("max_failure_percent", snapshot.maxFailurePercent());
+		failurePolicy.put("grace_seconds", snapshot.graceSeconds());
+		failurePolicy.put("operational_failed_objects", snapshot.operationalFailedObjects());
+		failurePolicy.put("excluded_failed_objects", snapshot.excludedFailedObjects());
+		failurePolicy.put("observed_failure_percent", snapshot.observedFailurePercent());
+		delete.set("failure_policy", failurePolicy);
+
+		final ObjectNode timing = objectMapper.createObjectNode();
+		timing.put("latency_definition", DELETE_LATENCY_DEFINITION);
+		timing.put("duration_definition", DELETE_DURATION_DEFINITION);
+		timing.set(
+						"latency",
+						timingObject(latencySnapshot, latencySnapshot == null ? 0.0 : latencySnapshot.mean()));
+		timing.set(
+						"duration",
+						timingObject(durationSnapshot, durationSnapshot == null ? 0.0 : durationSnapshot.mean()));
+		timing.putNull("object_latency");
+		delete.set("timing", timing);
+
+		final ObjectNode performance = objectMapper.createObjectNode();
+		performance.put("object_size", DELETE_NOT_APPLICABLE);
+		performance.put("data_moved", DELETE_NOT_APPLICABLE);
+		performance.put("bandwidth", DELETE_NOT_APPLICABLE);
+		performance.put("ttfb", DELETE_NOT_APPLICABLE);
+		delete.set("performance", performance);
+		delete.put("outcome_terminology", DELETE_OUTCOME_ACCEPTED);
+
+		final ObjectNode verification = objectMapper.createObjectNode();
+		verification.put("enabled", false);
+		verification.put("removal_confirmed", false);
+		verification.put("notice", DELETE_VERIFICATION_NOTICE);
+		delete.set("verification", verification);
+		delete.put("terminal_reconciled", snapshot.reconciled());
+		jsonObj.set("delete", delete);
+	}
+
+	private static void putOptionalSeconds(
+					final ObjectNode node, final String field, final long nanos) {
+		if (nanos < 0) {
+			node.putNull(field);
+		} else {
+			node.put(field, nanos / 1_000_000_000.0);
+		}
 	}
 
 	private static long corruptCount(final AllMetricsSnapshot snapshot) {
@@ -533,6 +702,10 @@ final class MetricsJsonResponder {
 			concurrency.put("current", entry.concurrencyLast);
 			concurrency.put("mean", entry.concurrencyMean);
 			jsonObj.set("concurrency", concurrency);
+			jsonObj.put(
+							MetricsConstants.METRIC_NAME_DELETE_DETAIL_EXPECTED,
+							entry.deleteDetailsExpected);
+			addDeleteMetrics(jsonObj, entry.deleteMetrics, entry.latencySnapshot, entry.durationSnapshot);
 
 			if (verbose) {
 				jsonObj.put("diag_cached_progress", true);
@@ -618,6 +791,10 @@ final class MetricsJsonResponder {
 			concurrency.put("current", entry.concurrencyLast);
 			concurrency.put("mean", entry.concurrencyMean);
 			jsonObj.set("concurrency", concurrency);
+			jsonObj.put(
+							MetricsConstants.METRIC_NAME_DELETE_DETAIL_EXPECTED,
+							entry.deleteDetailsExpected);
+			addDeleteMetrics(jsonObj, entry.deleteMetrics, entry.latencySnapshot, entry.durationSnapshot);
 
 			jsonObj.put("overall_completion_percent", completionPercent);
 			jsonObj.put("overall_unbounded", unbounded);
@@ -628,6 +805,11 @@ final class MetricsJsonResponder {
 				entry.nodesPresent.forEach(nodesPresent::add);
 			}
 			jsonObj.set("nodes_present", nodesPresent);
+			final ArrayNode contributorsPresent = objectMapper.createArrayNode();
+			if (entry.contributorsPresent != null) {
+				entry.contributorsPresent.forEach(contributorsPresent::add);
+			}
+			jsonObj.set(MetricsConstants.METRIC_NAME_CONTRIBUTORS_PRESENT, contributorsPresent);
 			final boolean partial = entry.partial && entry.nodeCount > 0;
 			jsonObj.put("partial", partial);
 			if (verbose) {

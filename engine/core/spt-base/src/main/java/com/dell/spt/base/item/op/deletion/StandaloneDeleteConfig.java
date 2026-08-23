@@ -1,5 +1,7 @@
 package com.dell.spt.base.item.op.deletion;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
+
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TimeUtil;
 import com.dell.spt.base.item.ItemType;
@@ -10,6 +12,9 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import java.util.NoSuchElementException;
+import java.util.Collections;
+import java.util.Map;
+import java.util.TreeMap;
 
 /** Parsed fail-closed engine settings for the standalone DELETE request spine. */
 public final class StandaloneDeleteConfig {
@@ -17,28 +22,62 @@ public final class StandaloneDeleteConfig {
 	private static final String STANDALONE_KEY = "standalone";
 	private static final String BATCH_SIZE_KEY = "batchSize";
 	private static final String DURATION_KEY = "duration";
+	private static final String SELECTION_ORDER_KEY = "selectionOrder";
+	private static final String SELECTED_KEY = "selected";
+	private static final String SELECTED_CURRENT_KEY = "selectedCurrentKey";
+	private static final String SELECTED_EXACT_VERSION_KEY = "selectedExactVersion";
+	private static final String SELECTED_BUCKETS_KEY = "selectedBuckets";
+	private static final String SEED_MILLIS_KEY = "seedMillis";
+	private static final String DISCOVERY_MILLIS_KEY = "discoveryMillis";
+	private static final String WORKFLOW_STARTED_EPOCH_NANOS_KEY = "workflowStartedEpochNanos";
 	private static final String OUTPUT_FILE_KEY = "output-file";
 
 	private final boolean enabled;
 	private final int batchSize;
 	private final boolean durationMode;
+	private final String selectionOrder;
+	private final long selected;
+	private final long selectedCurrentKey;
+	private final long selectedExactVersion;
+	private final Map<String, Long> selectedBuckets;
+	private final long seedMillis;
+	private final long discoveryMillis;
+	private final long workflowStartedEpochNanos;
 
 	private StandaloneDeleteConfig(
-					final boolean enabled, final int batchSize, final boolean durationMode) {
+					final boolean enabled,
+					final int batchSize,
+					final boolean durationMode,
+					final String selectionOrder,
+					final long selected,
+					final long selectedCurrentKey,
+					final long selectedExactVersion,
+					final Map<String, Long> selectedBuckets,
+					final long seedMillis,
+					final long discoveryMillis,
+					final long workflowStartedEpochNanos) {
 		this.enabled = enabled;
 		this.batchSize = batchSize;
 		this.durationMode = durationMode;
+		this.selectionOrder = selectionOrder;
+		this.selected = selected;
+		this.selectedCurrentKey = selectedCurrentKey;
+		this.selectedExactVersion = selectedExactVersion;
+		this.selectedBuckets = Collections.unmodifiableMap(new TreeMap<>(selectedBuckets));
+		this.seedMillis = seedMillis;
+		this.discoveryMillis = discoveryMillis;
+		this.workflowStartedEpochNanos = workflowStartedEpochNanos;
 	}
 
 	/** Parses the optional standalone DELETE node, preserving disabled compatibility if absent. */
 	public static StandaloneDeleteConfig from(final Config loadConfig) {
 		if (loadConfig == null) {
-			return new StandaloneDeleteConfig(false, 0, false);
+			return disabled();
 		}
 		try {
 			final var deleteConfig = loadConfig.configVal(DELETE_CONFIG_PATH);
 			if (deleteConfig == null || !deleteConfig.boolVal(STANDALONE_KEY)) {
-				return new StandaloneDeleteConfig(false, 0, false);
+				return disabled();
 			}
 			boolean durationMode = false;
 			try {
@@ -65,11 +104,80 @@ public final class StandaloneDeleteConfig {
 												+ "load-op-delete-duration=true");
 			}
 			return new StandaloneDeleteConfig(
-							true, deleteConfig.intVal(BATCH_SIZE_KEY), durationMode);
+							true,
+							deleteConfig.intVal(BATCH_SIZE_KEY),
+							durationMode,
+							canonicalSelectionOrder(deleteConfig),
+							optionalLong(deleteConfig, SELECTED_KEY, -1),
+							optionalLong(deleteConfig, SELECTED_CURRENT_KEY, -1),
+							optionalLong(deleteConfig, SELECTED_EXACT_VERSION_KEY, -1),
+							selectedBuckets(deleteConfig),
+							optionalLong(deleteConfig, SEED_MILLIS_KEY, -1),
+							optionalLong(deleteConfig, DISCOVERY_MILLIS_KEY, -1),
+							optionalLong(deleteConfig, WORKFLOW_STARTED_EPOCH_NANOS_KEY, -1));
 		} catch (final NoSuchElementException e) {
 			// Compatibility with extension-supplied schemas created before this optional node.
-			return new StandaloneDeleteConfig(false, 0, false);
+			return disabled();
 		}
+	}
+
+	private static StandaloneDeleteConfig disabled() {
+		return new StandaloneDeleteConfig(
+						false, 0, false, DELETE_SELECTION_ORDER_CANONICAL,
+						-1, -1, -1, Map.of(), -1, -1, -1);
+	}
+
+	private static String optionalString(final Config config, final String key, final String fallback) {
+		try {
+			final String value = config.stringVal(key);
+			return value == null || value.isBlank() ? fallback : value;
+		} catch (final RuntimeException ignored) {
+			return fallback;
+		}
+	}
+
+	private static String canonicalSelectionOrder(final Config config) {
+		final String selectionOrder = optionalString(
+						config, SELECTION_ORDER_KEY, DELETE_SELECTION_ORDER_CANONICAL);
+		if (!DELETE_SELECTION_ORDER_CANONICAL.equals(selectionOrder)) {
+			throw new IllegalConfigurationException(
+							"load-op-delete-selectionOrder must be " + DELETE_SELECTION_ORDER_CANONICAL);
+		}
+		return selectionOrder;
+	}
+
+	private static long optionalLong(final Config config, final String key, final long fallback) {
+		try {
+			return config.longVal(key);
+		} catch (final RuntimeException ignored) {
+			return fallback;
+		}
+	}
+
+	private static Map<String, Long> selectedBuckets(final Config config) {
+		final var result = new TreeMap<String, Long>();
+		final java.util.List<?> values;
+		try {
+			values = config.listVal(SELECTED_BUCKETS_KEY);
+		} catch (final RuntimeException ignored) {
+			return result;
+		}
+		if (values == null) {
+			return result;
+		}
+		for (final Object raw : values) {
+			final String value = String.valueOf(raw);
+			final int separator = value.lastIndexOf('=');
+			if (separator <= 0 || separator == value.length() - 1) {
+				throw new IllegalConfigurationException("Invalid DELETE selected bucket metric: " + value);
+			}
+			try {
+				result.put(value.substring(0, separator), Long.parseLong(value.substring(separator + 1)));
+			} catch (final NumberFormatException failure) {
+				throw new IllegalConfigurationException("Invalid DELETE selected bucket metric: " + value, failure);
+			}
+		}
+		return result;
 	}
 
 	/** Returns whether the standalone request spine is explicitly enabled. */
@@ -85,6 +193,68 @@ public final class StandaloneDeleteConfig {
 	/** Returns whether natural finite-input completion before the step deadline is invalid. */
 	public boolean durationMode() {
 		return durationMode;
+	}
+
+	/** Returns the canonical target selection order. */
+	public String selectionOrder() {
+		return selectionOrder;
+	}
+
+	/** Returns the selected target count, or {@code -1} when unavailable. */
+	public long selected() {
+		return selected;
+	}
+
+	/** Returns the selected current-key count, or {@code -1} when unavailable. */
+	public long selectedCurrentKey() {
+		return selectedCurrentKey;
+	}
+
+	/** Returns the selected exact-version count, or {@code -1} when unavailable. */
+	public long selectedExactVersion() {
+		return selectedExactVersion;
+	}
+
+	/** Returns immutable selected-target counts keyed by bucket. */
+	public Map<String, Long> selectedBuckets() {
+		return selectedBuckets;
+	}
+
+	/** Returns whether immutable selected/version/bucket identities are internally complete. */
+	public boolean frozenSelectionAvailable() {
+		if (selected < 0 || selectedCurrentKey < 0 || selectedExactVersion < 0) {
+			return false;
+		}
+		try {
+			if (Math.addExact(selectedCurrentKey, selectedExactVersion) != selected) {
+				return false;
+			}
+			long bucketTotal = 0;
+			for (final long count : selectedBuckets.values()) {
+				if (count < 0) {
+					return false;
+				}
+				bucketTotal = Math.addExact(bucketTotal, count);
+			}
+			return bucketTotal == selected;
+		} catch (final ArithmeticException ignored) {
+			return false;
+		}
+	}
+
+	/** Returns measured seed time in milliseconds, or {@code -1} when not applicable. */
+	public long seedMillis() {
+		return seedMillis;
+	}
+
+	/** Returns measured discovery time in milliseconds, or {@code -1} when not applicable. */
+	public long discoveryMillis() {
+		return discoveryMillis;
+	}
+
+	/** Returns the full-workflow monotonic epoch-relative start in nanoseconds, or {@code -1}. */
+	public long workflowStartedEpochNanos() {
+		return workflowStartedEpochNanos;
 	}
 
 	/** Validates operation-type, item-type, recycle, retry, and cardinality settings. */

@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 func TestMonitorStatusRejectsTerminalStateForDifferentOwnedRun(t *testing.T) {
@@ -99,11 +101,12 @@ func TestMonitorStatusCompletesOnlyAfterMatchingOwnedRun(t *testing.T) {
 			orchestrator.apiClient.SetRunID("77")
 			updates := make(chan *TestStatus, 16)
 			outputs := make(chan string, 4)
+			errorMessages := make(chan string, 1)
 			orchestrator.SetCallbacks(
 				func(status *TestStatus) { updates <- status },
 				nil,
 				func(output string) { outputs <- output },
-				nil,
+				func(message string) { errorMessages <- message },
 			)
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -129,13 +132,27 @@ func TestMonitorStatusCompletesOnlyAfterMatchingOwnedRun(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatalf("matching %s status did not complete the session", state)
 			}
-			select {
-			case output := <-outputs:
-				if output != "Test "+state {
-					t.Fatalf("completion output = %q", output)
+			if state == constants.StateFailed {
+				select {
+				case message := <-errorMessages:
+					if !strings.Contains(message, "Test FAILED") {
+						t.Fatalf("failure output = %q", message)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("matching failure produced no error")
 				}
-			case <-time.After(time.Second):
-				t.Fatal("matching completion produced no output")
+				if orchestrator.CompletionError() == nil {
+					t.Fatal("matching failed status did not retain a completion error")
+				}
+			} else {
+				select {
+				case output := <-outputs:
+					if output != "Test "+state {
+						t.Fatalf("completion output = %q", output)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("matching completion produced no output")
+				}
 			}
 			select {
 			case extra := <-outputs:

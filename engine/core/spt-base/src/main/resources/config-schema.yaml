@@ -69,6 +69,14 @@ load:
       standalone: boolean
       batchSize: int
       duration: boolean
+      selectionOrder: string
+      selected: long
+      selectedCurrentKey: long
+      selectedExactVersion: long
+      selectedBuckets: list
+      seedMillis: long
+      discoveryMillis: long
+      workflowStartedEpochNanos: long
     failureBudget:
       mode: string
       maxFailedObjects: long
@@ -118,6 +126,8 @@ output:
     quantiles: list
 run:
   id: long
+  cluster:
+    id: string
   comment: string
   node: boolean
   port: int

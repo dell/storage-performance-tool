@@ -2469,6 +2469,14 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 	if err != nil {
 		t.Fatalf("StartDistributedTest returned error: %v", err)
 	}
+	contributors, err := orchestrator.MetricContributorIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contributors) != 2 || contributors[0] != constants.MetricsLocalContributorID ||
+		contributors[1] != "127.0.0.1:"+constants.RMIRegistryPort {
+		t.Fatalf("runtime metric contributors = %v", contributors)
+	}
 
 	worker := orchestrator.hosts[1]
 	if worker.GetStatus() != HostStatusRunning {

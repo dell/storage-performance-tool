@@ -57,6 +57,38 @@ func TestLiveViewRenderer_Stop(t *testing.T) {
 	renderer.Stop()
 }
 
+func TestLiveViewRendererDeleteTransferColumnsAreNotApplicable(t *testing.T) {
+	renderer := NewLiveViewRenderer(&scenario.ScenarioParams{
+		WorkloadType: scenario.WorkloadTypeDelete,
+		ObjectSize:   "1MiB",
+	})
+	defer renderer.Stop()
+
+	metric := &PerformanceMetric{
+		OpType:       "DELETE",
+		SuccessCount: 100,
+		OpsPerSec:    50,
+		MiBPerSec:    100,
+		Delete: &DeleteMetrics{Performance: DeletePerformanceApplicability{
+			ObjectSize: "not_applicable",
+			DataMoved:  "not_applicable",
+			Bandwidth:  "not_applicable",
+			TTFB:       "not_applicable",
+		}},
+	}
+	collector := NewMetricsCollector()
+	collector.AddMultiNodeSample(&MultiNodeMetricsUpdate{
+		Aggregated: metric,
+		PerNode:    map[string]*PerformanceMetric{"node-a": metric},
+		NodeStatus: map[string]NodeConnectionStatus{"node-a": {IsConnected: true}},
+	})
+
+	table := renderer.formatMultiNodeTable(collector, metric, 120)
+	if strings.Count(table, "N/A") < 4 {
+		t.Fatalf("DELETE table fabricated transfer values: %q", table)
+	}
+}
+
 func TestLiveViewRenderer_RenderEmptyView(t *testing.T) {
 	params := &scenario.ScenarioParams{
 		WorkloadType: "write",

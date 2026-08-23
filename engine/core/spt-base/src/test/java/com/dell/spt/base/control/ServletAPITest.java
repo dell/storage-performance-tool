@@ -99,7 +99,7 @@ public class ServletAPITest {
 		assertTrue(arr.isArray());
 		assertEquals(1, arr.size());
 		final JsonNode obj = arr.get(0);
-		assertEquals(3, obj.get("metrics_schema").asInt());
+		assertEquals(4, obj.get("metrics_schema").asInt());
 		assertEquals("node", obj.get("scope").asText());
 		assertTrue(obj.hasNonNull("sample_ts"));
 		assertEquals("", obj.get("run_id").asText());

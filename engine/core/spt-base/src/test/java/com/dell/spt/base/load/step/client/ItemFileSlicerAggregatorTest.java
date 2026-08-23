@@ -21,6 +21,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -151,6 +153,8 @@ class ItemFileSlicerAggregatorTest {
 			}).when(fileMgr).writeToFile(anyString(), any(byte[].class));
 		}
 		final Config baseCfg = TestConfigBuilder.config();
+		baseCfg.val("load-op-type", "delete");
+		baseCfg.val("load-op-delete-standalone", true);
 		final List<Config> configSlices = List.of(new BasicConfig(baseCfg), new BasicConfig(baseCfg));
 
 		try (final var input = new IntegrityManifestItemInput(source);
@@ -158,6 +162,14 @@ class ItemFileSlicerAggregatorTest {
 										"canonical-delete-slicer", fileMgrs, configSlices, input, 2, true)) {
 			assertEquals("canonical-slice-0.csv", configSlices.get(0).stringVal("item-input-file"));
 			assertEquals("canonical-slice-1.csv", configSlices.get(1).stringVal("item-input-file"));
+			for (int i = 0; i < configSlices.size(); i++) {
+				final Config slice = configSlices.get(i);
+				assertEquals(2L, slice.longVal("load-op-delete-selected"));
+				assertEquals(i == 0 ? 2L : 0L, slice.longVal("load-op-delete-selectedCurrentKey"));
+				assertEquals(i == 0 ? 0L : 2L, slice.longVal("load-op-delete-selectedExactVersion"));
+				assertEquals(List.of("bucket=2"), slice.listVal("load-op-delete-selectedBuckets"));
+				assertEquals("canonical", slice.stringVal("load-op-delete-selectionOrder"));
+			}
 			assertEquals(
 							"bucket,key,size,version_id\nbucket,alpha,9,\nbucket,gamma,5,\n",
 							captured.get(0).toString(StandardCharsets.UTF_8));
@@ -166,6 +178,56 @@ class ItemFileSlicerAggregatorTest {
 											+ "bucket,omega,3,version-omega\n",
 							captured.get(1).toString(StandardCharsets.UTF_8));
 		}
+	}
+
+	@Test
+	void strictSlicerPublishesOneCanonicalBucketMappingToEveryWorker() throws Exception {
+		final Path source = Files.createTempFile("spt-delete-many-buckets-", ".csv");
+		filesToCleanup.add(source);
+		final StringBuilder manifest = new StringBuilder("bucket,key,size,version_id\n");
+		for (int i = 0; i <= com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.MAX_BUCKET_METRICS; i++) {
+			manifest.append(String.format(java.util.Locale.ROOT, "bucket-%03d,key-%03d,1,\n", i, i));
+		}
+		manifest.append("bucket-099,repeat-a,1,\n");
+		manifest.append("bucket-099,repeat-b,1,\n");
+		Files.writeString(source, manifest, StandardCharsets.UTF_8);
+
+		final List<FileManager> fileMgrs = List.of(mock(FileManager.class), mock(FileManager.class));
+		for (int i = 0; i < fileMgrs.size(); i++) {
+			when(fileMgrs.get(i).newTmpFileName()).thenReturn("many-bucket-slice-" + i);
+		}
+		final Config baseCfg = TestConfigBuilder.config();
+		baseCfg.val("load-op-type", "delete");
+		baseCfg.val("load-op-delete-standalone", true);
+		final List<Config> configSlices = List.of(new BasicConfig(baseCfg), new BasicConfig(baseCfg));
+
+		try (final var input = new IntegrityManifestItemInput(source);
+						final var ignored = new ItemInputFileSlicer(
+										"canonical-bucket-map", fileMgrs, configSlices, input, 16, true)) {
+			final Map<String, Long> first = selectedBuckets(configSlices.get(0));
+			final Map<String, Long> second = selectedBuckets(configSlices.get(1));
+			assertEquals(first.keySet(), second.keySet(),
+							"every worker must receive the same retained bucket names");
+			assertEquals(
+							com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.MAX_BUCKET_METRICS + 1,
+							first.size());
+			assertTrue(first.containsKey("bucket-099"));
+			assertTrue(first.containsKey(com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.OVERFLOW_BUCKET));
+			assertEquals(1L, first.get("bucket-099"));
+			assertEquals(2L, second.get("bucket-099"));
+			assertEquals(1L, first.get(com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.OVERFLOW_BUCKET));
+			assertEquals(0L, second.get(com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.OVERFLOW_BUCKET));
+		}
+	}
+
+	private static Map<String, Long> selectedBuckets(final Config config) {
+		final Map<String, Long> result = new TreeMap<>();
+		for (final Object raw : config.listVal("load-op-delete-selectedBuckets")) {
+			final String value = String.valueOf(raw);
+			final int separator = value.lastIndexOf('=');
+			result.put(value.substring(0, separator), Long.parseLong(value.substring(separator + 1)));
+		}
+		return result;
 	}
 
 	@Test

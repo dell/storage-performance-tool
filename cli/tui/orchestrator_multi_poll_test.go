@@ -168,6 +168,80 @@ func TestPollerSetsIsConnectedFlag(t *testing.T) {
 	// Ensure we actually parsed metrics for the good host
 	if m := results.Metrics["goodHost"]; m == nil || m.OpsPerSec == 0 {
 		t.Errorf("expected parsed metrics for goodHost, got %+v", m)
+	} else if m.NodeID != fleetLocalContributorID {
+		t.Fatalf("entry metric contributor = %q, want %q", m.NodeID, fleetLocalContributorID)
+	}
+
+	update := wrapper.collectAllMetrics(context.Background())
+	if update == nil || update.Aggregated == nil {
+		t.Fatal("expected a fail-closed aggregate from the successful contributor")
+	}
+	if update.Aggregated.NodesCount != 2 || len(update.Aggregated.NodesPresent) != 1 {
+		t.Fatalf("expected one of two contributors, got count=%d present=%v",
+			update.Aggregated.NodesCount, update.Aggregated.NodesPresent)
+	}
+	if update.Aggregated.NodesPresent[0] != fleetLocalContributorID {
+		t.Fatalf("successful contributor = %q, want %q",
+			update.Aggregated.NodesPresent[0], fleetLocalContributorID)
+	}
+	if !update.Aggregated.Partial {
+		t.Fatal("a failed contributor poll must make the aggregate partial")
+	}
+}
+
+func TestPerOperationCompletenessUsesExpectedFleetNotObservedContributors(t *testing.T) {
+	metric := &PerformanceMetric{
+		MetricsSchema: 4,
+		Scope:         "node",
+		ClusterID:     "cluster-a",
+		RunID:         "run-a",
+		StepID:        "delete-step",
+		NodeID:        fleetLocalContributorID,
+		OpType:        "DELETE",
+		Delete:        &DeleteMetrics{},
+	}
+	present, unique := contributorsForOp([]*PerformanceMetric{metric}, "DELETE")
+	got := withPollCompleteness(metric, 2, present, !unique || len(present) != 2)
+	if got.NodesCount != 2 || len(got.NodesPresent) != 1 || !got.Partial {
+		t.Fatalf("N-1 operation must be partial against expected fleet: %+v", got)
+	}
+}
+
+func TestFleetContributorIDsMatchEngineContract(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Original: "entry.example", Host: "entry.example"},
+		{Original: "worker.example", Host: "worker.example"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.hosts[1].AdvertisedIP = "192.0.2.25"
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+
+	if got := wrapper.fleetContributorID(orchestrator.hosts[0]); got != "local" {
+		t.Fatalf("entry contributor = %q, want local", got)
+	}
+	if got := wrapper.fleetContributorID(orchestrator.hosts[1]); got != "192.0.2.25:1099" {
+		t.Fatalf("worker contributor = %q, want 192.0.2.25:1099", got)
+	}
+	orchestrator.executionContributorIDs = []string{"local", "192.0.2.25:1099"}
+	got, err := orchestrator.MetricContributorIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "local" || got[1] != "192.0.2.25:1099" {
+		t.Fatalf("execution contributor IDs = %v", got)
+	}
+	got[0] = "mutated"
+	again, err := orchestrator.MetricContributorIDs()
+	if err != nil || again[0] != "local" {
+		t.Fatalf("execution contributor IDs were not copied: ids=%v err=%v", again, err)
+	}
+}
+
+func TestMetricContributorIDsRejectUnavailableExecutionTopology(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Original: "entry.example", Host: "entry.example"}}, 1)
+	if _, err := orchestrator.MetricContributorIDs(); err == nil {
+		t.Fatal("unavailable execution contributor topology was accepted")
 	}
 }
 

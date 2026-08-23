@@ -172,9 +172,100 @@ func TestPrepareDeleteManifestAndGenerateTerminalScenario(t *testing.T) {
 	if _, ok := configPath(config, "load", "op", "limit", "count"); ok {
 		t.Fatal("public object count was mapped to generic request-count limit")
 	}
+	if strings.Contains(generated, "seedMillis") || strings.Contains(generated, "discoveryMillis") {
+		t.Fatalf("explicit-manifest DELETE reported an inapplicable named setup phase:\n%s", generated)
+	}
+	if !strings.Contains(generated, "var setupStartedNanos = com.dell.spt.base.load.step.DurationTime.monotonicEpochNanos()") ||
+		!strings.Contains(generated, `"workflowStartedEpochNanos": setupStartedNanos`) {
+		t.Fatalf("explicit-manifest DELETE omitted the full workflow boundary:\n%s", generated)
+	}
 	if !strings.Contains(generated, "selection_order=canonical") ||
 		!strings.Contains(generated, "cross-tool") {
 		t.Fatalf("generated scenario does not record canonical-order warning:\n%s", generated)
+	}
+}
+
+func TestGeneratedDeleteScenariosFreezeSelectionMetadataBeforeDispatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		params Params
+	}{
+		{
+			name: "prepared manifest",
+			params: Params{WorkloadType: workload.Delete, RunID: 901, ItemsFile: "/spt-input/items/verify-input.csv",
+				Threads: 1, S3Driver: S3DriverNetty, DeleteBatchSize: 1, BaseTimestamp: "20260822.120000.000"},
+		},
+		{
+			name: "seeded inventory",
+			params: Params{WorkloadType: workload.Delete, RunID: 902, Bucket: "bucket", ObjectCount: 2,
+				Threads: 1, S3Driver: S3DriverNetty, DeleteBatchSize: 1, BaseTimestamp: "20260822.120000.000"},
+		},
+		{
+			name: "discovered inventory",
+			params: Params{WorkloadType: workload.Delete, RunID: 903, Bucket: "bucket", Prefix: "safe/", ObjectCount: 2,
+				DeleteExisting: true, Threads: 1, S3Driver: S3DriverNetty, DeleteBatchSize: 1, BaseTimestamp: "20260822.120000.000"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generated, err := GenerateDeleteScenario(test.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			freeze := strings.Index(generated, "StandaloneDeleteSelection.fromManifest")
+			dispatch := strings.Index(generated, "DeleteLoad.config")
+			if freeze < 0 || dispatch < 0 || freeze > dispatch {
+				t.Fatalf("selection metadata was not frozen before DELETE dispatch:\n%s", generated)
+			}
+			for _, field := range []string{
+				`"selectionOrder": "canonical"`,
+				`"selected": deleteSelection.selected()`,
+				`"selectedCurrentKey": deleteSelection.selectedCurrentKey()`,
+				`"selectedExactVersion": deleteSelection.selectedExactVersion()`,
+				`"selectedBuckets": deleteSelection.selectedBuckets()`,
+			} {
+				if !strings.Contains(generated, field) {
+					t.Fatalf("generated DELETE omitted frozen selection field %q:\n%s", field, generated)
+				}
+			}
+		})
+	}
+}
+
+func TestDeleteScenarioTemplatesRenderSelectionOrderFromSharedData(t *testing.T) {
+	const selectionOrder = "selection-order-sentinel"
+	tests := []struct {
+		name         string
+		templateName string
+		data         any
+	}{
+		{
+			name:         "manifest",
+			templateName: "delete-manifest",
+			data:         deleteManifestScenarioData{SelectionOrder: selectionOrder},
+		},
+		{
+			name:         "seeded",
+			templateName: "delete-seeded",
+			data:         deleteSeededScenarioData{SelectionOrder: selectionOrder},
+		},
+		{
+			name:         "existing prefix",
+			templateName: "delete-existing",
+			data:         deleteExistingScenarioData{SelectionOrder: selectionOrder},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generated, err := executeIntegrityScenario(test.templateName, test.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `"selectionOrder": "` + selectionOrder + `"`
+			if !strings.Contains(generated, want) {
+				t.Fatalf("generated DELETE did not use the supplied selection order %q:\n%s", want, generated)
+			}
+		})
 	}
 }
 
@@ -195,6 +286,13 @@ func TestGenerateSeededDeleteScenarioFreezesUniqueInventoryBeforeTimedDelete(t *
 	}
 	if strings.Contains(generated, "ListLoad.config") || strings.Contains(generated, `"type": "list"`) {
 		t.Fatalf("seeded DELETE must not discover existing objects:\n%s", generated)
+	}
+	if strings.Contains(generated, "currentTimeMillis") ||
+		!strings.Contains(generated, "var setupStartedNanos = com.dell.spt.base.load.step.DurationTime.monotonicEpochNanos()") ||
+		!strings.Contains(generated, "var seedStartedNanos = java.lang.System.nanoTime()") ||
+		!strings.Contains(generated, `"seedMillis": seedDurationMillis`) ||
+		!strings.Contains(generated, `"workflowStartedEpochNanos": setupStartedNanos`) {
+		t.Fatalf("seeded DELETE omitted measured seed phase:\n%s", generated)
 	}
 
 	plan, err := BuildStepPlanFromScenario(generated)
@@ -288,6 +386,13 @@ func TestGenerateExistingPrefixDeleteScenarioFreezesCurrentKeysBeforeTimedDelete
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(generated, "currentTimeMillis") ||
+		!strings.Contains(generated, "var setupStartedNanos = com.dell.spt.base.load.step.DurationTime.monotonicEpochNanos()") ||
+		!strings.Contains(generated, "var discoveryStartedNanos = java.lang.System.nanoTime()") ||
+		!strings.Contains(generated, `"discoveryMillis": discoveryDurationMillis`) ||
+		!strings.Contains(generated, `"workflowStartedEpochNanos": setupStartedNanos`) {
+		t.Fatalf("existing-prefix DELETE omitted measured discovery phase:\n%s", generated)
 	}
 	plan, err := BuildStepPlanFromScenario(generated)
 	if err != nil {
@@ -644,6 +749,9 @@ func TestGenerateDeleteDurationScenariosUseFiniteLiveInventoriesWithoutRecycle(t
 			deleteStep := generated[strings.LastIndex(generated, "DeleteLoad.config"):]
 			if strings.Contains(deleteStep, `"limit": {"count"`) {
 				t.Fatalf("duration DELETE incorrectly mapped identities to request count:\n%s", deleteStep)
+			}
+			if strings.Contains(deleteStep, "preValidationMillis") {
+				t.Fatalf("manifest selection scan must not populate Ticket 14 pre-validation:\n%s", deleteStep)
 			}
 		})
 	}

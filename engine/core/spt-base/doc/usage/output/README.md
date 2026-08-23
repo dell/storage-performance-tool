@@ -323,6 +323,8 @@ The summary metrics produced at the end of each load step and the results are wr
 The layout is the same as for average metrics file output. To disable the summary metrics file output the configuration
 parameter `output-metrics-summary-persist` should be set to "false". Note that the file output for the metrics is always
 disabled for the load step slices (i.e. on the additional/remote nodes in the distributed mode).
+Standalone DELETE does not change this generic CSV layout; rows remain logical-request based.
+Durable DELETE-specific dimensions belong to a separate, versioned artifact contract.
 
 ## 2.3. Operation Traces
 

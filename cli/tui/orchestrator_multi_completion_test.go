@@ -5,9 +5,11 @@ Copyright © 2025 Dell Technologies
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 )
 
 // TestShouldSignalCompletion proves and guards the fix for premature headless
@@ -93,6 +95,40 @@ func TestShouldSignalCompletion(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "partial fleet never completes",
+			agg: &PerformanceMetric{
+				TestState: constants.TestStateCompleted,
+				Partial:   true,
+			},
+			want: false,
+		},
+		{
+			name: "unreconciled detailed delete never completes",
+			agg: &PerformanceMetric{
+				TestState: constants.TestStateCompleted,
+				OpType:    "DELETE",
+				Delete: &DeleteMetrics{
+					Completion:         DeleteCompletionMetrics{RequestPercent: 100, ObjectPercent: 100},
+					TerminalReconciled: false,
+				},
+			},
+			want: false,
+		},
+		{
+			name: "reconciled detailed delete completes",
+			agg: &PerformanceMetric{
+				TestState: constants.TestStateCompleted,
+				OpType:    "DELETE",
+				Delete: &DeleteMetrics{
+					Completion: DeleteCompletionMetrics{
+						RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true,
+					},
+					TerminalReconciled: true,
+				},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -141,5 +177,34 @@ func TestShouldSignalCompletionForExpectedStepsFallback(t *testing.T) {
 	}
 	if !shouldSignalCompletionForExpectedSteps(complete, nil) {
 		t.Fatal("missing expected step IDs should preserve existing completion behavior")
+	}
+}
+
+func TestDistributedCompletionRetainsRejectedDeleteOutcome(t *testing.T) {
+	metric := deleteNodeMetric("single", 1, 1, 1)
+	metric.TestState = constants.TestStateCompleted
+	metric.Delete.Timing.Latency = testTimingStat(1, 7)
+	metric.Delete.Timing.Duration = testTimingStat(1, 11)
+	metric.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeFailed
+	update := &MultiNodeMetricsUpdate{
+		Aggregated: metric,
+		PerOpType:  map[string]*PerformanceMetric{"DELETE": metric},
+	}
+
+	orchestrator := &MultiHostTestOrchestrator{completionCh: make(chan struct{})}
+	failure := terminalDeletePolicyFailure(update)
+	if failure == nil {
+		t.Fatal("failed DELETE policy outcome was not recognized")
+	}
+	orchestrator.recordCompletionFailure(failure)
+	orchestrator.signalCompletion()
+	select {
+	case <-orchestrator.CompletionCh():
+	default:
+		t.Fatal("distributed terminal failure did not finish presentation")
+	}
+	if err := orchestrator.CompletionError(); err == nil ||
+		!strings.Contains(err.Error(), "DELETE failure policy") {
+		t.Fatalf("distributed completion error = %v, want rejected DELETE outcome", err)
 	}
 }

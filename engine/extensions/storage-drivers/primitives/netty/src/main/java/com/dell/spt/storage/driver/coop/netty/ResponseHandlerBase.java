@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty;
 
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
@@ -97,6 +98,9 @@ public abstract class ResponseHandlerBase<M, I extends Item, O extends Operation
 			}
 			if (!driver.isStopped()) {
 				try {
+					if (op instanceof DeleteRequestOperation deleteOperation) {
+						deleteOperation.failTransportAttempt();
+					}
 					driver.complete(channel, op);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);

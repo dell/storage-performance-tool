@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 )
 
 // DiscoverStepIDs fetches /metrics/json and returns unique step IDs found.
@@ -116,4 +117,222 @@ func parseMetricsRunID(raw json.RawMessage) (int64, error) {
 		return 0, fmt.Errorf("decode run_id: %w", err)
 	}
 	return strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+}
+
+type terminalDeleteMetricsStep struct {
+	MetricsSchema        int                    `json:"metrics_schema"`
+	Scope                string                 `json:"scope"`
+	Role                 string                 `json:"role"`
+	ClusterID            string                 `json:"cluster_id"`
+	RunID                json.RawMessage        `json:"run_id"`
+	StepID               string                 `json:"step_id"`
+	OpType               string                 `json:"op_type"`
+	Terminal             bool                   `json:"terminal"`
+	Partial              bool                   `json:"partial"`
+	NodesCount           int                    `json:"nodes_count"`
+	ContributorsPresent  []string               `json:"contributors_present"`
+	DeleteDetailExpected bool                   `json:"delete_detail_expected"`
+	Delete               *deletemetrics.Metrics `json:"delete"`
+}
+
+// CaptureTerminalDeleteMetricsForRunContext captures the additive terminal v4 model used by
+// stored summaries. expectedContributorIDs must contain the exact engine contributor identities
+// ("local" plus every remote node address). Fleet metrics are authoritative when that endpoint
+// exists; node metrics are only a single-node compatibility fallback when fleet metrics are
+// unavailable.
+func CaptureTerminalDeleteMetricsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (map[string]*deletemetrics.Metrics, error) {
+	if expectedRunID <= 0 {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: expected run identity is unavailable")
+	}
+	expectedSteps, err := exactStepSet(expectedStepIDs)
+	if err != nil {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	expectedContributors, err := exactContributorSet(expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	expectedClusterID := constants.RunClusterID(expectedRunID)
+	fleet, available, err := captureTerminalDeleteMetricsFromPath(
+		ctx, baseURL, constants.SptFleetMetricsEndpoint, "fleet", expectedRunID, expectedClusterID,
+		expectedSteps, expectedContributors)
+	if err != nil {
+		return nil, err
+	}
+	if available {
+		return fleet, nil
+	}
+	if !allowNodeFallback {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: authoritative fleet endpoint is unavailable")
+	}
+	if len(expectedContributors) != 1 {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: node fallback requires exactly one expected contributor")
+	}
+	if _, local := expectedContributors["local"]; !local {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: node fallback requires the local contributor identity")
+	}
+	node, available, err := captureTerminalDeleteMetricsFromPath(
+		ctx, baseURL, constants.SptMetricsEndpoint, "node", expectedRunID, expectedClusterID,
+		expectedSteps, expectedContributors)
+	if err != nil {
+		return nil, err
+	}
+	if !available {
+		return nil, fmt.Errorf("capture terminal DELETE metrics: node endpoint is unavailable")
+	}
+	return node, nil
+}
+
+func exactContributorSet(contributorIDs []string) (map[string]struct{}, error) {
+	expected := make(map[string]struct{}, len(contributorIDs))
+	for _, contributorID := range contributorIDs {
+		contributorID = strings.TrimSpace(contributorID)
+		if contributorID == "" {
+			return nil, fmt.Errorf("expected DELETE contributor identity is empty")
+		}
+		if _, duplicate := expected[contributorID]; duplicate {
+			return nil, fmt.Errorf("expected DELETE contributor identity %q is duplicated", contributorID)
+		}
+		expected[contributorID] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+	}
+	return expected, nil
+}
+
+func exactStepSet(stepIDs []string) (map[string]struct{}, error) {
+	expected := make(map[string]struct{}, len(stepIDs))
+	for _, stepID := range stepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if stepID == "" {
+			return nil, fmt.Errorf("expected DELETE step identity is empty")
+		}
+		if _, duplicate := expected[stepID]; duplicate {
+			return nil, fmt.Errorf("expected DELETE step identity %q is duplicated", stepID)
+		}
+		expected[stepID] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil, fmt.Errorf("expected DELETE step identity is unavailable")
+	}
+	return expected, nil
+}
+
+func captureTerminalDeleteMetricsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	expectedRunID int64,
+	expectedClusterID string,
+	expectedSteps map[string]struct{},
+	expectedContributors map[string]struct{},
+) (map[string]*deletemetrics.Metrics, bool, error) {
+	client := &http.Client{Timeout: constants.ResultsDiscoveryHTTPTimeout}
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+metricsPath, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("create %s request: %w", metricsPath, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("fetch %s: %w", metricsPath, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, true, fmt.Errorf("%s status: %d", metricsPath, resp.StatusCode)
+	}
+	var steps []terminalDeleteMetricsStep
+	if err := json.NewDecoder(resp.Body).Decode(&steps); err != nil {
+		return nil, true, fmt.Errorf("decode %s: %w", metricsPath, err)
+	}
+	metrics := make(map[string]*deletemetrics.Metrics)
+	seen := make(map[string]struct{}, len(expectedSteps))
+	for i := range steps {
+		step := &steps[i]
+		runID, parseErr := parseMetricsRunID(step.RunID)
+		_, expectedStep := expectedSteps[strings.TrimSpace(step.StepID)]
+		if parseErr != nil {
+			if expectedStep && strings.EqualFold(step.OpType, "DELETE") {
+				return nil, true, fmt.Errorf("%s expected DELETE step %q has malformed run identity", metricsPath, step.StepID)
+			}
+			continue
+		}
+		if runID != expectedRunID {
+			continue
+		}
+		if !strings.EqualFold(step.OpType, "DELETE") {
+			continue
+		}
+		if !expectedStep {
+			return nil, true, fmt.Errorf("%s returned unexpected current-run DELETE step %q", metricsPath, step.StepID)
+		}
+		if _, duplicate := seen[step.StepID]; duplicate {
+			return nil, true, fmt.Errorf("%s returned duplicate DELETE step %q", metricsPath, step.StepID)
+		}
+		seen[step.StepID] = struct{}{}
+		if step.MetricsSchema < deletemetrics.SchemaVersion ||
+			!strings.EqualFold(step.Scope, wantScope) || !validMetricsRole(wantScope, step.Role) ||
+			step.ClusterID != expectedClusterID || !step.Terminal || step.Partial ||
+			!step.DeleteDetailExpected {
+			return nil, true, fmt.Errorf("%s returned incomplete authoritative DELETE step %q", metricsPath, step.StepID)
+		}
+		if strings.EqualFold(wantScope, "fleet") &&
+			!completeContributorEvidence(step.NodesCount, step.ContributorsPresent, expectedContributors) {
+			return nil, true, fmt.Errorf("%s returned incomplete contributor evidence for DELETE step %q", metricsPath, step.StepID)
+		}
+		if validateErr := deletemetrics.ValidateTerminal(step.Delete); validateErr != nil {
+			return nil, true, fmt.Errorf("%s DELETE step %q: %w", metricsPath, step.StepID, validateErr)
+		}
+		metrics[step.StepID] = step.Delete
+	}
+	for stepID := range expectedSteps {
+		if _, ok := metrics[stepID]; !ok {
+			return nil, true, fmt.Errorf("%s is missing authoritative terminal DELETE step %q", metricsPath, stepID)
+		}
+	}
+	return metrics, true, nil
+}
+
+func completeContributorEvidence(
+	nodeCount int,
+	contributors []string,
+	expected map[string]struct{},
+) bool {
+	if nodeCount <= 0 || nodeCount != len(expected) || len(contributors) != nodeCount {
+		return false
+	}
+	seen := make(map[string]struct{}, len(contributors))
+	for _, contributor := range contributors {
+		contributor = strings.TrimSpace(contributor)
+		if contributor == "" {
+			return false
+		}
+		if _, duplicate := seen[contributor]; duplicate {
+			return false
+		}
+		if _, wanted := expected[contributor]; !wanted {
+			return false
+		}
+		seen[contributor] = struct{}{}
+	}
+	return len(seen) == len(expected)
+}
+
+func validMetricsRole(scope, role string) bool {
+	if strings.EqualFold(scope, "fleet") {
+		return strings.EqualFold(role, "aggregate")
+	}
+	return strings.EqualFold(role, "entry") || strings.EqualFold(role, "worker")
 }

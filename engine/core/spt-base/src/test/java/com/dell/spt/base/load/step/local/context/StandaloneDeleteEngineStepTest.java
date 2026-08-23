@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local.context;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_PERCENTAGE;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,6 +34,7 @@ import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -44,8 +46,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
 
 class StandaloneDeleteEngineStepTest {
@@ -63,9 +68,11 @@ class StandaloneDeleteEngineStepTest {
 		try {
 			step.start();
 			awaitDone(step);
-			metrics.refreshLastSnapshot();
+			metrics.refreshLastSnapshot(true);
 
 			assertEquals(2, driver.completed.size());
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.latency() > 0));
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.duration() > 0));
 			assertTrue(driver.completed.stream()
 							.allMatch(operation -> operation.deleteRequest().targets().size() == 1));
 			assertEquals(2, step.operationLifecycle().dispatched());
@@ -75,6 +82,34 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(2, step.deleteObjectLifecycle().fullSuccessfulRequests());
 			assertTrue(step.deleteObjectLifecycle().reconciled());
 			assertEquals(2, metrics.lastSnapshot().successSnapshot().count());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void nativeTransportIntervalFeedsEstablishedRequestLatencyMetric() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new DeterministicDeleteDriver(DriverMode.NATIVE_TRANSPORT_TIMING);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-native-transport-timing",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+		try {
+			step.start();
+			awaitDone(step);
+			metrics.refreshLastSnapshot(true);
+
+			assertEquals(1, metrics.lastSnapshot().latencySnapshot().count());
+			assertEquals(500.0, metrics.lastSnapshot().latencySnapshot().mean());
+			assertEquals(500L, driver.completed.get(0).transportRequestLatency());
+			assertEquals(0L, driver.completed.get(0).requestFirstByteTime(),
+							"a direct transport-clock interval must not invent an epoch timestamp");
 		} finally {
 			step.close();
 			metrics.close();
@@ -93,7 +128,7 @@ class StandaloneDeleteEngineStepTest {
 		try {
 			step.start();
 			awaitDone(step);
-			metrics.refreshLastSnapshot();
+			metrics.refreshLastSnapshot(true);
 
 			assertEquals(2, driver.completed.size());
 			assertEquals(
@@ -104,6 +139,8 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(
 							List.of(DeleteRequestOutcome.FULL_SUCCESS, DeleteRequestOutcome.PARTIAL),
 							driver.completed.stream().map(op -> op.deleteResult().outcome()).toList());
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.latency() > 0));
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.duration() > 0));
 			assertEquals(
 							List.of(DeleteFailureClassification.NONE, DeleteFailureClassification.OPERATIONAL),
 							driver.completed.stream().map(op -> op.deleteResult().failureClassification()).toList());
@@ -122,6 +159,303 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(0, metrics.lastSnapshot().byteSnapshot().count());
 			assertEquals(1, metrics.lastSnapshot().successSnapshot().count());
 			assertEquals(1, metrics.lastSnapshot().failsSnapshot().count());
+			assertEquals(2, metrics.lastSnapshot().latencySnapshot().count());
+			assertEquals(2, metrics.lastSnapshot().durationSnapshot().count());
+			final double firstByteLatencyMean = driver.completed.stream()
+							.mapToLong(operation -> operation.responseFirstByteTime() - operation.requestFirstByteTime())
+							.average()
+							.orElseThrow();
+			assertEquals(firstByteLatencyMean, metrics.lastSnapshot().latencySnapshot().mean(), 0.001);
+			assertTrue(driver.completed.stream()
+							.allMatch(operation -> operation.requestFirstByteTime() > operation.reqTimeStart()));
+			assertTrue(driver.completed.stream()
+							.allMatch(operation -> operation.responseFirstByteTime() - operation.requestFirstByteTime() > operation.latency()));
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(2, delete.requestAttempted());
+			assertEquals(1, delete.requestFullSuccess());
+			assertEquals(1, delete.requestPartial());
+			assertEquals(0, delete.requestFailed());
+			assertEquals(4, delete.objectSelected());
+			assertEquals(3, delete.objectAccepted());
+			assertEquals(1, delete.objectFailed());
+			assertEquals(2, delete.actualRequestCount());
+			assertEquals(4, delete.actualObjectCount());
+			assertEquals(2, delete.fullBatchCount());
+			assertEquals(0, delete.partialBatchCount());
+			assertEquals(4, delete.currentKeyCount());
+			assertEquals(0, delete.exactVersionCount());
+			assertEquals(1, delete.buckets().size());
+			assertEquals("bucket", delete.buckets().get(0).bucket());
+			assertEquals("batch", delete.mode());
+			assertEquals("canonical", delete.selectionOrder());
+			assertEquals("fixed", delete.failurePolicyMode());
+			assertTrue(delete.reconciled());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void percentageFailureBudgetPublishesTheSharedWireValue() throws Exception {
+		final var config = config(1, 10);
+		config.val("load-op-failureBudget-mode", DELETE_FAILURE_POLICY_MODE_PERCENTAGE);
+		config.val("load-op-failureBudget-maxFailurePercent", 100.0);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-percentage-policy",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			metrics.refreshLastSnapshot(true);
+
+			assertEquals(
+							DELETE_FAILURE_POLICY_MODE_PERCENTAGE,
+							metrics.lastSnapshot().deleteMetrics().failurePolicyMode());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void reorderedDispatchUsesSelectionBucketMappingWithoutInflatingGlobalTotals() throws Exception {
+		final int retainedBucketCount = DeleteMetricsSnapshot.MAX_BUCKET_METRICS;
+		final int overflowBucketCount = 5;
+		final int bucketCount = retainedBucketCount + overflowBucketCount;
+		final var config = config(1, 10);
+		final var selectedBuckets = new ArrayList<String>();
+		for (int i = 0; i < retainedBucketCount; i++) {
+			selectedBuckets.add(String.format(Locale.ROOT, "bucket-%03d=1", i));
+		}
+		selectedBuckets.add(DeleteMetricsSnapshot.OVERFLOW_BUCKET + '=' + overflowBucketCount);
+		config.val("load-op-delete-selected", (long) bucketCount);
+		config.val("load-op-delete-selectedCurrentKey", (long) bucketCount);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", selectedBuckets);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-bounded-buckets",
+						generator(config, driver, new ReorderedBucketManifestInput(bucketCount)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			metrics.refreshLastSnapshot(true);
+
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(bucketCount, delete.objectSelected());
+			assertEquals(bucketCount, delete.objectAttempted());
+			assertEquals(bucketCount, delete.objectAccepted());
+			assertEquals(retainedBucketCount + 1, delete.buckets().size());
+			assertEquals(
+							delete.objectSelected(),
+							delete.buckets().stream().mapToLong(bucket -> bucket.selected()).sum());
+			assertEquals(
+							delete.objectAttempted(),
+							delete.buckets().stream().mapToLong(bucket -> bucket.attempted()).sum());
+			assertEquals(
+							delete.objectAccepted(),
+							delete.buckets().stream().mapToLong(bucket -> bucket.accepted()).sum());
+			assertEquals(
+							delete.objectFailed(),
+							delete.buckets().stream().mapToLong(bucket -> bucket.failed()).sum());
+			final var overflow = delete.buckets().get(delete.buckets().size() - 1);
+			assertEquals(DeleteMetricsSnapshot.OVERFLOW_BUCKET, overflow.bucket());
+			assertEquals(overflowBucketCount, overflow.selected());
+			assertEquals(overflowBucketCount, overflow.attempted());
+			assertEquals(overflowBucketCount, overflow.accepted());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void monotonicWorkflowStartSpansSetupInterphaseAndDeleteWithoutEnteringRequestTiming()
+					throws Exception {
+		final var config = config(1, 10);
+		config.val("load-op-delete-seedMillis", 125L);
+		final long workflowStartedNanos = DurationTime.monotonicEpochNanos();
+		config.val("load-op-delete-workflowStartedEpochNanos", workflowStartedNanos);
+		Thread.sleep(200);
+		final long beforeDeleteStep = DurationTime.monotonicEpochNanos();
+		final long independentlyObservedSetupAndInterphase = DurationTime.elapsedNanos(
+						workflowStartedNanos, beforeDeleteStep);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var generator = generator(config, driver, new ManifestInput(1));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-phase-canary",
+						generator,
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(TimeUnit.MILLISECONDS.toNanos(125), delete.seedNanos());
+			assertEquals(-1, delete.discoveryNanos());
+			assertEquals(-1, delete.preValidationNanos());
+			assertTrue(
+							delete.totalWallNanos() >= independentlyObservedSetupAndInterphase,
+							"total wall must span the gap between setup and DELETE step start");
+			assertTrue(
+							delete.totalWallNanos() > delete.seedNanos() + delete.scheduledDeleteNanos() + delete.drainNanos(),
+							"total wall must use the independently measured workflow interval");
+			assertEquals(1, metrics.lastSnapshot().latencySnapshot().count());
+			assertEquals(1, metrics.lastSnapshot().durationSnapshot().count());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void futureDistributedWorkflowBoundaryFallsBackToLocalDeleteStep() throws Exception {
+		final var config = config(1, 10);
+		config.val(
+						"load-op-delete-workflowStartedEpochNanos",
+						DurationTime.monotonicEpochNanos() + TimeUnit.HOURS.toNanos(1));
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var generator = generator(config, driver, new ManifestInput(1));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-future-clock-skew",
+						generator,
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertTrue(delete.totalWallNanos() >= 0, "future skew must not produce negative wall time");
+			assertTrue(
+							delete.totalWallNanos() < TimeUnit.MINUTES.toNanos(1),
+							"a future shared boundary must fall back to the local DELETE-step start");
+			assertTrue(
+							delete.totalWallNanos() >= delete.scheduledDeleteNanos(),
+							"clock-skew fallback must not make total wall shorter than scheduled DELETE");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void delayedControllerReleaseAndDrainDoNotEnterDeleteRequestOrObjectRates() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new DeterministicDeleteDriver(DriverMode.COMPLETE_DURING_DRAIN);
+		final var generator = generator(config, driver, new ManifestInput(2));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-delayed-release",
+						generator,
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+		step.holdObjectFailureBudgetAdmission();
+
+		try {
+			final long stepStartedAt = System.nanoTime();
+			step.start();
+			Thread.sleep(200);
+			final long releaseStartedAt = System.nanoTime();
+			assertTrue(
+							DurationTime.elapsedNanos(stepStartedAt, releaseStartedAt) >= TimeUnit.MILLISECONDS.toNanos(150),
+							"the admission hold must be independently observable");
+			step.releaseObjectFailureBudgetAdmission();
+			awaitScheduled(driver, 2);
+			final long exhaustionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (step.schedulingExhaustionNanos().isEmpty()
+							&& System.nanoTime() < exhaustionDeadline) {
+				Thread.onSpinWait();
+			}
+			final long schedulingExhaustedAt = step.schedulingExhaustionNanos().orElseThrow();
+			final long scheduledUpperBound = DurationTime.elapsedNanos(
+							releaseStartedAt, schedulingExhaustedAt);
+			assertTrue(scheduledUpperBound > 0);
+			Thread.sleep(200);
+			final long beforeDrainRelease = System.nanoTime();
+			final long independentlyObservedDrain = DurationTime.elapsedNanos(
+							schedulingExhaustedAt, beforeDrainRelease);
+			assertTrue(
+							independentlyObservedDrain >= TimeUnit.MILLISECONDS.toNanos(150),
+							"the in-flight drain must be independently observable");
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertTrue(
+							delete.scheduledDeleteNanos() <= scheduledUpperBound,
+							"scheduled DELETE must end no later than generator exhaustion");
+			assertTrue(
+							delete.drainNanos() >= independentlyObservedDrain,
+							"time after scheduling exhaustion belongs to drain, not the rate clock");
+			assertTrue(
+							delete.totalWallNanos() - delete.scheduledDeleteNanos() - delete.drainNanos() >= TimeUnit.MILLISECONDS.toNanos(150),
+							"controller admission hold must enter total wall without entering the rate clock");
+			final double scheduledSeconds = delete.scheduledDeleteNanos()
+							/ (double) TimeUnit.SECONDS.toNanos(1);
+			assertTrue(scheduledSeconds > 0);
+			assertEquals(
+							delete.requestAttempted() / scheduledSeconds,
+							delete.requestsPerSecond(),
+							0.000_001);
+			assertEquals(
+							delete.objectAttempted() / scheduledSeconds,
+							delete.objectsPerSecond(),
+							0.000_001);
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void scheduledDeleteClockAcceptsNegativeNanoTimeValues() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new DeterministicDeleteDriver(DriverMode.HOLD);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-negative-clock",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			atomicBooleanField(step, "startedOnce").set(true);
+			atomicLongField(step, "deleteScheduledStartedNanos").set(-100L);
+			assertEquals(90L, step.currentScheduledDeleteNanos(-10L));
+
+			atomicBooleanField(step, "operationAdmissionClosed").set(true);
+			atomicLongField(step, "deleteAdmissionClosedNanos").set(-50L);
+			assertEquals(50L, step.currentScheduledDeleteNanos(10L));
 		} finally {
 			step.close();
 			metrics.close();
@@ -428,6 +762,41 @@ class StandaloneDeleteEngineStepTest {
 	}
 
 	@Test
+	void frozenVersionSelectionSurvivesUnattemptedManifestSuffix() throws Exception {
+		final var config = config(2, 0);
+		config.val("load-op-delete-selected", 6L);
+		config.val("load-op-delete-selectedCurrentKey", 3L);
+		config.val("load-op-delete-selectedExactVersion", 3L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=6"));
+		final var driver = new DeterministicDeleteDriver(DriverMode.HOLD);
+		final var input = new InterruptGatedManifestInput(6, 4);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-frozen-versions",
+						generator(config, driver, input),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			assertTrue(input.awaitSecondRead());
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(6, delete.objectSelected());
+			assertEquals(2, delete.objectUnattempted());
+			assertEquals(3, delete.currentKeyCount());
+			assertEquals(3, delete.exactVersionCount());
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
 	void drainWinsBlockedTerminalPublicationWithoutRecordingRequestOrObjectOutcome()
 					throws Exception {
 		final var config = config(2, 0);
@@ -445,10 +814,16 @@ class StandaloneDeleteEngineStepTest {
 		try {
 			step.start();
 			assertTrue(driver.awaitOutputAcceptance(), "result output should accept before terminal commit");
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+			metrics.refreshLastSnapshot(true);
+			final var liveDelete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(2, liveDelete.objectAttempted());
+			assertEquals(2, liveDelete.actualObjectCount());
+			assertTrue(liveDelete.objectsPerSecond() > 0);
 			step.stop();
 			driver.releaseTerminalPublication();
 			assertTrue(driver.awaitCompletionThread(), "late terminal attempt should finish");
-			metrics.refreshLastSnapshot();
+			metrics.refreshLastSnapshot(true);
 
 			final var objects = step.deleteObjectLifecycle();
 			assertEquals(2, objects.selected());
@@ -513,6 +888,20 @@ class StandaloneDeleteEngineStepTest {
 		assertTrue(objects.reconciled());
 	}
 
+	private static AtomicBoolean atomicBooleanField(
+					final Object target, final String name) throws ReflectiveOperationException {
+		final var field = target.getClass().getDeclaredField(name);
+		field.setAccessible(true);
+		return (AtomicBoolean) field.get(target);
+	}
+
+	private static AtomicLong atomicLongField(
+					final Object target, final String name) throws ReflectiveOperationException {
+		final var field = target.getClass().getDeclaredField(name);
+		field.setAccessible(true);
+		return (AtomicLong) field.get(target);
+	}
+
 	private static void assertFailedObjectReconciliation(
 					final DriverMode mode, final long expectedProtocolFailures) throws Exception {
 		final var config = config(3, 10);
@@ -529,7 +918,7 @@ class StandaloneDeleteEngineStepTest {
 		try {
 			step.start();
 			awaitDone(step);
-			metrics.refreshLastSnapshot();
+			metrics.refreshLastSnapshot(true);
 
 			final var objects = step.deleteObjectLifecycle();
 			assertEquals(3, objects.selected());
@@ -538,7 +927,11 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(3, objects.failed());
 			assertEquals(expectedProtocolFailures, objects.protocolFailed());
 			assertTrue(objects.reconciled());
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.latency() > 0));
+			assertTrue(driver.completed.stream().allMatch(operation -> operation.duration() > 0));
 			assertEquals(1, metrics.lastSnapshot().failsSnapshot().count());
+			assertEquals(1, metrics.lastSnapshot().latencySnapshot().count());
+			assertEquals(1, metrics.lastSnapshot().durationSnapshot().count());
 		} finally {
 			step.close();
 			metrics.close();
@@ -724,6 +1117,60 @@ class StandaloneDeleteEngineStepTest {
 		public void close() {}
 	}
 
+	private static final class ReorderedBucketManifestInput
+					implements RemainingItemCountInput<IntegrityManifestDataItem> {
+		private final int count;
+		private int next;
+
+		private ReorderedBucketManifestInput(final int count) {
+			this.count = count;
+		}
+
+		@Override
+		public IntegrityManifestDataItem get() {
+			return next < count ? item(next++) : null;
+		}
+
+		@Override
+		public int get(final List<IntegrityManifestDataItem> buffer, final int limit) {
+			if (next >= count) {
+				com.github.akurilov.commons.lang.Exceptions.throwUnchecked(new EOFException());
+			}
+			final int start = next;
+			while (next < count && next - start < limit) {
+				buffer.add(item(next++));
+			}
+			return next - start;
+		}
+
+		private IntegrityManifestDataItem item(final int index) {
+			final int bucketIndex = count - index - 1;
+			return new IntegrityManifestDataItem(
+							String.format(Locale.ROOT, "bucket-%03d", bucketIndex),
+							"key-" + index,
+							index,
+							null);
+		}
+
+		@Override
+		public long skip(final long count) {
+			return 0;
+		}
+
+		@Override
+		public long remainingItemCount() {
+			return (long) count - next;
+		}
+
+		@Override
+		public void reset() {
+			next = 0;
+		}
+
+		@Override
+		public void close() {}
+	}
+
 	private static final class InterruptGatedManifestInput
 					implements RemainingItemCountInput<IntegrityManifestDataItem> {
 		private final int count;
@@ -794,7 +1241,7 @@ class StandaloneDeleteEngineStepTest {
 	}
 
 	private enum DriverMode {
-		DEFAULT, HOLD, TRANSPORT_FAILURE, PROTOCOL_DEFECT, BLOCK_TERMINAL_PUBLICATION, COMPLETE_DURING_DRAIN, COMPLETE_AFTER_DEADLINE_DURING_RECOVERY
+		DEFAULT, HOLD, TRANSPORT_FAILURE, PROTOCOL_DEFECT, NATIVE_TRANSPORT_TIMING, BLOCK_TERMINAL_PUBLICATION, COMPLETE_DURING_DRAIN, COMPLETE_AFTER_DEADLINE_DURING_RECOVERY
 	}
 
 	private static final class DeterministicDeleteDriver extends AsyncRunnableBase
@@ -855,8 +1302,17 @@ class StandaloneDeleteEngineStepTest {
 		private boolean complete(final DeleteRequestOperation operation, final int requestIndex) {
 			operation.reset();
 			operation.startRequest();
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+			if (mode == DriverMode.NATIVE_TRANSPORT_TIMING) {
+				operation.recordTransportRequestTiming(1_000_000L, 1_500_000L);
+			} else {
+				operation.markRequestFirstByteSent();
+			}
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
 			operation.finishRequest();
-			operation.startResponse();
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+			operation.markResponseFirstByteReceived();
+			LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
 			operation.finishResponse();
 			if (mode == DriverMode.TRANSPORT_FAILURE) {
 				operation.completeDelete(DeleteTransportResult.failure(

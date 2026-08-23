@@ -1202,7 +1202,7 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 		}
 	}
 
-	return errors.Join(launchErr, stopErr)
+	return errors.Join(launchErr, stopErr, orchestrator.CompletionError())
 }
 
 // StartTUIWithMultiHostOrchestrator starts the TUI with a pre-configured multi-host orchestrator
@@ -1385,7 +1385,7 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 		}
 	}
 
-	return errors.Join(launchErr, stopErr)
+	return errors.Join(launchErr, stopErr, multiOrchestrator.CompletionError())
 }
 
 // StartTUIWithScenarioAndParamsTimeout starts the TUI (single host) and exits after autoTerminateSeconds (>0).
@@ -1523,7 +1523,7 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 			m.liveViewRenderer.Stop()
 		}
 	}
-	return errors.Join(launchErr, stopErr)
+	return errors.Join(launchErr, stopErr, orchestrator.CompletionError())
 }
 
 // StartTUIWithMultiHostOrchestratorTimeout starts the TUI (multi-host) and exits after autoTerminateSeconds (>0).
@@ -1663,7 +1663,7 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 			m.liveViewRenderer.Stop()
 		}
 	}
-	return errors.Join(launchErr, stopErr)
+	return errors.Join(launchErr, stopErr, multiOrchestrator.CompletionError())
 }
 
 func newProgramWithTrace(model Model, tracePath string, traceAppend bool) (*tea.Program, *os.File, error) {

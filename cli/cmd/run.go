@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
@@ -92,6 +94,8 @@ type autoResultsOutcome struct {
 	Tracker              *portcheck.RunResult
 	TrackerErr           error
 	ArtifactErr          error
+	DeleteMetricsErr     error
+	DeleteTerminalErr    error
 	Finalization         *integrity.FinalizeOutcome
 	FinalizationErr      error
 	ObservedCorruptCount *int64
@@ -196,6 +200,144 @@ func recordTrackedStepLifecycles(metadata *runMetadata, result *portcheck.RunRes
 	}
 }
 
+func captureStoredDeleteMetrics(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	runtimeStepIDs []string,
+	metadata *runMetadata,
+) (captureErr error) {
+	if metadata == nil || metadata.WorkloadType != WorkloadTypeDelete {
+		return nil
+	}
+	defer func() {
+		if captureErr != nil {
+			metadata.DeleteMetrics = nil
+			metadata.DeleteMetricsError = captureErr.Error()
+		} else {
+			metadata.DeleteMetricsError = ""
+		}
+	}()
+	expectedDeleteSteps, err := bindRuntimeDeleteSteps(metadata.ExpectedStepIDs, runtimeStepIDs)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	expectedContributorIDs, err := expectedDeleteContributorIDs(metadata)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	captured, err := captureDeleteMetricsFunc(
+		ctx, baseURL, expectedRunID, expectedDeleteSteps, expectedContributorIDs,
+		len(expectedContributorIDs) == 1)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	if len(captured) != len(expectedDeleteSteps) {
+		return fmt.Errorf(
+			"capture terminal DELETE metrics: captured %d of %d expected steps",
+			len(captured), len(expectedDeleteSteps))
+	}
+	for _, stepID := range expectedDeleteSteps {
+		if captured[stepID] == nil {
+			return fmt.Errorf("capture terminal DELETE metrics: expected step %q is missing", stepID)
+		}
+	}
+	metadata.DeleteMetrics = captured
+	return nil
+}
+
+func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error {
+	failedSteps := make([]string, 0)
+	for stepID, metric := range metrics {
+		if metric != nil && metric.FailurePolicy.Outcome == deletemetrics.OutcomeFailed {
+			failedSteps = append(failedSteps, stepID)
+		}
+	}
+	if len(failedSteps) == 0 {
+		return nil
+	}
+	sort.Strings(failedSteps)
+	return fmt.Errorf(
+		"DELETE failure policy rejected terminal outcome for step(s): %s",
+		strings.Join(failedSteps, ", "))
+}
+
+func expectedDeleteContributorIDs(metadata *runMetadata) ([]string, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+	}
+	if metadata.deleteContributors != nil {
+		contributorIDs, err := metadata.deleteContributors()
+		if err != nil {
+			return nil, fmt.Errorf("resolve DELETE contributor identity: %w", err)
+		}
+		if len(contributorIDs) == 0 {
+			return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+		}
+		return append([]string(nil), contributorIDs...), nil
+	}
+	if len(metadata.Hosts) == 1 {
+		return []string{constants.MetricsLocalContributorID}, nil
+	}
+	return nil, fmt.Errorf("expected DELETE contributor identity is unavailable for fleet capture")
+}
+
+// bindRuntimeDeleteSteps binds the planned DELETE role to runtime identity by
+// stable scenario ordinal. Runtime timestamps may differ from the generated
+// plan, so planned IDs must never be used when discovery evidence is present.
+func bindRuntimeDeleteSteps(plannedStepIDs, runtimeStepIDs []string) ([]string, error) {
+	plannedDeleteNumbers := make([]int, 0, 1)
+	plannedDeletes := make([]string, 0, 1)
+	for _, stepID := range plannedStepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if !strings.HasSuffix(strings.ToLower(stepID), "-delete") {
+			continue
+		}
+		number, ok := integrityplan.RuntimeStepNumber(stepID)
+		if !ok {
+			return nil, fmt.Errorf("planned DELETE step identity %q has no stable ordinal", stepID)
+		}
+		plannedDeleteNumbers = append(plannedDeleteNumbers, number)
+		plannedDeletes = append(plannedDeletes, stepID)
+	}
+	if len(plannedDeletes) == 0 {
+		return nil, fmt.Errorf("expected DELETE step identity is unavailable")
+	}
+	if len(runtimeStepIDs) == 0 {
+		return plannedDeletes, nil
+	}
+	byNumber := make(map[int]string, len(runtimeStepIDs))
+	seen := make(map[string]struct{}, len(runtimeStepIDs))
+	for _, stepID := range runtimeStepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if stepID == "" {
+			return nil, fmt.Errorf("runtime step identity is empty")
+		}
+		if _, duplicate := seen[stepID]; duplicate {
+			return nil, fmt.Errorf("runtime step identity %q is duplicated", stepID)
+		}
+		seen[stepID] = struct{}{}
+		number, ok := integrityplan.RuntimeStepNumber(stepID)
+		if !ok {
+			continue
+		}
+		if existing, conflict := byNumber[number]; conflict {
+			return nil, fmt.Errorf(
+				"runtime step identities %q and %q conflict for ordinal %d", existing, stepID, number)
+		}
+		byNumber[number] = stepID
+	}
+	bound := make([]string, 0, len(plannedDeletes))
+	for i, number := range plannedDeleteNumbers {
+		stepID := byNumber[number]
+		if stepID == "" {
+			return nil, fmt.Errorf("runtime evidence is missing planned DELETE step %q", plannedDeletes[i])
+		}
+		bound = append(bound, stepID)
+	}
+	return bound, nil
+}
+
 // markDiscoveredStoppedStepsStarted reconciles runtime discovery with a
 // STOPPED status carrier. The engine's top-level status may not name the
 // scenario step, while metrics discovery only reports steps which actually
@@ -293,6 +435,7 @@ var (
 	startAutoResultsFunc          = startAutoResultsMonitor
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
+	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -685,6 +828,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			if metadata != nil {
 				metadata.ActualStepIDs = append([]string(nil), stepIDs...)
 				metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
+				if captureErr := captureStoredDeleteMetrics(
+					artifactCtx, baseURL, expectedRunID, runtimeStepIDs, metadata,
+				); captureErr != nil {
+					outcome.DeleteMetricsErr = captureErr
+					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, captureErr)
+				} else {
+					outcome.DeleteTerminalErr = terminalDeleteOutcomeError(metadata.DeleteMetrics)
+				}
 				if err := writeRunMetadata(metadata, root); err != nil {
 					logging.LogError("auto-results", "write run metadata", err, "dest", root)
 				}
@@ -1000,6 +1151,53 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 		}
 	}
 	return nil
+}
+
+func resolveRunCompletionError(
+	runErr error, outcome autoResultsOutcome, received bool, params scenario.Params,
+) error {
+	if params.WorkloadType == scenario.WorkloadTypeDelete {
+		var reasons []string
+		var causes []error
+		if outcome.DeleteMetricsErr != nil {
+			reasons = append(reasons, "terminal DELETE metrics are incomplete: "+outcome.DeleteMetricsErr.Error())
+			causes = append(causes, outcome.DeleteMetricsErr)
+		}
+		if outcome.DeleteTerminalErr != nil {
+			reasons = append(reasons, outcome.DeleteTerminalErr.Error())
+			causes = append(causes, outcome.DeleteTerminalErr)
+		}
+		if outcome.TrackerErr != nil {
+			reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
+			causes = append(causes, outcome.TrackerErr)
+		}
+		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted {
+			if outcome.Tracker.FinalState == constants.StateFailed {
+				reasons = append(reasons, fmt.Sprintf(
+					"step %s failed (%s): %s",
+					outcome.Tracker.FailureStepID,
+					outcome.Tracker.FailureCategory,
+					outcome.Tracker.FailureMessage))
+			} else {
+				reasons = append(reasons, fmt.Sprintf(
+					"engine terminal state is %s", outcome.Tracker.FinalState))
+			}
+		} else if received && outcome.Tracker == nil {
+			reasons = append(reasons, "terminal engine status was not captured")
+		}
+		if len(reasons) == 0 {
+			return runErr
+		}
+		if runErr != nil {
+			reasons = append(reasons, "run also failed: "+runErr.Error())
+			causes = append(causes, runErr)
+		}
+		return &ExitCodeError{
+			Code: constants.ExitCodeWorkloadFailure, Msg: strings.Join(reasons, "; "),
+			Cause: errors.Join(causes...),
+		}
+	}
+	return resolveVerificationRunError(runErr, outcome, received, params)
 }
 
 // uniqueStepIDs merges ordered slices of step IDs, removing duplicates and empty entries.
@@ -1667,6 +1865,7 @@ Available workload types:
 				metadata.RuntimeIdentity = &evidence
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
+			metadata.deleteContributors = multiHostOrchestrator.MetricContributorIDs
 		}
 		var runSession *runcontrol.Session
 		if resultsOpts.AutoResults {
@@ -1808,11 +2007,11 @@ Available workload types:
 				if autoTerminated {
 					waitForAutoResults()
 					finalizeTraceArtifact()
-					return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+					return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 				}
 				waitForAutoResults()
 				finalizeTraceArtifact()
-				return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+				return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
@@ -1835,7 +2034,7 @@ Available workload types:
 			}
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		// Single host mode (existing logic)
@@ -1862,7 +2061,7 @@ Available workload types:
 			}
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		fmt.Printf("Starting TUI...\n\n")
@@ -1889,7 +2088,7 @@ Available workload types:
 		}
 		waitForAutoResults()
 		finalizeTraceArtifact()
-		return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+		return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 	},
 }
 

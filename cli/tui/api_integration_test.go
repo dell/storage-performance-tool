@@ -65,6 +65,7 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 			// Return different JSON metrics over time to simulate progress
 			if metricsCount < 3 {
 				step := newTestStep()
+				step.RunID = runID
 				step.StepID = "integration_test"
 				step.Timestamp = time.Now().UnixMilli()
 				step.Operations.SuccessCount = int64(metricsCount * 100)
@@ -76,6 +77,7 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 				_, _ = w.Write([]byte(marshalSteps(t, []JSONMetricsStep{step})))
 			} else {
 				step := newTestStep()
+				step.RunID = runID
 				step.StepID = "integration_test"
 				step.Timestamp = time.Now().UnixMilli()
 				step.Operations.SuccessCount = 1000

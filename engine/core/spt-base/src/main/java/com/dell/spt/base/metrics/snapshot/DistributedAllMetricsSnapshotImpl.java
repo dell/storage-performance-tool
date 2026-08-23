@@ -59,6 +59,47 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 					final RateMetricSnapshot bytesSnapshot,
 					final int nodeCount,
 					final long elapsedTimeMillis) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						nodeCount,
+						elapsedTimeMillis,
+						null);
+	}
+
+	/**
+	 * Creates a distributed snapshot including optional detailed DELETE measurements.
+	 *
+	 * @param durSnapshot request-duration distribution
+	 * @param latSnapshot request-latency distribution
+	 * @param ttfbSnapshot time-to-first-byte distribution
+	 * @param actualConcurrencySnapshot observed concurrency
+	 * @param failsSnapshot failed-operation rate
+	 * @param corruptSnapshot corrupt-operation rate
+	 * @param successSnapshot successful-operation rate
+	 * @param bytesSnapshot transferred-byte rate
+	 * @param nodeCount participating node count
+	 * @param elapsedTimeMillis elapsed step time in milliseconds
+	 * @param deleteMetrics optional detailed DELETE metrics
+	 */
+	public DistributedAllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final int nodeCount,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics) {
 		super(
 						durSnapshot,
 						latSnapshot,
@@ -68,7 +109,8 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 						corruptSnapshot,
 						successSnapshot,
 						bytesSnapshot,
-						elapsedTimeMillis);
+						elapsedTimeMillis,
+						deleteMetrics);
 		this.nodeCount = nodeCount;
 	}
 
