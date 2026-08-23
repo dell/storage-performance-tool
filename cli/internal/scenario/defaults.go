@@ -28,7 +28,13 @@ type DefaultsConfig struct {
 
 // RunConfig carries a preallocated verification run identity.
 type RunConfig struct {
-	ID int64 `yaml:"id"`
+	ID      int64            `yaml:"id"`
+	Cluster RunClusterConfig `yaml:"cluster"`
+}
+
+// RunClusterConfig carries the stable identity shared by all participants in one run.
+type RunClusterConfig struct {
+	ID string `yaml:"id"`
 }
 
 // StorageConfig represents storage configuration
@@ -152,7 +158,12 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		},
 	}
 	if params.RunID > 0 {
-		config.Run = &RunConfig{ID: params.RunID}
+		config.Run = &RunConfig{
+			ID: params.RunID,
+			Cluster: RunClusterConfig{
+				ID: constants.RunClusterID(params.RunID),
+			},
+		}
 	}
 
 	// Configure based on workload type

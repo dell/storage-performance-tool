@@ -116,6 +116,7 @@ const (
 // REST API endpoint constants
 const (
 	SptMetricsEndpoint      = "/metrics/json"
+	SptFleetMetricsEndpoint = "/metrics/fleet/json"
 	SptConfigSchemaEndpoint = "/config/schema"
 )
 

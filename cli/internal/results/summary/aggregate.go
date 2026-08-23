@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -90,6 +91,7 @@ type StepSummary struct {
 	MissingRequired    []string
 	MissingOptional    []string
 	Notes              []string
+	Delete             *deletemetrics.Metrics
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -300,6 +302,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			MissingRequired: append([]string(nil), stepData.MissingRequired...),
 			MissingOptional: append([]string(nil), stepData.MissingOptional...),
 			Notes:           append([]string(nil), stepData.Notes...),
+			Delete:          stepData.Delete,
 		}
 
 		var metrics *PhaseMetrics
@@ -342,7 +345,6 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
 }
-
 func mixedDistributionFromParams(workloadType string, params ScenarioParams) MixedDistribution {
 	if !strings.EqualFold(workloadType, workloadreg.Mixed) && !strings.EqualFold(params.WorkloadType, workloadreg.Mixed) {
 		return MixedDistribution{}

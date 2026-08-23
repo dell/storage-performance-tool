@@ -158,6 +158,52 @@ within budget and exit 0; a breach or invalid terminal result reports the policy
 objects, observed percentage, and exits nonzero. Even a 100% budget cannot validate a run with no
 fully successful request or no accepted object.
 
+Schema-v4 `failure_policy.outcome` is controller-owned. Live rows use `running`; a reconciled
+terminal row uses `completed_cleanly`, `completed_within_failure_budget`, or `failed`. Human output
+renders the same terminal distinction. Worker rows do not independently infer the fleet verdict.
+
+Standalone DELETE metrics use explicit units. The existing operation rate and success/failure
+counts remain logical API requests: one full-success request succeeds, while a partial or failed
+request fails once regardless of batch size. Schema-v4 detail separately reports request outcomes;
+selected, attempted, accepted, failed, unattempted, and unresolved object identities; configured
+and actual batch counts; current-key versus exact-version targets; and request/object completion.
+Multi-bucket counts are bounded to 100 named buckets plus `__other__`; bucket latency is not
+created. Result identity records single versus batch mode, configured batch size, and canonical
+selection order, and unlike identities are not merged.
+
+DELETE latency remains first request byte sent through first response byte received. Duration is
+request formulation through the last response byte. Netty records the request marker when the first
+nonempty encoded (or TLS-encrypted) outbound buffer reaches the channel transport and the response
+marker on the first nonempty inbound transport buffer, before HTTP headers have been decoded. On
+AWS, SPT records CRT's native HTTP-stream `send-start` and
+`receive-start` timestamps directly,
+including header-only single DELETE, rather than substituting SDK request handoff, publisher
+subscription, or body delivery. The wrapper separately records the first received response headers
+and the response publisher's actual completion for duration. Transparent retries retain the logical
+request's first native send timestamp but replace earlier response timing, so a final failure without
+a received response contributes neither stale latency nor fabricated duration. Available
+request distributions expose p50, p90, p99, and p99.9. There is no
+per-object latency for a batch. Object size, data moved, bandwidth, and TTFB display as N/A. Phase
+output distinguishes seed, discovery, pre-validation, scheduled DELETE, drain, post-verification,
+cleanup, and total wall time, leaving phases that are not yet applicable unset. Live schema-v4 JSON
+uses `null` for a phase until its interval has actually been measured; `0` means an applicable
+interval was measured as zero. With verification
+disabled, `accepted` always means a logical DELETE API outcome—not confirmed removal—and human and
+machine output carry an explicit warning. The existing TUI continues to chart logical request
+rate/count while tolerating the additive detail; headless and engine-only output expose it. The
+top-level `delete_detail_expected` marker opts standalone rows into strict detail validation;
+generic or cleanup DELETE rows without that marker remain compatible even when the engine reports
+schema v4.
+
+Fleet schema v4 preserves the existing `nodes_present` remote-address representation and adds
+`contributors_present` for the fresh identity set used by completeness checks (`local` plus fresh
+remote contributors). Headless DELETE output exposes both fields; stale, duplicate, or incomplete
+contributor sets remain partial. A local run is normalized to exactly one `local` contributor before
+fleet comparison. After terminal status, the CLI makes three bounded attempts to capture and splice
+the controller-authoritative detailed DELETE row before reporting a presentation failure; it does
+not report a stale `running` outcome as completed. A 404 with no previously observed standalone
+DELETE detail retains compatibility with engines that do not expose the detailed endpoint.
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)

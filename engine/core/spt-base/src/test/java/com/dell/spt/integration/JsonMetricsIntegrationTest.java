@@ -186,7 +186,7 @@ public class JsonMetricsIntegrationTest {
 
 		if (jsonArray.size() > 0) {
 			JsonNode jsonObj = jsonArray.get(0);
-			assertEquals(3, jsonObj.get("metrics_schema").asInt());
+			assertEquals(4, jsonObj.get("metrics_schema").asInt());
 			assertEquals("fleet", jsonObj.get("scope").asText());
 			assertEquals("aggregate", jsonObj.get("role").asText());
 			assertEquals("integration-entry", jsonObj.get("node_id").asText());
@@ -273,7 +273,7 @@ public class JsonMetricsIntegrationTest {
 		JsonNode arr = objectMapper.readTree(fetchFromUrl(NODE_JSON_URL));
 		assertEquals(1, arr.size(), "/metrics/json should emit a single idle sample when no local contexts are active");
 		JsonNode obj = arr.get(0);
-		assertEquals(3, obj.get("metrics_schema").asInt());
+		assertEquals(4, obj.get("metrics_schema").asInt());
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("entry", obj.get("role").asText(), "Role should be entry when distributed context exists");
 		assertTrue(obj.hasNonNull("sample_ts"));

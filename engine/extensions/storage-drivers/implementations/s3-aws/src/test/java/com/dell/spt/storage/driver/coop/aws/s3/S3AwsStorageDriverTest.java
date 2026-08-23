@@ -17,6 +17,7 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -52,6 +53,7 @@ import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -1062,6 +1064,29 @@ public class S3AwsStorageDriverTest {
 			drv.execute(op).join();
 
 			verifyNoInteractions(mockS3Client);
+		}
+	}
+
+	@Nested
+	class DeleteTimingInterceptorTest {
+
+		@Test
+		void interceptorCarriesDeleteOperationToHttpTransportWithoutMarkingTiming() {
+			final DeleteRequestOperation op = S3AwsDeleteRequestTestFixture.operation(
+							S3AwsDeleteRequestTestFixture.target("key", null));
+			op.startRequest();
+			op.finishRequest();
+			final ExecutionAttributes attrs = new ExecutionAttributes()
+							.putAttribute(S3AwsStorageDriver.DELETE_TIMING_OPERATION_ATTRIBUTE, op);
+			final var interceptor = new S3AwsStorageDriver.DeleteTimingExecutionInterceptor();
+
+			interceptor.beforeTransmission(mock(Context.BeforeTransmission.class), attrs);
+			assertEquals(0, op.requestFirstByteTime());
+			assertEquals(0, op.responseFirstByteTime());
+			assertSame(
+							op,
+							attrs.getAttribute(SdkInternalExecutionAttribute.SDK_HTTP_EXECUTION_ATTRIBUTES)
+											.getAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION));
 		}
 	}
 

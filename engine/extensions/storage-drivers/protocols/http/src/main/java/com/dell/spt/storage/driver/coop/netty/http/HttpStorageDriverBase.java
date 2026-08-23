@@ -24,6 +24,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
@@ -31,10 +32,13 @@ import com.dell.spt.storage.driver.coop.netty.NettyStorageDriverBase;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
@@ -76,6 +80,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 				extends NettyStorageDriverBase<I, O> implements HttpStorageDriver<I, O> {
 
 	private static final String CLS_NAME = HttpStorageDriverBase.class.getSimpleName();
+	private static final String DELETE_REQUEST_TIMING_HANDLER = "deleteRequestTiming";
 	private static final Function<String, Input<String>> EXPR_INPUT_FUNC = expr -> CompositeExpressionInputBuilder.newInstance()
 					.expression(expr)
 					.build();
@@ -184,8 +189,37 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		super.appendHandlers(channel);
 		channel
 						.pipeline()
+						.addFirst(DELETE_REQUEST_TIMING_HANDLER, new DeleteRequestTimingHandler())
 						.addLast(new HttpClientCodec(REQ_LINE_LEN, HEADERS_LEN, maxChunkSize, true))
 						.addLast(new ChunkedWriteHandler());
+	}
+
+	private static final class DeleteRequestTimingHandler extends ChannelDuplexHandler {
+		@Override
+		public void channelRead(
+						final ChannelHandlerContext ctx, final Object msg) throws Exception {
+			if (msg instanceof ByteBuf buffer && buffer.isReadable()) {
+				final Operation<?> op = ctx.channel().attr(ATTR_KEY_OPERATION).get();
+				if (op instanceof DeleteRequestOperation deleteOperation) {
+					deleteOperation.markResponseFirstByteReceived();
+				}
+			}
+			ctx.fireChannelRead(msg);
+		}
+
+		@Override
+		public void write(
+						final ChannelHandlerContext ctx,
+						final Object msg,
+						final ChannelPromise promise) throws Exception {
+			if (msg instanceof ByteBuf buffer && buffer.isReadable()) {
+				final Operation<?> op = ctx.channel().attr(ATTR_KEY_OPERATION).get();
+				if (op instanceof DeleteRequestOperation deleteOperation) {
+					deleteOperation.markRequestFirstByteSent();
+				}
+			}
+			ctx.write(msg, promise);
+		}
 	}
 
 	protected HttpRequest httpRequest(final O op, final String nodeAddr) throws URISyntaxException {

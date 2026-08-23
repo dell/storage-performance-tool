@@ -62,3 +62,6 @@ const (
 // AutoResultsTrackerStableConfirmations is the number of unchanged successful
 // probes required before a step artifact is considered complete.
 const AutoResultsTrackerStableConfirmations = 2
+
+// TerminalMetricsCaptureAttempts bounds final metrics retries after the engine reports a terminal state.
+const TerminalMetricsCaptureAttempts = 3

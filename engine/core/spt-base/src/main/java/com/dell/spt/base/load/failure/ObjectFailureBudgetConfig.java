@@ -3,7 +3,6 @@ package com.dell.spt.base.load.failure;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.github.akurilov.confuse.Config;
 import java.time.Duration;
-import java.util.Locale;
 
 /** Immutable additive configuration for controller-level failed-object policy. */
 public record ObjectFailureBudgetConfig(
@@ -39,8 +38,7 @@ public record ObjectFailureBudgetConfig(
 			final Config budget = loadConfig.configVal(CONFIG_PATH);
 			final ObjectFailureBudgetMode mode;
 			try {
-				mode = ObjectFailureBudgetMode.valueOf(
-						budget.stringVal("mode").trim().toUpperCase(Locale.ROOT));
+				mode = ObjectFailureBudgetMode.fromWireValue(budget.stringVal("mode"));
 			} catch (final RuntimeException failure) {
 				throw invalid("failure budget mode must be fixed or percentage", failure);
 			}

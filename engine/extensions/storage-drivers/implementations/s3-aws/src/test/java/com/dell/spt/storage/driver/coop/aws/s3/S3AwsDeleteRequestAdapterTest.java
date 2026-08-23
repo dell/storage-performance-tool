@@ -207,6 +207,27 @@ final class S3AwsDeleteRequestAdapterTest {
 			assertEquals(DeleteFailureClassification.OPERATIONAL,
 							operation.deleteResult().failureClassification());
 			assertEquals(2, operation.deleteResult().failedObjectCount());
+			assertEquals(0, operation.responseFirstByteTime(),
+							"transport failures must not fabricate a response-start marker");
+			assertEquals(0, operation.respTimeDone(),
+							"transport failures without a response must not fabricate a last-byte marker");
+		}
+	}
+
+	@Test
+	void invokeNioTransportFailureDoesNotFabricateResponseTiming() throws Exception {
+		final S3AsyncClient primary = mock(S3AsyncClient.class);
+		when(primary.deleteObjects(any(DeleteObjectsRequest.class)))
+						.thenReturn(CompletableFuture.failedFuture(
+										SdkClientException.builder().message("transport unavailable").build()));
+		try (final var driver = driver(primary, mock(S3AsyncClient.class))) {
+			final DeleteRequestOperation operation = operation(target("one", null), target("two", null));
+
+			driver.invokeNio(operation);
+
+			assertEquals(0, operation.responseFirstByteTime());
+			assertEquals(0, operation.respTimeDone(),
+							"invokeNio failure cleanup must not invent a completed transport response");
 		}
 	}
 

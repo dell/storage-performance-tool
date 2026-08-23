@@ -7,6 +7,8 @@ import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.SHUTDOWN;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.STARTED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_BATCH;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SINGLE;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
@@ -25,16 +27,15 @@ import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
-import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.item.op.deletion.DeletePhaseTimingSnapshot;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
-import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetConfig;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.DurationTime;
@@ -44,6 +45,7 @@ import com.dell.spt.base.logging.OperationTraceCsvBatchLogMessage;
 import com.dell.spt.base.logging.OperationTraceCsvLogMessage;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -60,6 +62,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
@@ -151,12 +154,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final OperationLifecycleTracker<O> operationLifecycle;
 	private final boolean standaloneDeleteEnabled;
 	private final boolean standaloneDeleteDurationMode;
+	private final StandaloneDeleteConfig standaloneDeleteConfig;
+	private final ObjectFailureBudgetConfig deleteFailurePolicy;
 	private final AtomicLong deleteScheduledStartedNanos = new AtomicLong();
 	private final AtomicLong deleteScheduledDeadlineNanos = new AtomicLong();
 	private final AtomicLong deleteAdmissionClosedNanos = new AtomicLong();
 	private final AtomicLong deleteDrainCompletedNanos = new AtomicLong();
+	private final AtomicLong deleteWorkflowStartedEpochNanos = new AtomicLong();
+	private final AtomicLong deleteWorkflowCompletedEpochNanos = new AtomicLong();
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
-	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters = new DeleteObjectLifecycleCounters();
+	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -309,6 +316,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.retryFlag = opConfig.boolVal("retry");
 		this.retryLimit = opConfig.intVal("retryLimit");
 		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
+		this.standaloneDeleteConfig = standaloneDelete;
+		this.deleteObjectLifecycleCounters = new DeleteObjectLifecycleCounters(
+						standaloneDelete.selectedBuckets().keySet());
+		this.deleteFailurePolicy = standaloneDelete.enabled()
+						? ObjectFailureBudgetConfig.from(loadConfig)
+						: null;
 		this.standaloneDeleteEnabled = standaloneDelete.enabled();
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
 		standaloneDelete.validateSettings(opType, itemType, this.recycleFlag, this.retryFlag);
@@ -365,7 +378,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
 		if (standaloneDelete.enabled()) {
+			operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
 			operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
+			this.metricsCtx.metadata().put(
+							com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS,
+							(java.util.function.Supplier<DeleteMetricsSnapshot>) this::deleteMetricsSnapshot);
 		}
 		if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
 			this.metricsCtx.metadata().put(
@@ -1149,6 +1166,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		objectFailureBudgetAdmissionReleased.set(false);
 		operationLifecycle.reset();
 		if (standaloneDeleteEnabled) {
+			final long deleteStepStartedEpochNanos = DurationTime.monotonicEpochNanos();
+			final long configuredWorkflowStartedEpochNanos = standaloneDeleteConfig.workflowStartedEpochNanos();
+			deleteWorkflowStartedEpochNanos.set(
+							configuredWorkflowStartedEpochNanos != -1
+											&& configuredWorkflowStartedEpochNanos <= deleteStepStartedEpochNanos
+															? configuredWorkflowStartedEpochNanos
+															: deleteStepStartedEpochNanos);
 			deleteScheduledStartedNanos.set(
 							standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()
 											? 0
@@ -1156,6 +1180,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteScheduledDeadlineNanos.set(0);
 			deleteAdmissionClosedNanos.set(0);
 			deleteDrainCompletedNanos.set(0);
+			deleteWorkflowCompletedEpochNanos.set(0);
 			deleteDrainTimestampRecorded.set(false);
 		}
 		if (standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
@@ -1354,7 +1379,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return DeletePhaseTimingSnapshot.empty();
 		}
 		final long started = deleteScheduledStartedNanos.get();
-		final long scheduledDeadline = deleteScheduledDeadlineNanos.get();
 		final long admissionClosed = deleteAdmissionClosedNanos.get();
 		final long drainCompleted = deleteDrainCompletedNanos.get();
 		final boolean schedulingStarted = standaloneDeleteDurationMode
@@ -1363,16 +1387,55 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (!schedulingStarted || !operationAdmissionClosed.get()) {
 			return DeletePhaseTimingSnapshot.empty();
 		}
-		final long scheduledBoundary = standaloneDeleteDurationMode
-						&& DurationTime.deadlineReached(scheduledDeadline, admissionClosed)
-										? scheduledDeadline
-										: admissionClosed;
+		final long scheduledBoundary = scheduledDeleteBoundaryNanos(started, admissionClosed);
 		final long drainBoundary = deleteDrainTimestampRecorded.get()
 						? drainCompleted
 						: scheduledBoundary;
 		return new DeletePhaseTimingSnapshot(
 						DurationTime.elapsedNanos(started, scheduledBoundary),
 						DurationTime.elapsedNanos(scheduledBoundary, drainBoundary));
+	}
+
+	private long currentScheduledDeleteNanos() {
+		return currentScheduledDeleteNanos(System.nanoTime());
+	}
+
+	long currentScheduledDeleteNanos(final long currentNanos) {
+		final long started = deleteScheduledStartedNanos.get();
+		final boolean schedulingStarted = standaloneDeleteDurationMode
+						? durationIntervalStarted.get()
+						: startedOnce.get();
+		if (!schedulingStarted) {
+			return 0;
+		}
+		final long admissionClosed = deleteAdmissionClosedNanos.get();
+		final long observedBoundary;
+		if (operationAdmissionClosed.get()) {
+			observedBoundary = admissionClosed;
+		} else {
+			observedBoundary = currentNanos;
+		}
+		final long scheduledBoundary = scheduledDeleteBoundaryNanos(started, observedBoundary);
+		return DurationTime.elapsedNanos(started, scheduledBoundary);
+	}
+
+	private long scheduledDeleteBoundaryNanos(
+					final long started, final long observedBoundary) {
+		if (standaloneDeleteDurationMode) {
+			final long scheduledDeadline = deleteScheduledDeadlineNanos.get();
+			return DurationTime.deadlineReached(scheduledDeadline, observedBoundary)
+							? scheduledDeadline
+							: observedBoundary;
+		}
+		final var schedulingExhaustion = generator.schedulingExhaustionNanos();
+		if (schedulingExhaustion.isPresent()) {
+			final long exhaustedAt = schedulingExhaustion.getAsLong();
+			if (DurationTime.deadlineReached(started, exhaustedAt)
+							&& DurationTime.deadlineReached(exhaustedAt, observedBoundary)) {
+				return exhaustedAt;
+			}
+		}
+		return observedBoundary;
 	}
 
 	@Override
@@ -1416,26 +1479,170 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteOperation.completeDelete(null);
 		}
 		final var result = deleteOperation.deleteResult();
-		final long acceptedObjects = result.acceptedObjectCount();
-		final long failedObjects = result.failedObjectCount();
-		deleteObjectLifecycleCounters.recordTerminal(
-						acceptedObjects,
-						failedObjects,
-						result.failureClassification() == DeleteFailureClassification.PROTOCOL
-										? failedObjects
-										: 0,
-						result.outcome() == DeleteRequestOutcome.FULL_SUCCESS ? 1 : 0);
+		deleteObjectLifecycleCounters.recordTerminal(result);
 		final var metrics = resolveMetrics(operation.type());
+		final long requestDuration = standaloneDeleteRequestDuration(deleteOperation);
+		final long requestLatency = standaloneDeleteRequestLatency(deleteOperation);
 		if (Status.SUCC.equals(result.operationStatus())) {
 			metrics.markSucc(
 							0,
-							operation.duration(),
-							operation.latency(),
+							requestDuration,
+							requestLatency,
 							timeToFirstByte(operation));
 		} else {
-			metrics.markFail();
+			metrics.markFail(requestDuration, requestLatency);
 		}
 		counterResults.increment();
+	}
+
+	private static long standaloneDeleteRequestLatency(final DeleteRequestOperation operation) {
+		final long requestLatency = operation.transportRequestLatency();
+		if (requestLatency <= 0) {
+			return 0;
+		}
+		return standaloneDeleteRequestDuration(operation) >= requestLatency
+						? requestLatency
+						: 0;
+	}
+
+	private static long standaloneDeleteRequestDuration(final DeleteRequestOperation operation) {
+		final long requestStart = operation.reqTimeStart();
+		final long responseDone = operation.respTimeDone();
+		return requestStart > 0 && responseDone > requestStart ? responseDone - requestStart : 0;
+	}
+
+	private void recordStandaloneDeleteDispatch(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation deleteOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE dispatch lifecycle received a non-DELETE-request operation");
+		}
+		deleteObjectLifecycleCounters.recordDispatch(
+						deleteOperation.deleteRequest(), standaloneDeleteConfig.batchSize());
+	}
+
+	private DeleteMetricsSnapshot deleteMetricsSnapshot() {
+		if (!standaloneDeleteEnabled) {
+			return null;
+		}
+		final var objects = deleteObjectLifecycle();
+		final var requests = operationLifecycle.snapshot();
+		final var counters = deleteObjectLifecycleCounters.snapshot();
+		final boolean frozenSelection = standaloneDeleteConfig.frozenSelectionAvailable();
+		if (!frozenSelection && counters.attemptedObjects() != objects.selected()) {
+			// Dispatch counters cannot classify the version or bucket identity of an unread
+			// manifest suffix. Omit detail until every selected identity is represented instead
+			// of fabricating current/exact-version or overflow counts.
+			return null;
+		}
+		final var phaseTiming = deletePhaseTiming();
+		final long selectedObjects = standaloneDeleteConfig.selected() >= 0
+						? standaloneDeleteConfig.selected()
+						: objects.selected();
+		final double elapsedSeconds = currentScheduledDeleteNanos()
+						/ (double) TimeUnit.SECONDS.toNanos(1);
+		final double requestsPerSecond = elapsedSeconds > 0
+						? counters.attemptedRequests() / elapsedSeconds
+						: 0.0;
+		final double objectsPerSecond = elapsedSeconds > 0
+						? counters.attemptedObjects() / elapsedSeconds
+						: 0.0;
+		final long operationalFailedObjects = Math.subtractExact(
+						objects.failed(), objects.protocolFailed());
+		// Strict inventory pre-validation is introduced by the later verification contract.
+		final long preValidationNanos = -1;
+		final long seedNanos = optionalPhaseNanos(standaloneDeleteConfig.seedMillis());
+		final long discoveryNanos = optionalPhaseNanos(standaloneDeleteConfig.discoveryMillis());
+		final long totalWallNanos = currentDeleteWorkflowNanos();
+		final boolean scheduledPhaseMeasured = operationAdmissionClosed.get();
+		final boolean drainAndTotalMeasured = deleteDrainTimestampRecorded.get();
+		final var builder = DeleteMetricsSnapshot.builder(standaloneDeleteConfig.batchSize())
+						.identity(
+										standaloneDeleteConfig.batchSize() == 1
+														? DELETE_IDENTITY_MODE_SINGLE
+														: DELETE_IDENTITY_MODE_BATCH,
+										standaloneDeleteConfig.selectionOrder())
+						.requests(
+										counters.attemptedRequests(),
+										counters.fullSuccessfulRequests(),
+										counters.partialRequests(),
+										counters.failedRequests(),
+										requests.unresolved(),
+										requestsPerSecond)
+						.objects(
+										selectedObjects,
+										counters.attemptedObjects(),
+										objects.accepted(),
+										objects.failed(),
+										objects.unattempted(),
+										objects.unresolved(),
+										objectsPerSecond)
+						.batches(
+										counters.attemptedRequests(),
+										counters.attemptedObjects(),
+										counters.fullBatchRequests(),
+										counters.partialBatchRequests())
+						.versions(
+										frozenSelection
+														? standaloneDeleteConfig.selectedCurrentKey()
+														: counters.currentKeyTargets(),
+										frozenSelection
+														? standaloneDeleteConfig.selectedExactVersion()
+														: counters.exactVersionTargets())
+						.phases(
+										seedNanos,
+										discoveryNanos,
+										preValidationNanos,
+										scheduledPhaseMeasured ? phaseTiming.scheduledNanos() : -1,
+										drainAndTotalMeasured ? phaseTiming.drainNanos() : -1,
+										-1,
+										-1,
+										drainAndTotalMeasured ? totalWallNanos : -1)
+						.failurePolicy(
+										deleteFailurePolicy.mode().wireValue(),
+										deleteFailurePolicy.maxFailedObjects(),
+										deleteFailurePolicy.maxFailurePercent(),
+										deleteFailurePolicy.grace().toSeconds(),
+										operationalFailedObjects,
+										objects.protocolFailed())
+						.reconciled(objects.reconciled());
+
+		final var bucketMetrics = new TreeMap<String, long[]>();
+		standaloneDeleteConfig.selectedBuckets().forEach(
+						(name, selected) -> bucketMetrics.put(name, new long[]{selected, 0, 0, 0
+						}));
+		counters.buckets().forEach((name, counts) -> {
+			final long[] values = bucketMetrics.computeIfAbsent(
+							name, ignored -> new long[]{
+									standaloneDeleteConfig.selectedBuckets().isEmpty() ? counts.attempted() : 0,
+									0, 0, 0
+			});
+			values[1] = counts.attempted();
+			values[2] = counts.accepted();
+			values[3] = counts.failed();
+		});
+		long selectedByBucket = bucketMetrics.values().stream().mapToLong(values -> values[0]).sum();
+		if (selectedByBucket < selectedObjects) {
+			final long[] overflow = bucketMetrics.computeIfAbsent(
+							DeleteMetricsSnapshot.OVERFLOW_BUCKET, ignored -> new long[4]);
+			overflow[0] = Math.addExact(overflow[0], selectedObjects - selectedByBucket);
+		}
+		bucketMetrics.forEach((name, values) -> builder.bucket(
+						name, values[0], values[1], values[2], values[3]));
+		return builder.build();
+	}
+
+	private static long optionalPhaseNanos(final long millis) {
+		return millis < 0 ? -1 : TimeUnit.MILLISECONDS.toNanos(millis);
+	}
+
+	private long currentDeleteWorkflowNanos() {
+		if (!startedOnce.get()) {
+			return 0;
+		}
+		final long boundary = deleteDrainTimestampRecorded.get()
+						? deleteWorkflowCompletedEpochNanos.get()
+						: DurationTime.monotonicEpochNanos();
+		return DurationTime.elapsedNanos(deleteWorkflowStartedEpochNanos.get(), boundary);
 	}
 
 	private static long deleteTargetCount(final List<? extends Operation<?>> operations) {
@@ -1580,6 +1787,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} finally {
 			if (standaloneDeleteEnabled && !deleteDrainTimestampRecorded.get()) {
 				deleteDrainCompletedNanos.set(System.nanoTime());
+				deleteWorkflowCompletedEpochNanos.set(DurationTime.monotonicEpochNanos());
 				deleteDrainTimestampRecorded.set(true);
 			}
 			final var snapshot = operationLifecycle.snapshot();

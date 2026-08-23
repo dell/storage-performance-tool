@@ -14,6 +14,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -45,6 +46,8 @@ type runMetadata struct {
 	ExpectedStepIDs         []string                                                `json:"expectedStepIds,omitempty"`
 	ActualStepIDs           []string                                                `json:"actualStepIds,omitempty"`
 	DiscoveredStepIDs       []string                                                `json:"discoveredStepIds,omitempty"`
+	DeleteMetrics           map[string]*deletemetrics.Metrics                       `json:"deleteMetrics,omitempty"`
+	DeleteMetricsError      string                                                  `json:"deleteMetricsError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
 	CLI                     runCLIInfo                                              `json:"cli"`
@@ -54,6 +57,7 @@ type runMetadata struct {
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
 	Lifecycle               *runLifecycleMetadata                                   `json:"lifecycle,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
+	deleteContributors      func() ([]string, error)                                `json:"-"`
 	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
 	preparedCleanup         func(context.Context) error                             `json:"-"`
 	preparedInputs          bool                                                    `json:"-"`

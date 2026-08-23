@@ -302,6 +302,91 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 	}
 }
 
+func TestRunCmdDeleteFailedTrackerReturnsWorkloadFailureEveryTopology(t *testing.T) {
+	previousValidate := validateRunWorkloadTypeFunc
+	previousPort := resolvePortConflictFunc
+	previousConnect := connectMultiHostOrchestratorFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousMulti := startMultiHostHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		validateRunWorkloadTypeFunc = previousValidate
+		resolvePortConflictFunc = previousPort
+		connectMultiHostOrchestratorFunc = previousConnect
+		startLocalHeadlessRunFunc = previousLocal
+		startMultiHostHeadlessRunFunc = previousMulti
+		startAutoResultsFunc = previousAutoResults
+	})
+	validateRunWorkloadTypeFunc = func(string) error { return nil }
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+		return nil
+	}
+	startLocalHeadlessRunFunc = func(
+		_ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+	) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	startMultiHostHeadlessRunFunc = func(
+		_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params,
+		options headless.HeadlessOptions,
+	) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	const failureMessage = "DELETE failure budget exceeded"
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool,
+		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, metadata *runMetadata,
+		_ io.Writer, _ io.Writer, _ string, _ func(context.Context),
+		_ ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		monitor := &autoResultsMonitor{
+			done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
+		}
+		go func() {
+			<-monitor.armed
+			outcome := autoResultsOutcome{Tracker: &portcheck.RunResult{
+				FinalState: constants.StateFailed, FailureStepID: "mt-002-delete",
+				FailureCategory: "execution", FailureMessage: failureMessage,
+			}}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
+		}()
+		return monitor
+	}
+
+	for _, topology := range []struct {
+		name, hosts, minHosts string
+	}{
+		{name: "local", hosts: "127.0.0.1", minHosts: "1"},
+		{name: "distributed", hosts: "entry.example,worker.example", minHosts: "2"},
+	} {
+		t.Run(topology.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			for name, value := range map[string]string{
+				"test-hosts": topology.hosts, "min-hosts": topology.minHosts,
+				"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+				"bucket": "qualification", "object-count": "1", "duration": "", "threads": "1",
+				"headless": "true", "auto-results": "true", "shutdown-on-complete": "false",
+				"generate-only": "false", "items-file": "", "delete-batch-size": "1",
+			} {
+				setGlobalRunFlagForTest(t, name, value)
+			}
+
+			err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
+			var exitErr *ExitCodeError
+			if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+				!strings.Contains(err.Error(), failureMessage) {
+				t.Fatalf("RunE() error = %#v, want workload failure preserving %q", err, failureMessage)
+			}
+		})
+	}
+}
+
 func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for name, value := range map[string]string{

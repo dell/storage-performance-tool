@@ -2,16 +2,19 @@ package com.dell.spt.base.load.step.client;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.load.step.client.LoadStepClient.OUTPUT_PROGRESS_PERIOD_MILLIS;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
 
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
 import java.io.ByteArrayOutputStream;
@@ -23,8 +26,11 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -38,7 +44,32 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	private final String loadStepId;
 	private final Map<FileManager, String> itemInputFileSlices;
 	private final List<FileManager> fileMgrs;
+	private final Map<FileManager, Config> configsByFileManager;
 	private final boolean strictMode;
+
+	private static final class DeleteSelectionStats {
+		private final Set<String> retainedBuckets;
+		private long selected;
+		private long currentKey;
+		private long exactVersion;
+		private final Map<String, Long> buckets = new TreeMap<>();
+
+		private DeleteSelectionStats(final Set<String> retainedBuckets) {
+			this.retainedBuckets = retainedBuckets;
+		}
+
+		private void record(final IntegrityManifestDataItem item) {
+			selected++;
+			if (item.versionId() == null || item.versionId().isEmpty()) {
+				currentKey++;
+			} else {
+				exactVersion++;
+			}
+			final boolean retained = retainedBuckets.contains(item.bucket());
+			final String bucket = retained ? item.bucket() : DeleteMetricsSnapshot.OVERFLOW_BUCKET;
+			buckets.merge(bucket, 1L, Math::addExact);
+		}
+	}
 
 	public <I extends Item> ItemInputFileSlicer(
 					final String loadStepId,
@@ -60,6 +91,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		this.strictMode = strictMode;
 		final var sliceCount = configSlices.size();
 		itemInputFileSlices = new HashMap<>(sliceCount);
+		configsByFileManager = new HashMap<>(sliceCount);
 		this.fileMgrs = fileMgrs;
 		for (var i = 0; i < sliceCount; i++) {
 			try {
@@ -71,6 +103,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				final var itemInputFileName = fileMgr.newTmpFileName() + (strictMode ? ".csv" : "");
 				itemInputFileSlices.put(fileMgr, itemInputFileName);
 				final var configSlice = configSlices.get(i);
+				configsByFileManager.put(fileMgr, configSlice);
 				configSlice.val("item-input-file", itemInputFileName);
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
@@ -189,6 +222,8 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		}
 		final Map<FileManager, ByteArrayOutputStream> buffers = new HashMap<>(sliceFileMgrs.size());
 		final Map<FileManager, CSVPrinter> printers = new HashMap<>(sliceFileMgrs.size());
+		final Map<FileManager, DeleteSelectionStats> deleteStats = new HashMap<>(sliceFileMgrs.size());
+		final Set<String> retainedBuckets = canonicalRetainedBuckets(itemInput);
 		try {
 			for (final FileManager fileMgr : sliceFileMgrs) {
 				final var buffer = new ByteArrayOutputStream(batchSize * APPROX_LINE_LENGTH);
@@ -200,6 +235,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				buffer.reset();
 				buffers.put(fileMgr, buffer);
 				printers.put(fileMgr, printer);
+				deleteStats.put(fileMgr, new DeleteSelectionStats(retainedBuckets));
 			}
 
 			final List<I> items = new ArrayList<>(batchSize);
@@ -226,6 +262,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					final FileManager fileMgr = sliceFileMgrs.get((int) (nextSliceIndex % sliceFileMgrs.size()));
 					printers.get(fileMgr).printRecord(
 									item.bucket(), item.name(), item.size(), item.versionId() == null ? "" : item.versionId());
+					deleteStats.get(fileMgr).record(item);
 					nextSliceIndex++;
 				}
 				items.clear();
@@ -246,6 +283,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 							itemInput,
 							count,
 							sliceFileMgrs.size());
+			publishDeleteSelectionStats(deleteStats, retainedBuckets);
 		} finally {
 			for (final CSVPrinter printer : printers.values()) {
 				try {
@@ -254,6 +292,72 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					LogUtil.exception(Level.WARN, e, "Failed to close a canonical item-input slice writer");
 				}
 			}
+		}
+	}
+
+	private static <I extends Item> Set<String> canonicalRetainedBuckets(final Input<I> itemInput)
+					throws IOException {
+		if (!(itemInput instanceof IntegrityManifestItemInput manifestInput)) {
+			throw new IOException("strict item scatter requires a canonical integrity manifest input");
+		}
+		final Set<String> retained = new LinkedHashSet<>(DeleteMetricsSnapshot.MAX_BUCKET_METRICS);
+		for (final String encoded : StandaloneDeleteSelection
+						.fromManifest(manifestInput.filePath().toString())
+						.selectedBuckets()) {
+			final int separator = encoded.lastIndexOf('=');
+			final String bucket = encoded.substring(0, separator);
+			if (!DeleteMetricsSnapshot.OVERFLOW_BUCKET.equals(bucket)) {
+				retained.add(bucket);
+			}
+		}
+		return retained;
+	}
+
+	private void publishDeleteSelectionStats(
+					final Map<FileManager, DeleteSelectionStats> deleteStats,
+					final Set<String> retainedBuckets) {
+		final boolean hasOverflow = deleteStats.values().stream()
+						.anyMatch(stats -> stats.buckets.containsKey(DeleteMetricsSnapshot.OVERFLOW_BUCKET));
+		for (final var entry : deleteStats.entrySet()) {
+			final Config config = configsByFileManager.get(entry.getKey());
+			if (!standaloneDelete(config)) {
+				continue;
+			}
+			final DeleteSelectionStats stats = entry.getValue();
+			config.val("load-op-delete-selectionOrder", DELETE_SELECTION_ORDER_CANONICAL);
+			config.val("load-op-delete-selected", stats.selected);
+			config.val("load-op-delete-selectedCurrentKey", stats.currentKey);
+			config.val("load-op-delete-selectedExactVersion", stats.exactVersion);
+			config.val(
+							"load-op-delete-selectedBuckets",
+							canonicalBucketCounts(stats, retainedBuckets, hasOverflow).entrySet().stream()
+											.map(bucket -> bucket.getKey() + '=' + bucket.getValue())
+											.toList());
+		}
+	}
+
+	private static Map<String, Long> canonicalBucketCounts(
+					final DeleteSelectionStats stats,
+					final Set<String> retainedBuckets,
+					final boolean hasOverflow) {
+		final Map<String, Long> result = new TreeMap<>();
+		retainedBuckets.forEach(bucket -> result.put(bucket, stats.buckets.getOrDefault(bucket, 0L)));
+		if (hasOverflow) {
+			result.put(
+							DeleteMetricsSnapshot.OVERFLOW_BUCKET,
+							stats.buckets.getOrDefault(DeleteMetricsSnapshot.OVERFLOW_BUCKET, 0L));
+		}
+		return result;
+	}
+
+	private static boolean standaloneDelete(final Config config) {
+		if (config == null) {
+			return false;
+		}
+		try {
+			return config.boolVal("load-op-delete-standalone");
+		} catch (final RuntimeException ignored) {
+			return false;
 		}
 	}
 

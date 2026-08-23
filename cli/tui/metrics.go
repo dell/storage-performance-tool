@@ -14,6 +14,7 @@ import (
 
 const (
 	maxMetricsSamples = 10000
+	notAvailableValue = "N/A"
 )
 
 // PerformanceMetric represents a single performance data point from Spt
@@ -36,6 +37,8 @@ type PerformanceMetric struct {
 	MiBPerSec          int64   // Last Rate [MiB/s] - secondary chart metric
 	MeanLatency        int64   // Display latency [us]; schema 3 prefers p50 with mean fallback
 	MeanDuration       int64   // Display duration [us]; schema 3 prefers p50 with mean fallback
+	HasLatency         bool    // Whether request-latency timing is available in the sample
+	HasDuration        bool    // Whether request-duration timing is available in the sample
 	MeanTTFB           int64   // Display TTFB [us]
 	HasTTFB            bool    // Whether TTFB was present in the metrics sample
 	FailureIncrement   int64   // Incremental failures since last sample
@@ -48,7 +51,12 @@ type PerformanceMetric struct {
 	RunID         string
 	NodesCount    int
 	NodesPresent  []string
-	Partial       bool
+	// ContributorsPresent is the additive schema-v4 freshness/identity set. NodesPresent retains
+	// its established public presentation semantics.
+	ContributorsPresent []string
+	Partial             bool
+	// DeleteDetailExpected opts this row into the standalone schema-v4 detail contract.
+	DeleteDetailExpected bool
 
 	LimitType    string
 	LimitOpCount int64
@@ -62,6 +70,10 @@ type PerformanceMetric struct {
 	OverallCompletionPercent float64
 	Unbounded                bool
 	OverallUnbounded         bool
+
+	// Delete holds schema-v4 explicit request/object units. It is nil for v2/v3,
+	// generic DELETE operations, and non-DELETE operations.
+	Delete *DeleteMetrics
 }
 
 // NodePhase represents the lifecycle stage of a node from spt's perspective.

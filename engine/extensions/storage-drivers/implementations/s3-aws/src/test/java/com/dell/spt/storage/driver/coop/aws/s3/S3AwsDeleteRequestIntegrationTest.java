@@ -70,6 +70,7 @@ final class S3AwsDeleteRequestIntegrationTest {
 			final DeleteRequestOperation result = execute(driver, operation(target("current-key", null)));
 
 			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
+			assertCompletedTransportTiming(result);
 			final CapturedRequest request = onlyRequest("DELETE");
 			assertEquals("/bucket/current-key", request.rawPath());
 			assertNull(request.rawQuery());
@@ -83,9 +84,32 @@ final class S3AwsDeleteRequestIntegrationTest {
 							driver, operation(target("exact-key", "v+1/=")));
 
 			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
+			assertCompletedTransportTiming(result);
 			final CapturedRequest request = onlyRequest("DELETE");
 			assertEquals("/bucket/exact-key", request.rawPath());
 			assertEquals("versionId=v%2B1%2F%3D", request.rawQuery());
+		}
+	}
+
+	@Test
+	void nativeTimingConnectionReturnsToSingleSlotPoolForTheNextRequest() throws Exception {
+		try (final var driver = newDriver()) {
+			final ResultOutput output = new ResultOutput();
+			driver.operationResultOutput(output);
+			driver.start();
+
+			assertTrue(driver.put(operation(target("first-key", null))));
+			final DeleteRequestOperation first = output.await();
+			assertNotNull(first);
+			assertCompletedTransportTiming(first);
+
+			assertTrue(driver.put(operation(target("second-key", null))));
+			final DeleteRequestOperation second = output.await();
+			assertNotNull(second, "the one-slot CRT pool did not release its first connection");
+			assertCompletedTransportTiming(second);
+			assertEquals(2, requests.stream()
+							.filter(request -> "DELETE".equals(request.method()))
+							.count());
 		}
 	}
 
@@ -109,8 +133,17 @@ final class S3AwsDeleteRequestIntegrationTest {
 			assertEquals(1, driver.scheduledOpCount());
 			assertEquals(1, driver.completedOpCount());
 			assertEquals(0, driver.activeOpCount());
-			assertTrue(result.duration() > 0);
+			assertCompletedTransportTiming(result);
 		}
+	}
+
+	private static void assertCompletedTransportTiming(final DeleteRequestOperation result) {
+		assertTrue(result.transportRequestLatency() > 0,
+						"AWS CRT send-start/receive-start metrics did not populate request latency");
+		assertEquals(result.respTimeStart(), result.responseFirstByteTime());
+		assertTrue(result.respTimeDone() >= result.responseFirstByteTime());
+		assertTrue(result.duration() > 0);
+		assertTrue(result.duration() >= result.transportRequestLatency());
 	}
 
 	private static void awaitCompletionAccounting(
@@ -138,12 +171,15 @@ final class S3AwsDeleteRequestIntegrationTest {
 			assertEquals(1, result.deleteResult().acceptedObjectCount());
 			assertEquals(1, result.deleteResult().failedObjectCount());
 			assertEquals(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_SVC, result.status());
+			assertCompletedTransportTiming(result);
 		}
 	}
 
 	private S3AwsStorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> newDriver()
 					throws Exception {
-		return driver(newClient(), newClient());
+		final TimingClient timingClient = newTimingClient();
+		return driver(
+						newClient(), newClient(), timingClient.s3Client(), timingClient.httpClient());
 	}
 
 	private S3AsyncClient newClient() {
@@ -160,6 +196,28 @@ final class S3AwsDeleteRequestIntegrationTest {
 										.apiCallTimeout(Duration.ofSeconds(3))
 										.build())
 						.build();
+	}
+
+	private TimingClient newTimingClient() {
+		final URI endpoint = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+		final var credentials = AwsBasicCredentials.create(CREDENTIAL.getUid(), CREDENTIAL.getSecret());
+		final var httpClient = new DeleteTimingAsyncHttpClient(
+						CrtDeleteTimingAsyncHttpClient.builder()
+										.operationAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION)
+										.maxConcurrency(1)
+										.build());
+		final var s3Client = S3AsyncClient.builder()
+						.credentialsProvider(StaticCredentialsProvider.create(credentials))
+						.region(Region.US_EAST_1)
+						.endpointOverride(endpoint)
+						.forcePathStyle(true)
+						.httpClient(httpClient)
+						.overrideConfiguration(ClientOverrideConfiguration.builder()
+										.apiCallAttemptTimeout(Duration.ofSeconds(2))
+										.apiCallTimeout(Duration.ofSeconds(3))
+										.build())
+						.build();
+		return new TimingClient(s3Client, httpClient);
 	}
 
 	private static DeleteRequestOperation execute(
@@ -206,6 +264,9 @@ final class S3AwsDeleteRequestIntegrationTest {
 	}
 
 	private record CapturedRequest(String method, String rawPath, String rawQuery, String body) {}
+
+	private record TimingClient(
+					S3AsyncClient s3Client, DeleteTimingAsyncHttpClient httpClient) {}
 
 	private static final class ResultOutput implements Output<DeleteRequestOperation> {
 

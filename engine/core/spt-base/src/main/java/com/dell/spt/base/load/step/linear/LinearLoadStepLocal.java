@@ -6,6 +6,7 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.io.IntegrityOperationManifestOutput;
@@ -81,6 +82,7 @@ public class LinearLoadStepLocal
 		initMetrics(originIndex, opType, concurrencyLimit, metricsConfig, itemDataSize, outputColorFlag);
 
 		final Config itemConfig = config.configVal("item");
+		StandaloneDeleteSelection.ensureFrozen(loadConfig, itemConfig);
 		final Config dataConfig = itemConfig.configVal("data");
 		final Config dataInputConfig = dataConfig.configVal("input");
 		final Config dataLayerConfig = dataInputConfig.configVal("layer");

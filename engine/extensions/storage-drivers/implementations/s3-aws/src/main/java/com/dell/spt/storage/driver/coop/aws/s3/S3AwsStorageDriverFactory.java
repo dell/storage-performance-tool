@@ -20,6 +20,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.net.URI;
+import java.time.Duration;
+import java.util.LinkedList;
 import java.util.List;
 
 /**
@@ -193,11 +195,26 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// Note: partSizeBytes is used for driver-level multipart decisions
 		// The CRT manages part size internally based on minimumPartSizeInBytes
 
-		S3AsyncClient s3AsyncClient = crtBuilder.build();
-		final String exactClientRegion = region;
-		final int exactClientMaxConcurrency = maxConcurrency;
+		final var constructionResources = new ConstructionResources();
 		try {
-			return new S3AwsStorageDriver<>(
+			final S3AsyncClient s3AsyncClient = constructionResources.own(crtBuilder.build());
+			final var deleteHttpClient = constructionResources.own(
+							new DeleteTimingAsyncHttpClient(
+											CrtDeleteTimingAsyncHttpClient.builder()
+															.operationAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION)
+															.maxConcurrency(maxConcurrency)
+															.connectionTimeout(Duration.ofMillis(connectionTimeoutMs))
+															.build()));
+			final S3AsyncClient deleteS3Client = constructionResources.own(S3AsyncClient.builder()
+							.credentialsProvider(StaticCredentialsProvider.create(creds))
+							.region(Region.of(region))
+							.endpointOverride(URI.create(endpoint))
+							.forcePathStyle(pathStyle)
+							.httpClient(deleteHttpClient)
+							.build());
+			final String exactClientRegion = region;
+			final int exactClientMaxConcurrency = maxConcurrency;
+			final S3AwsStorageDriver<I, O> driver = new S3AwsStorageDriver<>(
 							stepId,
 							dataInput,
 							storageConfig,
@@ -217,15 +234,42 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 																.maxConcurrency(exactClientMaxConcurrency))
 												.build();
 							},
+							deleteS3Client,
+							deleteHttpClient,
 							smallObjectThresholdBytes,
 							partSizeBytes);
-		} catch (RuntimeException e) {
-			try {
-				s3AsyncClient.close();
-			} catch (RuntimeException closeFailure) {
-				e.addSuppressed(closeFailure);
+			constructionResources.release();
+			return driver;
+		} catch (final RuntimeException | Error failure) {
+			constructionResources.closeOnFailure(failure);
+			throw failure;
+		}
+	}
+
+	/** Reverse-order cleanup transaction for clients created before driver ownership transfers. */
+	static final class ConstructionResources {
+		private final LinkedList<AutoCloseable> resources = new LinkedList<>();
+
+		<T extends AutoCloseable> T own(final T resource) {
+			if (resource != null) {
+				resources.push(resource);
 			}
-			throw e;
+			return resource;
+		}
+
+		void release() {
+			resources.clear();
+		}
+
+		void closeOnFailure(final Throwable constructionFailure) {
+			resources.forEach(resource -> {
+				try {
+					resource.close();
+				} catch (final Exception | Error closeFailure) {
+					constructionFailure.addSuppressed(closeFailure);
+				}
+			});
+			resources.clear();
 		}
 	}
 

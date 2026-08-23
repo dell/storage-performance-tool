@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -16,9 +17,16 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +45,7 @@ import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -2135,6 +2144,115 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void terminalFailureBudgetDecisionIsPublishedIntoMetricsMetadata() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final Map<String, Object> metadata = new HashMap<>();
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(metadata);
+		client.addMetricsContextForTest(metricsContext);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(slice.deleteObjectLifecycle()).thenReturn(
+						new DeleteObjectLifecycleSnapshot(2, 2, 1, 1, 0, 0, 0, 1, true));
+		addRawStepSlice(client, slice);
+
+		assertTrue(client.await(1, TimeUnit.SECONDS));
+		assertDoesNotThrow(client::close);
+
+		assertEquals(
+						"completed_within_failure_budget",
+						metadata.get(com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME));
+	}
+
+	@Test
+	void closePublishesFailureBudgetOutcomeIntoRetainedFleetMetrics() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
+		final Map<String, Object> metadata = new HashMap<>();
+		metadata.put(MetricsConstants.METADATA_DELETE_METRICS, true);
+		metadata.put(
+						MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME,
+						MetricsConstants.DELETE_FAILURE_OUTCOME_RUNNING);
+		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
+		final RateMetricSnapshot success = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot fails = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot bytes = mock(RateMetricSnapshot.class);
+		final TimingMetricSnapshot latency = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot duration = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot ttfb = mock(TimingMetricSnapshot.class);
+		final ConcurrencyMetricSnapshot concurrency = mock(ConcurrencyMetricSnapshot.class);
+		when(success.count()).thenReturn(1L);
+		when(snapshot.successSnapshot()).thenReturn(success);
+		when(snapshot.failsSnapshot()).thenReturn(fails);
+		when(snapshot.byteSnapshot()).thenReturn(bytes);
+		when(snapshot.latencySnapshot()).thenReturn(latency);
+		when(snapshot.durationSnapshot()).thenReturn(duration);
+		when(snapshot.ttfbSnapshot()).thenReturn(ttfb);
+		when(snapshot.concurrencySnapshot()).thenReturn(concurrency);
+		when(snapshot.elapsedTimeMillis()).thenReturn(1_000L);
+		final DeleteMetricsSnapshot runningDeleteMetrics = DeleteMetricsSnapshot.builder(1)
+						.requests(1, 1, 0, 0, 0, 1)
+						.objects(1, 1, 1, 0, 0, 0, 0)
+						.failureOutcome(MetricsConstants.DELETE_FAILURE_OUTCOME_RUNNING)
+						.build();
+		when(snapshot.deleteMetrics()).thenAnswer(ignored -> runningDeleteMetrics.toBuilder()
+						.failureOutcome((String) metadata.get(
+										MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME))
+						.build());
+		final DistributedMetricsContext<?> context = mock(DistributedMetricsContext.class);
+		when(context.loadStepId()).thenReturn(client.loadStepId());
+		when(context.opType()).thenReturn(OpType.DELETE);
+		when(context.lastSnapshot()).thenReturn(snapshot);
+		when(context.metadata()).thenReturn(metadata);
+		when(context.quantileValues()).thenReturn(List.of());
+		when(context.nodeCount()).thenReturn(1);
+		when(context.nodeAddrs()).thenReturn(List.of("local"));
+		when(context.nodesPresent()).thenReturn(List.of("local"));
+		when(context.contributorsPresent()).thenReturn(List.of("local"));
+		when(context.concurrencyLimit()).thenReturn(1);
+		when(context.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(0));
+		when(context.comment()).thenReturn("");
+		when(context.runId()).thenReturn(1L);
+		when(context.sumPersistEnabled()).thenReturn(false);
+		when(context.timingPersistEnabled()).thenReturn(false);
+		client.addMetricsContextForTest(context);
+		metricsManager.register(context);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		addRawStepSlice(client, slice);
+
+		final CapturingMessageAppender appender = new CapturingMessageAppender("Failure Policy:");
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.METRICS_STD_OUT.getName());
+		logger.addAppender(appender);
+		try {
+			assertTrue(client.await(1, TimeUnit.SECONDS));
+			assertDoesNotThrow(client::close);
+			assertTrue(appender.awaitTarget(1, TimeUnit.SECONDS));
+			assertTrue(
+							appender.messages().stream().anyMatch(message -> message.contains(
+											"Outcome:                   completed cleanly")),
+							"engine-only result must contain the controller terminal verdict");
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+
+		final var retainedFleet = metricsManager.getTerminalSteps().stream()
+						.filter(entry -> entry.distributed && client.loadStepId().equals(entry.stepId))
+						.findFirst()
+						.orElseThrow();
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleet.deleteMetrics.failureOutcome(),
+						"close must update the retained fleet row after the controller decision");
+	}
+
+	@Test
 	void terminalCounterProbeTimesOutOnceAndFailsClosed() throws Exception {
 		final Config config = countDeleteConfig();
 		config.val("load-op-wait-limit", 0);
@@ -2282,6 +2400,18 @@ class LoadStepClientBaseTest {
 						List.of("worker-a", "worker-b", "worker-c"),
 						LoadStepClientBase.participatingRemoteNodeAddrs(
 										writeVerify, List.of("worker-a", "worker-b", "worker-c")));
+	}
+
+	@Test
+	void distributedContributorIdsIncludeLocalSliceAndOnlyParticipatingRemotes() {
+		final Config config = TestConfigBuilder.config();
+		config.val("storage-integrity-output-requireExactCount", true);
+		config.val("load-op-limit-count", 2L);
+
+		assertEquals(
+						List.of("local", "worker-a"),
+						LoadStepClientBase.distributedContributorIds(
+										config, List.of("worker-a", "worker-b", "worker-c")));
 	}
 
 	@Test

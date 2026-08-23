@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
@@ -105,6 +106,49 @@ func TestAutoResultsSetupFailureIsArtifactOutcome(t *testing.T) {
 				t.Fatalf("verification result = %v, want setup failure", runErr)
 			}
 		})
+	}
+}
+
+func TestResolveRunCompletionErrorFailsDeleteOnMissingTerminalMetrics(t *testing.T) {
+	failure := errors.New("authoritative DELETE detail is missing")
+	outcome := autoResultsOutcome{DeleteMetricsErr: failure}
+	err := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "terminal DELETE metrics") {
+		t.Fatalf("DELETE completion error = %v, want terminal metrics failure", err)
+	}
+
+	nonDelete := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeRead})
+	if nonDelete != nil {
+		t.Fatalf("non-DELETE result inherited DELETE metrics failure: %v", nonDelete)
+	}
+}
+
+func TestResolveRunCompletionErrorFailsDeleteOnRejectedTerminalOutcome(t *testing.T) {
+	failure := terminalDeleteOutcomeError(map[string]*deletemetrics.Metrics{
+		"mt-002-delete": {
+			FailurePolicy: deletemetrics.FailurePolicy{Outcome: deletemetrics.OutcomeFailed},
+		},
+	})
+	outcome := autoResultsOutcome{
+		Tracker:           &portcheck.RunResult{FinalState: constants.StateCompleted},
+		DeleteTerminalErr: failure,
+	}
+	err := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "mt-002-delete") {
+		t.Fatalf("DELETE rejected outcome error = %v, want terminal policy failure", err)
+	}
+}
+
+func TestResolveRunCompletionErrorPreservesPresenterFailureWithoutAutoResults(t *testing.T) {
+	presenterFailure := errors.New("owned DELETE presentation failed")
+	got := resolveRunCompletionError(
+		presenterFailure, autoResultsOutcome{}, false,
+		scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if got != presenterFailure {
+		t.Fatalf("DELETE presenter error = %v, want original %v", got, presenterFailure)
 	}
 }
 

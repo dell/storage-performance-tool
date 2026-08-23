@@ -14,6 +14,7 @@ import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.Arrays;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 final class S3AwsDeleteRequestTestFixture {
@@ -24,6 +25,27 @@ final class S3AwsDeleteRequestTestFixture {
 
 	static DeleteTarget target(final String key, final String versionId) {
 		return new DeleteTarget(new IntegrityManifestDataItem("bucket", key, 0, versionId));
+	}
+
+	static S3AwsStorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> driver(
+					final S3AsyncClient primaryClient,
+					final S3AsyncClient exactVersionClient,
+					final S3AsyncClient standaloneDeleteClient,
+					final SdkAsyncHttpClient standaloneDeleteHttpClient)
+					throws Exception {
+		return new S3AwsStorageDriver<>(
+						"aws-delete-test",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						storageConfig(),
+						false,
+						16,
+						primaryClient,
+						() -> exactVersionClient,
+						standaloneDeleteClient,
+						standaloneDeleteHttpClient,
+						100 * 1024L,
+						8 * 1024 * 1024L);
 	}
 
 	static DeleteRequestOperation operation(final DeleteTarget... targets) {

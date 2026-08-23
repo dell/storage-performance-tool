@@ -17,10 +17,12 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -33,10 +35,149 @@ import org.junit.jupiter.api.Test;
 public class MetricsJsonResponderTest {
 
 	@Test
+	void schema4DeleteMetricsPreserveGenericRequestUnitsAndExposeDetailedContract() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(2L, 1L, 2_000L);
+		when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot());
+		when(snapshot.latencySnapshot()).thenReturn(
+						TimingMetricSnapshotImpl.fromSamples("latency", List.of(100L, 200L, 300L)));
+		when(snapshot.durationSnapshot()).thenReturn(
+						TimingMetricSnapshotImpl.fromSamples("duration", List.of(200L, 400L, 600L)));
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"delete-step", OpType.DELETE, snapshot,
+						Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode json = new MetricsJsonResponder(mgr, defaultConfig())
+						.buildClusterMetrics(false)
+						.get(0);
+
+		assertEquals(4, json.get("metrics_schema").asInt());
+		assertTrue(json.get("delete_detail_expected").asBoolean());
+		assertEquals(2, json.get("operations").get("success_count").asLong());
+		assertEquals(1, json.get("operations").get("failed_count").asLong());
+		final JsonNode delete = json.get("delete");
+		assertEquals("logical_api_requests", delete.get("units").get("requests").asText());
+		assertEquals("object_identities", delete.get("units").get("objects").asText());
+		assertEquals("logical_api_requests", delete.get("units").get("batches").asText());
+		assertEquals(3, delete.get("requests").get("attempted").asLong());
+		assertEquals(2, delete.get("requests").get("full_success").asLong());
+		assertEquals(1, delete.get("requests").get("partial").asLong());
+		assertEquals(0, delete.get("requests").get("failed").asLong());
+		assertEquals(175, delete.get("objects").get("selected").asLong());
+		assertEquals(170, delete.get("objects").get("accepted").asLong());
+		assertEquals(5, delete.get("objects").get("failed").asLong());
+		assertEquals(100, delete.get("batches").get("configured_size").asInt());
+		assertEquals(3, delete.get("batches").get("actual_request_count").asLong());
+		assertEquals(175, delete.get("batches").get("actual_object_count").asLong());
+		assertEquals(100.0, delete.get("completion").get("request_percent").asDouble());
+		assertEquals(100.0, delete.get("completion").get("object_percent").asDouble());
+		assertEquals("batch", delete.get("identity").get("mode").asText());
+		assertEquals("canonical", delete.get("identity").get("selection_order").asText());
+		assertEquals("accepted", delete.get("outcome_terminology").asText());
+		assertFalse(delete.get("verification").get("enabled").asBoolean());
+		assertFalse(delete.get("verification").get("removal_confirmed").asBoolean());
+		assertTrue(delete.get("verification").get("notice").asText().contains("not confirmed"));
+		assertEquals("not_applicable", delete.get("performance").get("object_size").asText());
+		assertEquals("not_applicable", delete.get("performance").get("data_moved").asText());
+		assertEquals("not_applicable", delete.get("performance").get("bandwidth").asText());
+		assertEquals("not_applicable", delete.get("performance").get("ttfb").asText());
+		assertEquals(1.25, delete.get("phases").get("seed").asDouble());
+		assertEquals(0.75, delete.get("phases").get("discovery").asDouble());
+		assertTrue(delete.get("phases").get("pre_validation").isNull());
+		assertEquals(4.25, delete.get("phases").get("total_wall_seconds").asDouble());
+		assertEquals(5, delete.get("failure_policy").get("operational_failed_objects").asLong());
+		assertEquals(0, delete.get("failure_policy").get("excluded_failed_objects").asLong());
+		assertEquals("completed_within_failure_budget",
+						delete.get("failure_policy").get("outcome").asText());
+		assertEquals(5.0 / 175.0 * 100.0,
+						delete.get("failure_policy").get("observed_failure_percent").asDouble(),
+						0.000_001);
+		assertEquals(
+						"first_request_byte_sent_to_first_response_byte_received",
+						delete.get("timing").get("latency_definition").asText());
+		assertEquals(
+						"request_formulation_to_last_response_byte_received",
+						delete.get("timing").get("duration_definition").asText());
+		assertTrue(delete.get("timing").get("latency").get("p999_us").asLong() > 0);
+		assertTrue(delete.get("timing").get("duration").get("p99_us").asLong() > 0);
+		assertTrue(delete.get("timing").get("object_latency").isNull());
+		assertEquals(2, delete.get("buckets").size());
+	}
+
+	@Test
+	void engineApiMatchesSharedDeleteCrossViewFixture() throws Exception {
+		final JsonNode expected = new ObjectMapper().readTree(
+						MetricsJsonResponderTest.class.getResourceAsStream(
+										"/delete-metrics-v4-cross-view.json"))
+						.get(0);
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(2L, 1L, 2_000L);
+		when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot());
+		when(snapshot.latencySnapshot()).thenReturn(
+						TimingMetricSnapshotImpl.fromSamples("latency", List.of(100L, 200L, 300L)));
+		when(snapshot.durationSnapshot()).thenReturn(
+						TimingMetricSnapshotImpl.fromSamples("duration", List.of(200L, 400L, 600L)));
+		when(snapshot.successSnapshot().last()).thenReturn(3.0);
+		final DistributedMetricsContext context = mockDistributedContext(
+						"delete-cross-view", OpType.DELETE, snapshot,
+						Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+		final MetricsManager manager = mock(MetricsManager.class);
+		when(manager.getDistributedContexts()).thenReturn(Set.of(context));
+		when(manager.getAllContexts()).thenReturn(Set.of());
+		when(manager.getTerminalSteps()).thenReturn(List.of());
+		final JsonNode actual = new MetricsJsonResponder(manager, defaultConfig())
+						.buildClusterMetrics(false).get(0);
+
+		assertEquals(expected.get("operations").toString(), actual.get("operations").toString());
+		for (final String field : List.of(
+						"units", "requests", "objects", "batches", "completion", "versions",
+						"buckets", "phases", "identity", "failure_policy", "timing", "performance",
+						"outcome_terminology", "verification", "terminal_reconciled")) {
+			assertEquals(
+							expected.get("delete").get(field).toString(),
+							actual.get("delete").get(field).toString(),
+							field);
+		}
+	}
+
+	@Test
+	void liveDeletePhasesRemainNullUntilTheirIntervalsAreMeasured() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(0L, 0L, 100L);
+		when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot().toBuilder()
+						.phases(-1, -1, -1)
+						.failureOutcome("running")
+						.reconciled(false)
+						.build());
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"delete-live", OpType.DELETE, snapshot,
+						Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode phases = new MetricsJsonResponder(mgr, defaultConfig())
+						.buildClusterMetrics(false).get(0).get("delete").get("phases");
+
+		assertTrue(phases.get("scheduled_delete_seconds").isNull());
+		assertTrue(phases.get("drain_seconds").isNull());
+		assertTrue(phases.get("total_wall_seconds").isNull());
+	}
+
+	@Test
 	void clusterMetricsIncludesAggregatedFields() throws Exception {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot();
-		final DistributedMetricsContext ctx = mockDistributedContext("step-agg", OpType.READ, snapshot,
-						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 200));
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"step-agg",
+						OpType.READ,
+						snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 200),
+						2,
+						List.of("remote-node:1099"));
+		when(ctx.contributorsPresent()).thenReturn(List.of("local", "remote-node:1099"));
 
 		final MetricsManager mgr = mock(MetricsManager.class);
 		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
@@ -47,7 +188,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildClusterMetrics(false);
 		assertEquals(1, payload.size());
 		final JsonNode obj = payload.get(0);
-		assertEquals(3, obj.get("metrics_schema").asInt());
+		assertEquals(4, obj.get("metrics_schema").asInt());
 		assertEquals("fleet", obj.get("scope").asText());
 		assertEquals("aggregate", obj.get("role").asText());
 		assertEquals("step-agg", obj.get("step_id").asText());
@@ -56,8 +197,11 @@ public class MetricsJsonResponderTest {
 		assertTrue(obj.get("operations").get("success_count").asLong() > 0L);
 		assertEquals(2L, obj.get("operations").get("corrupt_count").asLong());
 		assertTrue(obj.get("bandwidth").get("bytes_total").asLong() > 0L);
-		assertEquals(1, obj.get("nodes_count").asInt());
+		assertEquals(2, obj.get("nodes_count").asInt());
 		assertEquals(1, obj.get("nodes_present").size());
+		assertEquals("remote-node:1099", obj.get("nodes_present").get(0).asText());
+		assertEquals(2, obj.get("contributors_present").size());
+		assertEquals("local", obj.get("contributors_present").get(0).asText());
 		assertFalse(obj.get("partial").asBoolean());
 		assertEquals("123", obj.get("run_id").asText());
 	}
@@ -169,8 +313,50 @@ public class MetricsJsonResponderTest {
 		assertEquals("777", first.get("run_id").asText());
 		assertTrue(first.get("terminal").asBoolean());
 		assertEquals("node", nodePayload.get(0).get("scope").asText());
-		assertEquals(3, nodePayload.get(0).get("metrics_schema").asInt());
+		assertEquals(4, nodePayload.get(0).get("metrics_schema").asInt());
 		assertEquals("entry", nodePayload.get(0).get("role").asText());
+	}
+
+	@Test
+	void terminalNodeMetricsRetainSchema4DeleteContract() {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		final var delete = deleteMetricsSnapshot();
+		final TerminalStepEntry entry = new TerminalStepEntry(
+						"delete-terminal",
+						OpType.DELETE,
+						888L,
+						System.currentTimeMillis(),
+						1L,
+						2L,
+						0L,
+						0L,
+						200.0,
+						400.0,
+						TimingMetricSnapshotImpl.fromSamples("latency", List.of(100L, 200L, 300L)),
+						TimingMetricSnapshotImpl.fromSamples("duration", List.of(200L, 400L, 600L)),
+						null,
+						0L,
+						0.0,
+						0L,
+						0L,
+						2_000L,
+						false,
+						0,
+						List.of(),
+						false,
+						delete);
+		when(mgr.getTerminalSteps()).thenReturn(List.of(entry));
+
+		final JsonNode json = new MetricsJsonResponder(mgr, defaultConfig())
+						.buildNodeMetrics(false).get(0);
+
+		assertTrue(json.get("terminal").asBoolean());
+		assertTrue(json.get("delete_detail_expected").asBoolean());
+		assertEquals(170, json.get("delete").get("objects").get("accepted").asLong());
+		assertEquals("accepted", json.get("delete").get("outcome_terminology").asText());
+		assertEquals("not_applicable", json.get("delete").get("performance").get("bandwidth").asText());
 	}
 
 	@Test
@@ -230,6 +416,7 @@ public class MetricsJsonResponderTest {
 						true,
 						3,
 						List.of("node-a", "node-b"),
+						List.of("local", "node-a"),
 						true);
 		when(mgr.getTerminalSteps()).thenReturn(List.of(terminal));
 
@@ -242,6 +429,8 @@ public class MetricsJsonResponderTest {
 		assertEquals("aggregate", agg.get("role").asText());
 		assertEquals(3, agg.get("nodes_count").asInt());
 		assertEquals(2, agg.get("nodes_present").size());
+		assertEquals(2, agg.get("contributors_present").size());
+		assertEquals("local", agg.get("contributors_present").get(0).asText());
 		assertTrue(agg.get("partial").asBoolean());
 		assertEquals("321", agg.get("run_id").asText());
 		assertEquals(110L, agg.get("operations").get("success_count").asLong() + agg.get("operations").get("failed_count").asLong());
@@ -316,7 +505,9 @@ public class MetricsJsonResponderTest {
 						snapshot,
 						Map.of(MetricsConstants.METADATA_LIMIT_TIME_SEC, 30L),
 						3,
-						List.of("node-1", "node-2"));
+						List.of("node-1", "node-2", "node-3"));
+		when(ctx.nodesPresent()).thenReturn(List.of("node-1", "node-2"));
+		when(ctx.partial()).thenReturn(true);
 
 		final MetricsManager mgr = mock(MetricsManager.class);
 		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
@@ -328,6 +519,56 @@ public class MetricsJsonResponderTest {
 		assertEquals(3, obj.get("nodes_count").asInt());
 		assertEquals(2, obj.get("nodes_present").size());
 		assertTrue(obj.get("partial").asBoolean());
+	}
+
+	@Test
+	void legacyDistributedContextDefaultsPreserveNodePresentationAndPartialState() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(10L, 0L, 1000L);
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"step-legacy-context",
+						OpType.READ,
+						snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_TIME_SEC, 30L),
+						3,
+						List.of("node-1", "node-2"));
+		doCallRealMethod().when(ctx).nodesPresent();
+		doCallRealMethod().when(ctx).partial();
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode obj = new MetricsJsonResponder(mgr, defaultConfig())
+						.buildClusterMetrics(false).get(0);
+		assertEquals(2, obj.get("nodes_present").size(),
+						"additive context defaults must preserve legacy node addresses");
+		assertTrue(obj.get("partial").asBoolean(),
+						"additive context defaults must preserve legacy missing-node detection");
+	}
+
+	@Test
+	void clusterPartialFlagIncludesDistributedDetailCompleteness() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(10L, 0L, 1000L);
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"step-delete-detail-partial",
+						OpType.DELETE,
+						snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 10L),
+						2,
+						List.of("node-1", "node-2"));
+		when(ctx.partial()).thenReturn(true);
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode obj = new MetricsJsonResponder(mgr, defaultConfig())
+						.buildClusterMetrics(false).get(0);
+		assertEquals(2, obj.get("nodes_present").size());
+		assertTrue(obj.get("partial").asBoolean(),
+						"mixed/missing standalone DELETE detail must make the fleet sample partial");
 	}
 
 	@Test
@@ -498,7 +739,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildNodeMetrics(false);
 		assertEquals(1, payload.size(), "Expected a single idle element");
 		final JsonNode obj = payload.get(0);
-		assertEquals(3, obj.get("metrics_schema").asInt());
+		assertEquals(4, obj.get("metrics_schema").asInt());
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("worker", obj.get("role").asText());
 		assertEquals("idle-node", obj.get("node_id").asText());
@@ -536,6 +777,22 @@ public class MetricsJsonResponderTest {
 		assertEquals("comment-node", obj.get("node_id").asText());
 		assertFalse(obj.has("cluster_id"));
 		assertEquals("aggregate", obj.get("role").asText());
+	}
+
+	@Test
+	void configuredRunClusterIdentityIsPublishedBySchema4Metrics() {
+		final Config config = TestConfigBuilder.config();
+		config.val("run-cluster-id", "spt-run-123");
+
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"delete-step", OpType.DELETE, mockDistributedSnapshot(1L, 0L, 1_000L), Map.of());
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode obj = new MetricsJsonResponder(mgr, config).buildClusterMetrics(false).get(0);
+		assertEquals("spt-run-123", obj.get("cluster_id").asText());
 	}
 
 	private static ListShardMetricsRecorder testRecorder() {
@@ -610,6 +867,30 @@ public class MetricsJsonResponderTest {
 		when(snapshot.concurrencySnapshot()).thenReturn(conc);
 		when(snapshot.elapsedTimeMillis()).thenReturn(5000L);
 		return snapshot;
+	}
+
+	private static DeleteMetricsSnapshot deleteMetricsSnapshot() {
+		return DeleteMetricsSnapshot.builder(100)
+						.identity("batch", "canonical")
+						.requests(3, 2, 1, 0, 0, 3.0)
+						.objects(175, 175, 170, 5, 0, 0, 175.0)
+						.batches(3, 175, 1, 2)
+						.versions(150, 25)
+						.bucket("bucket-a", 150, 150, 145, 5)
+						.bucket("bucket-b", 25, 25, 25, 0)
+						.phases(
+										1_250_000_000L,
+										750_000_000L,
+										-1,
+										1_500_000_000L,
+										500_000_000L,
+										-1,
+										-1,
+										4_250_000_000L)
+						.failurePolicy("fixed", 100_000, 0, 30, 5, 0)
+						.failureOutcome("completed_within_failure_budget")
+						.reconciled(true)
+						.build();
 	}
 
 	private static DistributedAllMetricsSnapshot mockDistributedSnapshot(
@@ -768,7 +1049,7 @@ public class MetricsJsonResponderTest {
 					final OpType opType,
 					final DistributedAllMetricsSnapshot snapshot,
 					final Map<String, Object> metadata) {
-		return mockDistributedContext(stepId, opType, snapshot, metadata, 1, List.of("node-1"));
+		return mockDistributedContext(stepId, opType, snapshot, metadata, 1, List.of("local"));
 	}
 
 	private static DistributedMetricsContext mockDistributedContext(
@@ -786,6 +1067,7 @@ public class MetricsJsonResponderTest {
 		when(ctx.runId()).thenReturn(123L);
 		when(ctx.nodeCount()).thenReturn(nodeCount);
 		when(ctx.nodeAddrs()).thenReturn(nodeAddrs);
+		when(ctx.nodesPresent()).thenReturn(nodeAddrs);
 		return ctx;
 	}
 

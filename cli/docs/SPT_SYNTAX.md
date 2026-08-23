@@ -254,6 +254,97 @@ the selected policy and threshold, failed-object count, and observed percentage.
 completed-within-budget outcomes exit 0; failed or inconclusive outcomes exit nonzero. A 100%
 budget still cannot validate zero fully successful requests or zero accepted objects.
 
+### Standalone DELETE metric units and schema
+
+The generic operation count/rate remains one logical DELETE API request. A full-success request is
+one success; a partial or failed reconciliation is one failure. Additive JSON metrics schema v4
+reports separate request (`attempted`, full-success, partial, failed, unresolved, requests/s) and
+object (`selected`, attempted, accepted, failed, unattempted, unresolved, objects/s) units. Batch
+detail uses the explicit `logical_api_requests` unit and includes configured size, observed
+request/object totals, mean objects/request, full and
+partial counts, and full-batch percentage. Version counts distinguish current-key and exact-version
+targets; the deferred all-version/delete-marker mode is not exposed.
+
+DELETE request/object rates divide cumulative attempted dispatches by the scheduled DELETE interval.
+That interval starts at actual worker admission release, after setup and the controller barrier. A
+count run ends it when the finite generator exhausts or admission closes; a duration run ends it at
+the configured deadline (or an earlier admission close). Controller wait and the separately reported
+drain interval do not enter either rate denominator.
+
+Seed and discovery durations use monotonic clocks. Total wall time is one independently measured
+monotonic interval from setup start through DELETE drain rather than a sum of named phases. It
+therefore includes configuration, slicing, orchestration, inter-phase overhead, and the controller
+admission barrier even though those intervals remain outside the request/object rate clock. The
+boundary is epoch-aligned with a fixed per-runtime offset so distributed workers do not compare
+private `System.nanoTime()` origins. Distributed participants must have synchronized system clocks
+when their runtimes establish that offset. If clock skew makes the shared setup boundary appear to
+be in a worker's future, that worker falls back to its local DELETE-step start instead of reporting a
+negative interval. Skew in the other direction can conservatively enlarge total wall time. Neither
+case changes the scheduled DELETE interval used by request/object rate denominators.
+
+Per-node and aggregate views use the same fields and independent request/object completion.
+Multi-bucket metrics contain selected, attempted, accepted, and failed counts for at most 100 named
+buckets plus `__other__`; distributed slicing freezes one canonical retained-name set before any
+slice is scattered, so the same bucket never splits between a named series and `__other__` across
+workers. They never add bucket or per-object latency dimensions. Result identity is
+`single` or `batch` plus configured batch size and `canonical` selection order, and unlike identities
+cannot be combined. The top-level `delete_detail_expected=true` marker identifies standalone rows
+whose detail is mandatory. Generic and cleanup DELETE rows with the marker false or absent remain
+valid schema-v4 operation metrics without a `delete` block.
+
+Fleet schema v4 leaves the existing `nodes_present` remote-address field unchanged and publishes
+the current identity evidence separately as `contributors_present` (`local` plus fresh remote
+contributors). The latter drives exact fleet timing comparison and duplicate/missing contributor
+guards; headless output includes both representations. Local presentation normalizes the expected
+set to exactly one `local` contributor. Once the engine reports terminal status, the CLI makes three
+bounded attempts to capture and splice the controller-authoritative detailed DELETE result; a
+persistent capture failure is returned as a run failure instead of completing with stale `running`
+detail. A 404 without previously observed standalone DELETE detail remains the compatibility path
+for engines that do not expose detailed metrics.
+
+Request latency remains first request byte sent through first response byte received. Request
+duration remains request formulation through the last response byte. Netty records the request
+boundary from its first nonempty encoded (or TLS-encrypted) outbound buffer and the response boundary
+from the first nonempty inbound transport buffer, before HTTP headers have been decoded. The AWS
+adapter carries the operation through the SDK interceptor
+into its HTTP client wrapper. A dedicated CRT connection-manager seam records native stream
+`send-start` and `receive-start` timestamps for both header-only single DELETE and batched DELETE.
+Publisher subscription, request-body delivery, signed-request handoff, and SDK-future completion are
+not byte markers. Native `receive-start` marks response arrival, while the response-header callback
+hands the response to the SDK and the response publisher's completion marks the last byte.
+Transparent retries retain the first send
+marker while replacing earlier response timing. A terminal failure without a completed response stream
+therefore contributes neither stale latency nor fabricated duration. Authoritative
+fleet timing therefore accepts only the available population, with
+`0 <= latency samples <= duration samples <= terminal requests`; it never manufactures samples for
+failed transport phases. Both retain p50, p90, p99, and p99.9. Object latency,
+object size, data moved, bandwidth, and TTFB are N/A. Phase fields distinguish seed, discovery,
+pre-validation, scheduled DELETE, drain, post-verification, cleanup, and total wall time; unavailable
+phases remain unset rather than zero. Live JSON serializes an unmeasured phase as `null`; numeric
+zero is reserved for an applicable interval actually measured as zero. The current workflow leaves
+pre-validation unset because
+manifest parsing and selection staging are not inventory validation. `accepted` is the required outcome term. Unless verification is
+enabled by the later verification contract, it describes a logical API result and does not confirm
+object removal. Schema v4 removes or renames no schema v2/v3 field, so the existing TUI continues to
+show logical request rate/count while safely ignoring additional detail.
+
+The failure-policy observation is operationally failed objects divided by accepted plus
+operationally failed objects. Protocol/correctness failures are reported as excluded failures and
+do not enter that denominator. The controller owns `failure_policy.outcome`: live metrics use
+`running`, and terminal metrics use `completed_cleanly`,
+`completed_within_failure_budget`, or `failed`. Worker rows do not infer a fleet verdict; the
+controller publishes its authoritative terminal outcome before results capture. The generic
+`metrics.total.csv` layout remains unchanged and
+request-based. Auto-results captures complete terminal schema-v4 DELETE detail into the existing
+stored run-metadata model before engine shutdown, and the loader carries that model through aggregate
+and rendered summaries. It does not add a raw/versioned DELETE metrics artifact; that dedicated
+persistence contract remains later work. Capture accepts only the exact run cluster and expected
+DELETE steps after their units, counters, timing populations, and terminal reconciliation validate.
+Distributed runs require the authoritative fleet view; only a declared single-node run may fall back
+to its node view. Missing, duplicate, partial, stale, or malformed terminal rows fail the results
+artifact and the DELETE command with the workload-failure exit code instead of silently storing
+incomplete metrics; run metadata records the capture error and omits DELETE metrics.
+
 All-version discovery requires the target's list-version permission
 (`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never
 falls back to current-version discovery. SPT follows version pagination,

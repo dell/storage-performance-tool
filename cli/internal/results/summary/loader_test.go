@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
@@ -106,6 +107,56 @@ func TestLoaderLoadSuccess(t *testing.T) {
 	}
 	if data.Params.ScenarioParams.Prefix != "daily/" {
 		t.Fatalf("expected prefix 'daily/', got %q", data.Params.ScenarioParams.Prefix)
+	}
+}
+
+func TestLoaderHydratesTerminalDeleteModelThroughAggregateAndRender(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "delete-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const stepID = "mt-001-delete"
+	manifest := makeManifest(t, runDir, []stepFixture{{
+		ID: stepID,
+		MetricsContent: sampleMetricsCSV([]string{
+			`"2026-08-23T10:00:00Z",DELETE,1,1,1,1,2,0,0,1,2,2,2,0,0,10,10,10,10,10,20,20,20,20,20,20`,
+		}),
+	}})
+	writeManifest(t, runDir, manifest)
+	stored := &deletemetrics.Metrics{
+		Units:              deletemetrics.Units{Requests: deletemetrics.RequestUnit, Objects: deletemetrics.ObjectUnit, Batches: deletemetrics.RequestUnit},
+		Requests:           deletemetrics.Requests{Attempted: 1, FullSuccess: 1},
+		Objects:            deletemetrics.Objects{Selected: 2, Attempted: 2, Accepted: 2},
+		Identity:           deletemetrics.Identity{Mode: "batch", ConfiguredBatchSize: 2, SelectionOrder: "canonical"},
+		OutcomeTerminology: deletemetrics.OutcomeAccepted,
+		TerminalReconciled: true,
+	}
+	metadata, err := json.Marshal(map[string]any{
+		"workloadType":    "delete",
+		"expectedStepIds": []string{stepID},
+		"deleteMetrics":   map[string]*deletemetrics.Metrics{stepID: stored},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, constants.ResultsMetadataFileName), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.Steps[stepID].Delete == nil {
+		t.Fatal("loader dropped stored terminal DELETE model")
+	}
+	aggregated, err := Aggregate(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := NewRenderer(RenderOptions{}).FullReport(aggregated)
+	if !strings.Contains(report, "DELETE Results") || !strings.Contains(report, "accepted 2") {
+		t.Fatalf("stored terminal DELETE model did not reach rendered report:\n%s", report)
 	}
 }
 

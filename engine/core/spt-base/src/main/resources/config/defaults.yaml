@@ -62,6 +62,14 @@ load:
       standalone: false
       batchSize: 100
       duration: false
+      # Controller-populated canonical selection metadata used by DELETE metrics.
+      selectionOrder: canonical
+      selected: -1
+      selectedCurrentKey: -1
+      selectedExactVersion: -1
+      selectedBuckets: []
+      seedMillis: -1
+      discoveryMillis: -1
     # Controller-level object-unit failure policy. Existing limit.fail fields retain their
     # legacy failed-operation meanings and are not used as this budget.
     failureBudget:
@@ -129,6 +137,8 @@ output:
 
 run:
   id: 0
+  cluster:
+    id: ""
   comment: ""
   node: false
   port: 9999

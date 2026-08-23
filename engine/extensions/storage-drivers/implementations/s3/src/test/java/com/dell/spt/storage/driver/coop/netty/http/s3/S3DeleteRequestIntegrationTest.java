@@ -137,8 +137,11 @@ final class S3DeleteRequestIntegrationTest {
 			assertEquals(1, driver.completedOpCount());
 			assertEquals(0, driver.activeOpCount());
 			assertTrue(result.reqTimeStart() > 0);
+			assertTrue(result.requestFirstByteTime() >= result.reqTimeStart());
+			assertTrue(result.requestFirstByteTime() <= result.reqTimeDone());
 			assertTrue(result.reqTimeDone() >= result.reqTimeStart());
-			assertTrue(result.respTimeStart() >= result.reqTimeDone());
+			assertEquals(result.respTimeStart(), result.responseFirstByteTime());
+			assertTrue(result.responseFirstByteTime() >= result.reqTimeDone());
 			assertTrue(result.duration() > 0);
 		}
 	}

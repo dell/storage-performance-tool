@@ -1,8 +1,25 @@
 package com.dell.spt.base.load.step;
 
+import java.util.concurrent.TimeUnit;
+
 /** Signed-safe monotonic time arithmetic for bounded duration phases. */
 public final class DurationTime {
+	private static final long MONOTONIC_EPOCH_OFFSET_NANOS = Math.subtractExact(
+					TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis()), System.nanoTime());
+
 	private DurationTime() {}
+
+	/**
+	 * Returns an epoch-aligned timestamp which remains monotonic for this runtime.
+	 *
+	 * <p>The fixed startup offset lets cooperating JVMs with synchronized system clocks exchange
+	 * workflow boundaries without comparing their private {@link System#nanoTime()} origins.
+	 *
+	 * @return the current monotonic epoch-relative timestamp in nanoseconds
+	 */
+	public static long monotonicEpochNanos() {
+		return Math.addExact(MONOTONIC_EPOCH_OFFSET_NANOS, System.nanoTime());
+	}
 
 	/** Returns a monotonic deadline using the signed-difference arithmetic required by nanoTime. */
 	public static long deadlineAfter(final long boundaryNanos, final long budgetNanos) {

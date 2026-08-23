@@ -71,6 +71,14 @@ response is reconciled by key and version before the logical request completes, 
 malformed batch responses cannot be reported as full success. SDK-managed retries remain inside
 the single logical request future and timing sample.
 
+The standalone DELETE timing client records native CRT HTTP-stream `send-start` and `receive-start`
+timestamps for both header-only `DeleteObject` and body-bearing `DeleteObjects`. The SDK wrapper
+observes received headers and response-publisher completion for duration. Publisher subscription,
+request-body delivery, signed-request handoff, and SDK-future completion are not byte markers.
+Transparent retries retain the logical request's first send marker but replace earlier response timing,
+so a terminal failure
+without a completed response cannot reuse stale latency or duration samples.
+
 ### Blocking Compatibility
 
 To maintain compatibility with the existing `NioStorageDriverBase` threading model, async operations are blocked using `.join()` in `invokeNio()`. This preserves the existing driver architecture while leveraging CRT's native performance benefits.

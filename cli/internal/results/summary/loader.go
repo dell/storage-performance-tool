@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"gopkg.in/yaml.v3"
 )
@@ -49,6 +50,7 @@ type StepData struct {
 	StepID            string
 	Manifest          *results.StepManifest
 	Metrics           *MetricsTotals
+	Delete            *deletemetrics.Metrics
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -126,6 +128,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			StepID:   sm.StepID,
 			Manifest: sm,
 			Status:   StepStatusUnknown,
+			Delete:   params.DeleteMetrics[sm.StepID],
 		}
 		step.MetricsSuppressed = l.metricsSummaryPersistSuppressed(runDir, sm)
 		required, optional := l.categorizeMissing(sm)
@@ -317,27 +320,28 @@ func removeString(list []string, value string) []string {
 
 // RunParams mirrors the structure of spt_run_params.json for ingestion purposes.
 type RunParams struct {
-	GeneratedAt        time.Time         `json:"generatedAt"`
-	WorkloadType       string            `json:"workloadType"`
-	SptImage           string            `json:"sptImage"`
-	APIPort            string            `json:"apiPort"`
-	BaseURL            string            `json:"baseUrl"`
-	TraceFile          string            `json:"traceFile"`
-	TraceAuto          bool              `json:"traceAuto"`
-	Label              string            `json:"label"`
-	ResultsDir         string            `json:"resultsDir"`
-	ResultsRoot        string            `json:"resultsRoot"`
-	ScenarioFile       string            `json:"scenarioFile"`
-	ScenarioStoredPath string            `json:"scenarioStoredPath"`
-	ScenarioParams     ScenarioParams    `json:"scenarioParams"`
-	Hosts              []RunHost         `json:"hosts"`
-	TestHosts          string            `json:"testHosts"`
-	ExpectedStepIDs    []string          `json:"expectedStepIds"`
-	ActualStepIDs      []string          `json:"actualStepIds"`
-	DiscoveredStepIDs  []string          `json:"discoveredStepIds"`
-	ResultsOptions     RunResultsOptions `json:"resultsOptions"`
-	CLI                RunCLI            `json:"cli"`
-	MultiHost          RunMultiHost      `json:"multiHost"`
+	GeneratedAt        time.Time                         `json:"generatedAt"`
+	WorkloadType       string                            `json:"workloadType"`
+	SptImage           string                            `json:"sptImage"`
+	APIPort            string                            `json:"apiPort"`
+	BaseURL            string                            `json:"baseUrl"`
+	TraceFile          string                            `json:"traceFile"`
+	TraceAuto          bool                              `json:"traceAuto"`
+	Label              string                            `json:"label"`
+	ResultsDir         string                            `json:"resultsDir"`
+	ResultsRoot        string                            `json:"resultsRoot"`
+	ScenarioFile       string                            `json:"scenarioFile"`
+	ScenarioStoredPath string                            `json:"scenarioStoredPath"`
+	ScenarioParams     ScenarioParams                    `json:"scenarioParams"`
+	Hosts              []RunHost                         `json:"hosts"`
+	TestHosts          string                            `json:"testHosts"`
+	ExpectedStepIDs    []string                          `json:"expectedStepIds"`
+	ActualStepIDs      []string                          `json:"actualStepIds"`
+	DiscoveredStepIDs  []string                          `json:"discoveredStepIds"`
+	DeleteMetrics      map[string]*deletemetrics.Metrics `json:"deleteMetrics,omitempty"`
+	ResultsOptions     RunResultsOptions                 `json:"resultsOptions"`
+	CLI                RunCLI                            `json:"cli"`
+	MultiHost          RunMultiHost                      `json:"multiHost"`
 }
 
 // ScenarioParams captures key scenario tunables stored with the run.

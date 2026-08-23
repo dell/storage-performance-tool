@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -749,7 +750,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		ThreadContext.put(KEY_STEP_ID, stepId);
 
 		try {
-			op.finishResponse();
+			if (op instanceof DeleteRequestOperation deleteOperation) {
+				deleteOperation.markResponseLastByteReceived();
+			} else {
+				op.finishResponse();
+			}
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}

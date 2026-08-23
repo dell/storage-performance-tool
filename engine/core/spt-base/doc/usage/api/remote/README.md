@@ -320,15 +320,99 @@ spt_elapsed_time_value{load_step_id="linear_20190304.123915.606",load_op_type="R
 Additionally, JSON-formatted endpoints are available for clients that prefer structured data:
 
 - `GET /metrics/json` (always present) returns per-node metrics. Each array element includes:
-  - Metadata: `metrics_schema` (currently `3`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, optional `cluster_id`, and `sample_ts` (RFC3339 timestamp).
+  - Metadata: `metrics_schema` (currently `4`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, `cluster_id` for configured active runs, and `sample_ts` (RFC3339 timestamp). The public CLI supplies one nonempty cluster identity to every participant from the preallocated run ID.
   - Step data: `step_id`, `op_type`, `timestamp`, `elapsed_time_seconds`, `test_state`.
   - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing`, `concurrency{current,mean}`.
-  - Timing: schema 3 keeps the compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and adds nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
+  - Timing: schema 4 retains the schema 2/3 compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and the nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
   - Time to first byte: `timing.ttfb` has the same nested shape when available, or `null` when the operation type has no body timing sample. TTFB is measured from request completion to the first non-empty response body byte.
   - Progress helpers: `completion_percent`, `overall_completion_percent`, `overall_unbounded`, plus `limit{type,op_count?,time_sec?}`.
   - Terminal entries (`"terminal": true`) persist after a step finishes so idle nodes still return context; their rate gauges are set to zero and `timestamp` reflects completion time.
 
-- `GET /metrics/cluster/json` (entry nodes only, see `server.metrics.expose_fleet` below) returns cluster-wide aggregates. Items reuse the fields above with `scope = "fleet"` and `role = "aggregate"`, and add `nodes_count`, `nodes_present` (list of node IDs contributing to the sample), and `partial` (true when one or more nodes are missing from the aggregate). A legacy alias is still exposed at `/metrics/fleet/json` for older clients.
+Schema 4 adds a `delete` object only for the first-class standalone DELETE request path. It is
+additive: every schema 2/3 field above keeps its name and meaning, and tolerant older consumers may
+ignore `delete`. Generic `operations` remain logical API request units: a fully reconciled request
+increments `success_count`, while a partial or failed request increments `failed_count`. They never
+count object targets.
+
+The DELETE object has the following contract:
+
+- `units` labels `requests` and `batches` as `logical_api_requests` and `objects` as
+  `object_identities`.
+- `requests` contains `attempted`, `full_success`, `partial`, `failed`, `unresolved`, and
+  `per_second`. One request is one `DeleteObject` or `DeleteObjects` invocation. `per_second` is
+  cumulative attempted request dispatches divided by the scheduled DELETE interval.
+- `objects` contains `selected`, `attempted`, `accepted`, `failed`, `unattempted`, `unresolved`,
+  and `per_second`. Its denominator is the same scheduled DELETE interval; the numerator is
+  attempted object identities. `accepted` describes the logical API outcome; it does not assert
+  removal.
+- `batches` contains `configured_size`, `actual_request_count`, `actual_object_count`,
+  `mean_objects_per_request`, `full_batch_count`, `partial_batch_count`, and
+  `full_batch_percent`. Actual counts are observed and are not inferred from configured size.
+- `completion` contains request and object percentages plus `terminal_reconciled`. Object
+  completion uses accounted object identities, independently of request completion.
+- `versions` contains `current_key` and `exact_version`. No all-version or delete-marker metric is
+  exposed by this schema.
+- `buckets` contains bounded `{bucket,selected,attempted,accepted,failed}` entries. At most 100
+  named buckets are retained; additional buckets are combined as `__other__`. Distributed slicing
+  freezes one canonical retained-name set before scattering, and every worker receives that same
+  set (including zero counts), so names cannot split across worker-local overflow decisions. Bucket
+  latency is intentionally absent, keeping metric cardinality bounded.
+- The top-level `delete_detail_expected` boolean is true only for standalone DELETE rows. Consumers
+  strictly validate a missing or malformed `delete` block only when this marker is true. Generic and
+  cleanup DELETE rows with the marker false or absent remain valid additive schema-v4 metrics.
+- `phases` contains `seed`, `discovery`, `pre_validation`, `scheduled_delete_seconds`,
+  `drain_seconds`, `post_verification`, `cleanup`, and `total_wall_seconds`. A phase that is not
+  part of the current engine step is JSON `null`; zero is reserved for an applicable measured
+  interval that took no observable time. Scheduled DELETE starts at actual worker admission release,
+  after setup and the controller barrier. Count mode ends it at finite-generator exhaustion or an
+  earlier admission close; duration mode ends it at the configured deadline or an earlier admission
+  close. Setup, controller wait, and drain are excluded from request/object rate denominators. Seed
+  and discovery use monotonic clocks. `total_wall_seconds` is one independently measured monotonic
+  interval from setup start through DELETE drain; it includes configuration, slicing, orchestration,
+  inter-phase overhead, and the controller barrier instead of being reconstructed from named phases.
+  Its fixed-offset epoch alignment lets participating JVMs exchange the monotonic boundary without
+  comparing private `System.nanoTime()` origins. Distributed participants must have synchronized
+  system clocks when their runtimes establish the offset. If clock skew puts the shared setup
+  boundary in a worker's future, that worker falls back to its local DELETE-step start instead of
+  reporting a negative interval. Skew in the other direction can conservatively enlarge total wall
+  time. Neither case changes the scheduled DELETE interval used by request/object rate denominators.
+- `timing.latency` and `timing.duration` use the standard distribution shape, including p50, p90,
+  p99, and p99.9. DELETE request latency remains first request byte sent through first response
+  byte received; duration remains request formulation through the last response byte. Netty marks
+  the first nonempty encoded (or TLS-encrypted) outbound buffer and the first readable inbound
+  transport buffer before HTTP status and headers are decoded.
+  The AWS adapter records native CRT stream `send-start` and `receive-start` timestamps for both
+  header-only single DELETE and batched DELETE. Publisher subscription, request-body delivery,
+  signed-request handoff, and SDK-future completion are not byte markers. The adapter marks the first
+  received response headers and completes duration only when the response publisher itself completes.
+  Transparent retries retain the logical request's first send marker while replacing prior-attempt
+  response timing, so a terminal failure does not manufacture stale samples. Consumers validate the
+  available fleet population as
+  `0 <= latency count <= duration count <= terminal request count`; sparse transport failures do not
+  invalidate an otherwise authoritative terminal aggregate.
+  `object_latency` is always
+  `null` because batch target latency cannot be derived from request timing.
+- `performance.object_size`, `data_moved`, `bandwidth`, and `ttfb` are `not_applicable`. The
+  compatibility `bandwidth` group remains present and zero-valued; consumers must use DELETE's
+  applicability labels instead of presenting zero as a transfer measurement.
+- `identity` records `mode` (`single` or `batch`), `configured_batch_size`, and canonical
+  `selection_order`. Aggregates reject contributors with different identity values.
+- `failure_policy` records `mode`, `max_failed_objects`, `max_failure_percent`, `grace_seconds`,
+  `operational_failed_objects`, `excluded_failed_objects`, and `observed_failure_percent` in object
+  units. The observed percentage is operational failures divided by accepted plus operational
+  failures; excluded protocol/correctness failures do not enter the denominator.
+- `outcome_terminology` is `accepted`. `verification.enabled` and `removal_confirmed` are false
+  until verification is implemented, and `verification.notice` explicitly says logical DELETE
+  outcomes do not confirm object removal. `terminal_reconciled` states whether the final object
+  lifecycle invariants hold.
+
+Worker `/metrics/json`, entry `/metrics/json`, live cluster aggregates, and retained terminal
+entries use the same DELETE shape. Cluster phases use the maximum node wall interval rather than a
+sum, while request/object/batch/version/bucket counters and rates are additive. Clients use the
+fleet aggregate's merged request histograms for exact multi-node quantiles; quantiles are never
+averaged or reconstructed from node percentiles.
+
+- `GET /metrics/cluster/json` (entry nodes only, see `server.metrics.expose_fleet` below) returns cluster-wide aggregates. Items reuse the fields above with `scope = "fleet"` and `role = "aggregate"`, and add `nodes_count`, the existing `nodes_present` list of configured remote RMI addresses, the additive schema-v4 `contributors_present` list of identities represented by the current successful fetch, and `partial` (true when a node is missing, a contributor identity is duplicated, or any expected DELETE contributor lacks its detailed DELETE block). `contributors_present` contains `local` for the entry slice plus each fresh participating remote RMI address; `nodes_count` is the independently expected participant count. Keeping contributor evidence separate preserves the pre-v4 `nodes_present` representation. A failed worker refresh invalidates its cached snapshot rather than reusing stale evidence. Schema-v4 fleet and contributor rows require nonempty, exact run, cluster, step, and contributor identities; schema 2/3 rows retain their documented compatibility tolerance. The CLI selects one current run/cluster/step row per operation and normalizes polled hosts to the same identities, so stale, missing, duplicate, or cross-cluster evidence cannot authorize an exact fleet DELETE timing replacement. A legacy alias is still exposed at `/metrics/fleet/json` for older clients.
 
 Distributed vs worker behavior:
 - Entry node `/metrics/json` now emits only the entry’s local workload. Clients should rely on `/metrics/cluster/json` (or the `/metrics/fleet/json` alias) for cluster totals.

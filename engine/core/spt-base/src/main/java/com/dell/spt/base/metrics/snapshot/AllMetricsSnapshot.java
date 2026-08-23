@@ -28,6 +28,11 @@ public interface AllMetricsSnapshot extends Serializable {
 						0.0, 0.0, MetricsConstants.METRIC_NAME_CORRUPT, 0, elapsedTimeMillis());
 	}
 
+	/** Optional additive DELETE contract; null for older snapshots and non-DELETE operations. */
+	default DeleteMetricsSnapshot deleteMetrics() {
+		return null;
+	}
+
 	/** Returns the duration of the measurement window in milliseconds. */
 	long elapsedTimeMillis();
 }

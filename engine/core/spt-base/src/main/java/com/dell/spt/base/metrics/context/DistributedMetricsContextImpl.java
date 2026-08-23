@@ -6,6 +6,7 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshotImpl;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
@@ -13,6 +14,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -20,6 +22,9 @@ import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_COMMENT;
+import static com.dell.spt.base.metrics.MetricsConstants.METADATA_CONTRIBUTOR_IDS;
+import static com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS;
+import static com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_ITEM_DATA_SIZE;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_CONC;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_NODE_LIST;
@@ -38,6 +43,9 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	private final boolean sumPersistFlag;
 	private final boolean timingPersistFlag;
 	private volatile DistributedMetricsListener metricsListener = null;
+	private volatile List<String> nodesPresent = List.of();
+	private volatile List<String> contributorsPresent = List.of();
+	private volatile boolean partial;
 	private final List<Double> quantileValues;
 
 	public DistributedMetricsContextImpl(
@@ -114,6 +122,27 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	}
 
 	@Override
+	@SuppressWarnings("unchecked")
+	public List<String> contributorIds() {
+		return (List<String>) metadata.get(METADATA_CONTRIBUTOR_IDS);
+	}
+
+	@Override
+	public List<String> nodesPresent() {
+		return nodesPresent;
+	}
+
+	@Override
+	public List<String> contributorsPresent() {
+		return contributorsPresent;
+	}
+
+	@Override
+	public boolean partial() {
+		return partial;
+	}
+
+	@Override
 	public int nodeCount() {
 		return nodeCountSupplier.getAsInt();
 	}
@@ -148,7 +177,42 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot(final boolean force) {
 
-		final var snapshots = snapshotsSupplier.get();
+		final var suppliedSnapshots = snapshotsSupplier.get();
+		if (suppliedSnapshots == null) {
+			nodesPresent = List.of();
+			contributorsPresent = List.of();
+			partial = true;
+			lastSnapshot = null;
+			return;
+		}
+		final List<AllMetricsSnapshot> snapshots = new ArrayList<>(suppliedSnapshots.size());
+		final List<String> freshContributors = new ArrayList<>(suppliedSnapshots.size());
+		final List<String> expectedContributors = contributorIds();
+		for (var i = 0; i < suppliedSnapshots.size(); i++) {
+			final var snapshot = suppliedSnapshots.get(i);
+			if (snapshot != null) {
+				snapshots.add(snapshot);
+				if (expectedContributors != null && i < expectedContributors.size()) {
+					freshContributors.add(expectedContributors.get(i));
+				}
+			}
+		}
+		final List<String> publicNodeAddrs = nodeAddrs();
+		nodesPresent = publicNodeAddrs == null ? List.of() : List.copyOf(publicNodeAddrs);
+		contributorsPresent = expectedContributors == null ? List.of() : List.copyOf(freshContributors);
+		final int expectedCount = nodeCountSupplier.getAsInt();
+		final boolean snapshotsComplete = suppliedSnapshots.size() == expectedCount
+						&& snapshots.size() == expectedCount
+						&& expectedCount > 0;
+		final boolean identitiesComplete = expectedContributors == null
+						|| expectedContributors.size() == expectedCount
+										&& freshContributors.size() == expectedCount
+										&& new HashSet<>(freshContributors).size() == expectedCount;
+		final boolean contributorsAuthoritative = snapshotsComplete && identitiesComplete;
+		final boolean deleteDetailsExpected = metadata.containsKey(METADATA_DELETE_METRICS);
+		final boolean deleteDetailsComplete = !deleteDetailsExpected || opType() != OpType.DELETE
+						|| snapshots.stream().allMatch(snapshot -> snapshot.deleteMetrics() != null);
+		partial = !contributorsAuthoritative || !deleteDetailsComplete;
 		final var snapshotsCount = snapshots.size();
 
 		if (snapshotsCount > 0) { // do nothing otherwise
@@ -161,6 +225,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 			final TimingMetricSnapshot durSnapshot;
 			final TimingMetricSnapshot latSnapshot;
 			final TimingMetricSnapshot ttfbSnapshot;
+			final DeleteMetricsSnapshot suppliedDeleteMetrics;
 
 			if (snapshotsCount == 1) { // single
 
@@ -173,6 +238,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				durSnapshot = snapshot.durationSnapshot();
 				latSnapshot = snapshot.latencySnapshot();
 				ttfbSnapshot = snapshot.ttfbSnapshot();
+				suppliedDeleteMetrics = contributorsAuthoritative ? snapshot.deleteMetrics() : null;
 
 			} else { // many
 
@@ -184,6 +250,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				final List<RateMetricSnapshot> failSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> corruptSnapshots = new ArrayList<>();
 				final List<RateMetricSnapshot> byteSnapshots = new ArrayList<>();
+				final List<DeleteMetricsSnapshot> deleteSnapshots = new ArrayList<>();
 				for (var i = 0; i < snapshotsCount; i++) {
 					final var snapshot = snapshots.get(i);
 					durSnapshots.add(snapshot.durationSnapshot());
@@ -196,6 +263,9 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 					corruptSnapshots.add(corruptSnapshot(snapshot));
 					byteSnapshots.add(snapshot.byteSnapshot());
 					conSnapshots.add(snapshot.concurrencySnapshot());
+					if (snapshot.deleteMetrics() != null) {
+						deleteSnapshots.add(snapshot.deleteMetrics());
+					}
 				}
 				successSnapshot = RateMetricSnapshotImpl.aggregate(succSnapshots);
 				failsSnapshot = RateMetricSnapshotImpl.aggregate(failSnapshots);
@@ -205,7 +275,11 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 				durSnapshot = TimingMetricSnapshotImpl.aggregate(durSnapshots);
 				latSnapshot = TimingMetricSnapshotImpl.aggregate(latSnapshots);
 				ttfbSnapshot = TimingMetricSnapshotImpl.aggregate(ttfbSnapshots, METRIC_NAME_TTFB);
+				suppliedDeleteMetrics = contributorsAuthoritative && deleteSnapshots.size() == snapshotsCount
+								? DeleteMetricsSnapshot.aggregate(deleteSnapshots)
+								: null;
 			}
+			final DeleteMetricsSnapshot deleteMetrics = applyFailureBudgetOutcome(suppliedDeleteMetrics);
 
 			lastSnapshot = (S) new DistributedAllMetricsSnapshotImpl(
 							durSnapshot,
@@ -217,14 +291,28 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 							successSnapshot,
 							bytesSnapshot,
 							nodeCountSupplier.getAsInt(),
-							elapsedTimeMillis());
+							elapsedTimeMillis(),
+							deleteMetrics);
 			if (metricsListener != null) {
 				metricsListener.notify(lastSnapshot);
 			}
 			if (thresholdMetricsCtx != null) {
 				thresholdMetricsCtx.refreshLastSnapshot(force);
 			}
+		} else {
+			lastSnapshot = null;
 		}
+	}
+
+	private DeleteMetricsSnapshot applyFailureBudgetOutcome(
+					final DeleteMetricsSnapshot snapshot) {
+		if (snapshot == null) {
+			return null;
+		}
+		final Object outcome = metadata.get(METADATA_DELETE_FAILURE_OUTCOME);
+		return outcome instanceof String value
+						? snapshot.toBuilder().failureOutcome(value).build()
+						: snapshot;
 	}
 
 	private static RateMetricSnapshot corruptSnapshot(final AllMetricsSnapshot snapshot) {
@@ -250,6 +338,8 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 						.snapshotsSupplier(snapshotsSupplier)
 						.quantileValues(quantileValues)
 						.nodeAddrs(nodeAddrs())
+						.contributorIds(contributorIds())
+						.deleteDetailsExpected(metadata.containsKey(METADATA_DELETE_METRICS))
 						.runId(runId())
 						.build();
 	}
@@ -405,6 +495,26 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		@Override
 		public DistributedContextBuilder nodeAddrs(final List<String> nodeAddrs) {
 			this.metaData.put(METADATA_NODE_LIST, nodeAddrs);
+			return this;
+		}
+
+		@Override
+		public DistributedContextBuilder contributorIds(final List<String> contributorIds) {
+			if (contributorIds == null) {
+				this.metaData.remove(METADATA_CONTRIBUTOR_IDS);
+			} else {
+				this.metaData.put(METADATA_CONTRIBUTOR_IDS, List.copyOf(contributorIds));
+			}
+			return this;
+		}
+
+		@Override
+		public DistributedContextBuilder deleteDetailsExpected(final boolean expected) {
+			if (expected) {
+				this.metaData.put(METADATA_DELETE_METRICS, Boolean.TRUE);
+			} else {
+				this.metaData.remove(METADATA_DELETE_METRICS);
+			}
 			return this;
 		}
 

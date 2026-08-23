@@ -125,11 +125,11 @@ const (
 	// DefaultMaxFailedObjects is the standalone DELETE object-unit failure budget.
 	DefaultMaxFailedObjects int64 = 100000
 	// FailureBudgetModeFixed selects a fixed failed-object threshold.
-	FailureBudgetModeFixed = "fixed"
+	FailureBudgetModeFixed = constants.DeleteFailurePolicyModeFixed
 	// FailureBudgetModePercentage selects a cumulative attempted-object percentage.
-	FailureBudgetModePercentage = "percentage"
+	FailureBudgetModePercentage = constants.DeleteFailurePolicyModePercentage
 	// SelectionOrderCanonical names the deterministic global DELETE selection order.
-	SelectionOrderCanonical = "canonical"
+	SelectionOrderCanonical = constants.DeleteSelectionOrderCanonical
 )
 
 // DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.

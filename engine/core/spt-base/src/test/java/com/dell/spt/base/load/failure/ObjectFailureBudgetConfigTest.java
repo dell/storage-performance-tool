@@ -1,5 +1,7 @@
 package com.dell.spt.base.load.failure;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_FIXED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_PERCENTAGE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -9,6 +11,25 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class ObjectFailureBudgetConfigTest {
+	@Test
+	void wireModesUseSharedVocabularyAndRejectEnumSpellingAliases() {
+		final var config = TestConfigBuilder.config();
+		config.val("load-op-failureBudget-mode", DELETE_FAILURE_POLICY_MODE_FIXED);
+		assertEquals(
+						DELETE_FAILURE_POLICY_MODE_FIXED,
+						ObjectFailureBudgetConfig.from(config.configVal("load")).mode().wireValue());
+
+		config.val("load-op-failureBudget-mode", DELETE_FAILURE_POLICY_MODE_PERCENTAGE);
+		assertEquals(
+						DELETE_FAILURE_POLICY_MODE_PERCENTAGE,
+						ObjectFailureBudgetConfig.from(config.configVal("load")).mode().wireValue());
+
+		config.val("load-op-failureBudget-mode", "PERCENTAGE");
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> ObjectFailureBudgetConfig.from(config.configVal("load")));
+	}
+
 	@Test
 	void shippedDefaultsAreNewFixedObjectUnitsAndLeaveLegacyControlsUntouched() {
 		final var config = TestConfigBuilder.config();

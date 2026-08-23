@@ -14,6 +14,26 @@ import static org.mockito.Mockito.*;
 
 class S3AwsStorageDriverFactoryTest {
 
+	@Test
+	void clientConstructionResourcesCloseInReverseOrderOnFailure() {
+		final AutoCloseable primary = mock(AutoCloseable.class);
+		final AutoCloseable timing = mock(AutoCloseable.class);
+		final var resources = new S3AwsStorageDriverFactory.ConstructionResources();
+		resources.own(primary);
+		resources.own(timing);
+		final var constructionFailure = new IllegalStateException("injected construction failure");
+
+		resources.closeOnFailure(constructionFailure);
+
+		final var order = inOrder(timing, primary);
+		try {
+			order.verify(timing).close();
+			order.verify(primary).close();
+		} catch (Exception unexpected) {
+			fail(unexpected);
+		}
+	}
+
 	// -----------------------------------------------------------------------
 	// Helper: build a mock Config chain for the endpoint resolution path
 	//   storageConfig → configVal("net") → netConfig

@@ -1,7 +1,11 @@
 package com.dell.spt.base.logging;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_VERIFICATION_NOTICE;
+
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.Constants;
 import com.dell.spt.base.item.op.OpType;
@@ -9,6 +13,7 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshotImpl;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
@@ -101,5 +106,52 @@ public class StepResultsMetricsLogMessageTest extends StepResultsMetricsLogMessa
 		assertEquals(true, parsed.containsKey("Bandwidth [MiB/s]"));
 		assertEquals(true, parsed.containsKey("Transfer Size"));
 		assertEquals(false, parsed.containsKey("Bandwidth [MB/s]"));
+	}
+
+	@Test
+	void deleteOutputUsesAcceptedTerminologyAndNoTransferMeasurements() throws Exception {
+		final var delete = DeleteMetricsSnapshot.builder(100)
+						.identity("batch", "canonical")
+						.requests(2, 1, 1, 0, 0, 2.0)
+						.objects(150, 150, 145, 5, 0, 0, 150.0)
+						.batches(2, 150, 1, 1)
+						.versions(125, 25)
+						.bucket("bucket-a", 150, 150, 145, 5)
+						.phases(1_000_000_000L, 100_000_000L, 1_100_000_000L)
+						.failurePolicy("fixed", 100_000, 0, 30, 5.0 / 150.0 * 100.0)
+						.failureOutcome("completed_within_failure_budget")
+						.reconciled(true)
+						.build();
+		final var snapshot = new DistributedAllMetricsSnapshotImpl(
+						SNAPSHOT.durationSnapshot(),
+						SNAPSHOT.latencySnapshot(),
+						SNAPSHOT.ttfbSnapshot(),
+						SNAPSHOT.concurrencySnapshot(),
+						SNAPSHOT.failsSnapshot(),
+						SNAPSHOT.corruptSnapshot(),
+						SNAPSHOT.successSnapshot(),
+						SNAPSHOT.byteSnapshot(),
+						SNAPSHOT.nodeCount(),
+						SNAPSHOT.elapsedTimeMillis(),
+						delete);
+		final var message = new StepResultsMetricsLogMessage(
+						OpType.DELETE, "delete-step", 8, snapshot, latencies, durations);
+		final var output = new StringBuilder();
+		message.formatTo(output);
+		final String text = output.toString();
+		new ObjectMapper(new YAMLFactory()).readValue(text, Object[].class);
+		assertTrue(text.contains("Transfer Size:               N/A"));
+		assertTrue(text.contains("Bandwidth [MiB/s]:           N/A"));
+		assertTrue(text.contains("Accepted:                   145"));
+		assertTrue(text.contains("Batches:                   logical_api_requests"));
+		assertTrue(text.contains("Outcome:                   completed within failure budget"));
+		assertTrue(text.contains("Outcome Terminology:         accepted"));
+		assertTrue(text.contains("Request Latency Quantiles [us]:"));
+		assertTrue(text.contains("P99.9:"));
+		assertTrue(text.contains("Operations Duration [us]:    " + System.lineSeparator() + "    N/A"));
+		assertTrue(text.contains("Operations Latency [us]:     " + System.lineSeparator() + "    N/A"));
+		assertTrue(text.contains("Removal Confirmed:          false"));
+		assertTrue(text.contains(DELETE_VERIFICATION_NOTICE));
+		assertFalse(text.contains("Removed:"));
 	}
 }
