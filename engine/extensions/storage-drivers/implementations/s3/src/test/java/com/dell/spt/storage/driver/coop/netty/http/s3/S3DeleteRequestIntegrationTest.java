@@ -193,8 +193,10 @@ final class S3DeleteRequestIntegrationTest {
 					@TempDir final Path tempDir) throws Exception {
 		final Path manifest = copyContractResource(tempDir, "verify-input.csv");
 		copyContractResource(tempDir, "verify-input.complete.json");
-		final String scenario = contractScenarioText().replace(
-						"/spt-input/items/verify-input.csv", manifest.toString());
+		final String deleteStepId = tempDir.getFileName() + "-delete";
+		final String scenario = contractScenarioText()
+						.replace("/spt-input/items/verify-input.csv", manifest.toString())
+						.replace("mt-001-20260822.120000.000-delete", deleteStepId);
 		multiDeleteResponse = "<DeleteResult>"
 						+ "<Deleted><Key>alpha</Key></Deleted>"
 						+ "<Deleted><Key>comma,key</Key><VersionId>version-comma</VersionId></Deleted>"
@@ -224,7 +226,7 @@ final class S3DeleteRequestIntegrationTest {
 
 			final var terminal = metrics.getTerminalSteps().stream()
 							.filter(entry -> !entry.distributed)
-							.filter(entry -> "mt-001-20260822.120000.000-delete".equals(entry.stepId))
+							.filter(entry -> deleteStepId.equals(entry.stepId))
 							.findFirst()
 							.orElseThrow();
 			assertEquals(OpType.DELETE, terminal.opType);

@@ -1,6 +1,6 @@
 package com.dell.spt.base.item.op.deletion;
 
-/** Per-target accepted or failed DELETE outcome. */
+/** Per-target terminal or recovered DELETE lifecycle outcome. */
 public enum DeleteTargetOutcome {
-	ACCEPTED, FAILED
+	ACCEPTED, FAILED, UNATTEMPTED, UNRESOLVED
 }

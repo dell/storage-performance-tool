@@ -222,6 +222,7 @@ func captureStoredDeleteMetrics(
 	if err != nil {
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
+	metadata.DeleteArtifactStepIDs = append([]string(nil), expectedDeleteSteps...)
 	expectedContributorIDs, err := expectedDeleteContributorIDs(metadata)
 	if err != nil {
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)

@@ -1,0 +1,3 @@
+schema_version,request_id,target_id,target_index,bucket,key,size,version_id,outcome,error_classification,error
+1,delete-request-01ac12dc5f8c3a9cf59c678bfc249e5fd10532ce9743a401faafa7b7835049c7,delete-target-8047bd7e2214ce80a1c4c559b98eac062555f2855201f3357916d42e9f240305,0,bucket,alpha,9,,accepted,none,
+1,delete-request-01ac12dc5f8c3a9cf59c678bfc249e5fd10532ce9743a401faafa7b7835049c7,delete-target-ced8c69526027932675aeacfa9f45826eacd305646b61b8ff1816c4388b9dcb6,1,bucket,"comma,key",7,version-comma,accepted,none,

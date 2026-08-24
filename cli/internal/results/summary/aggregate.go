@@ -92,6 +92,7 @@ type StepSummary struct {
 	MissingOptional    []string
 	Notes              []string
 	Delete             *deletemetrics.Metrics
+	DeleteEvidence     *DeleteArtifactEvidence
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -303,6 +304,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			MissingOptional: append([]string(nil), stepData.MissingOptional...),
 			Notes:           append([]string(nil), stepData.Notes...),
 			Delete:          stepData.Delete,
+			DeleteEvidence:  stepData.DeleteEvidence,
 		}
 
 		var metrics *PhaseMetrics

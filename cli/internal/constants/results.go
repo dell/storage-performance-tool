@@ -7,8 +7,10 @@ package constants
 
 // Results manifest and metadata filenames.
 const (
-	ResultsManifestFileName         = "index.json"
-	ResultsMetadataFileName         = "spt_run_params.json"
+	ResultsManifestFileName = "index.json"
+	ResultsMetadataFileName = "spt_run_params.json"
+	// ResultsDeleteArtifactsVersion marks runs that require the complete DELETE evidence set.
+	ResultsDeleteArtifactsVersion   = 1
 	ResultsPreparedDefaultsFileName = "defaults.yaml"
 	ResultsSummaryFilePrefix        = "spt_"
 	ResultsSummaryFileSuffix        = "_results_summary.txt"
@@ -28,6 +30,10 @@ const (
 	ResultsArtifactSuffixScenario              = "scenario.txt"
 	ResultsArtifactSuffixMetricsThreshold      = "metrics.threshold.total.csv"
 	ResultsArtifactSuffixOpTrace               = "op.trace.csv"
+	ResultsArtifactSuffixDeleteMetricsTotal    = "delete.metrics.total.csv"
+	ResultsArtifactSuffixDeleteRequests        = "delete.requests.csv"
+	ResultsArtifactSuffixDeleteObjects         = "delete.objects.csv"
+	ResultsArtifactSuffixDeleteCompletion      = "delete.complete.json"
 	ResultsArtifactSuffixWritten               = "written.csv"
 	ResultsArtifactSuffixWrittenCompletion     = "written.complete.json"
 	ResultsArtifactSuffixVerifyInput           = "verify-input.csv"

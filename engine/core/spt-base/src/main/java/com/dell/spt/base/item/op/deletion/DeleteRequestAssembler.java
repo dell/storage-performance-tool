@@ -26,6 +26,7 @@ public final class DeleteRequestAssembler
 	private String retainedBucket;
 	private Credential retainedCredential;
 	private int unrecoverableIdentityCount;
+	private long nextSelectionIndex;
 	private boolean assemblyFailed;
 	private boolean finished;
 
@@ -81,7 +82,8 @@ public final class DeleteRequestAssembler
 		RuntimeException targetFailure = null;
 		for (final var item : items) {
 			try {
-				inputTargets.add(new DeleteTarget(item));
+				inputTargets.add(new DeleteTarget(item, nextSelectionIndex));
+				nextSelectionIndex = Math.addExact(nextSelectionIndex, 1);
 			} catch (final RuntimeException e) {
 				unrecoverableIdentityCount++;
 				if (targetFailure == null) {

@@ -187,6 +187,10 @@ func TestCaptureStoredDeleteMetricsAssignsTerminalModelWithoutRawArtifact(t *tes
 		metadata.DeleteMetrics["mt-002-20260823.100000.001-delete"] != stored {
 		t.Fatalf("stored DELETE model = %+v", metadata.DeleteMetrics)
 	}
+	if len(metadata.DeleteArtifactStepIDs) != 1 ||
+		metadata.DeleteArtifactStepIDs[0] != "mt-002-20260823.100000.001-delete" {
+		t.Fatalf("runtime DELETE artifact steps = %v", metadata.DeleteArtifactStepIDs)
+	}
 }
 
 func TestCaptureStoredDeleteMetricsBindsFleetRuntimeDeleteIdentity(t *testing.T) {

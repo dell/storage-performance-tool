@@ -1,0 +1,2 @@
+schema_version,request_id,batch_id,target_count,outcome,node,start_us,duration_us,latency_us
+1,delete-request-01ac12dc5f8c3a9cf59c678bfc249e5fd10532ce9743a401faafa7b7835049c7,delete-request-01ac12dc5f8c3a9cf59c678bfc249e5fd10532ce9743a401faafa7b7835049c7,2,full_success,local,0,0,0
