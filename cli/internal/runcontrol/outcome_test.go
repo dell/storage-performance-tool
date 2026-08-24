@@ -6,6 +6,7 @@ package runcontrol
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -35,5 +36,19 @@ func TestFinalizationOutcomePreservesDiagnosticsAndRemoval(t *testing.T) {
 	}
 	if !errors.Is(outcome.Error(), diagnosticsErr) || !errors.Is(outcome.Error(), removalErr) {
 		t.Fatalf("finalization aggregate = %v", outcome.Error())
+	}
+}
+
+func TestOnlyOwnedEngineTerminalFailureRejectsIndependentJoinedErrors(t *testing.T) {
+	terminal := &OwnedEngineTerminalFailure{Detail: "cleanup step failed"}
+	if !IsOnlyOwnedEngineTerminalFailure(terminal) ||
+		!IsOnlyOwnedEngineTerminalFailure(fmt.Errorf("presenter: %w", terminal)) ||
+		!IsOnlyOwnedEngineTerminalFailure(errors.Join(terminal)) {
+		t.Fatal("typed owned engine terminal failure lost its attribution")
+	}
+	independent := errors.New("container cleanup failed")
+	if IsOnlyOwnedEngineTerminalFailure(independent) ||
+		IsOnlyOwnedEngineTerminalFailure(errors.Join(terminal, independent)) {
+		t.Fatal("independent run failure was misclassified as a generic terminal reflection")
 	}
 }

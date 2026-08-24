@@ -829,6 +829,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final OpType opType = op.type();
 		if (op instanceof DeleteRequestOperation deleteOperation) {
 			httpRequest = standaloneDeleteRequest(deleteOperation, nodeAddr);
+		} else if (OpType.DELETE.equals(opType) && op.requestedVersionId() != null) {
+			// A manifest VersionedItem is an explicit object identity. Preserve it before
+			// tagging or composite-object dispatch can reinterpret the DELETE request.
+			httpRequest = objectVersioningRequest(op, nodeAddr);
 		} else if (op instanceof CompositeDataOperation) {
 			if (OpType.CREATE.equals(opType)) {
 				final var mpuOp = (CompositeDataOperation) op;
@@ -1572,7 +1576,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var item = (I) op.item();
 		final var opType = op.type();
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
-		final boolean explicitVersionCarrier = integrityMetadataEnabled();
+		final boolean explicitVersionCarrier = integrityMetadataEnabled() || op.requestedVersionId() != null;
 		String versionId = op.requestedVersionId();
 		if (!explicitVersionCarrier) {
 			// Retain the legacy key~version convention only for ordinary mode.

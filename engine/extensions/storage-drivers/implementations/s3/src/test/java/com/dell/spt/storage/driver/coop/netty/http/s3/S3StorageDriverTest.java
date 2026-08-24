@@ -2210,6 +2210,29 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	void exactVersionCompositeDeletePrecedesCompositeAndTaggingDispatch() throws Exception {
+		final Config config = baseConfig(false, 2, false, null, "127.0.0.1");
+		config.val("storage-object-tagging-enabled", true);
+		try (final var driver = new TestS3Driver(config)) {
+			final var item = new IntegrityManifestDataItem(
+							"bucket", "prefix/key~literal", 4_096, "version/with+chars");
+			final var composite = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem>(
+							0, OpType.DELETE, item, null, null, TEST_CRED, null, 0, 1_024);
+
+			final HttpRequest request = driver.httpRequest(
+							(Operation<Item>) (Operation<?>) composite,
+							"s3.us-east-1.amazonaws.com:443");
+
+			assertEquals(HttpMethod.DELETE, request.method());
+			assertEquals(
+							"/bucket/prefix/key~literal?versionId=version%2Fwith%2Bchars", request.uri());
+			assertFalse(request.uri().contains("tagging"));
+			assertEquals("prefix/key~literal", item.name());
+		}
+	}
+
+	@Test
 	void suspendedBucketNullVersionSurvivesManifestRoundTripIntoGetQuery() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		final var listOp = new ListOperationImpl<PathItemImpl>(

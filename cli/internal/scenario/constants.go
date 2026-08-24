@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"strings"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -103,12 +104,13 @@ const (
 	templateKeyReadShuffleBatchSize = "ReadShuffleBatchSize"
 	templateKeyReadPhasePause       = "ReadPhasePauseSeconds"
 
-	stepOpCreate = "create"
-	stepOpRead   = "read"
-	stepOpSeed   = "seed"
-	stepOpDelete = "delete"
-	stepOpList   = "list"
-	stepOpMixed  = "mixed"
+	stepOpCreate  = "create"
+	stepOpRead    = "read"
+	stepOpSeed    = "seed"
+	stepOpDelete  = "delete"
+	stepOpCleanup = "cleanup"
+	stepOpList    = "list"
+	stepOpMixed   = "mixed"
 )
 
 const (
@@ -131,6 +133,12 @@ const (
 	// SelectionOrderCanonical names the deterministic global DELETE selection order.
 	SelectionOrderCanonical = constants.DeleteSelectionOrderCanonical
 )
+
+// IsSeededDeleteCleanupStepID reports whether stepID identifies the cleanup phase of a
+// seeded DELETE scenario.
+func IsSeededDeleteCleanupStepID(stepID string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(stepID)), "-"+stepOpCleanup)
+}
 
 // DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.
 const DefaultFailureBudgetGrace = 30 * time.Second

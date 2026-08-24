@@ -152,6 +152,48 @@ func TestResolveRunCompletionErrorPreservesPresenterFailureWithoutAutoResults(t 
 	}
 }
 
+func TestResolveRunCompletionErrorKeepsSeededCleanupFailureOutOfDeleteVerdict(t *testing.T) {
+	presenterFailure := &runcontrol.OwnedEngineTerminalFailure{Detail: "cleanup partially failed"}
+	cleanupFailure := autoResultsOutcome{Tracker: &portcheck.RunResult{
+		FinalState:      constants.StateFailed,
+		FailureStepID:   "mt-003-20260824.140000.000-cleanup",
+		FailureCategory: "execution",
+		FailureMessage:  "cleanup partially failed",
+	}}
+	params := scenario.Params{WorkloadType: scenario.WorkloadTypeDelete, Cleanup: true}
+	if got := resolveRunCompletionError(nil, cleanupFailure, true, params); got != nil {
+		t.Fatalf("cleanup-only failure changed measured DELETE verdict: %v", got)
+	}
+	if got := resolveRunCompletionError(presenterFailure, cleanupFailure, true, params); got != nil {
+		t.Fatalf("cleanup-only presenter failure changed measured DELETE exit status: %v", got)
+	}
+	independentFailure := errors.New("orchestrator cleanup failed")
+	if got := resolveRunCompletionError(independentFailure, cleanupFailure, true, params); !errors.Is(got, independentFailure) {
+		t.Fatalf("independent run failure was hidden by cleanup neutrality: %v", got)
+	}
+	if got := resolveRunCompletionError(
+		errors.Join(presenterFailure, independentFailure), cleanupFailure, true, params,
+	); !errors.Is(got, independentFailure) {
+		t.Fatalf("joined independent run failure was hidden by cleanup neutrality: %v", got)
+	}
+
+	measuredFailure := cleanupFailure
+	measuredFailure.Tracker = &portcheck.RunResult{
+		FinalState:      constants.StateFailed,
+		FailureStepID:   "mt-002-20260824.140000.000-delete",
+		FailureCategory: "execution",
+		FailureMessage:  "failure budget exceeded",
+	}
+	if got := resolveRunCompletionError(nil, measuredFailure, true, params); got == nil {
+		t.Fatal("measured DELETE failure was hidden by cleanup mode")
+	}
+
+	params.Cleanup = false
+	if got := resolveRunCompletionError(nil, cleanupFailure, true, params); got == nil {
+		t.Fatal("ordinary DELETE failure with cleanup-shaped step ID was ignored")
+	}
+}
+
 func TestJoinFallbackPreparedCleanupReportsCleanupFailureWithoutPrimary(t *testing.T) {
 	cleanupFailure := errors.New("prepared cleanup failed")
 	prepared := runcontrol.NewPreparedRun(

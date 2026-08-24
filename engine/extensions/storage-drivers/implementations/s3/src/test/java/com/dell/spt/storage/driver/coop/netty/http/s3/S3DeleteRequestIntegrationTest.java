@@ -29,8 +29,12 @@ import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
+import com.dell.spt.base.item.op.deletion.SeededDeleteCleanupFinalizer;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -52,6 +56,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -72,9 +77,11 @@ final class S3DeleteRequestIntegrationTest {
 	private final ExecutorService executor = Executors.newSingleThreadExecutor();
 	private HttpServer server;
 	private volatile String multiDeleteResponse;
+	private volatile Function<String, String> multiDeleteResponseFactory;
 	private volatile String listResponse;
 	private volatile Function<CapturedRequest, String> listResponseFactory;
 	private volatile Function<CapturedRequest, Integer> headResponseStatus = ignored -> 200;
+	private volatile Function<CapturedRequest, Integer> deleteResponseStatus = ignored -> 204;
 	private volatile int multiDeleteStatus = 200;
 	private final AtomicInteger putResponseCount = new AtomicInteger();
 
@@ -421,6 +428,144 @@ final class S3DeleteRequestIntegrationTest {
 						.orElseThrow();
 		assertEquals(2, delete.body().split("<Object>", -1).length - 1);
 		assertEquals(1, delete.body().split("<VersionId>returned-version</VersionId>", -1).length - 1);
+	}
+
+	@Test
+	void seededResidualCleanupUsesProductionStepsArtifactsAndExactVersionDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 902;
+		final String scenarioId = tempDir.getFileName().toString();
+		final String seedStep = scenarioId + "-seed";
+		final String deleteStep = scenarioId + "-delete";
+		final String cleanupStep = scenarioId + "-cleanup";
+		final Path manifest = tempDir.resolve("written.csv");
+		final Path residual = Path.of(
+						FileManager.INSTANCE.logFileName(Loggers.DELETE_RESIDUAL.getName(), deleteStep))
+						.toAbsolutePath();
+		final String manifestPath = jsPath(manifest);
+		final String residualPath = jsPath(residual);
+		final String scenario = """
+						var writtenFile = "%s";
+						var residualFile = "%s";
+						CreateLoad.config({
+						  "storage": {
+						    "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						    "integrity": {"mode": "metadata", "algorithm": "sha256",
+						      "input": {"provenance": "none", "expectedProducerId": ""},
+						      "output": {"requireExactCount": true}}
+						  },
+						  "item": {"type": "data", "data": {"size": "1KiB"},
+						    "naming": {"prefix": "safe-root/spt~delete-902/"},
+						    "output": {"path": "/bucket", "file": writtenFile}},
+						  "load": {"op": {"type": "create", "limit": {"count": 3}},
+						    "step": {"id": "%s"}},
+						  "output": {"metrics": {"summary": {"persist": true}}}
+						}).run();
+						var deleteSelection = com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection.fromManifest(writtenFile);
+						var benchmarkFailure = null;
+						try {
+						  DeleteLoad.config({
+						    "storage": {
+						      "driver": {"type": "s3", "limit": {"concurrency": 1}},
+						      "integrity": {"mode": "metadata", "algorithm": "sha256",
+						        "input": {"provenance": "engine_step", "expectedProducerId": "%s"}}
+						    },
+						    "item": {"type": "data", "input": {"file": writtenFile}},
+						    "load": {"batch": {"size": 2}, "op": {"type": "delete",
+						      "delete": {"standalone": true, "batchSize": 2,
+						        "selected": deleteSelection.selected(),
+						        "selectedCurrentKey": deleteSelection.selectedCurrentKey(),
+						        "selectedExactVersion": deleteSelection.selectedExactVersion(),
+						        "selectedBuckets": deleteSelection.selectedBuckets()},
+						      "failureBudget": {"mode": "fixed", "maxFailedObjects": 2,
+						        "maxFailurePercent": 0.0, "graceSeconds": 0},
+						      "recycle": {"mode": false}, "retry": false, "wait": {"finish": true}},
+						      "step": {"id": "%s"}},
+						    "output": {"metrics": {"summary": {"persist": true}}}
+						  }).run();
+						} catch (failure) {
+						  benchmarkFailure = failure;
+						}
+						var cleanupFailure = null;
+						var cleanupLoad = null;
+						var cleanupStartedNanos = java.lang.System.nanoTime();
+						try {
+						  cleanupLoad = DeleteLoad.config({
+						    "storage": {"driver": {"type": "s3", "limit": {"concurrency": 1}},
+						      "object": {"tagging": {"enabled": true}}},
+						    "item": {"type": "data", "input": {"file": residualFile}},
+						    "load": {"op": {"type": "delete",
+						      "limit": {"fail": {"count": 0, "rate": false}},
+						      "retry": false, "wait": {"finish": true}},
+						      "step": {"id": "%s"}},
+						    "output": {"metrics": {"summary": {"persist": true}}}
+						  });
+						  cleanupLoad.run();
+						} catch (failure) {
+						  cleanupFailure = failure;
+						}
+						var cleanupOutcome = com.dell.spt.base.item.op.deletion.SeededDeleteCleanupFinalizer.finish(
+						    "%s", java.lang.System.nanoTime() - cleanupStartedNanos,
+						    benchmarkFailure, cleanupFailure, cleanupLoad, residualFile);
+						""".formatted(
+						manifestPath, residualPath, seedStep, seedStep, deleteStep,
+						cleanupStep, cleanupStep);
+		final var batchRejectedVersion = new AtomicBoolean();
+		final var singleVersionAttempts = new AtomicInteger();
+		multiDeleteResponseFactory = body -> {
+			if (body.contains("<VersionId>returned-version</VersionId>")) {
+				batchRejectedVersion.set(true);
+			}
+			return partialVersionedDeleteResponse(body);
+		};
+		deleteResponseStatus = request -> {
+			if ("versionId=returned-version".equals(request.rawQuery())
+							&& !batchRejectedVersion.get()
+							&& singleVersionAttempts.getAndIncrement() == 0) {
+				return 403;
+			}
+			return 204;
+		};
+
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			metrics.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			new RunImpl("seeded residual cleanup canary", scenario, engine, runId).run();
+
+			final var measured = awaitTerminalStep(metrics, deleteStep);
+			assertNotNull(measured.deleteMetrics);
+			assertEquals(2, measured.deleteMetrics.requestAttempted());
+			assertEquals(3, measured.deleteMetrics.objectSelected());
+			assertEquals(2, measured.deleteMetrics.objectAccepted());
+			assertEquals(1, measured.deleteMetrics.objectFailed());
+		}
+
+		final var cleanupOutcome = (SeededDeleteCleanupFinalizer.Outcome) engine.get("cleanupOutcome");
+		assertNotNull(cleanupOutcome);
+		assertEquals(1, cleanupOutcome.selectedOperations());
+		assertEquals(1, cleanupOutcome.succeededOperations());
+		assertEquals(0, cleanupOutcome.failedOperations());
+		assertNull(cleanupOutcome.failure());
+		final var frozenResidual = new ArrayList<IntegrityManifestDataItem>();
+		try (final var input = new IntegrityManifestItemInput(residual)) {
+			assertEquals(1, input.get(frozenResidual, 2));
+		}
+		assertEquals("returned-version", frozenResidual.getFirst().versionId());
+		final CapturedRequest cleanupDelete = requests.stream()
+						.filter(request -> "DELETE".equals(request.method())
+										&& "versionId=returned-version".equals(request.rawQuery()))
+						.reduce((earlier, later) -> later)
+						.orElseThrow();
+		assertEquals("/bucket/" + frozenResidual.getFirst().name(), cleanupDelete.rawPath());
+		assertTrue(cleanupDelete.rawPath().contains("spt~delete-902"));
+		assertEquals(1, requests.stream()
+						.filter(request -> "POST".equals(request.method()) && "delete".equals(request.rawQuery()))
+						.count());
 	}
 
 	@Test
@@ -874,16 +1019,18 @@ final class S3DeleteRequestIntegrationTest {
 		} else if ("HEAD".equals(request.method())) {
 			exchange.sendResponseHeaders(headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(request.method())) {
-			exchange.sendResponseHeaders(204, -1);
+			exchange.sendResponseHeaders(deleteResponseStatus.apply(request), -1);
 		} else if ("POST".equals(request.method()) && "delete".equals(request.rawQuery())) {
 			if (multiDeleteStatus != 200) {
 				exchange.sendResponseHeaders(multiDeleteStatus, -1);
 				exchange.close();
 				return;
 			}
-			final String responseXml = multiDeleteResponse == null
-							? successfulDeleteResponse(request.body())
-							: multiDeleteResponse;
+			final String responseXml = multiDeleteResponseFactory != null
+							? multiDeleteResponseFactory.apply(request.body())
+							: multiDeleteResponse == null
+											? successfulDeleteResponse(request.body())
+											: multiDeleteResponse;
 			final byte[] responseBody = responseXml.getBytes(StandardCharsets.UTF_8);
 			exchange.getResponseHeaders().set("Content-Type", "application/xml");
 			exchange.sendResponseHeaders(200, responseBody.length);
@@ -907,6 +1054,42 @@ final class S3DeleteRequestIntegrationTest {
 			response.append("</Deleted>");
 		}
 		return response.append("</DeleteResult>").toString();
+	}
+
+	private static String partialVersionedDeleteResponse(final String requestBody) {
+		final Matcher objects = Pattern.compile(
+						"<Object><Key>(.*?)</Key>(?:<VersionId>(.*?)</VersionId>)?</Object>",
+						Pattern.DOTALL).matcher(requestBody);
+		final StringBuilder response = new StringBuilder("<DeleteResult>");
+		while (objects.find()) {
+			if (objects.group(2) == null) {
+				response.append("<Deleted><Key>").append(objects.group(1)).append("</Key></Deleted>");
+			} else {
+				response.append("<Error><Key>").append(objects.group(1)).append("</Key><VersionId>")
+								.append(objects.group(2))
+								.append("</VersionId><Code>AccessDenied</Code><Message>denied</Message></Error>");
+			}
+		}
+		return response.append("</DeleteResult>").toString();
+	}
+
+	private static String jsPath(final Path path) {
+		return path.toString().replace("\\", "\\\\").replace("\"", "\\\"");
+	}
+
+	private static TerminalStepEntry awaitTerminalStep(
+					final MetricsManagerImpl metrics, final String stepId) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		do {
+			final var entry = metrics.getTerminalSteps().stream()
+							.filter(candidate -> !candidate.distributed && stepId.equals(candidate.stepId))
+							.findFirst();
+			if (entry.isPresent()) {
+				return entry.get();
+			}
+			TimeUnit.MILLISECONDS.sleep(10);
+		} while (System.nanoTime() < deadline);
+		throw new AssertionError("terminal metrics were not published for step " + stepId);
 	}
 
 	private record CapturedRequest(

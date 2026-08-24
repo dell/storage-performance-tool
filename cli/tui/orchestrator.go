@@ -18,6 +18,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -465,7 +466,7 @@ func ownedTerminalStatusFailure(status *TestStatus) error {
 	if detail == "" {
 		detail = "engine reported FAILED"
 	}
-	return fmt.Errorf("owned engine run failed: %s", detail)
+	return &runcontrol.OwnedEngineTerminalFailure{Detail: detail}
 }
 
 func (o *TestOrchestrator) publishTerminalMetrics() (bool, error, error) {

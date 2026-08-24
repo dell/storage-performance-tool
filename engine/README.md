@@ -387,6 +387,15 @@ driver. DELETE qualification uses deterministic unavailable-transport and fake-a
 contract tests; RDMA-capable hardware is not required because DELETE transfers no payload over
 RDMA.
 
+For SPT-owned seeded benchmarks, optional residual cleanup is a later ordinary DELETE step, not
+part of the standalone measured request assembler. It starts only after the measured step has
+finished post-verification and committed its immutable `items.csv`, and consumes those canonical
+current-key or exact-version identities without an item output. The scenario finalizer reconciles
+terminal success and failure counts to that residual, reports one bounded cleanup result, suppresses
+cleanup failure from the benchmark verdict, and rethrows the original measured failure when one
+exists. This preserves the legacy single-object extension path and keeps cleanup time and errors out
+of standalone request metrics.
+
 ### RDMA Token Format
 
 The `x-amz-rdma-token` header carries all information the server needs to perform the transfer:

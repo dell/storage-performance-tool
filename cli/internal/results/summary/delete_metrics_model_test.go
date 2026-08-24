@@ -76,3 +76,53 @@ func TestBuildStepSummariesCarriesRuntimeDeleteModelIntoStoredSummary(t *testing
 		t.Fatalf("production summary path lost runtime DELETE model: %+v", steps)
 	}
 }
+
+func TestAggregateAppendsSeededCleanupTimingWithoutMergingCleanupOutcome(t *testing.T) {
+	measuredWall := 2.5
+	stored := &deletemetrics.Metrics{
+		Phases:             deletemetrics.Phases{TotalWallSeconds: &measuredWall},
+		OutcomeTerminology: deletemetrics.OutcomeAccepted,
+		TerminalReconciled: true,
+	}
+	deleteStep := "mt-002-20260824.140000.000-delete"
+	cleanupStep := "mt-003-20260824.140000.000-cleanup"
+	data := &RunData{
+		Params: &RunParams{
+			WorkloadType: "delete",
+			ScenarioParams: ScenarioParams{
+				WorkloadType: "delete",
+				Cleanup:      true,
+			},
+		},
+		StepOrder: []string{deleteStep, cleanupStep},
+		Steps: map[string]*StepData{
+			deleteStep: {StepID: deleteStep, Status: StepStatusComplete, Delete: stored},
+			cleanupStep: {
+				StepID: cleanupStep,
+				Status: StepStatusPartial,
+				Metrics: &MetricsTotals{Rows: []MetricsTotalsRow{{
+					Operation: "DELETE", SuccessCount: 2, FailureCount: 1, StepDurationSeconds: 0.75,
+				}}},
+			},
+		},
+	}
+
+	summary, err := Aggregate(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Steps) != 2 || summary.Steps[1].PhaseLabel != "Cleanup" ||
+		summary.Steps[1].Status != StepStatusPartial || summary.Steps[1].Metrics == nil ||
+		summary.Steps[1].Metrics.FailureCount != 1 {
+		t.Fatalf("cleanup outcome was not retained as its own stored step: %+v", summary.Steps)
+	}
+	measured := summary.Steps[0].Delete
+	if measured == nil || measured.Phases.CleanupSeconds == nil ||
+		*measured.Phases.CleanupSeconds != 0.75 || measured.Phases.TotalWallSeconds == nil ||
+		*measured.Phases.TotalWallSeconds != 3.25 {
+		t.Fatalf("measured DELETE lifecycle did not append cleanup timing: %+v", measured)
+	}
+	if stored.Phases.CleanupSeconds != nil || *stored.Phases.TotalWallSeconds != measuredWall {
+		t.Fatalf("aggregation mutated the immutable measured DELETE model: %+v", stored.Phases)
+	}
+}

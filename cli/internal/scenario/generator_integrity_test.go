@@ -418,7 +418,7 @@ func parseGeneratedScenarioConfigs(t *testing.T, scenarioText string) []map[stri
 			t.Fatalf("unterminated generated config object at offset %d", objectStart)
 		}
 		rawConfig := scenarioText[objectStart:objectEnd]
-		for _, variable := range []string{"writtenFile", "verifiedFile", "verifyInputFile"} {
+		for _, variable := range []string{"writtenFile", "verifiedFile", "verifyInputFile", "residualFile"} {
 			rawConfig = strings.ReplaceAll(rawConfig, variable, quoteJS(variable))
 		}
 		for _, variable := range []string{

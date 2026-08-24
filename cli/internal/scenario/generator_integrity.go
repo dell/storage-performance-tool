@@ -172,6 +172,9 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	if strings.TrimSpace(params.ItemsFile) == "" {
 		return generateSeededDeleteScenario(params, selectionOrder, failureBudget, verification)
 	}
+	if params.Cleanup {
+		return "", fmt.Errorf("delete explicit-manifest mode cannot use cleanup because SPT did not create the selected objects")
+	}
 	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
 		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
 		DeleteStorage: integrityStorageTemplateData{
@@ -283,10 +286,12 @@ func generateSeededDeleteScenario(
 	}
 	ts := resolveTimestamp(params)
 	seedStep := formatStepID(1, ts, stepOpSeed)
+	deleteStep := formatStepID(2, ts, stepOpDelete)
 	driver := resolveStorageDriverType(params.S3Driver)
 	return executeIntegrityScenario("delete-seeded", deleteSeededScenarioData{
-		SeedStep:   seedStep,
-		DeleteStep: formatStepID(2, ts, stepOpDelete),
+		SeedStep:    seedStep,
+		DeleteStep:  deleteStep,
+		CleanupStep: formatStepID(3, ts, stepOpCleanup),
 		SeedStorage: integrityStorageTemplateData{
 			Driver: driver, Concurrency: params.Threads,
 			Integrity: integrityTemplateData{
@@ -301,6 +306,9 @@ func generateSeededDeleteScenario(
 				ExpectedProducerID: seedStep,
 			},
 		},
+		CleanupStorage: deleteCleanupStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+		},
 		BucketPath:     "/" + strings.TrimPrefix(strings.TrimSpace(params.Bucket), "/"),
 		ObjectSize:     objectSize,
 		Namespace:      deleteSeedNamespace(params.Prefix, params.RunID),
@@ -310,6 +318,7 @@ func generateSeededDeleteScenario(
 		Duration:       duration,
 		FailureBudget:  failureBudget,
 		Verification:   verification,
+		Cleanup:        params.Cleanup,
 	})
 }
 

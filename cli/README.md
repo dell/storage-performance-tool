@@ -121,6 +121,19 @@ DELETE. If the inventory is smaller than
 request waves; it does not auto-calibrate or reject the finite run solely for
 concurrency underfill.
 
+Seeded mode alone accepts the optional `--cleanup` flag because only that source is
+owned by SPT. Explicit-manifest and existing-prefix modes reject it before orchestration.
+After the timed DELETE has drained, the engine first completes any requested
+post-verification and freezes the measured step's canonical residual `items.csv`.
+Cleanup then runs as a separate ordinary DELETE step over exactly that residual: failed,
+unattempted, unresolved, still-present, or verification-inconclusive identities as
+applicable. Current-key and exact-version identities are preserved, and retrying an
+already-absent target is safe. Cleanup still runs after an operational failure-budget
+stop. Its duration, metrics, and errors remain separate from seed and measured DELETE;
+partial cleanup is logged once at finalization and never changes the measured verdict or
+exit code. Neither the seed inventory nor the pre-cleanup residual is rewritten, so both
+remain durable evidence independent of the cleanup outcome.
+
 At the deadline the controller closes request and driver admission across every local or
 distributed input slice before permitting recovery on any slice. Identities
 still in generator or driver queues are unattempted; identities that reached actual driver
@@ -547,7 +560,7 @@ Executes a benchmark test with the specified workload type.
 - `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
-- `--cleanup`: Delete created objects after test completion. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
+- `--cleanup`: Best-effort deletion of SPT-created objects after test completion. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker

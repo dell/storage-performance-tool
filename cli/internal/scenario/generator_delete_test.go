@@ -185,6 +185,20 @@ func TestPrepareDeleteManifestAndGenerateTerminalScenario(t *testing.T) {
 	}
 }
 
+func TestGenerateExplicitManifestDeleteRejectsCleanup(t *testing.T) {
+	_, err := GenerateDeleteScenario(Params{
+		WorkloadType:    workload.Delete,
+		RunID:           778,
+		ItemsFile:       "/spt-input/items/verify-input.csv",
+		Threads:         1,
+		DeleteBatchSize: 1,
+		Cleanup:         true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not create") {
+		t.Fatalf("explicit-manifest cleanup error = %v", err)
+	}
+}
+
 func TestGeneratedDeleteScenariosFreezeSelectionMetadataBeforeDispatch(t *testing.T) {
 	tests := []struct {
 		name   string
