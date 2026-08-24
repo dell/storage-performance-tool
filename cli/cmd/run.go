@@ -51,6 +51,7 @@ const (
 	flagPrefixShards          = "prefix-shards"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
+	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -249,18 +250,33 @@ func captureStoredDeleteMetrics(
 
 func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error {
 	failedSteps := make([]string, 0)
+	verificationFailedSteps := make([]string, 0)
 	for stepID, metric := range metrics {
 		if metric != nil && metric.FailurePolicy.Outcome == deletemetrics.OutcomeFailed {
-			failedSteps = append(failedSteps, stepID)
+			if deletemetrics.HasVerificationFailure(metric.Verification) {
+				verificationFailedSteps = append(verificationFailedSteps, stepID)
+			} else {
+				failedSteps = append(failedSteps, stepID)
+			}
 		}
 	}
-	if len(failedSteps) == 0 {
+	if len(failedSteps) == 0 && len(verificationFailedSteps) == 0 {
 		return nil
 	}
 	sort.Strings(failedSteps)
-	return fmt.Errorf(
-		"DELETE failure policy rejected terminal outcome for step(s): %s",
-		strings.Join(failedSteps, ", "))
+	sort.Strings(verificationFailedSteps)
+	parts := make([]string, 0, 2)
+	if len(verificationFailedSteps) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"DELETE verification failed for step(s): %s",
+			strings.Join(verificationFailedSteps, ", ")))
+	}
+	if len(failedSteps) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"DELETE failure policy rejected terminal outcome for step(s): %s",
+			strings.Join(failedSteps, ", ")))
+	}
+	return errors.New(strings.Join(parts, "; "))
 }
 
 func expectedDeleteContributorIDs(metadata *runMetadata) ([]string, error) {
@@ -1605,7 +1621,7 @@ func joinFallbackPreparedCleanup(
 var runCmd = &cobra.Command{
 	Use:   "run <type>",
 	Short: "Executes a benchmark test with a specified workload type.",
-	Long: `The 'run' command executes a benchmark test. The <type> argument specifies the workload.
+	Long: fmt.Sprintf(`The 'run' command executes a benchmark test. The <type> argument specifies the workload.
 
 Available workload types:
   write: Perform a write-only test, creating new objects.
@@ -1614,9 +1630,17 @@ Available workload types:
   write-verify: Write and verify every successful object, or defer readback for later campaigns.
   read-verify: Verify self-verifying objects from discovery or --items-file.
   mixed: Perform a test with a specified mix of read and write operations.
-  delete: Perform a test to measure object deletion performance.
+  delete: Measure DeleteObject or DeleteObjects performance against a frozen inventory.
   mock: Run a mock test using the dummy-mock driver (no S3 endpoint required).
-  tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.`,
+  tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.
+
+DELETE is destructive. With no source flag it safely seeds a run-owned namespace, then deletes
+that frozen inventory. --items-file selects an explicit canonical manifest. Existing data is
+eligible only with --delete-existing plus an exact --bucket and explicitly supplied --prefix;
+whole-bucket selection additionally requires --allow-empty-prefix. DELETE defaults to %d
+seeded %s objects, batches %d targets per logical request, and does not verify removal unless
+--verify or --validate-inventory enables verification.`, scenario.DefaultDeleteObjectCount,
+		scenario.DefaultDeleteObjectSize, scenario.DefaultDeleteBatchSize),
 	Args:         cobra.ExactArgs(1), // Enforce that exactly one argument (workload type) is provided
 	SilenceUsage: true,               // Suppress usage on runtime errors; validation will re-enable
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
@@ -1643,8 +1667,10 @@ Available workload types:
 			return err
 		}
 
-		if workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify ||
-			workloadType == WorkloadTypeDelete {
+		// Every public run emits schema-v4 metrics, whose distributed identity contract
+		// requires a run and cluster ID. Preserve an identity supplied by a replay or
+		// imported caller and allocate only when this command created fresh parameters.
+		if params.RunID <= 0 {
 			params.RunID = time.Now().UnixMilli()
 		}
 		writeDeleteSeedConcurrencyWarning(cmd.ErrOrStderr(), params)
@@ -2111,17 +2137,17 @@ func init() {
 	runCmd.Flags().Bool("slice-endpoints", false, "Partition endpoints across nodes in distributed runs")
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
-	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
+	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
 	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
 	runCmd.Flags().IntP("threads", "t", 1, "Number of parallel client threads to run (e.g., 16)")
-	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
+	runCmd.Flags().StringP("object-size", "o", "", fmt.Sprintf("Object size (e.g., 1MiB, 256KiB, 4GiB); seeded DELETE defaults to %s", scenario.DefaultDeleteObjectSize))
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
 	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; seeded DELETE creates this many identities, while manifest/existing-prefix DELETE caps the canonical selection")
-	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "Standalone DELETE logical request size (1 uses DeleteObject; 2-1000 use DeleteObjects)")
+	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, fmt.Sprintf("Standalone DELETE logical request size (the minimum %d uses DeleteObject; larger values up to %d use DeleteObjects)", scenario.MinDeleteBatchSize, scenario.MaxDeleteBatchSize))
 	runCmd.Flags().Bool(flagDeleteExisting, false, "Destructive DELETE opt-in: discover and freeze current keys under the exact --bucket/--prefix before timing")
 	runCmd.Flags().Bool(flagAllowEmptyPrefix, false, "Second destructive DELETE opt-in required with --delete-existing --prefix='' to select an entire bucket")
 	runCmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "Maximum operational DELETE object failures permitted; the budget trips only above this object count")
@@ -2214,7 +2240,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("s3-driver", "default",
 		`S3 storage driver backend: "default" (Netty), "aws" (AWS SDK), "rdma" (RDMA-accelerated).
 Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
-	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
+	runCmd.Flags().Bool("use-rdma", false, "Use S3-RDMA; DELETE requests use HTTP, but driver startup still requires RDMA or --rdma-fallback")
 	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
 	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
 	runCmd.Flags().Bool("rdma-fallback", false, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
@@ -2755,8 +2781,10 @@ func formatScenarioParams(params scenario.Params) string {
 		lines = append(lines, fmt.Sprintf("Part Size: %s (multipart upload)", params.PartSize))
 	}
 
-	// Always show object count (0 means not set)
-	if params.ObjectCount > 0 {
+	// Existing-prefix DELETE interprets an omitted cap as the full discovered selection.
+	if params.WorkloadType == WorkloadTypeDelete && params.DeleteExisting && params.ObjectCount <= 0 {
+		lines = append(lines, "Object Count: "+deleteAllDiscoveredLabel)
+	} else if params.ObjectCount > 0 {
 		lines = append(lines, fmt.Sprintf("Object Count: %d", params.ObjectCount))
 	} else {
 		lines = append(lines, "Object Count: (not set)")
@@ -2810,10 +2838,14 @@ func formatScenarioParams(params scenario.Params) string {
 			if prefix == "" {
 				prefix = "(empty; entire bucket)"
 			}
+			danger := "DANGER: deletes the frozen current-key selection from an existing namespace."
+			if params.ObjectCount <= 0 {
+				danger = "DANGER: deletes all discovered current-key identities from an existing namespace (unbounded)."
+			}
 			lines = append(lines,
 				"DELETE Source: existing current-key prefix",
 				fmt.Sprintf("DELETE Scope: bucket=%s prefix=%s", params.Bucket, prefix),
-				"DANGER: deletes the frozen current-key selection from an existing namespace.",
+				danger,
 				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
 				"Discovery Phase: setup only; excluded from DELETE request timing.",
 			)
@@ -2878,9 +2910,14 @@ func writeDeleteExistingSafetyWarning(output io.Writer, params scenario.Params) 
 	if prefix == "" {
 		prefix = "(empty; entire bucket)"
 	}
+	selection := "the frozen current-key selection"
+	if params.ObjectCount <= 0 {
+		selection = deleteAllDiscoveredLabel
+	}
 	_, _ = fmt.Fprintf(
 		output,
-		"DANGER: --delete-existing will delete the frozen current-key selection under bucket %q prefix %q. Keep the namespace quiescent; concurrent writers can replace a frozen identity before deletion. Discovery is setup and is excluded from DELETE request timing.\n",
+		"DANGER: --delete-existing will delete %s under bucket %q prefix %q. Keep the namespace quiescent; concurrent writers can replace a frozen identity before deletion. Discovery is setup and is excluded from DELETE request timing.\n",
+		selection,
 		params.Bucket, prefix,
 	)
 }

@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"gopkg.in/yaml.v3"
 )
 
 func TestGenerateAndWriteGeneratedUsePrivateArtifacts(t *testing.T) {
@@ -67,6 +69,33 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	if !got.Params.ObjectDataDedupable {
 		t.Fatalf("replay params should keep dedupe-friendly data by default")
 	}
+	if got.Params.RunID <= 0 {
+		t.Fatalf("replay params run ID = %d, want a positive generated identity", got.Params.RunID)
+	}
+	var defaults struct {
+		Run struct {
+			ID      int64 `yaml:"id"`
+			Cluster struct {
+				ID string `yaml:"id"`
+			} `yaml:"cluster"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(got.DefaultsYAML, &defaults); err != nil {
+		t.Fatalf("parse replay defaults: %v", err)
+	}
+	if defaults.Run.ID != got.Params.RunID || defaults.Run.Cluster.ID != fmt.Sprintf("spt-run-%d", got.Params.RunID) {
+		t.Fatalf("defaults identity = run %d cluster %q, want run %d cluster spt-run-%d",
+			defaults.Run.ID, defaults.Run.Cluster.ID, got.Params.RunID, got.Params.RunID)
+	}
+	var metadata struct {
+		RunID int64 `json:"runId"`
+	}
+	if err := json.Unmarshal(got.MetadataJSON, &metadata); err != nil {
+		t.Fatalf("parse replay metadata: %v", err)
+	}
+	if metadata.RunID != got.Params.RunID {
+		t.Fatalf("metadata run ID = %d, want %d", metadata.RunID, got.Params.RunID)
+	}
 	if got.Params.ObjectSize != "10KB" {
 		t.Fatalf("replay params object size = %q, want 10KB", got.Params.ObjectSize)
 	}
@@ -94,6 +123,45 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	if gotMode := info.Mode().Perm(); gotMode != 0o700 {
 		t.Fatalf("output dir mode = %o, want 700", gotMode)
+	}
+}
+
+func TestGeneratePreservesCallerSuppliedRunIdentity(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="max.s3.sanity.json">scenario</a>`)
+	})
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export RUN_TIME=900
+export RUN_TIME_FOR_SMALL_OBJ=1800
+export WAIT_TIME=60
+export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/max.s3.sanity.json`)
+	})
+	mux.HandleFunc("/max.s3.sanity.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, maxS3SanityJSON)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	const suppliedRunID = int64(424242)
+	got, err := Generate(context.Background(), Options{
+		SourceURL:     server.URL,
+		RunID:         suppliedRunID,
+		Endpoints:     []string{"http://10.0.0.1:9020"},
+		Bucket:        "local-bucket",
+		BaseTimestamp: "20260605.121400.000",
+		HTTPClient:    server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if got.Params.RunID != suppliedRunID {
+		t.Fatalf("Params.RunID = %d, want caller-supplied %d", got.Params.RunID, suppliedRunID)
+	}
+	if !strings.Contains(string(got.DefaultsYAML), "id: 424242") ||
+		!strings.Contains(string(got.DefaultsYAML), "id: spt-run-424242") {
+		t.Fatalf("defaults do not preserve caller-supplied identity:\n%s", got.DefaultsYAML)
 	}
 }
 

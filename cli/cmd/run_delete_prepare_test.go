@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -138,6 +139,63 @@ func TestBuildSeededDeleteScenarioOwnsNamespaceAndOrdersFinitePhases(t *testing.
 	}
 }
 
+func TestRunCmdGenerateOnlyPublicDeleteContainsPositiveTimedPhase(t *testing.T) {
+	t.Chdir(t.TempDir())
+	setDeleteRouteFlags(t, "127.0.0.1", "1")
+	setGlobalRunFlagForTest(t, "generate-only", "true")
+
+	if err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete}); err != nil {
+		t.Fatalf("RunE() public DELETE generate-only error = %v", err)
+	}
+	paths, err := filepath.Glob("spt-scenario-*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("generated DELETE scenarios = %v, want exactly one", paths)
+	}
+	content, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioJS := string(content)
+	seed := strings.Index(scenarioJS, "CreateLoad.config")
+	deletePhase := strings.Index(scenarioJS, "DeleteLoad.config")
+	if seed < 0 || deletePhase <= seed ||
+		!strings.Contains(scenarioJS[deletePhase:], `"standalone": true`) {
+		t.Fatalf("public DELETE generate-only scenario lacks positive timed phase:\n%s", scenarioJS)
+	}
+}
+
+func TestRunDeleteHelpDocumentsPublicSafetyAndDefaults(t *testing.T) {
+	help := strings.Join(strings.Fields(runCmd.Long), " ")
+	for _, want := range []string{
+		"delete: Measure DeleteObject or DeleteObjects performance against a frozen inventory.",
+		"DELETE is destructive",
+		"--delete-existing plus an exact --bucket and explicitly supplied --prefix",
+		fmt.Sprintf("defaults to %d seeded %s objects", scenario.DefaultDeleteObjectCount, scenario.DefaultDeleteObjectSize),
+		fmt.Sprintf("batches %d targets per logical request", scenario.DefaultDeleteBatchSize),
+		"does not verify removal unless",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("run help omitted public DELETE contract %q:\n%s", want, runCmd.Long)
+		}
+	}
+	for _, flag := range []string{
+		flagDeleteBatchSize, flagDeleteExisting, flagAllowEmptyPrefix,
+		flagMaxFailedObjects, flagMaxFailurePercent, flagValidateInventory,
+		flagVerifyDelete, flagVerificationTimeout,
+	} {
+		if found := runCmd.Flags().Lookup(flag); found == nil || strings.TrimSpace(found.Usage) == "" {
+			t.Fatalf("public DELETE flag --%s is missing help", flag)
+		}
+	}
+	rdmaHelp := runCmd.Flags().Lookup("use-rdma")
+	if rdmaHelp == nil || !strings.Contains(rdmaHelp.Usage, "driver startup still requires RDMA or --rdma-fallback") {
+		t.Fatalf("public S3-RDMA help must distinguish HTTP DELETE from driver startup requirements")
+	}
+}
+
 func TestDeleteSeedConcurrencyWarningIsBoundedAndReportsFullWaves(t *testing.T) {
 	params := scenario.Params{
 		WorkloadType:    WorkloadTypeDelete,
@@ -187,6 +245,7 @@ func TestDeleteExistingSafetyWarningNamesExactScopeAndUntimedDiscovery(t *testin
 	for _, want := range []string{
 		"DANGER: --delete-existing",
 		`bucket "existing" prefix "guarded/root/"`,
+		"all discovered identities (unbounded)",
 		"Keep the namespace quiescent",
 		"Discovery is setup and is excluded from DELETE request timing",
 	} {
@@ -389,22 +448,18 @@ func TestDeleteManifestFailureStopsBeforeEveryOrchestrationSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previousValidate := validateRunWorkloadTypeFunc
 	previousPort := resolvePortConflictFunc
 	previousConnect := connectMultiHostOrchestratorFunc
 	previousLocal := startLocalHeadlessRunFunc
 	previousMulti := startMultiHostHeadlessRunFunc
 	previousAutoResults := startAutoResultsFunc
 	t.Cleanup(func() {
-		validateRunWorkloadTypeFunc = previousValidate
 		resolvePortConflictFunc = previousPort
 		connectMultiHostOrchestratorFunc = previousConnect
 		startLocalHeadlessRunFunc = previousLocal
 		startMultiHostHeadlessRunFunc = previousMulti
 		startAutoResultsFunc = previousAutoResults
 	})
-	validateRunWorkloadTypeFunc = func(string) error { return nil }
-
 	var portCalls, connectCalls, localCalls, multiCalls, autoResultsCalls int
 	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 		portCalls++

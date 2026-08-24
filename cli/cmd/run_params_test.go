@@ -311,9 +311,10 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 			expected: []string{
 				"Object Size: (not applicable)",
+				"Object Count: all discovered identities (unbounded)",
 				"DELETE Source: existing current-key prefix",
 				"DELETE Scope: bucket=existing prefix=guarded/root/",
-				"DANGER: deletes the frozen current-key selection from an existing namespace.",
+				"DANGER: deletes all discovered current-key identities from an existing namespace (unbounded).",
 				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
 				"Discovery Phase: setup only; excluded from DELETE request timing.",
 			},

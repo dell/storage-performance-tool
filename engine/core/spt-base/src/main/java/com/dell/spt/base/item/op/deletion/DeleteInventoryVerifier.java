@@ -1,5 +1,7 @@
 package com.dell.spt.base.item.op.deletion;
 
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
+
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import java.io.BufferedInputStream;
@@ -36,6 +38,7 @@ public final class DeleteInventoryVerifier {
 		if (retryTimeout.isNegative()) {
 			throw new IllegalArgumentException("DELETE verification timeout must be nonnegative");
 		}
+		throwIfInterrupted();
 
 		final long started = System.nanoTime();
 		Path results = null;
@@ -59,7 +62,7 @@ public final class DeleteInventoryVerifier {
 						TimeUnit.MILLISECONDS.sleep(RETRY_PAUSE_MILLIS);
 					} catch (final InterruptedException interrupted) {
 						Thread.currentThread().interrupt();
-						break;
+						throwUnchecked(interrupted);
 					}
 				}
 			}
@@ -83,6 +86,7 @@ public final class DeleteInventoryVerifier {
 						OutputStream output = new BufferedOutputStream(Files.newOutputStream(results))) {
 			long index = 0;
 			for (IntegrityManifestDataItem item = input.get(); item != null; item = input.get()) {
+				throwIfInterrupted();
 				if (index >= selectedCount) {
 					throw new IOException("DELETE verification inventory exceeds its frozen count");
 				}
@@ -109,6 +113,7 @@ public final class DeleteInventoryVerifier {
 						var ledger = new RandomAccessFile(results.toFile(), "rw")) {
 			long index = 0;
 			for (IntegrityManifestDataItem item = input.get(); item != null; item = input.get()) {
+				throwIfInterrupted();
 				if (index >= selectedCount || System.nanoTime() >= deadline) {
 					return;
 				}
@@ -137,18 +142,28 @@ public final class DeleteInventoryVerifier {
 					final DeleteVerificationPhase phase,
 					final Path results,
 					final long selectedCount) throws IOException {
+		throwIfInterrupted();
 		try (InputStream input = new BufferedInputStream(Files.newInputStream(results))) {
 			for (long index = 0; index < selectedCount; index++) {
+				throwIfInterrupted();
 				final int presence = input.read();
 				if (presence < 0) {
 					throw new IOException("DELETE verification evidence ended before its frozen count");
 				}
+				throwIfInterrupted();
 				if (retryable(phase, DeleteVerificationReport.decode((byte) presence))) {
 					return true;
 				}
 			}
 		}
+		throwIfInterrupted();
 		return false;
+	}
+
+	private static void throwIfInterrupted() {
+		if (Thread.currentThread().isInterrupted()) {
+			throwUnchecked(new InterruptedException("DELETE verification interrupted"));
+		}
 	}
 
 	private static boolean retryable(

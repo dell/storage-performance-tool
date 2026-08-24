@@ -277,7 +277,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			if (n > 0) { // the tasks buffer has free space for the new tasks
 				if (itemInputFinishFlag) { // items input was exhausted
 					if (!recycleFlag) { // never recycled -> recycling is not enabled
-						opInputFinishFlag = true; // allow shutdown
+						pendingOpCount += finishAssemblerNormally(opBuff);
+						opInputFinishFlag = assemblerFinished.get();
 					} else { // recycle the tasks if any
 						n = 0;
 						O recycledOp;
@@ -572,7 +573,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		itemInputFinishFlag = true;
 		final int finishedOperationCount = finishAssemblerNormally(opBuff);
 		if (!recycleFlag) {
-			opInputFinishFlag = true;
+			opInputFinishFlag = assemblerFinished.get();
 		}
 		return finishedOperationCount;
 	}
@@ -773,6 +774,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private int finishAssemblerNormally(final CircularBuffer<O> opBuff) throws IOException {
 		assemblyLock.lock();
 		try {
+			// finish() may consume one retained tail. Defer that irreversible call until
+			// the dispatch buffer has the slot promised by OperationAssembler.
+			if (opBuff.size() >= batchSize) {
+				return 0;
+			}
 			if (!assemblerFinished.compareAndSet(false, true)) {
 				return 0;
 			}

@@ -687,10 +687,10 @@ func TestGenerateSeededDeleteScenarioRejectsNonFiniteOrInvalidInputs(t *testing.
 	}
 }
 
-func TestDeleteGeneratorIsInternalWhilePublicRegistryRemainsGated(t *testing.T) {
+func TestDeleteGeneratorIsPublicAndProducesATimedPhase(t *testing.T) {
 	spec, ok := workload.Lookup(workload.Delete)
-	if !ok || spec.Implemented {
-		t.Fatalf("delete registry gate = %+v, found=%t; want implemented=false", spec, ok)
+	if !ok || !spec.Implemented {
+		t.Fatalf("delete registry gate = %+v, found=%t; want implemented=true", spec, ok)
 	}
 	generated, err := GenerateScenario(Params{
 		WorkloadType:    workload.Delete,
@@ -699,8 +699,9 @@ func TestDeleteGeneratorIsInternalWhilePublicRegistryRemainsGated(t *testing.T) 
 		Threads:         1,
 		DeleteBatchSize: 1,
 	})
-	if err != nil || !strings.Contains(generated, "DeleteLoad.config") {
-		t.Fatalf("internal delete generation = %q, %v", generated, err)
+	if err != nil || !strings.Contains(generated, "DeleteLoad.config") ||
+		!strings.Contains(generated, `"standalone": true`) {
+		t.Fatalf("public delete generation = %q, %v", generated, err)
 	}
 }
 

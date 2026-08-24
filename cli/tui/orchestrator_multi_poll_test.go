@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
@@ -204,6 +205,79 @@ func TestPerOperationCompletenessUsesExpectedFleetNotObservedContributors(t *tes
 	got := withPollCompleteness(metric, 2, present, !unique || len(present) != 2)
 	if got.NodesCount != 2 || len(got.NodesPresent) != 1 || !got.Partial {
 		t.Fatalf("N-1 operation must be partial against expected fleet: %+v", got)
+	}
+}
+
+func TestSchemaV4OrdinaryContributorsAggregateAndSignalCompletion(t *testing.T) {
+	for _, opType := range []string{"READ", "CREATE", "LIST", "MIXED", "NOOP", "TABLE"} {
+		t.Run(opType, func(t *testing.T) {
+			results := PollResults{
+				Metrics: map[string]*PerformanceMetric{
+					"entry": {
+						MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-77", RunID: "77",
+						StepID: "step-final", NodeID: "local", OpType: opType,
+						TestState: constants.TestStateCompleted, CompletionPercent: 100,
+					},
+					"worker": {
+						MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-77", RunID: "77",
+						StepID: "step-final", NodeID: "worker:1099", OpType: opType,
+						TestState: constants.TestStateCompleted, CompletionPercent: 100,
+					},
+				},
+				ContributorIDs: map[string]string{"entry": "local", "worker": "worker:1099"},
+			}
+			contributors, valid := metricsByContributor(results)
+			if !valid {
+				t.Fatal("schema-v4 contributors with public run identity were rejected")
+			}
+			aggregated := NewMetricsAggregator().Aggregate(contributors)
+			if aggregated == nil || !shouldSignalCompletionForExpectedSteps(
+				aggregated, []string{"step-final"}) {
+				t.Fatalf("ordinary schema-v4 completion did not aggregate or signal: %+v", aggregated)
+			}
+		})
+	}
+}
+
+func TestReplayIdentityAggregatesDistributedSchemaV4CompletionAndRetainsLegacyCompatibility(t *testing.T) {
+	const replayStepID = "replay-001-20260824.171700.000-create"
+	results := PollResults{
+		Metrics: map[string]*PerformanceMetric{
+			"entry": {
+				MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-1717", RunID: "1717",
+				StepID: replayStepID, NodeID: "local", OpType: "CREATE",
+				TestState: constants.TestStateCompleted, CompletionPercent: 100,
+			},
+			"worker": {
+				MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-1717", RunID: "1717",
+				StepID: replayStepID, NodeID: "worker:1099", OpType: "CREATE",
+				TestState: constants.TestStateCompleted, CompletionPercent: 100,
+			},
+		},
+		ContributorIDs: map[string]string{"entry": "local", "worker": "worker:1099"},
+	}
+	contributors, valid := metricsByContributor(results)
+	if !valid {
+		t.Fatal("schema-v4 replay contributors with generated run identity were rejected")
+	}
+	aggregated := NewMetricsAggregator().Aggregate(contributors)
+	if aggregated == nil || aggregated.RunID != "1717" || aggregated.ClusterID != "spt-run-1717" ||
+		aggregated.StepID != replayStepID ||
+		!shouldSignalCompletionForExpectedSteps(aggregated, []string{replayStepID}) {
+		t.Fatalf("schema-v4 replay did not aggregate and complete with one identity: %+v", aggregated)
+	}
+
+	for _, metric := range results.Metrics {
+		metric.MetricsSchema = 3
+		metric.RunID = ""
+		metric.ClusterID = ""
+	}
+	legacyContributors, legacyValid := metricsByContributor(results)
+	legacyAggregate := NewMetricsAggregator().Aggregate(legacyContributors)
+	if !legacyValid || legacyAggregate == nil ||
+		!shouldSignalCompletionForExpectedSteps(legacyAggregate, []string{replayStepID}) {
+		t.Fatalf("legacy replay contributors without run identity lost compatibility: valid=%t aggregate=%+v",
+			legacyValid, legacyAggregate)
 	}
 }
 

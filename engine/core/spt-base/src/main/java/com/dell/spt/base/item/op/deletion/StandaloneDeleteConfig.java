@@ -18,7 +18,12 @@ import java.util.TreeMap;
 
 /** Parsed fail-closed engine settings for the standalone DELETE request spine. */
 public final class StandaloneDeleteConfig {
+	/** Shipped per-phase verification retry bound. */
+	public static final long DEFAULT_VERIFICATION_TIMEOUT_MILLIS = 30_000;
+
 	private static final String DELETE_CONFIG_PATH = "op-delete";
+	private static final String OP_CONFIG_PATH = "op";
+	private static final String SHUFFLE_KEY = "shuffle";
 	private static final String STANDALONE_KEY = "standalone";
 	private static final String BATCH_SIZE_KEY = "batchSize";
 	private static final String DURATION_KEY = "duration";
@@ -91,6 +96,10 @@ public final class StandaloneDeleteConfig {
 			if (deleteConfig == null || !deleteConfig.boolVal(STANDALONE_KEY)) {
 				return disabled();
 			}
+			if (optionalBoolean(loadConfig.configVal(OP_CONFIG_PATH), SHUFFLE_KEY, false)) {
+				throw new IllegalConfigurationException(
+								"Standalone DELETE cannot use load-op-shuffle");
+			}
 			boolean durationMode = false;
 			try {
 				durationMode = deleteConfig.boolVal(DURATION_KEY);
@@ -129,7 +138,9 @@ public final class StandaloneDeleteConfig {
 							optionalLong(deleteConfig, WORKFLOW_STARTED_EPOCH_NANOS_KEY, -1),
 							optionalBoolean(deleteConfig, PRE_VALIDATION_KEY, false),
 							optionalBoolean(deleteConfig, POST_VERIFICATION_KEY, false),
-							optionalLong(deleteConfig, VERIFICATION_TIMEOUT_MILLIS_KEY, 30_000));
+							optionalLong(
+											deleteConfig, VERIFICATION_TIMEOUT_MILLIS_KEY,
+											DEFAULT_VERIFICATION_TIMEOUT_MILLIS));
 		} catch (final NoSuchElementException e) {
 			// Compatibility with extension-supplied schemas created before this optional node.
 			return disabled();
@@ -139,7 +150,8 @@ public final class StandaloneDeleteConfig {
 	private static StandaloneDeleteConfig disabled() {
 		return new StandaloneDeleteConfig(
 						false, 0, false, DELETE_SELECTION_ORDER_CANONICAL,
-						-1, -1, -1, Map.of(), -1, -1, -1, false, false, 30_000);
+						-1, -1, -1, Map.of(), -1, -1, -1, false, false,
+						DEFAULT_VERIFICATION_TIMEOUT_MILLIS);
 	}
 
 	private static boolean optionalBoolean(

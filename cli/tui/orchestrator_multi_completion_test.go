@@ -208,3 +208,19 @@ func TestDistributedCompletionRetainsRejectedDeleteOutcome(t *testing.T) {
 		t.Fatalf("distributed completion error = %v, want rejected DELETE outcome", err)
 	}
 }
+
+func TestDistributedCompletionClassifiesVerificationFailure(t *testing.T) {
+	metric := deleteNodeMetric("single", 1, 1, 1)
+	metric.TestState = constants.TestStateCompleted
+	metric.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeFailed
+	metric.Delete.Verification = deletemetrics.Verification{
+		AcceptedUnresolved:   1,
+		CorrectnessFailures:  1,
+		InconclusiveFailures: 1,
+	}
+
+	failure := terminalDeletePolicyFailure(&MultiNodeMetricsUpdate{Aggregated: metric})
+	if failure == nil || !strings.Contains(strings.ToLower(failure.Error()), "verification") {
+		t.Fatalf("distributed verification terminal error = %v, want classified verdict", failure)
+	}
+}

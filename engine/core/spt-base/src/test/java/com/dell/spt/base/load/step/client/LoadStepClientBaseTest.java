@@ -86,6 +86,9 @@ import org.apache.logging.log4j.core.config.Property;
 @DisplayName("LoadStepClientBase Tests")
 class LoadStepClientBaseTest {
 	private static final int BLOCKING_PHASE_WIDTH = 8;
+	private static final long TRAILING_SLICE_CLIENT_AWAIT_SECONDS = 30;
+	private static final long BLOCKING_PROBE_SETUP_TIMEOUT_SECONDS = 15;
+	private static final long TRAILING_SLICE_COMPLETION_TIMEOUT_SECONDS = 2;
 	private static final String REAL_RMI_STEP_TYPE = "duration-rmi-test";
 
 	private Config testConfig;
@@ -1152,14 +1155,14 @@ class LoadStepClientBaseTest {
 		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
 		final Thread awaitThread = Thread.ofPlatform().start(() -> {
 			try {
-				client.await(10, TimeUnit.SECONDS);
+				client.await(TRAILING_SLICE_CLIENT_AWAIT_SECONDS, TimeUnit.SECONDS);
 			} catch (final Throwable failure) {
 				awaitFailure.set(failure);
 			}
 		});
 		try {
-			assertTrue(blockersEntered.await(5, TimeUnit.SECONDS));
-			awaitThread.join(TimeUnit.SECONDS.toMillis(2));
+			assertTrue(blockersEntered.await(BLOCKING_PROBE_SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+			awaitThread.join(TimeUnit.SECONDS.toMillis(TRAILING_SLICE_COMPLETION_TIMEOUT_SECONDS));
 			assertFalse(
 							awaitThread.isAlive(),
 							"uninterruptible leading probes starved a trailing exhausted slice");

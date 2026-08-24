@@ -31,20 +31,16 @@ func TestRunCmdDeleteRoutesEveryHostTopologyAndSkipsTheOtherPath(t *testing.T) {
 			t.Chdir(t.TempDir())
 			setDeleteRouteFlags(t, test.hosts, test.minHosts)
 
-			previousValidate := validateRunWorkloadTypeFunc
 			previousPort := resolvePortConflictFunc
 			previousConnect := connectMultiHostOrchestratorFunc
 			previousLocal := startLocalHeadlessRunFunc
 			previousRemote := startMultiHostHeadlessRunFunc
 			t.Cleanup(func() {
-				validateRunWorkloadTypeFunc = previousValidate
 				resolvePortConflictFunc = previousPort
 				connectMultiHostOrchestratorFunc = previousConnect
 				startLocalHeadlessRunFunc = previousLocal
 				startMultiHostHeadlessRunFunc = previousRemote
 			})
-			validateRunWorkloadTypeFunc = func(string) error { return nil }
-
 			var portCalls, connectCalls, localCalls, remoteCalls int
 			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 				portCalls++
@@ -116,20 +112,16 @@ func TestRunCmdExistingPrefixDeleteRejectsDistributedIdentityBeforeLaunch(t *tes
 			setGlobalRunFlagForTest(t, flagDeleteExisting, "true")
 			setGlobalRunFlagForTest(t, "prefix", "guarded/")
 
-			previousValidate := validateRunWorkloadTypeFunc
 			previousPort := resolvePortConflictFunc
 			previousConnect := connectMultiHostOrchestratorFunc
 			previousPrepare := prepareDistributedIntegrityRuntimeIdentityFunc
 			previousRemote := startMultiHostHeadlessRunFunc
 			t.Cleanup(func() {
-				validateRunWorkloadTypeFunc = previousValidate
 				resolvePortConflictFunc = previousPort
 				connectMultiHostOrchestratorFunc = previousConnect
 				prepareDistributedIntegrityRuntimeIdentityFunc = previousPrepare
 				startMultiHostHeadlessRunFunc = previousRemote
 			})
-			validateRunWorkloadTypeFunc = func(string) error { return nil }
-
 			var portCalls, connectCalls, identityCalls, launchCalls int
 			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 				portCalls++

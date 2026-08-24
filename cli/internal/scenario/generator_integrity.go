@@ -131,8 +131,7 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	})
 }
 
-// GenerateDeleteScenario renders the internally available count- and duration-based DELETE slices. The
-// public workload registry remains gated until the complete DELETE feature is qualified.
+// GenerateDeleteScenario renders the public count- and duration-based DELETE workload.
 func GenerateDeleteScenario(params Params) (string, error) {
 	if params.RunID <= 0 {
 		return "", fmt.Errorf("delete requires a positive run id")

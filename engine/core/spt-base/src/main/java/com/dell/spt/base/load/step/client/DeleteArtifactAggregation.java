@@ -1,5 +1,11 @@
 package com.dell.spt.base.load.step.client;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_BATCH;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SINGLE;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OBJECT_UNIT;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
+
 import com.dell.spt.base.integrity.FailurePreservingCleanup;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
@@ -9,6 +15,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.item.op.deletion.DeleteArtifacts;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -469,7 +476,7 @@ final class DeleteArtifactAggregation {
 						CsvCursor objects = new CsvCursor(objectsByRequest, DeleteArtifacts.OBJECTS_HEADER)) {
 			boolean hasObject = objects.advance();
 			while (hasObject && objects.current.get(1).isEmpty()) {
-				if (!"unattempted".equals(objects.current.get(8))) {
+				if (!DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED.equals(objects.current.get(8))) {
 					throw terminal(stepId, "DELETE attempted target has no request link", null);
 				}
 				hasObject = objects.advance();
@@ -483,15 +490,15 @@ final class DeleteArtifactAggregation {
 					throw terminal(stepId, "DELETE target reconciliation has a missing request link", null);
 				}
 				while (hasObject && objects.current.get(1).equals(requestId)) {
-					if ("unattempted".equals(objects.current.get(8))) {
+					if (DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED.equals(objects.current.get(8))) {
 						throw terminal(stepId, "DELETE unattempted target cannot claim an API invocation", null);
 					}
 					linked = Math.addExact(linked, 1);
 					final int outcome = objectOutcome(objects.current.get(8));
 					linkedOutcomes[outcome] = Math.addExact(linkedOutcomes[outcome], 1);
-					if ("operational".equals(objects.current.get(9))) {
+					if (DeleteArtifacts.FAILURE_CLASSIFICATION_OPERATIONAL.equals(objects.current.get(9))) {
 						linkedFailureClassifications[0] = Math.addExact(linkedFailureClassifications[0], 1);
-					} else if ("protocol".equals(objects.current.get(9))) {
+					} else if (DeleteArtifacts.FAILURE_CLASSIFICATION_PROTOCOL.equals(objects.current.get(9))) {
 						linkedFailureClassifications[1] = Math.addExact(linkedFailureClassifications[1], 1);
 					}
 					hasObject = objects.advance();
@@ -522,14 +529,14 @@ final class DeleteArtifactAggregation {
 		final long operational = failureClassifications[0];
 		final long protocol = failureClassifications[1];
 		final boolean compatible = switch (requestOutcome) {
-		case "full_success" -> accepted == linked && operational == 0 && protocol == 0;
-		case "partial" -> accepted > 0 && failed > 0
+		case DeleteArtifacts.REQUEST_OUTCOME_FULL_SUCCESS -> accepted == linked && operational == 0 && protocol == 0;
+		case DeleteArtifacts.REQUEST_OUTCOME_PARTIAL -> accepted > 0 && failed > 0
 						&& Math.addExact(accepted, failed) == linked
 						&& operational == failed && protocol == 0;
-		case "failed" -> failed == linked
+		case DeleteArtifacts.REQUEST_OUTCOME_FAILED -> failed == linked
 						&& ((operational == linked && protocol == 0)
 										|| (protocol == linked && operational == 0));
-		case "unresolved" -> unresolved == linked && operational == 0 && protocol == 0;
+		case DeleteArtifacts.REQUEST_OUTCOME_UNRESOLVED -> unresolved == linked && operational == 0 && protocol == 0;
 		default -> false;
 		};
 		if (!compatible || unattempted != 0) {
@@ -627,8 +634,8 @@ final class DeleteArtifactAggregation {
 		if (!verificationPresence(prePresence) || !verificationPresence(postPresence)) {
 			throw terminal(stepId, "DELETE verification contains an invalid presence classification", null);
 		}
-		if (preEnabled == "disabled".equals(prePresence)
-						|| postEnabled == "disabled".equals(postPresence)) {
+		if (preEnabled == DeleteArtifacts.VERIFICATION_PRESENCE_DISABLED.equals(prePresence)
+						|| postEnabled == DeleteArtifacts.VERIFICATION_PRESENCE_DISABLED.equals(postPresence)) {
 			throw terminal(stepId, "DELETE verification enablement and presence disagree", null);
 		}
 		final String outcome = verification.get(7);
@@ -638,14 +645,16 @@ final class DeleteArtifactAggregation {
 						stepId, verification.get(13), "verification inconclusive");
 		final boolean residual = canonicalBoolean(
 						stepId, verification.get(14), "verification residual");
-		final boolean expectedCorrectness = "accepted".equals(outcome)
-						&& postEnabled && !"unattempted".equals(postPresence)
-						&& !"absent".equals(postPresence);
-		final boolean expectedInconclusive = !"unattempted".equals(outcome)
-						&& "unresolved".equals(postPresence);
-		final boolean expectedResidual = postEnabled && !"unattempted".equals(postPresence)
-						? !"absent".equals(postPresence)
-						: !"accepted".equals(outcome);
+		final boolean expectedCorrectness = DeleteArtifacts.TARGET_OUTCOME_ACCEPTED.equals(outcome)
+						&& postEnabled
+						&& !DeleteArtifacts.VERIFICATION_PRESENCE_UNATTEMPTED.equals(postPresence)
+						&& !DeleteArtifacts.VERIFICATION_PRESENCE_ABSENT.equals(postPresence);
+		final boolean expectedInconclusive = !DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED.equals(outcome)
+						&& DeleteArtifacts.VERIFICATION_PRESENCE_UNRESOLVED.equals(postPresence);
+		final boolean expectedResidual = postEnabled
+						&& !DeleteArtifacts.VERIFICATION_PRESENCE_UNATTEMPTED.equals(postPresence)
+										? !DeleteArtifacts.VERIFICATION_PRESENCE_ABSENT.equals(postPresence)
+										: !DeleteArtifacts.TARGET_OUTCOME_ACCEPTED.equals(outcome);
 		if (correctness != expectedCorrectness || inconclusive != expectedInconclusive
 						|| residual != expectedResidual) {
 			throw terminal(stepId, "DELETE verification classifications do not reconcile", null);
@@ -653,9 +662,7 @@ final class DeleteArtifactAggregation {
 	}
 
 	private static boolean verificationPresence(final String value) {
-		return "disabled".equals(value) || "present".equals(value)
-						|| "absent".equals(value) || "unresolved".equals(value)
-						|| "unattempted".equals(value);
+		return DeleteArtifacts.isVerificationPresence(value);
 	}
 
 	private static boolean canonicalBoolean(
@@ -822,16 +829,17 @@ final class DeleteArtifactAggregation {
 					final String stepId, final List<String> totals, final List<String> identity) {
 		if (totals.size() != DeleteArtifacts.METRICS_HEADER.size()
 						|| !DeleteArtifacts.SCHEMA_VERSION.equals(totals.get(0))
-						|| !DeleteArtifacts.REQUEST_UNIT.equals(totals.get(1))
-						|| !DeleteArtifacts.OBJECT_UNIT.equals(totals.get(2))
-						|| !DeleteArtifacts.REQUEST_UNIT.equals(totals.get(3))) {
+						|| !DELETE_REQUEST_UNIT.equals(totals.get(1))
+						|| !DELETE_OBJECT_UNIT.equals(totals.get(2))
+						|| !DELETE_REQUEST_UNIT.equals(totals.get(3))) {
 			throw terminal(stepId, "DELETE totals schema or units are incompatible", null);
 		}
 		final long batchSize = nonnegative(totals.get(5));
-		if (!("single".equals(totals.get(4)) || "batch".equals(totals.get(4)))
-						|| batchSize == 0 || batchSize > 1_000
-						|| ("single".equals(totals.get(4)) != (batchSize == 1))
-						|| !"canonical".equals(totals.get(6))) {
+		if (!(DELETE_IDENTITY_MODE_SINGLE.equals(totals.get(4))
+						|| DELETE_IDENTITY_MODE_BATCH.equals(totals.get(4)))
+						|| batchSize == 0 || batchSize > DeleteRequest.MAX_TARGET_COUNT
+						|| (DELETE_IDENTITY_MODE_SINGLE.equals(totals.get(4)) != (batchSize == 1))
+						|| !DELETE_SELECTION_ORDER_CANONICAL.equals(totals.get(6))) {
 			throw terminal(stepId, "DELETE totals merge identity is incompatible", null);
 		}
 		final List<String> candidate = totals.subList(0, TOTAL_FIRST_COUNTER);
@@ -858,9 +866,10 @@ final class DeleteArtifactAggregation {
 	private static void validateObjectRow(final String stepId, final List<String> row) {
 		final String outcome = row.size() > OBJECT_OUTCOME_INDEX ? row.get(OBJECT_OUTCOME_INDEX) : "";
 		final String classification = row.size() > 9 ? row.get(9) : "";
-		final boolean classificationCompatible = "failed".equals(outcome)
-						? Set.of("operational", "protocol").contains(classification)
-						: "none".equals(classification);
+		final boolean failedOutcome = DeleteArtifacts.TARGET_OUTCOME_FAILED.equals(outcome);
+		final boolean noneClassification = DeleteArtifacts.FAILURE_CLASSIFICATION_NONE.equals(classification);
+		final boolean classificationCompatible = DeleteArtifacts.isFailureClassification(classification)
+						&& (failedOutcome ? !noneClassification : noneClassification);
 		if (row.size() != DeleteArtifacts.OBJECTS_HEADER.size()
 						|| !DeleteArtifacts.SCHEMA_VERSION.equals(row.get(0))
 						|| row.get(2).isEmpty() || row.get(4).isEmpty() || row.get(5).isEmpty()
@@ -881,23 +890,11 @@ final class DeleteArtifactAggregation {
 	}
 
 	private static int requestOutcome(final String outcome) {
-		return switch (outcome) {
-		case "full_success" -> 0;
-		case "partial" -> 1;
-		case "failed" -> 2;
-		case "unresolved" -> 3;
-		default -> -1;
-		};
+		return DeleteArtifacts.requestOutcomeIndex(outcome);
 	}
 
 	private static int objectOutcome(final String outcome) {
-		return switch (outcome) {
-		case "accepted" -> 0;
-		case "failed" -> 1;
-		case "unattempted" -> 2;
-		case "unresolved" -> 3;
-		default -> -1;
-		};
+		return DeleteArtifacts.targetOutcomeIndex(outcome);
 	}
 
 	private static int compareManifest(

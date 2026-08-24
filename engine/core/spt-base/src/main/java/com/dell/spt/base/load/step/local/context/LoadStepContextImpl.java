@@ -1341,6 +1341,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
 							(DeleteVerificationProbe) driver);
 		} catch (final Exception failure) {
+			throwUncheckedIfInterrupted(failure);
 			throw new IntegrityTerminalException(
 							IntegrityTerminalException.Category.INPUT,
 							id,
@@ -1373,6 +1374,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
 							(DeleteVerificationProbe) driver);
 		} catch (final Exception failure) {
+			throwUncheckedIfInterrupted(failure);
 			deletePostVerificationStarted.set(false);
 			throw new IntegrityTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
@@ -1689,6 +1691,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							IntegrityTerminalException.Category.EXECUTION,
 							id,
 							"Standalone DELETE post-verification evidence is incomplete",
+							null);
+		}
+		if (verification.requiresFailedTerminalOutcome()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification reported correctness or inconclusive failures",
 							null);
 		}
 		final var objects = deleteObjectLifecycle();

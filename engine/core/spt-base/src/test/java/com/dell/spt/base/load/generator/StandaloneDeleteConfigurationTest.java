@@ -172,6 +172,20 @@ class StandaloneDeleteConfigurationTest {
 	}
 
 	@Test
+	void standaloneDeleteRejectsShuffledSelectionButKeepsAdvancedCountOverrideCompatible() {
+		final var shuffled = standaloneConfig();
+		shuffled.val("load-op-shuffle", true);
+		final var shuffleFailure = assertThrows(
+						IllegalConfigurationException.class,
+						() -> StandaloneDeleteConfig.from(shuffled.configVal("load")));
+		assertTrue(shuffleFailure.getMessage().contains("load-op-shuffle"));
+
+		final var countLimited = standaloneConfig();
+		countLimited.val("load-op-limit-count", 1L);
+		assertFalse(StandaloneDeleteConfig.from(countLimited.configVal("load")).durationMode());
+	}
+
+	@Test
 	void builderFailsClosedForUnsupportedDriverAndSingleItemOutputTopologies() {
 		final var unsupportedDriver = supportedDriver();
 		when(unsupportedDriver.supportsStandaloneDeleteRequests()).thenReturn(false);

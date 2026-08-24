@@ -142,6 +142,22 @@ func TestResolveRunCompletionErrorFailsDeleteOnRejectedTerminalOutcome(t *testin
 	}
 }
 
+func TestResolveRunCompletionErrorReportsVerificationFailureAsTerminalVerdict(t *testing.T) {
+	metrics := &deletemetrics.Metrics{
+		FailurePolicy: deletemetrics.FailurePolicy{Outcome: deletemetrics.OutcomeFailed},
+		Verification: deletemetrics.Verification{
+			AcceptedPresent: 1, CorrectnessFailures: 1,
+		},
+	}
+	failure := terminalDeleteOutcomeError(map[string]*deletemetrics.Metrics{
+		"mt-002-delete": metrics,
+	})
+	if failure == nil || !strings.Contains(strings.ToLower(failure.Error()), "verification") ||
+		strings.Contains(strings.ToLower(failure.Error()), "incomplete") {
+		t.Fatalf("DELETE verification terminal error = %v, want classified verification verdict", failure)
+	}
+}
+
 func TestResolveRunCompletionErrorPreservesPresenterFailureWithoutAutoResults(t *testing.T) {
 	presenterFailure := errors.New("owned DELETE presentation failed")
 	got := resolveRunCompletionError(

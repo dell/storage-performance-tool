@@ -70,7 +70,7 @@ The `run` command executes a benchmark. Its structure is `spt run <type> [option
 | `mock` | Implemented | Exercise the CLI with in-memory drivers (no S3 required) |
 | `tables` | Implemented | Benchmark S3 Tables (Iceberg) operations — see [S3_TABLES.md](S3_TABLES.md) |
 | `mixed` | Implemented | Run a weighted mix of GET, PUT, DELETE, and STAT operations concurrently |
-| `delete` | Planned | Measure object deletion performance |
+| `delete` | Implemented | Measure single-object or batched object deletion against a frozen inventory — see [S3_DELETE.md](S3_DELETE.md) |
 
 ### Options (Flags)
 
@@ -85,7 +85,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--endpoints` | `-e` | *(required)* | One or more S3 endpoint URLs (comma-separated or repeatable) |
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
-| `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In the internal explicit-manifest DELETE slice, it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
+| `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
 | `--prefix` | | `""` | Generated-key namespace for `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
@@ -100,22 +100,22 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
-| `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`). Internal standalone DELETE requires enough finite live inventory to remain schedulable for the full interval |
+| `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`). Standalone DELETE requires enough finite live inventory to remain schedulable for the full interval |
 | `--prefix-shards` | | `-1` | Prefix directories for generated object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
-| `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks and duration-based internal standalone DELETE |
+| `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks and duration-based standalone DELETE |
 | `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
-| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` and internal explicit-manifest DELETE. Omit it for owned seeded DELETE; mutually exclusive with `--delete-existing` |
-| `--delete-batch-size` | | `100` | Internal standalone DELETE canonical identities per logical request (`1` through `1000`); multi-bucket manifests require `1` |
-| `--delete-existing` | | `false` | Destructive internal DELETE opt-in: discover and freeze current keys under the exact `--bucket` and explicitly supplied `--prefix` before timing |
+| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Omit it for owned seeded DELETE; mutually exclusive with `--delete-existing` |
+| `--delete-batch-size` | | `100` | Standalone DELETE canonical identities per logical request (`1` through `1000`); multi-bucket manifests require `1` |
+| `--delete-existing` | | `false` | Destructive DELETE opt-in: discover and freeze current keys under the exact `--bucket` and explicitly supplied `--prefix` before timing |
 | `--allow-empty-prefix` | | `false` | Second destructive opt-in required with `--delete-existing --prefix=''` to select an entire bucket; a prompt cannot replace it |
 | `--max-failed-objects` | | `100000` | Standalone DELETE operational failed-object budget. Permits exactly this many failed targets and trips only when the global count is greater; zero is strict. Mutually exclusive with `--max-failure-percent` |
 | `--max-failure-percent` | | *(unset)* | Alternative cumulative operational failed-object percentage, inclusive from 0 through 100. Zero is enforced immediately; positive values are evaluated after the grace period and at completion |
 | `--failure-budget-grace` | | `30s` | Measured-phase delay before evaluating a positive `--max-failure-percent`; whole seconds only, and an explicit value is accepted only with a positive percentage budget |
-| `--validate-inventory` | | `false` | Internal standalone DELETE only. Require every selected current-key or exact-version identity to be present before timing; also enables post-verification unless `--verify=false` is explicit |
-| `--verify` | | `false` | Internal standalone DELETE only. Verify the full frozen inventory after DELETE drain; by itself it does not enable pre-validation |
+| `--validate-inventory` | | `false` | Standalone DELETE only. Require every selected current-key or exact-version identity to be present before timing; also enables post-verification unless `--verify=false` is explicit |
+| `--verify` | | `false` | Standalone DELETE only. Verify the full frozen inventory after DELETE drain; by itself it does not enable pre-validation |
 | `--verification-timeout` | | `30s` | Independent positive whole-millisecond settle timeout for each enabled DELETE validation or verification phase |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
@@ -137,10 +137,10 @@ objects: `--object-count` caps its deterministic discovery selection and
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
 
-#### Count and duration DELETE contract (internal, not public)
+#### Count and duration DELETE contract
 
-The still-planned public `delete` command currently has three internal finite-inventory
-slices. With no external source-selection flag, seeded mode is selected. It writes
+The public `delete` command has three finite-inventory source modes. With no external
+source-selection flag, seeded mode is selected. It writes
 only beneath `spt-delete-<run-id>/`, or `<prefix-root>/spt-delete-<run-id>/` when
 `--prefix` is supplied. The prefix is therefore a seed namespace root and never an
 existing-data selection opt-in. With neither count nor duration, seeded mode creates
@@ -183,7 +183,7 @@ recovery inventory, and cleanup outcome independently inspectable in stored resu
 
 Explicit-manifest mode is selected by `--items-file`.
 
-The implementation slice behind the still-planned `delete` command consumes a frozen CSV with the
+Explicit-manifest DELETE consumes a frozen CSV with the
 exact header `bucket,key,size,version_id`. Normal CSV quoting is required, so keys containing commas
 remain one field; `size` is a non-negative integer and `version_id` may be empty or name an exact
 version. Before orchestration, the CLI rejects malformed rows, an empty selection, identical
@@ -198,11 +198,10 @@ single-object requests. Duration mode consumes this frozen inventory without rec
 if the inventory exhausts before the requested deadline. Explicit-manifest mode rejects `--prefix`
 and `--cleanup`. A failed
 validation or staging attempt stops before container/remote orchestration, and the private staging
-directory is removed. The public registry remains gated until the remaining DELETE safety and
-qualification tickets are complete.
+directory is removed.
 
 Existing-prefix mode is selected only by `--delete-existing` and is mutually exclusive with
-`--items-file`. Its internal qualification command shape is deliberately explicit:
+`--items-file`. Its command shape is deliberately explicit:
 
 ```bash
 spt run delete --endpoints https://s3.example.com \
@@ -229,7 +228,7 @@ throughput. Duration mode consumes this frozen current-key inventory without rec
 if it exhausts before the requested deadline. Existing-prefix mode rejects
 `--versions=all`, delete-marker selection, and `--cleanup`. Keep the exact namespace
 quiescent for the entire run: a concurrent writer can replace a frozen current-key identity before
-the timed DELETE reaches it. The public workload registry remains gated.
+the timed DELETE reaches it.
 
 Inventory validation and absence verification are optional and operate on the complete frozen
 selection, never a sample. Their flag truth table is:
@@ -408,8 +407,11 @@ request-based. Auto-results captures complete terminal schema-v4 DELETE detail i
 stored run-metadata model before engine shutdown, and the loader carries that model through aggregate
 and rendered summaries. Auto-results also fetches the committed raw DELETE evidence set:
 `delete.metrics.total.csv` v1, one-row-per-invocation `delete.requests.csv` v1,
-per-target `delete.objects.csv` v1, the pre-cleanup residual `items.csv`, frozen
-`verify-input.csv` plus its provenance completion record, and the final `delete.complete.json`.
+per-target `delete.objects.csv` v1, selection-indexed `delete.verification.csv` v1, the pre-cleanup
+residual `items.csv`, frozen `verify-input.csv` plus its provenance completion record, and the final
+`delete.complete.json`. Current completion v2 records `verification_rows` and hashes that seven-file
+evidence set. Completion v1 remains readable for pre-verification runs, hashes the original six
+files, and cannot substantiate enabled inventory validation or post-verification.
 The loader prefers DELETE totals v1 for request/object/batch detail while leaving ordinary and older
 result sets compatible. It verifies every completion hash, selection source/unique/selected count,
 producer identity, request link, target identity, and residual row before rendering recovery counts.
@@ -427,7 +429,7 @@ incomplete metrics; run metadata records the capture error and omits DELETE metr
 
 ### Standalone DELETE topology and recovery contract
 
-Standalone DELETE uses three distinct command routes while the public workload gate remains closed:
+Standalone DELETE uses three distinct command routes:
 
 - No `--test-hosts`, or one local host, uses the local Docker/controller route. Only this route runs
   the controller's local API-port conflict check.
@@ -584,7 +586,7 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--use-rdma` | `false` | Use RDMA-accelerated S3 driver (requires RDMA hardware) |
+| `--use-rdma` | `false` | Use the S3-RDMA driver. Standalone DELETE requests use HTTP, but driver startup still requires RDMA access unless `--rdma-fallback` is enabled |
 | `--rdma-local-ip` | `""` | Local RDMA interface IP address |
 | `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g., `0`, `256KB`, `4MB`) |
 | `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
@@ -1418,5 +1420,5 @@ current=5.10.4 latest=5.11.0 available=true
 | Data compressibility control (`--object-data-compressibility`) | Implemented |
 | Anti-dedupe stamping (`--object-data-dedupable`) | Implemented |
 | Post-quantum TLS (`pqcMode`: `off`/`prefer`/`require`) | Implemented |
-| `delete` workload | Planned |
+| `delete` workload | Implemented |
 | `results` command | Planned (stub exists) |

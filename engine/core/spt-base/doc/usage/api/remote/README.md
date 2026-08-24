@@ -401,9 +401,20 @@ The DELETE object has the following contract:
   `operational_failed_objects`, `excluded_failed_objects`, and `observed_failure_percent` in object
   units. The observed percentage is operational failures divided by accepted plus operational
   failures; excluded protocol/correctness failures do not enter the denominator.
-- `outcome_terminology` is `accepted`. `verification.enabled` and `removal_confirmed` are false
-  until verification is implemented, and `verification.notice` explicitly says logical DELETE
-  outcomes do not confirm object removal. `terminal_reconciled` states whether the final object
+- `outcome_terminology` is always `accepted`. `verification` reports the independently configured
+  pre-validation and post-verification phases: `enabled`, `pre_validation_enabled`,
+  `post_verification_enabled`, their complete/skipped states, `timeout_seconds`, and
+  `pre_validation_failures`. `verified_absent`, `still_present`, and `unresolved` are the aggregate
+  post-observation counts. The `accepted_*`, `failed_*`, `operational_unresolved_*`, and
+  `unattempted_*` fields form the outcome-by-observation matrix; `correctness_failures`,
+  `inconclusive_failures`, and `residual` are derived from that matrix. `removal_confirmed` is true
+  only when strict pre-validation and post-verification both completed, pre-validation found every
+  identity, and there are no correctness, inconclusive, operationally failed, operationally
+  unresolved, or unattempted targets. Post-verification without strict pre-validation establishes
+  observed absence but not causal removal, so `removal_confirmed` remains false. `notice` states one
+  of four conditions: verification disabled, post-verification skipped after strict pre-validation
+  failure, post-verification without causal pre-validation, or full validation/verification
+  classifications reported. `terminal_reconciled` separately states whether the final object
   lifecycle invariants hold.
 
 Worker `/metrics/json`, entry `/metrics/json`, live cluster aggregates, and retained terminal

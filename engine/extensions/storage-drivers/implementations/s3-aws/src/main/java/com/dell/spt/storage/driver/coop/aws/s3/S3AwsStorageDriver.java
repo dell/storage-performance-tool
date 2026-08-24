@@ -1,5 +1,7 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
@@ -42,6 +44,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.reactivestreams.Publisher;
@@ -991,9 +994,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			request.versionId(target.versionId());
 		}
 		try {
-			deleteClient(target.versionId() != null).headObject(request.build()).join();
+			deleteClient(target.versionId() != null).headObject(request.build()).get();
 			return Presence.PRESENT;
-		} catch (final RuntimeException failure) {
+		} catch (final InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			throwUncheckedIfInterrupted(interrupted);
+			return Presence.UNRESOLVED;
+		} catch (final RuntimeException | ExecutionException failure) {
 			Throwable cause = failure;
 			while (cause.getCause() != null && cause != cause.getCause()) {
 				cause = cause.getCause();
@@ -1001,6 +1008,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (cause instanceof NoSuchKeyException
 							|| cause instanceof S3Exception s3Failure && s3Failure.statusCode() == 404) {
 				return Presence.ABSENT;
+			}
+			if (cause instanceof InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throwUncheckedIfInterrupted(interrupted);
 			}
 			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
 			return Presence.UNRESOLVED;

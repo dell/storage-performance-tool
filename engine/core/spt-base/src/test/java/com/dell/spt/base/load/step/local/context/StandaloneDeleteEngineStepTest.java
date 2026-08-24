@@ -1,12 +1,15 @@
 package com.dell.spt.base.load.step.local.context;
 
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_PERCENTAGE;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED;
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -64,6 +67,100 @@ import org.junit.jupiter.api.io.TempDir;
 
 class StandaloneDeleteEngineStepTest {
 	private static final int MULTI_INPUT_CONTEXT_COUNT = 10;
+
+	@Test
+	void preValidationForwardsProbeInterruptionWithoutStartingDelete(
+					@TempDir final Path temp) throws Exception {
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection, "bucket,key,size,version_id\nbucket,current,1,\n");
+		final var config = config(1, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 1L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=1"));
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-verificationTimeoutMillis", 1_000L);
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		driver.presence = ignored -> {
+			throwUnchecked(expected);
+			return null;
+		};
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-interrupted-pre",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"),
+						(ignoredId, ignoredSelection, ignoredCount) -> null);
+		try {
+			step.holdObjectFailureBudgetAdmission();
+			step.start();
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							step::validateDeleteInventoryBeforeAdmission);
+			assertSame(expected, actual);
+			assertEquals(1, driver.presenceCalls.get());
+			assertEquals(0, driver.scheduled.get(), "interrupted pre-validation started timed DELETE");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void postVerificationForwardsProbeInterruptionWithoutClassifyingInventory(
+					@TempDir final Path temp) throws Exception {
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection, "bucket,key,size,version_id\nbucket,current,1,\n");
+		final var config = config(1, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 1L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=1"));
+		config.val("load-op-delete-postVerification", true);
+		config.val("load-op-delete-verificationTimeoutMillis", 1_000L);
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		driver.presence = ignored -> {
+			throwUnchecked(expected);
+			return null;
+		};
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-interrupted-post",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"),
+						(ignoredId, ignoredSelection, ignoredCount) -> null);
+		try {
+			step.holdObjectFailureBudgetAdmission();
+			step.start();
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							step::verifyDeleteInventoryAfterDrain);
+			assertSame(expected, actual);
+			assertEquals(1, driver.presenceCalls.get());
+			assertEquals(0, driver.scheduled.get(), "interrupted post-verification scheduled DELETE work");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
 
 	@Test
 	void strictPreValidationRetainsClassificationAndTimingAndSkipsPostAfterFailure(
@@ -239,7 +336,11 @@ class StandaloneDeleteEngineStepTest {
 			assertEquals(1, delete.verification().acceptedUnresolved());
 			assertEquals(2, delete.verification().correctnessFailures());
 			assertEquals(1, delete.verification().inconclusiveFailures());
+			assertEquals(DELETE_FAILURE_OUTCOME_FAILED, delete.failureOutcome());
 			assertTrue(delete.postVerificationNanos() >= 0);
+			final var verificationFailure = assertThrows(
+							IntegrityTerminalException.class, step::validateTerminalState);
+			assertTrue(verificationFailure.getMessage().contains("verification"));
 		} finally {
 			step.close();
 			metrics.close();

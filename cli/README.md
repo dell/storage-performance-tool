@@ -82,8 +82,10 @@ for later campaigns, then use `read-verify` for later checks. These are
 correctness workloads, not ordinary benchmarks; corruption returns exit code
 `20` and leaves a resumable `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
 
-Standalone DELETE remains publicly gated while its remaining safety and result
-contracts are completed. Its default internal source owns what it deletes: with
+For an operator-focused DELETE walkthrough, including destructive selection modes,
+verification, artifacts, and recovery, see [S3 DELETE](docs/S3_DELETE.md).
+
+Standalone DELETE is a supported destructive workload. Its safe default source owns what it deletes: with
 neither `--items-file` nor `--delete-existing`, a count run creates exactly
 `--object-count` objects under a
 run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
@@ -220,7 +222,7 @@ DELETE detail retains compatibility with engines that do not expose the detailed
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
-- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
+- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, delete, list, mixed, and mock operations
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
@@ -521,7 +523,7 @@ Executes a benchmark test with the specified workload type.
 - `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write now or defer readback
 - `read-verify`: Verify v1 metadata objects selected by LIST or `--items-file`
 - `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
-- `delete`: Test to measure object deletion performance (coming soon)
+- `delete`: Measure single-object or batched object deletion performance against a frozen inventory
 - `mock`: Run tests with dummy-mock driver (no S3 endpoint required)
 
 **Required Flags (for S3 workloads, optional for mock):**
@@ -545,10 +547,10 @@ Executes a benchmark test with the specified workload type.
 - `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
-- `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based internal standalone DELETE (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and internal explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
-- `--delete-batch-size`: Internal standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
-- `--delete-existing`: Destructive internal DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
+- `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
+- `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
+- `--delete-existing`: Destructive DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
 - `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection
 - `--max-failed-objects`: Operational DELETE object failures permitted before the controller stops scheduling (default 100,000; zero is strict; mutually exclusive with `--max-failure-percent`)
 - `--max-failure-percent`: Cumulative operational DELETE object failure percentage from 0 through 100; zero is strict and positive values use the grace period
@@ -570,8 +572,8 @@ Executes a benchmark test with the specified workload type.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
 
-The public `delete` command remains gated while qualification continues. Its internal
-explicit-manifest slice requires the exact CSV header `bucket,key,size,version_id`, performs strict
+The public `delete` command's explicit-manifest mode requires the exact CSV header
+`bucket,key,size,version_id`, performs strict
 CSV validation and identity conflict checks before orchestration, de-duplicates identical rows,
 and rejects an empty selection. An optional `--bucket` value asserts every source row; omitting it
 allows multiple buckets when `--delete-batch-size=1`. `--object-count` caps objects only after the
@@ -580,7 +582,7 @@ SHA-256. Canonical selection order is deterministic but can differ from another 
 Duration mode uses the complete frozen selection without recycling and rejects early inventory
 exhaustion. This slice rejects `--prefix` and `--cleanup`; failed staging is removed.
 
-The internal existing-prefix slice is mutually exclusive with `--items-file`. It requires
+Existing-prefix mode is mutually exclusive with `--items-file`. It requires
 `--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
 unless the command also supplies `--allow-empty-prefix`. A whole-bucket scope is never inferred,
 and neither opt-in is replaced by a prompt. The LIST setup phase selects current keys only,
