@@ -14,6 +14,9 @@ import (
 
 // Generate imports artifacts and generates replay scenario/defaults/metadata.
 func Generate(ctx context.Context, opts Options) (*Generated, error) {
+	if opts.RunID <= 0 {
+		opts.RunID = time.Now().UnixMilli()
+	}
 	artifacts, err := FetchArtifacts(ctx, opts.SourceURL, opts.HTTPClient)
 	if err != nil {
 		return nil, ensureClassifiedError(err)
@@ -47,6 +50,7 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 
 	params := scenario.Params{
 		WorkloadType: "write",
+		RunID:        opts.RunID,
 		Endpoints:    opts.Endpoints,
 		AccessKey:    localAccess,
 		SecretKey:    localSecret,
@@ -346,6 +350,7 @@ func commonReplayCount(steps []StepSummary) (int, bool) {
 func buildMetadata(g *Generated) []byte {
 	type metadata struct {
 		GeneratedAt     string             `json:"generatedAt"`
+		RunID           int64              `json:"runId"`
 		SourceURL       string             `json:"sourceUrl"`
 		RunScript       string             `json:"runScript"`
 		Scenario        string             `json:"scenario"`
@@ -358,6 +363,7 @@ func buildMetadata(g *Generated) []byte {
 	}
 	data, _ := json.MarshalIndent(metadata{
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		RunID:           g.Params.RunID,
 		SourceURL:       g.Artifacts.FolderURL,
 		RunScript:       g.Artifacts.RunScriptName,
 		Scenario:        g.Artifacts.ScenarioName,

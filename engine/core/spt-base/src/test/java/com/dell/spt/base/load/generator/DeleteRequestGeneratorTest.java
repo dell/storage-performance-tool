@@ -182,6 +182,49 @@ class DeleteRequestGeneratorTest {
 	}
 
 	@Test
+	void fullFinalReadAcrossCredentialBoundariesEmitsRetainedTailExactlyOnce() throws Exception {
+		final var firstCredential = Credential.getInstance("first", "secret");
+		final var secondCredential = Credential.getInstance("second", "secret");
+		final var thirdCredential = Credential.getInstance("third", "secret");
+		final var builder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(3) {
+			@Override
+			public Credential nextCredential(final IntegrityManifestDataItem item) {
+				return switch (item.name()) {
+				case "key-0" -> firstCredential;
+				case "key-1" -> secondCredential;
+				default -> thirdCredential;
+				};
+			}
+		};
+		builder.opType(OpType.DELETE);
+		final var output = new CollectingOutput();
+		final var generator = generator(
+						partitionedInput("credential-boundary-input", List.of(item(0), item(1), item(2))),
+						output,
+						List.of(),
+						builder,
+						2);
+		final var lifecycle = new OperationLifecycleTracker<DeleteRequestOperation>();
+		generator.operationLifecycle(lifecycle);
+
+		try {
+			generator.doWork(); // retain key-0
+			generator.doWork(); // fill the operation buffer while retaining key-2
+			generator.doWork(); // emit the retained tail after buffer capacity returns
+
+			assertEquals(3, generator.consumedItemCount());
+			assertEquals(3, generator.generatedOpCount());
+			assertEquals(3, output.operations.size());
+			assertEquals(
+							List.of(List.of("key-0"), List.of("key-1"), List.of("key-2")),
+							output.operations.stream().map(DeleteRequestGeneratorTest::keys).toList());
+			assertEquals(0, lifecycle.snapshot().unattempted());
+		} finally {
+			generator.close();
+		}
+	}
+
+	@Test
 	void absoluteAdmissionDeadlineRejectsHandoffWithoutWaitingForTheGuardThread() throws Exception {
 		final var output = new CollectingOutput();
 		final var generator = generator(input("deadline-input", 4), output, List.of());
@@ -488,6 +531,28 @@ class DeleteRequestGeneratorTest {
 		return input;
 	}
 
+	@SuppressWarnings("unchecked")
+	private static Input<IntegrityManifestDataItem> partitionedInput(
+					final String name, final List<IntegrityManifestDataItem> items) throws Exception {
+		final var input = (RemainingItemCountInput<IntegrityManifestDataItem>) mock(RemainingItemCountInput.class);
+		when(input.toString()).thenReturn(name);
+		final var delivered = new AtomicInteger();
+		when(input.remainingItemCount()).thenAnswer(invocation -> (long) items.size() - delivered.get());
+		doAnswer(invocation -> {
+			final int start = delivered.get();
+			if (start >= items.size()) {
+				throw new EOFException();
+			}
+			final int requested = invocation.getArgument(1);
+			final int count = start == 0 ? 1 : Math.min(requested, items.size() - start);
+			invocation.<List<IntegrityManifestDataItem>> getArgument(0)
+							.addAll(items.subList(start, start + count));
+			delivered.addAndGet(count);
+			return count;
+		}).when(input).get(anyList(), anyInt());
+		return input;
+	}
+
 	private static IntegrityManifestDataItem item(final int index) {
 		return new IntegrityManifestDataItem("bucket", "key-" + index, index, null);
 	}
@@ -523,7 +588,9 @@ class DeleteRequestGeneratorTest {
 			if (!accepting) {
 				return 0;
 			}
-			operations.addAll(buffer.subList(from, to));
+			for (int index = from; index < to; index++) {
+				operations.add(buffer.get(index));
+			}
 			return to - from;
 		}
 

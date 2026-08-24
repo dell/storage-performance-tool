@@ -191,7 +191,12 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1, wantAuto: 1},
 		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
 		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
-		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote write", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote read", workload: WorkloadTypeRead, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote list", workload: WorkloadTypeList, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote mixed", workload: WorkloadTypeMixed, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote mock", workload: WorkloadTypeMock, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote tables", workload: WorkloadTypeTables, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
 		{name: "entry connection failure stops verification launch", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "1", shutdown: "false", wantConnect: 1, connectErr: errors.New("designated entry unavailable")},
 	}
 	for _, test := range tests {
@@ -227,6 +232,7 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			})
 
 			var portCalls, connectCalls, prepareCalls, localCalls, multiCalls, autoResultsCalls int
+			var launchedParams scenario.Params
 			var autoResultsContext context.Context
 			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 				portCalls++
@@ -242,15 +248,17 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				prepareCalls++
 				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
 			}
-			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+			startLocalHeadlessRunFunc = func(_ string, _ string, params scenario.Params, options headless.HeadlessOptions) error {
 				localCalls++
+				launchedParams = params
 				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
 			startMultiHostHeadlessRunFunc = func(
-				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, params scenario.Params, options headless.HeadlessOptions,
 			) error {
 				multiCalls++
+				launchedParams = params
 				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
@@ -294,6 +302,9 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			}
 			if test.wantAuto > 0 && (autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name) {
 				t.Fatalf("auto-results context = %#v, want command context marker %q", autoResultsContext, test.name)
+			}
+			if test.connectErr == nil && launchedParams.RunID <= 0 {
+				t.Fatalf("public %s run launched without a metrics run identity: %+v", test.workload, launchedParams)
 			}
 			if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
 				t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)

@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -103,6 +104,30 @@ public class S3StorageDriverTest {
 	private S3StorageDriver<Item, Operation<Item>> newDriverMock() {
 		// Create a mock that calls real methods; constructor is not invoked
 		return Mockito.mock(S3StorageDriver.class, Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
+	}
+
+	@Test
+	void verificationPresenceForwardsHttpInterruption() throws Exception {
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		final TestS3Driver driver = new TestS3Driver(cfg) {
+			@Override
+			protected FullHttpResponse executeHttpRequest(
+							final FullHttpRequest request, final boolean warnOnTimeout)
+							throws InterruptedException {
+				throw expected;
+			}
+		};
+		try {
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							() -> driver.presence(new DeleteTarget(
+											new IntegrityManifestDataItem("bucket", "key", 1, null), 0)));
+			assertSame(expected, actual);
+			assertTrue(Thread.currentThread().isInterrupted());
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Test

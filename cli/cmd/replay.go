@@ -45,6 +45,7 @@ var (
 	startReplayLocalHeadless        = headless.StartHeadlessModeWithScenarioContentAndParams
 	startReplayLocalTUI             = tui.StartTUIWithScenarioRunOptions
 	startReplayAutoResultsMonitor   = startAutoResultsMonitor
+	newReplayRunID                  = func() int64 { return time.Now().UnixMilli() }
 	confirmReplayLaunchCommand      = func(out io.Writer) error { return confirmReplayLaunch(out, os.OpenFile) }
 	shouldReplayRunHeadless         = shouldRunHeadless
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
@@ -73,6 +74,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
 		SourceURL:   sourceURL,
+		RunID:       newReplayRunID(),
 		Endpoints:   endpoints,
 		AccessKey:   accessKey,
 		SecretKey:   secretKey,

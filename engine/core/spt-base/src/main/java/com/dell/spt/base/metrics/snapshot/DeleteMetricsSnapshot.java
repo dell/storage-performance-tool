@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_OUTCOME_RUNNING;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_FIXED;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SINGLE;
@@ -123,7 +124,10 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		cleanupNanos = builder.cleanupNanos;
 		totalWallNanos = builder.totalWallNanos;
 		failurePolicyMode = builder.failurePolicyMode;
-		failureOutcome = builder.failureOutcome;
+		verification = builder.verification;
+		failureOutcome = verification.requiresFailedTerminalOutcome()
+						? DELETE_FAILURE_OUTCOME_FAILED
+						: builder.failureOutcome;
 		maxFailedObjects = builder.maxFailedObjects;
 		maxFailurePercent = builder.maxFailurePercent;
 		graceSeconds = builder.graceSeconds;
@@ -131,7 +135,6 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		excludedFailedObjects = builder.excludedFailedObjects;
 		observedFailurePercent = builder.observedFailurePercent;
 		reconciled = builder.reconciled;
-		verification = builder.verification;
 	}
 
 	/** Returns a builder for one configured DELETE batch size. */
@@ -222,6 +225,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		long cleanupNanos = -1;
 		long totalNanos = -1;
 		boolean reconciled = true;
+		boolean failureOutcomesMatch = true;
 		final List<DeleteVerificationSummary> verification = new ArrayList<>(snapshots.size());
 		for (final DeleteMetricsSnapshot snapshot : snapshots) {
 			if (snapshot == null) {
@@ -261,10 +265,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 			seedNanos = maxApplicable(seedNanos, snapshot.seedNanos);
 			discoveryNanos = maxApplicable(discoveryNanos, snapshot.discoveryNanos);
 			preValidationNanos = maxApplicable(preValidationNanos, snapshot.preValidationNanos);
-			if (!Objects.equals(first.failureOutcome, snapshot.failureOutcome)) {
-				throw new IllegalArgumentException(
-								"Cannot aggregate different DELETE failure-budget outcomes");
-			}
+			failureOutcomesMatch &= Objects.equals(first.failureOutcome, snapshot.failureOutcome);
 			scheduledNanos = maxApplicable(scheduledNanos, snapshot.scheduledDeleteNanos);
 			drainNanos = maxApplicable(drainNanos, snapshot.drainNanos);
 			postVerificationNanos = maxApplicable(
@@ -276,6 +277,11 @@ public final class DeleteMetricsSnapshot implements Serializable {
 			for (final Bucket bucket : snapshot.buckets) {
 				result.bucket(bucket.bucket(), bucket.selected(), bucket.attempted(), bucket.accepted(), bucket.failed());
 			}
+		}
+		final DeleteVerificationSummary aggregateVerification = DeleteVerificationSummary.aggregate(verification);
+		if (!failureOutcomesMatch && !aggregateVerification.requiresFailedTerminalOutcome()) {
+			throw new IllegalArgumentException(
+							"Cannot aggregate different DELETE failure-budget outcomes");
 		}
 		return result
 						.requests(requestAttempted, requestFullSuccess, requestPartial, requestFailed, requestUnresolved, requestRate)
@@ -306,7 +312,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 										operationalFailedObjects,
 										excludedFailedObjects)
 						.failureOutcome(first.failureOutcome)
-						.verification(DeleteVerificationSummary.aggregate(verification))
+						.verification(aggregateVerification)
 						.reconciled(reconciled)
 						.build();
 	}

@@ -36,7 +36,8 @@ public record DeleteVerificationSummary(
 	/** Disabled compatibility view. */
 	public static DeleteVerificationSummary disabled() {
 		return new DeleteVerificationSummary(
-				false, false, true, true, false, 30_000, 0, 0, 0, 0,
+				false, false, true, true, false,
+				StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS, 0, 0, 0, 0,
 				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 	}
 
@@ -205,6 +206,11 @@ public record DeleteVerificationSummary(
 		return Math.addExact(
 				Math.addExact(acceptedUnresolved, failedUnresolved),
 				operationalUnresolvedUnresolved);
+	}
+
+	/** Post-verification correctness or inconclusive evidence requires a failed verdict. */
+	public boolean requiresFailedTerminalOutcome() {
+		return correctnessFailures() > 0 || inconclusiveFailures() > 0;
 	}
 
 	/** Only complete strict validation plus clean accepted-target absence proves removal. */

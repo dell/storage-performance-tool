@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import com.dell.spt.base.Constants;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.net.URL;
@@ -29,6 +31,11 @@ class ConfigDefaultsTest {
 		assertEquals(100, config.intVal("load-op-delete-batchSize"));
 		assertFalse(config.boolVal("load-op-delete-preValidation"));
 		assertFalse(config.boolVal("load-op-delete-postVerification"));
-		assertEquals(30_000, config.longVal("load-op-delete-verificationTimeoutMillis"));
+		assertEquals(
+						StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS,
+						config.longVal("load-op-delete-verificationTimeoutMillis"));
+		assertEquals(
+						StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS,
+						DeleteVerificationSummary.disabled().timeoutMillis());
 	}
 }

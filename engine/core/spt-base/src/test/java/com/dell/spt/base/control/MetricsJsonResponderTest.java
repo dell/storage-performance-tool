@@ -219,6 +219,35 @@ public class MetricsJsonResponderTest {
 	}
 
 	@Test
+	void engineApiClassifiesAcceptedPresentAndUnresolvedVerificationAsFailed() {
+		for (final var verification : List.of(
+						new DeleteVerificationSummary(
+										false, true, true, true, false, 30_000, 0,
+										0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+						new DeleteVerificationSummary(
+										false, true, true, true, false, 30_000, 0,
+										0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))) {
+			final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(1L, 0L, 1_000L);
+			when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot().toBuilder()
+							.failureOutcome(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY)
+							.verification(verification)
+							.build());
+			final DistributedMetricsContext context = mockDistributedContext(
+							"delete-verification-failed", OpType.DELETE, snapshot,
+							Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+			final MetricsManager manager = mock(MetricsManager.class);
+			when(manager.getDistributedContexts()).thenReturn(Set.of(context));
+			when(manager.getAllContexts()).thenReturn(Set.of());
+			when(manager.getTerminalSteps()).thenReturn(List.of());
+
+			final JsonNode policy = new MetricsJsonResponder(manager, defaultConfig())
+							.buildClusterMetrics(false).get(0).get("delete").get("failure_policy");
+
+			assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, policy.get("outcome").asText());
+		}
+	}
+
+	@Test
 	void liveDeletePhasesRemainNullUntilTheirIntervalsAreMeasured() {
 		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(0L, 0L, 100L);
 		when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot().toBuilder()

@@ -1,6 +1,8 @@
 package com.dell.spt.base.metrics.snapshot;
 
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_POLICY_MODE_FIXED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SINGLE;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,6 +22,20 @@ final class DeleteMetricsSnapshotTest {
 		assertEquals(DELETE_IDENTITY_MODE_SINGLE, snapshot.mode());
 		assertEquals(DELETE_SELECTION_ORDER_CANONICAL, snapshot.selectionOrder());
 		assertEquals(DELETE_FAILURE_POLICY_MODE_FIXED, snapshot.failurePolicyMode());
+	}
+
+	@Test
+	void verificationCorrectnessAndInconclusiveFailuresForceFailedOutcome() {
+		for (final var verification : List.of(
+						verification(1, 0),
+						verification(0, 1))) {
+			final var snapshot = DeleteMetricsSnapshot.builder(1)
+							.failureOutcome(DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY)
+							.verification(verification)
+							.build();
+
+			assertEquals(DELETE_FAILURE_OUTCOME_FAILED, snapshot.failureOutcome());
+		}
 	}
 
 	@Test
@@ -73,6 +89,20 @@ final class DeleteMetricsSnapshotTest {
 						() -> DeleteMetricsSnapshot.aggregate(List.of(fixed, percentage)));
 	}
 
+	private static DeleteVerificationSummary verification(
+					final long acceptedPresent, final long acceptedUnresolved) {
+		return new DeleteVerificationSummary(
+						false, true, true, true, false, 30_000,
+						0,
+						0,
+						acceptedPresent,
+						acceptedUnresolved,
+						0,
+						acceptedPresent,
+						acceptedUnresolved,
+						0, 0, 0, 0, 0, 0, 0, 0, 0);
+	}
+
 	@Test
 	void boundsBucketCardinalityWithOneDeterministicOverflowEntry() {
 		final var builder = DeleteMetricsSnapshot.builder(1);
@@ -118,8 +148,10 @@ final class DeleteMetricsSnapshotTest {
 										0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 						.build();
 
-		final var verification = DeleteMetricsSnapshot.aggregate(List.of(nodeA, nodeB)).verification();
+		final var aggregate = DeleteMetricsSnapshot.aggregate(List.of(nodeA, nodeB));
+		final var verification = aggregate.verification();
 
+		assertEquals(DELETE_FAILURE_OUTCOME_FAILED, aggregate.failureOutcome());
 		assertEquals(1, verification.verifiedAbsent());
 		assertEquals(1, verification.stillPresent());
 		assertEquals(1, verification.unresolved());

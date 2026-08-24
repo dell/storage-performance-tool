@@ -314,8 +314,40 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().String("object-size", "", "")
 	cmd.Flags().Int("threads", 1, "")
 	cmd.Flags().Bool("object-data-dedupable", true, "")
+	cmd.Flags().StringArray(flagEngineOverride, nil, "")
 	cmd.Flags().Int("mpu-concurrent-objects", 0, "")
 	cmd.Flags().Int("mpu-concurrent-parts", 0, "")
 	cmd.Flags().Float64("object-data-compressibility", 0, "")
 	return cmd
+}
+
+func TestStandaloneDeleteEngineOverrideRejectsShuffleButKeepsCountLimitAvailable(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		override   string
+		wantDetail string
+	}{
+		{name: "dot path shuffle", override: "load.op.shuffle=true", wantDetail: "excluded from standalone DELETE"},
+		{name: "dash path shuffle", override: "load-op-shuffle=true", wantDetail: "excluded from standalone DELETE"},
+		{name: "count limit remains advanced", override: "load.op.limit.count=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := deleteValidationCommand(deleteValidationCase{
+				bucket: "owned", batchSize: scenario.DefaultDeleteBatchSize,
+			})
+			if err := cmd.Flags().Set(flagEngineOverride, test.override); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateRunCommand(cmd, []string{WorkloadTypeDelete})
+			if test.wantDetail == "" {
+				if err != nil {
+					t.Fatalf("advanced count override was newly rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantDetail) {
+				t.Fatalf("shuffle override validation error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
 }

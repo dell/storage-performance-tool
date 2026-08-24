@@ -2,9 +2,16 @@
 
 SPT supports an optional RDMA (Remote Direct Memory Access) data path for S3 workloads. When enabled, object transfers bypass the kernel networking stack for significantly lower latency and higher throughput on supported hardware.
 
-RDMA acceleration applies to `write` and `read` workloads. Objects below the configured threshold are transparently sent over standard HTTP.
+RDMA acceleration applies to `write` and `read` payloads. The `rdma` driver also supports
+standalone DELETE through its inherited Netty HTTP `DeleteObject`/`DeleteObjects` path. DELETE
+does not transfer an object payload and does not use the configured RDMA threshold. Selecting the
+driver still performs RDMA initialization at startup, however, so an operator needs the documented
+device access or must explicitly enable `--rdma-fallback`.
 
-> **Hardware required:** S3-RDMA requires RDMA-capable NICs, an RDMA-capable storage target (e.g., Dell ECS), and Linux. See [Requirements](#requirements) for details.
+> **Driver startup requirement:** the RDMA data path requires RDMA-capable NICs, an RDMA-capable
+> storage target (e.g., Dell ECS), and Linux. Standalone DELETE uses HTTP after startup, but it does
+> not bypass driver initialization; use `--rdma-fallback` explicitly when hardware is unavailable.
+> See [Requirements](#requirements) for data-path details.
 
 ---
 

@@ -135,7 +135,7 @@ available operation-buffer slots, and owns any resources it retains until `close
 
 #### 2.3.4.1. Standalone DELETE request contract
 
-The internal standalone DELETE spine is explicitly enabled by `load.op.delete.standalone`; the shipped default is
+The standalone DELETE spine is explicitly enabled by `load.op.delete.standalone`; the engine default is
 off so cleanup steps, read-workload cleanup, and mixed-workload DELETE keep their existing single-item
 `DataOperation` behavior. A capable storage driver must opt in through
 `StorageDriver.supportsStandaloneDeleteRequests()` before the step can initialize.
@@ -170,6 +170,27 @@ unresolved, and unattempted targets remain conservative recovery input. Absence 
 only when strict pre-validation also succeeded. Artifact-set completion v2 adds a selection-indexed
 `delete.verification.csv` v1 companion without changing the DELETE totals, request trace, or target
 reconciliation v1 schemas; artifact-set v1 remains readable only as unverified compatibility evidence.
+
+The durable standalone DELETE artifact contract is:
+
+| File | Versioned contents |
+|---|---|
+| `delete.metrics.total.csv` | v1 identity and explicit request/object/batch units, request/object/batch counters, and terminal lifecycle reconciliation |
+| `delete.requests.csv` | v1 one-row-per-invocation request trace with request and batch identities, node, target count, outcome, start, duration, and latency |
+| `delete.objects.csv` | v1 per-target reconciliation linked to request identity, including outcome and error classification but no object timing |
+| `delete.verification.csv` | v1 selection-indexed pre/post observation and correctness/inconclusive classification when artifact-set completion v2 is used |
+| `items.csv` | Canonical pre-cleanup residual inventory; it is recovery evidence, not ordinary successful-item output |
+| `delete.complete.json` | Hash-committed completion record for the complete artifact set and frozen selection provenance |
+
+Failure policy, phase intervals, and request timing distributions belong to JSON schema v4 and
+stored metadata. Per-invocation start, duration, and latency belong to the request trace; they are
+not fields in DELETE totals v1.
+
+Generic `metrics.total.csv` remains request-based. Metrics JSON schema v4 adds the standalone DELETE
+block without removing v2/v3 fields; `delete_detail_expected=true` makes that block mandatory only
+for the standalone request spine. Request latency is first request byte sent through first response
+byte received, request duration is formulation through last response byte, and no per-object timing
+is derived from a batch.
 
 A `DeleteRequestOperation` represents one logical API request and owns an immutable ordered list of 1 through 1,000
 canonical targets. Every target has the same bucket and effective credential and snapshots its key, size, and optional

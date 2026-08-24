@@ -1005,6 +1005,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							: Presence.UNRESOLVED;
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
+			throwUnchecked(interrupted);
 			return Presence.UNRESOLVED;
 		} catch (final ConnectException failure) {
 			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", failure.toString());

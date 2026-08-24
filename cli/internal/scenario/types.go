@@ -36,7 +36,7 @@ type Params struct {
 	ReadShuffleBatchSize  int    // Read-phase batch size override used when ReadShuffle is enabled
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
-	// Standalone DELETE workload. The public workload remains registry-gated until qualification.
+	// Standalone DELETE workload.
 	DeleteBatchSize         int
 	DeleteExisting          bool
 	AllowEmptyPrefix        bool
@@ -80,7 +80,7 @@ type Params struct {
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
 	BaseTimestamp string
-	RunID         int64 // Positive run identity shared by every verification step and staged input marker
+	RunID         int64 // Positive public-run identity shared by generated steps, defaults, and staged input markers
 
 	// TUI layout
 	MinimalTUI                  bool

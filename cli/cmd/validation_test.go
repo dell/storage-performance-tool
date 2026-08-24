@@ -34,10 +34,9 @@ func TestValidateWorkloadType(t *testing.T) {
 			wantErr:      false,
 		},
 		{
-			name:         "unimplemented delete workload",
+			name:         "valid delete workload",
 			workloadType: "delete",
-			wantErr:      true,
-			errContains:  "not yet implemented",
+			wantErr:      false,
 		},
 		{
 			name:         "valid list workload",

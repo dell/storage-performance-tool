@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -70,9 +71,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -163,6 +166,58 @@ public class S3AwsStorageDriverTest {
 		mockS3Client = mock(S3AsyncClient.class);
 		setS3Client(drv, mockS3Client);
 		setBucketName(drv, "test-bucket");
+	}
+
+	@Test
+	void verificationPresenceForwardsWaitingThreadInterruption() throws Exception {
+		final CountDownLatch requestStarted = new CountDownLatch(1);
+		final CompletableFuture<HeadObjectResponse> pending = new CompletableFuture<>();
+		when(mockS3Client.headObject(any(HeadObjectRequest.class))).thenAnswer(ignored -> {
+			requestStarted.countDown();
+			return pending;
+		});
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final AtomicBoolean interruptedStatus = new AtomicBoolean();
+		final Thread worker = Thread.ofPlatform().start(() -> {
+			try {
+				drv.presence(new DeleteTarget(
+								new IntegrityManifestDataItem("bucket", "key", 1, null), 0));
+			} catch (final Throwable thrown) {
+				failure.set(thrown);
+				interruptedStatus.set(Thread.currentThread().isInterrupted());
+			}
+		});
+		try {
+			assertTrue(requestStarted.await(5, TimeUnit.SECONDS), "verification HEAD never started");
+			worker.interrupt();
+			worker.join(TimeUnit.SECONDS.toMillis(5));
+			assertFalse(worker.isAlive(), "interrupted verification HEAD did not terminate");
+			assertTrue(failure.get() instanceof InterruptedException,
+							() -> "expected interruption, got " + failure.get());
+			assertTrue(interruptedStatus.get(), "verification HEAD cleared the interrupt status");
+		} finally {
+			pending.complete(HeadObjectResponse.builder().build());
+			worker.interrupt();
+			worker.join(TimeUnit.SECONDS.toMillis(5));
+		}
+	}
+
+	@Test
+	void verificationPresenceForwardsAsyncInterruption() {
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final CompletableFuture<HeadObjectResponse> interrupted = new CompletableFuture<>();
+		interrupted.completeExceptionally(expected);
+		when(mockS3Client.headObject(any(HeadObjectRequest.class))).thenReturn(interrupted);
+		try {
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							() -> drv.presence(new DeleteTarget(
+											new IntegrityManifestDataItem("bucket", "key", 1, null), 0)));
+			assertSame(expected, actual);
+			assertTrue(Thread.currentThread().isInterrupted());
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Nested

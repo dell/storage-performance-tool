@@ -338,10 +338,17 @@ files are recovery evidence only and must not be treated as a complete result.
 | `delete.metrics.total.csv` | DELETE totals v1: `schema_version`, request/object/batch units, mode, configured batch size, canonical selection order, request outcomes, object lifecycle counters, actual batch shape, and terminal reconciliation. |
 | `delete.requests.csv` | Request trace v1: one row per logical API invocation with stable request and batch IDs, target count, outcome, contributor node, start, duration, and request latency in microseconds. |
 | `delete.objects.csv` | Target reconciliation v1: every selected bucket/key/size/version identity, stable target ID, request link (empty only when unattempted), outcome, and error classification. It deliberately contains no object timing. |
+| `delete.verification.csv` | Verification evidence v1: one frozen-selection-indexed row per target with operational outcome, pre/post enablement and presence observations, correctness/inconclusive flags, and residual classification. |
 | `items.csv` | Canonical pre-cleanup residual inventory. Without verification it contains failed, unattempted, and unresolved targets, and excludes accepted targets. It is idempotent retry input, not the seed inventory. |
 | `verify-input.csv` | The immutable canonical selection used by the timed DELETE phase. |
 | `verify-input.complete.json` | Selection provenance and identity: producer, run, source/unique/selected counts, byte length, and SHA-256. |
-| `delete.complete.json` | DELETE evidence commit record: merge identity, contributors, row counts, and SHA-256 for each of the six files above. |
+| `delete.complete.json` | DELETE evidence commit record. Current completion v2 records `verification_rows` and the SHA-256 of all seven evidence files above. |
+
+Completion v2 requires `verification_rows` to cover the frozen selection and commits
+`delete.verification.csv` alongside the six original evidence files. Readers continue to accept
+completion v1 sets created before verification evidence existed; v1 has no `verification_rows`,
+hashes only the original six files, and can substantiate only an unverified legacy result. A v1 set
+cannot support a result that claims inventory validation or post-verification was enabled.
 
 The v1 units are `logical_api_requests` for request and batch counts and
 `object_identities` for object counts. Only results with the same single/batch mode, configured

@@ -1,5 +1,8 @@
 package com.dell.spt.base.item.op.deletion;
 
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OBJECT_UNIT;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
+
 import com.dell.spt.base.integrity.FailurePreservingCleanup;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
@@ -17,7 +20,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -270,7 +272,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		if (result == null) {
 			throw new IOException("DELETE terminal artifact requires reconciliation");
 		}
-		printRequest(requests, operation, result.outcome().name().toLowerCase(Locale.ROOT));
+		printRequest(requests, operation, DeleteArtifacts.requestOutcome(result.outcome()));
 		final String requestId = DeleteArtifacts.requestId(operation.deleteRequest());
 		for (final DeleteTargetResult target : result.targetResults()) {
 			printTarget(
@@ -292,7 +294,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 				}
 				printRequest(
 								requests, operation,
-								DeleteTargetOutcome.UNRESOLVED.name().toLowerCase(Locale.ROOT));
+								DeleteArtifacts.REQUEST_OUTCOME_UNRESOLVED);
 				final String requestId = DeleteArtifacts.requestId(operation.deleteRequest());
 				for (final DeleteTarget target : operation.deleteRequest().targets()) {
 					printTarget(
@@ -410,19 +412,21 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 
 	private static String operationalOutcome(final byte status) {
 		return switch (status) {
-		case STATUS_ACCEPTED -> "accepted";
-		case STATUS_FAILED -> "failed";
-		case STATUS_UNRESOLVED -> "unresolved";
-		default -> "unattempted";
+		case STATUS_ACCEPTED -> DeleteArtifacts.TARGET_OUTCOME_ACCEPTED;
+		case STATUS_FAILED -> DeleteArtifacts.TARGET_OUTCOME_FAILED;
+		case STATUS_UNRESOLVED -> DeleteArtifacts.TARGET_OUTCOME_UNRESOLVED;
+		default -> DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED;
 		};
 	}
 
 	private static String presence(
 					final boolean enabled, final DeleteVerificationProbe.Presence presence) {
 		if (!enabled) {
-			return "disabled";
+			return DeleteArtifacts.VERIFICATION_PRESENCE_DISABLED;
 		}
-		return presence == null ? "unattempted" : presence.name().toLowerCase(Locale.ROOT);
+		return presence == null
+						? DeleteArtifacts.VERIFICATION_PRESENCE_UNATTEMPTED
+						: DeleteArtifacts.verificationPresence(presence);
 	}
 
 	private void readRecordedTargetStatuses(
@@ -487,10 +491,10 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 
 	private static byte status(final String value) throws IOException {
 		return switch (value) {
-		case "accepted" -> STATUS_ACCEPTED;
-		case "failed" -> STATUS_FAILED;
-		case "unresolved" -> STATUS_UNRESOLVED;
-		case "unattempted" -> STATUS_UNSEEN;
+		case DeleteArtifacts.TARGET_OUTCOME_ACCEPTED -> STATUS_ACCEPTED;
+		case DeleteArtifacts.TARGET_OUTCOME_FAILED -> STATUS_FAILED;
+		case DeleteArtifacts.TARGET_OUTCOME_UNRESOLVED -> STATUS_UNRESOLVED;
+		case DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED -> STATUS_UNSEEN;
 		default -> throw new IOException("DELETE target reconciliation has an unknown outcome: " + value);
 		};
 	}
@@ -530,8 +534,8 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 						target.key(),
 						target.size(),
 						target.versionId() == null ? "" : target.versionId(),
-						outcome.name().toLowerCase(Locale.ROOT),
-						classification.name().toLowerCase(Locale.ROOT),
+						DeleteArtifacts.targetOutcome(outcome),
+						DeleteArtifacts.failureClassification(classification),
 						error == null ? "" : error);
 	}
 
@@ -544,9 +548,9 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 	private static String metricsRow(final DeleteMetricsSnapshot metrics) {
 		return DeleteArtifacts.csvLine(
 						DeleteArtifacts.SCHEMA_VERSION,
-						DeleteArtifacts.REQUEST_UNIT,
-						DeleteArtifacts.OBJECT_UNIT,
-						DeleteArtifacts.REQUEST_UNIT,
+						DELETE_REQUEST_UNIT,
+						DELETE_OBJECT_UNIT,
+						DELETE_REQUEST_UNIT,
 						metrics.mode(),
 						metrics.configuredBatchSize(),
 						metrics.selectionOrder(),

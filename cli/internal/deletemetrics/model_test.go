@@ -149,24 +149,40 @@ func TestValidateTerminalKeepsOperationallyUnresolvedTargetsOutOfUnattempted(t *
 }
 
 func TestValidateTerminalKeepsCorrectnessFailuresOutsideOperationalBudgetRoom(t *testing.T) {
-	metrics := validTerminalMetrics()
-	pre, post := 0.25, 0.5
-	metrics.Phases.PreValidationSeconds = &pre
-	metrics.Phases.PostVerificationSeconds = &post
-	metrics.FailurePolicy.Outcome = OutcomeFailed
-	metrics.Verification = Verification{
-		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
-		PreValidationComplete: true, PostVerificationComplete: true,
-		TimeoutSeconds: 30, StillPresent: 1, AcceptedPresent: 1,
-		CorrectnessFailures: 1, Residual: 1,
-		Notice: "Full inventory validation and verification classifications are reported.",
-	}
-	if err := ValidateTerminal(metrics); err != nil {
-		t.Fatalf("classified correctness failure was rejected as malformed: %v", err)
-	}
-	metrics.FailurePolicy.Outcome = OutcomeCompletedCleanly
-	if err := ValidateTerminal(metrics); err == nil {
-		t.Fatal("verification correctness failure was accepted as a clean terminal outcome")
+	for _, test := range []struct {
+		name         string
+		verification Verification
+	}{
+		{name: "accepted present", verification: Verification{
+			StillPresent: 1, AcceptedPresent: 1, CorrectnessFailures: 1, Residual: 1,
+		}},
+		{name: "accepted unresolved", verification: Verification{
+			Unresolved: 1, AcceptedUnresolved: 1, CorrectnessFailures: 1,
+			InconclusiveFailures: 1, Residual: 1,
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metrics := validTerminalMetrics()
+			pre, post := 0.25, 0.5
+			metrics.Phases.PreValidationSeconds = &pre
+			metrics.Phases.PostVerificationSeconds = &post
+			metrics.FailurePolicy.Outcome = OutcomeFailed
+			test.verification.Enabled = true
+			test.verification.PreValidationEnabled = true
+			test.verification.PostVerificationEnabled = true
+			test.verification.PreValidationComplete = true
+			test.verification.PostVerificationComplete = true
+			test.verification.TimeoutSeconds = 30
+			test.verification.Notice = "Full inventory validation and verification classifications are reported."
+			metrics.Verification = test.verification
+			if err := ValidateTerminal(metrics); err != nil {
+				t.Fatalf("classified verification failure was rejected as malformed: %v", err)
+			}
+			metrics.FailurePolicy.Outcome = OutcomeCompletedCleanly
+			if err := ValidateTerminal(metrics); err == nil {
+				t.Fatal("verification failure was accepted as a clean terminal outcome")
+			}
+		})
 	}
 }
 

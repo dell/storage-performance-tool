@@ -16,6 +16,7 @@ const (
 // Options contains user/local runtime inputs for importing and generating a replay.
 type Options struct {
 	SourceURL     string
+	RunID         int64
 	Endpoints     []string
 	AccessKey     string
 	SecretKey     string

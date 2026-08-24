@@ -263,7 +263,7 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	}
 	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
 		path, value, _ := strings.Cut(override, "=")
-		normalized := strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
+		normalized := normalizeEngineOverridePath(path)
 		if _, excluded := integrityExcludedEngineOverridePaths[normalized]; excluded {
 			return fmt.Errorf(
 				"engine override %q is excluded from verification workloads",
@@ -307,6 +307,26 @@ var integrityExcludedEngineOverridePaths = map[string]struct{}{
 	"load.op.recycle.mode":           {},
 	"load.op.recycle.content.update": {},
 	"load.op.type":                   {},
+}
+
+var standaloneDeleteExcludedEngineOverridePaths = map[string]struct{}{
+	"load.op.shuffle": {},
+}
+
+func normalizeEngineOverridePath(path string) string {
+	return strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
+}
+
+func validateStandaloneDeleteEngineOverrides(cmd *cobra.Command) error {
+	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
+		path, value, _ := strings.Cut(override, "=")
+		if _, excluded := standaloneDeleteExcludedEngineOverridePaths[normalizeEngineOverridePath(path)]; excluded {
+			return fmt.Errorf(
+				"engine override %q is excluded from standalone DELETE",
+				secretmask.EngineOverride(path+"="+value))
+		}
+	}
+	return nil
 }
 
 func mustStringArrayFlag(cmd *cobra.Command, name string) []string {
@@ -413,6 +433,9 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 			}
 		}
 		return nil
+	}
+	if err := validateStandaloneDeleteEngineOverrides(cmd); err != nil {
+		return err
 	}
 	if maxFailedObjectsFlag != nil && maxFailurePercentFlag != nil &&
 		maxFailedObjectsFlag.Changed && maxFailurePercentFlag.Changed {

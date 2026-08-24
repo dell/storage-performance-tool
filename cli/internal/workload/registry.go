@@ -27,7 +27,7 @@ var registry = []Spec{
 	{WriteVerify, "Write objects and verify each successful write now or in a later campaign.", true},
 	{ReadVerify, "Discover or load self-verifying objects and verify each once.", true},
 	{Mixed, "Run a configured mix of S3 operations.", true},
-	{Delete, "Measure object deletion performance.", false},
+	{Delete, "Measure object deletion performance.", true},
 	{List, "Benchmark object listing throughput.", true},
 	{Mock, "Run with the dummy-mock driver.", true},
 	{Tables, "Benchmark S3 Tables operations.", true},

@@ -713,7 +713,7 @@ func validateSuccessfulFailureBudgetOutcome(metrics *Metrics, observedFailurePer
 	if err := validateSuccessfulLifecycle(metrics); err != nil {
 		return err
 	}
-	if hasVerificationFailure(metrics.Verification) {
+	if HasVerificationFailure(metrics.Verification) {
 		return fmt.Errorf("DELETE verification failures are outside operational budget room")
 	}
 	if failureBudgetExceeded(policy, observedFailurePercent) {
@@ -728,7 +728,9 @@ func validateSuccessfulFailureBudgetOutcome(metrics *Metrics, observedFailurePer
 	return nil
 }
 
-func hasVerificationFailure(verification Verification) bool {
+// HasVerificationFailure reports verification evidence that cannot be excused by an
+// operational failure budget and therefore requires a failed terminal verdict.
+func HasVerificationFailure(verification Verification) bool {
 	return verification.PreValidationFailures > 0 || verification.CorrectnessFailures > 0 ||
 		verification.InconclusiveFailures > 0
 }
