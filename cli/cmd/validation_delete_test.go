@@ -79,6 +79,7 @@ func TestDeleteFailureBudgetValidation(t *testing.T) {
 func TestValidateDeleteManifestFlags(t *testing.T) {
 	tests := []deleteValidationCase{
 		{name: "seeded default", bucket: "owned", batchSize: 100},
+		{name: "seeded cleanup", bucket: "owned", batchSize: 100, cleanup: true},
 		{name: "seeded prefix remains owned", bucket: "owned", prefix: "team/root/", batchSize: 100},
 		{
 			name: "guarded existing prefix", bucket: "existing", prefix: "team/root/", prefixSet: true,

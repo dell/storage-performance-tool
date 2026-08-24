@@ -286,6 +286,19 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 		},
 		{
+			name: "Seeded delete reports verdict-neutral residual cleanup",
+			params: scenario.ScenarioParams{
+				WorkloadType:    WorkloadTypeDelete,
+				Bucket:          "owned",
+				Threads:         2,
+				DeleteBatchSize: 100,
+				Cleanup:         true,
+			},
+			expected: []string{
+				"Cleanup: Yes (best-effort seeded residual after measurement)",
+			},
+		},
+		{
 			name: "Existing-prefix delete reports destructive current-key scope",
 			params: scenario.ScenarioParams{
 				WorkloadType:    WorkloadTypeDelete,

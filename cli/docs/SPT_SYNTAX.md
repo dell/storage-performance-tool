@@ -164,8 +164,22 @@ seed elapsed time, PUT latency, and PUT throughput do not enter DELETE measureme
 An inventory below `threads * delete-batch-size` is valid but cannot fill one complete
 concurrency wave. The CLI emits one bounded warning and reports
 `floor(objects / (threads * batch-size))` as the maximum number of full request waves.
-SPT does not increase the inventory automatically. Seeded cleanup remains assigned to a
-later internal slice and is rejected for now.
+SPT does not increase the inventory automatically. `--cleanup` remains false by default and is
+accepted only for this SPT-owned seeded source. Explicit-manifest and existing-prefix modes reject
+it before orchestration side effects.
+
+When requested, cleanup is a distinct best-effort phase after post-verification, or directly after
+the timed DELETE drain when verification is disabled. It also runs after an operational
+failure-budget stop. Before cleanup begins, the measured DELETE step commits its canonical residual
+`items.csv`: failed, unattempted, unresolved, still-present, or verification-inconclusive identities
+as applicable. The cleanup step consumes exactly those current-key or exact-version identities by
+the legacy single-object DELETE path; deleting an identity already absent is idempotent. Seed PUT
+metrics, measured DELETE request/object metrics, and cleanup metrics/errors remain separate.
+Cleanup duration is appended only to cleanup and total-wall reporting, never to DELETE request
+latency, duration, or rate denominators. A partial or failed cleanup is reported once by the
+scenario finalizer but cannot alter the measured benchmark verdict or exit code. Cleanup never
+rewrites `written.csv` or the pre-cleanup residual, leaving the original seed inventory, measured
+recovery inventory, and cleanup outcome independently inspectable in stored results.
 
 Explicit-manifest mode is selected by `--items-file`.
 
@@ -471,7 +485,7 @@ spt run write \
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--cleanup` | | `false` | Delete created objects after the test completes. `write-verify` deletes only successfully verified objects; unsupported for `read-verify` and deferred verification |
+| `--cleanup` | | `false` | Best-effort deletion of SPT-created objects after the test. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. `write-verify` deletes only successfully verified objects; unsupported for `read-verify` and deferred verification |
 | `--generate-only` | | `false` | Generate the scenario file without running it |
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |

@@ -59,6 +59,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private final boolean standaloneDeletePostVerificationEnabled;
 	private final Map<String, RetainedDurationPhase<?>> retainedDurationPhases = new HashMap<>();
 	private volatile long startTimeSec = -1;
+	private volatile Throwable runFailure;
+	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
 
 	protected LoadStepBase(
 					final Config config,
@@ -107,6 +109,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	@Override
 	public final List<? extends AllMetricsSnapshot> metricsSnapshots() {
+		final var completedSnapshots = completedRunMetricsSnapshots;
+		if (completedSnapshots != null) {
+			return completedSnapshots;
+		}
+		return currentMetricsSnapshots();
+	}
+
+	private List<? extends AllMetricsSnapshot> currentMetricsSnapshots() {
 		MetricsContext ctx;
 		AllMetricsSnapshot snapshot;
 		final var count = metricsContexts.size();
@@ -124,8 +134,18 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		return metricsSnapshots;
 	}
 
+	/**
+	 * Returns the first failure observed by the most recent {@link #run()} call, including failures
+	 * swallowed to preserve the legacy behavior of ordinary load steps.
+	 */
+	public final Throwable runFailure() {
+		return runFailure;
+	}
+
 	@Override
 	public final void run() {
+		runFailure = null;
+		completedRunMetricsSnapshots = null;
 		IntegrityTerminalException terminalCause = null;
 		try {
 			start();
@@ -141,10 +161,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 									"failed to await metadata-mode step",
 									e);
 				} else {
+					recordRunFailure(e);
 					LogUtil.exception(Level.WARN, e, "Failed to await \"{}\"", toString());
 				}
 			}
 		} catch (final InterruptedException e) {
+			recordRunFailure(e);
 			throwUnchecked(e);
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
@@ -154,11 +176,20 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 								"metadata-mode step execution failed",
 								cause);
 			} else if (cause instanceof IllegalStateException) {
+				recordRunFailure(cause);
 				LogUtil.exception(Level.ERROR, cause, "Failed to start \"{}\"", toString());
 			} else {
+				recordRunFailure(cause);
 				LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
 			}
 		} finally {
+			try {
+				completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
+			} catch (final Throwable metricsFailure) {
+				throwUncheckedIfInterrupted(metricsFailure);
+				completedRunMetricsSnapshots = List.of();
+				recordRunFailure(metricsFailure);
+			}
 			final Throwable closeCause = closeAfterRun();
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
@@ -173,14 +204,32 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						terminalCause.addSuppressed(cleanupFailure);
 					}
 				} else {
+					recordRunFailure(closeCause);
 					doStop();
 					LogUtil.trace(Loggers.ERR, Level.WARN, closeCause, "Failed to close \"{}\"", toString());
 				}
 			}
 		}
 		if (terminalCause != null) {
+			recordRunFailure(terminalCause);
 			throw terminalCause;
 		}
+	}
+
+	private void recordRunFailure(final Throwable failure) {
+		if (failure == null || failure == runFailure) {
+			return;
+		}
+		if (runFailure == null) {
+			runFailure = failure;
+			return;
+		}
+		for (final Throwable suppressed : runFailure.getSuppressed()) {
+			if (suppressed == failure) {
+				return;
+			}
+		}
+		runFailure.addSuppressed(failure);
 	}
 
 	private Throwable closeAfterRun() {
@@ -253,6 +302,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 								"metadata-mode step failed to start",
 								cause);
 			}
+			recordRunFailure(cause);
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
 		}
 

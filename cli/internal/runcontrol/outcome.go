@@ -6,7 +6,49 @@ Copyright © 2026 Dell Technologies
 // session coordinator shared by headless and TUI execution paths.
 package runcontrol
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
+
+// OwnedEngineTerminalFailure identifies the presenter's generic reflection of an engine FAILED
+// terminal state. The authoritative completion tracker supplies the failed step attribution.
+type OwnedEngineTerminalFailure struct {
+	Detail string
+}
+
+func (e *OwnedEngineTerminalFailure) Error() string {
+	detail := strings.TrimSpace(e.Detail)
+	if detail == "" {
+		detail = "engine reported FAILED"
+	}
+	return "owned engine run failed: " + detail
+}
+
+// IsOnlyOwnedEngineTerminalFailure reports whether every leaf in err is the generic presenter
+// reflection of an owned engine terminal failure. Independent joined failures make it return false.
+func IsOnlyOwnedEngineTerminalFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !IsOnlyOwnedEngineTerminalFailure(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return IsOnlyOwnedEngineTerminalFailure(wrapped.Unwrap())
+	}
+	var terminalFailure *OwnedEngineTerminalFailure
+	return errors.As(err, &terminalFailure)
+}
 
 // ResourceDisposition records who owns process resources after finalization.
 type ResourceDisposition string

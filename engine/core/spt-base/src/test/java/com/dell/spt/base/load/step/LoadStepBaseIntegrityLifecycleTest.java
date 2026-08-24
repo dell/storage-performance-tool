@@ -71,10 +71,15 @@ class LoadStepBaseIntegrityLifecycleTest {
 	void ordinaryStartAndCleanupFailuresRetainLegacyNonThrowingBehavior() {
 		final Config config = metadataConfig();
 		config.val("storage-integrity-mode", "none");
-		final var step = new TestStep(config, new IllegalStateException("start failed"), true);
+		final var startFailure = new IllegalStateException("start failed");
+		final var step = new TestStep(config, startFailure, true);
 
 		assertDoesNotThrow(step::run);
 		assertTrue(step.closeCalled);
+		assertSame(startFailure, step.runFailure(),
+						"best-effort callers need the real swallowed lifecycle outcome");
+		assertEquals(1, step.runFailure().getSuppressed().length,
+						"cleanup failure should remain distinguishable behind the first failure");
 	}
 
 	@Test

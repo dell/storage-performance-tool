@@ -1172,7 +1172,11 @@ func resolveRunCompletionError(
 			reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
 			causes = append(causes, outcome.TrackerErr)
 		}
-		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted {
+		cleanupOnlyFailure := outcome.Tracker != nil &&
+			params.Cleanup &&
+			outcome.Tracker.FinalState == constants.StateFailed &&
+			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted && !cleanupOnlyFailure {
 			if outcome.Tracker.FinalState == constants.StateFailed {
 				reasons = append(reasons, fmt.Sprintf(
 					"step %s failed (%s): %s",
@@ -1187,6 +1191,10 @@ func resolveRunCompletionError(
 			reasons = append(reasons, "terminal engine status was not captured")
 		}
 		if len(reasons) == 0 {
+			if cleanupOnlyFailure &&
+				(runErr == nil || runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr)) {
+				return nil
+			}
 			return runErr
 		}
 		if runErr != nil {
@@ -2132,7 +2140,7 @@ func init() {
 
 	// Test Behavior Options
 	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks and duration-based standalone DELETE (default: 2500)")
-	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
+	runCmd.Flags().Bool("cleanup", false, "Best-effort deletion of SPT-created objects after the benchmark; DELETE permits this only for seeded mode")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
 	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
@@ -2780,7 +2788,11 @@ func formatScenarioParams(params scenario.Params) string {
 
 	// Always show cleanup status
 	if params.Cleanup {
-		lines = append(lines, "Cleanup: Yes (delete objects after test)")
+		if params.WorkloadType == WorkloadTypeDelete {
+			lines = append(lines, "Cleanup: Yes (best-effort seeded residual after measurement)")
+		} else {
+			lines = append(lines, "Cleanup: Yes (delete objects after test)")
+		}
 	} else {
 		lines = append(lines, "Cleanup: No")
 	}

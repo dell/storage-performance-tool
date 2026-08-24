@@ -12,6 +12,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
@@ -341,12 +342,46 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 
 		steps = append(steps, summary)
 	}
+	appendSeededDeleteCleanupPhase(steps, workload)
 
 	totals.DurationHuman = formatSeconds(totals.DurationSeconds)
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
 }
+
+func appendSeededDeleteCleanupPhase(steps []StepSummary, workload WorkloadSummary) {
+	if !workload.CleanupEnabled || !strings.EqualFold(workload.Type, workloadreg.Delete) {
+		return
+	}
+	deleteIndex := -1
+	cleanupSeconds := 0.0
+	cleanupFound := false
+	for i := range steps {
+		if steps[i].Delete != nil {
+			deleteIndex = i
+		}
+		if scenario.IsSeededDeleteCleanupStepID(steps[i].StepID) &&
+			steps[i].Metrics != nil {
+			cleanupSeconds = steps[i].Metrics.DurationSeconds
+			cleanupFound = true
+		}
+	}
+	if deleteIndex < 0 || !cleanupFound || steps[deleteIndex].Delete.Phases.CleanupSeconds != nil {
+		return
+	}
+
+	deleteMetrics := *steps[deleteIndex].Delete
+	phases := deleteMetrics.Phases
+	phases.CleanupSeconds = &cleanupSeconds
+	if phases.TotalWallSeconds != nil {
+		totalWallSeconds := *phases.TotalWallSeconds + cleanupSeconds
+		phases.TotalWallSeconds = &totalWallSeconds
+	}
+	deleteMetrics.Phases = phases
+	steps[deleteIndex].Delete = &deleteMetrics
+}
+
 func mixedDistributionFromParams(workloadType string, params ScenarioParams) MixedDistribution {
 	if !strings.EqualFold(workloadType, workloadreg.Mixed) && !strings.EqualFold(params.WorkloadType, workloadreg.Mixed) {
 		return MixedDistribution{}

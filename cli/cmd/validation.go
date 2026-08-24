@@ -498,10 +498,6 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 				return errors.New("DELETE duration mode requires --seed-objects to be greater than zero")
 			}
 		}
-		cleanup, _ := cmd.Flags().GetBool("cleanup")
-		if cleanup {
-			return errors.New("DELETE seeded mode does not support --cleanup")
-		}
 		return nil
 	}
 	prefix, _ := cmd.Flags().GetString("prefix")
