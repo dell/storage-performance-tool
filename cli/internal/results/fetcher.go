@@ -27,7 +27,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|delete\.metrics\.total|delete\.requests|delete\.objects|items)\.node-[0-9]{3}\.csv$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -51,6 +51,7 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"DeleteMetricsTotal"}, Suffix: constants.ResultsArtifactSuffixDeleteMetricsTotal, Required: false},
 	{Loggers: []string{"DeleteRequests"}, Suffix: constants.ResultsArtifactSuffixDeleteRequests, Required: false},
 	{Loggers: []string{"DeleteObjects"}, Suffix: constants.ResultsArtifactSuffixDeleteObjects, Required: false},
+	{Loggers: []string{"DeleteVerification"}, Suffix: constants.ResultsArtifactSuffixDeleteVerification, Required: false},
 	{Loggers: []string{"DeleteCompletion"}, Suffix: constants.ResultsArtifactSuffixDeleteCompletion, Required: false},
 	{Loggers: []string{"written.csv"}, Suffix: constants.ResultsArtifactSuffixWritten, Required: false},
 	{Loggers: []string{"written.complete.json"}, Suffix: constants.ResultsArtifactSuffixWrittenCompletion, Required: false},

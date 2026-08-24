@@ -245,9 +245,159 @@ class LoadStepClientBaseTest {
 						"spt-delete-duration-verdict-",
 						"spt-delete-recovery-",
 						"spt-delete-drain-",
+						"spt-delete-verification-",
 						"spt-delete-terminal-validation-",
 						"spt-delete-shutdown-",
 						"spt-delete-step-stop-");
+	}
+
+	@Test
+	void preValidationIsAWorkerBarrierBeforeAnyTimedAdmissionCanOpen() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep first = mock(LoadStep.class);
+		final LoadStep failing = mock(LoadStep.class);
+		addStepSlice(client, first);
+		addStepSlice(client, failing);
+		final AtomicInteger started = new AtomicInteger();
+		doAnswer(invocation -> {
+			started.incrementAndGet();
+			return null;
+		}).when(first).startDeleteInventoryPreValidation();
+		doAnswer(invocation -> {
+			started.incrementAndGet();
+			return null;
+		}).when(failing).startDeleteInventoryPreValidation();
+		when(first.isDeleteInventoryPreValidationComplete()).thenAnswer(invocation -> {
+			assertEquals(2, started.get(), "a worker was polled before every pre-validation started");
+			return true;
+		});
+		when(failing.isDeleteInventoryPreValidationComplete()).thenThrow(
+						new RemoteException("strict pre-validation failed"));
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class,
+						client::validateDeleteInventoriesBeforeAdmission);
+
+		assertTrue(failure.getMessage().contains("pre-validation"));
+		verify(first).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		verify(failing).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		verify(first, never()).startDurationInterval(anyLong());
+		verify(failing, never()).startDurationInterval(anyLong());
+		verify(first, never()).releaseObjectFailureBudgetAdmission();
+		verify(failing, never()).releaseObjectFailureBudgetAdmission();
+	}
+
+	@Test
+	void strictPreFailureWaitsForEveryPendingPeerToFinishItsMandatoryPass() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep pending = mock(LoadStep.class);
+		final LoadStep failing = mock(LoadStep.class);
+		addStepSlice(client, pending);
+		addStepSlice(client, failing);
+		final AtomicInteger pendingPolls = new AtomicInteger();
+		when(pending.isDeleteInventoryPreValidationComplete())
+						.thenAnswer(invocation -> pendingPolls.incrementAndGet() > 1);
+		when(failing.isDeleteInventoryPreValidationComplete()).thenThrow(
+						new RemoteException("strict pre-validation failed"));
+
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class,
+						client::validateDeleteInventoriesBeforeAdmission);
+
+		assertTrue(failure.getMessage().contains("pre-validation"));
+		assertEquals(2, pendingPolls.get(),
+						"a peer failure released the distributed barrier before the pending full pass completed");
+		verify(pending).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		verify(failing).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+	}
+
+	@Test
+	void failedStrictPreAbortPropagationCannotFallThroughToPostVerification() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep locallyPassing = mock(LoadStep.class);
+		final LoadStep locallyFailing = mock(LoadStep.class);
+		addStepSlice(client, locallyPassing);
+		addStepSlice(client, locallyFailing);
+		when(locallyPassing.isDeleteInventoryPreValidationComplete()).thenReturn(true);
+		when(locallyFailing.isDeleteInventoryPreValidationComplete()).thenThrow(
+						new RemoteException("strict pre-validation failed"));
+		doThrow(new RemoteException("abort propagation unavailable"))
+						.when(locallyPassing)
+						.skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		when(locallyPassing.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		when(locallyFailing.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		when(locallyPassing.isDeleteInventoryVerificationCompleteForStepStop()).thenReturn(true);
+		when(locallyFailing.isDeleteInventoryVerificationCompleteForStepStop()).thenReturn(true);
+
+		final IntegrityTerminalException failure = assertThrows(
+						IntegrityTerminalException.class,
+						client::validateDeleteInventoriesBeforeAdmission);
+		assertTrue(java.util.Arrays.stream(failure.getSuppressed())
+						.anyMatch(suppressed -> suppressed.getMessage().contains("propagate strict pre-validation abort")));
+
+		assertDoesNotThrow(client::doShutdown);
+		verify(locallyPassing, never()).verifyDeleteInventoryForStepStop();
+		verify(locallyFailing, never()).verifyDeleteInventoryForStepStop();
+	}
+
+	@Test
+	void globallySuccessfulPreValidationStillRunsConfiguredPostVerification() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep first = mock(LoadStep.class);
+		final LoadStep second = mock(LoadStep.class);
+		addStepSlice(client, first);
+		addStepSlice(client, second);
+
+		client.validateDeleteInventoriesBeforeAdmission();
+		assertDoesNotThrow(client::doShutdown);
+
+		verify(first).verifyDeleteInventoryForStepStop();
+		verify(second).verifyDeleteInventoryForStepStop();
+		verify(first, never()).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		verify(second, never()).skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+	}
+
+	@Test
+	@org.junit.jupiter.api.Timeout(value = 5)
+	void blockedPreValidationCompletionPollHasABoundedControlPlaneWait() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep blocked = mock(LoadStep.class);
+		addStepSlice(client, blocked);
+		when(blocked.isDeleteInventoryPreValidationComplete()).thenAnswer(invocation -> {
+			Thread.sleep(TimeUnit.SECONDS.toMillis(10));
+			return true;
+		});
+		final long started = System.nanoTime();
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class,
+							client::validateDeleteInventoriesBeforeAdmission);
+			assertTrue(failure.getMessage().contains("pre-validation"));
+			assertTrue(
+							System.nanoTime() - started < TimeUnit.SECONDS.toNanos(3),
+							"verification completion held an unbounded controller wait");
+		} finally {
+			client.close();
+		}
 	}
 
 	private static void assertNoLiveThreads(final String... namePrefixes)
@@ -332,15 +482,21 @@ class LoadStepClientBaseTest {
 						() -> compatibilityWorker.enforceDispatchedOperationsDeadlineForStepStop(1L));
 
 		assertTrue(failure.getMessage().contains("does not support"));
+		final RemoteException abortFailure = assertThrows(
+						RemoteException.class,
+						compatibilityWorker::skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure);
+		assertTrue(abortFailure.getMessage().contains("does not support"));
 	}
 
 	@Test
 	void terminalValidationFailureInvalidatesButStillClosesEveryReachableSlice() throws Exception {
 		final Config config = durationConfig();
+		config.val("load-op-delete-postVerification", true);
 		final TestLoadStepClient client = new TestLoadStepClient(
 						config, extensions, ctxConfigs, mockMetricsManager);
 		final LoadStep unresolved = mock(LoadStep.class);
 		when(unresolved.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(unresolved.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		doThrow(new IntegrityTerminalException(
 						IntegrityTerminalException.Category.EXECUTION,
 						"unresolved dispatched request"))
@@ -355,6 +511,7 @@ class LoadStepClientBaseTest {
 		assertTrue(failure.getMessage().contains("unresolved dispatched request"));
 		verify(unresolved).recoverQueuedOperationsForStepStop();
 		verify(unresolved).startDispatchedOperationsDrainForStepStop(anyLong());
+		verify(unresolved).verifyDeleteInventoryForStepStop();
 		verify(unresolved).validateTerminalStateForStepStop();
 		verify(unresolved).shutdown();
 		verify(unresolved).stop();
@@ -433,6 +590,7 @@ class LoadStepClientBaseTest {
 	@Test
 	void durationPublicStopCoordinatesEverySliceWithBoundedWorkersAndOneDrainBudget() throws Exception {
 		final Config config = durationConfig();
+		config.val("load-op-delete-postVerification", true);
 		config.val("load-op-wait-limit", 1);
 		final TestLoadStepClient client = new TestLoadStepClient(
 						config, extensions, ctxConfigs, mockMetricsManager);
@@ -447,6 +605,7 @@ class LoadStepClientBaseTest {
 
 		for (int i = 0; i < sliceCount; i++) {
 			final LoadStep slice = mock(LoadStep.class);
+			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 			doAnswer(invocation -> {
 				admissionsClosed.incrementAndGet();
 				return null;
@@ -490,6 +649,7 @@ class LoadStepClientBaseTest {
 		assertTrue(minimumDrainBudgetNanos.get() > 0);
 		assertTrue(elapsedNanos < TimeUnit.SECONDS.toNanos(1));
 		for (final LoadStep slice : slices) {
+			verify(slice).verifyDeleteInventoryForStepStop();
 			verify(slice).shutdown();
 			verify(slice).stop();
 		}
@@ -631,6 +791,7 @@ class LoadStepClientBaseTest {
 						"spt-delete-duration-verdict-",
 						"spt-delete-recovery-",
 						"spt-delete-drain-",
+						"spt-delete-verification-",
 						"spt-delete-terminal-validation-",
 						"spt-delete-shutdown-",
 						"spt-delete-step-stop-",
@@ -1362,6 +1523,7 @@ class LoadStepClientBaseTest {
 			awaitIgnoringInterrupt(releaseSnapshot);
 			return cleanDeleteLifecycle();
 		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();
 		final Thread awaitThread = Thread.ofPlatform().start(() -> {
@@ -1401,6 +1563,7 @@ class LoadStepClientBaseTest {
 			final LoadStep restartedSlice = mock(LoadStep.class);
 			when(restartedSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 			when(restartedSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+			when(restartedSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 			addRawStepSlice(restarted, restartedSlice);
 			assertTrue(restarted.await(1, TimeUnit.SECONDS));
 			final IntegrityTerminalException restartedFailure = assertThrows(
@@ -1425,6 +1588,7 @@ class LoadStepClientBaseTest {
 		final LoadStep recoveredSlice = mock(LoadStep.class);
 		when(recoveredSlice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 		when(recoveredSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(recoveredSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(recovered, recoveredSlice);
 		assertTrue(recovered.await(1, TimeUnit.SECONDS));
 		assertDoesNotThrow(recovered::close);
@@ -1454,6 +1618,7 @@ class LoadStepClientBaseTest {
 			awaitIgnoringInterrupt(releaseFirstProbe);
 			return cleanDeleteLifecycle();
 		});
+		when(firstSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(first, firstSlice);
 		assertTrue(first.await(2, TimeUnit.SECONDS));
 		assertEquals(1, LoadStepClientBase.activeFailureBudgetSnapshotFlightCount());
@@ -1660,6 +1825,7 @@ class LoadStepClientBaseTest {
 			awaitIgnoringInterrupt(releaseFirstProbe);
 			return cleanDeleteLifecycle();
 		});
+		when(firstSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(first, firstSlice);
 		final AtomicReference<Throwable> firstCloseFailure = new AtomicReference<>();
 		final Thread firstCloseThread = Thread.ofPlatform().start(() -> {
@@ -1685,6 +1851,7 @@ class LoadStepClientBaseTest {
 							config, extensions, ctxConfigs, mockMetricsManager);
 			final LoadStep nextSlice = mock(LoadStep.class);
 			when(nextSlice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+			when(nextSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 			addRawStepSlice(next, nextSlice);
 			releaseThread.start();
 
@@ -1723,6 +1890,7 @@ class LoadStepClientBaseTest {
 			awaitIgnoringInterrupt(releaseSnapshot);
 			return cleanDeleteLifecycle();
 		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 
 		assertTrue(client.await(2, TimeUnit.SECONDS));
@@ -1776,6 +1944,8 @@ class LoadStepClientBaseTest {
 			}
 			return cleanDeleteLifecycle();
 		});
+		when(completedSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		when(blockedSlice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, completedSlice);
 		addRawStepSlice(client, blockedSlice);
 		final Thread releaseThread = Thread.ofPlatform().unstarted(() -> {
@@ -1825,6 +1995,7 @@ class LoadStepClientBaseTest {
 				awaitIgnoringInterrupt(releaseProbes);
 				return cleanDeleteLifecycle();
 			});
+			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 			addRawStepSlice(client, slice);
 		}
 		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
@@ -2163,6 +2334,7 @@ class LoadStepClientBaseTest {
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 		when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 
 		assertTrue(client.await(1, TimeUnit.SECONDS));
@@ -2186,6 +2358,7 @@ class LoadStepClientBaseTest {
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 		when(slice.deleteObjectLifecycle()).thenReturn(
 						new DeleteObjectLifecycleSnapshot(2, 2, 1, 1, 0, 0, 0, 1, true));
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 
 		assertTrue(client.await(1, TimeUnit.SECONDS));
@@ -2254,6 +2427,7 @@ class LoadStepClientBaseTest {
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
 		when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 
 		final CapturingMessageAppender appender = new CapturingMessageAppender("Failure Policy:");
@@ -2299,6 +2473,7 @@ class LoadStepClientBaseTest {
 			awaitIgnoringInterrupt(releaseSnapshot);
 			return cleanDeleteLifecycle();
 		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 		final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
 		final Thread closeThread = Thread.ofPlatform().start(() -> {
@@ -2362,6 +2537,7 @@ class LoadStepClientBaseTest {
 						countDeleteConfig(), extensions, ctxConfigs, mockMetricsManager);
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		addRawStepSlice(client, slice);
 
 		assertTrue(client.await(1, TimeUnit.SECONDS));
@@ -3340,6 +3516,8 @@ class LoadStepClientBaseTest {
 		try {
 			when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
 			when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+			when(slice.isDeleteInventoryPreValidationComplete()).thenReturn(true);
+			when(slice.isDeleteInventoryVerificationCompleteForStepStop()).thenReturn(true);
 			when(slice.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 			addRawStepSlice(client, slice);
 		} catch (final RemoteException e) {

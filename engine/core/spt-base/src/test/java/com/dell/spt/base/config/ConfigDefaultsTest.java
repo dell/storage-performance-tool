@@ -27,5 +27,8 @@ class ConfigDefaultsTest {
 						config.boolVal("load-op-delete-standalone"),
 						"shipped configuration must preserve legacy DELETE by default");
 		assertEquals(100, config.intVal("load-op-delete-batchSize"));
+		assertFalse(config.boolVal("load-op-delete-preValidation"));
+		assertFalse(config.boolVal("load-op-delete-postVerification"));
+		assertEquals(30_000, config.longVal("load-op-delete-verificationTimeoutMillis"));
 	}
 }

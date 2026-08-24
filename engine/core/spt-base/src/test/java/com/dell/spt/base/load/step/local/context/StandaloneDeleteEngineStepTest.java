@@ -23,8 +23,10 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -56,11 +58,193 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class StandaloneDeleteEngineStepTest {
 	private static final int MULTI_INPUT_CONTEXT_COUNT = 10;
+
+	@Test
+	void strictPreValidationRetainsClassificationAndTimingAndSkipsPostAfterFailure(
+					@TempDir final Path temp) throws Exception {
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection,
+						"bucket,key,size,version_id\n"
+										+ "bucket,current,1,\n"
+										+ "bucket,exact,1,version-1\n");
+		final var config = config(2, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 2L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 1L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=2"));
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		config.val("load-op-delete-verificationTimeoutMillis", 1L);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		driver.presence = target -> "exact".equals(target.key())
+						? DeleteVerificationProbe.Presence.ABSENT
+						: DeleteVerificationProbe.Presence.PRESENT;
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-strict-pre",
+						generator(config, driver, new ManifestInput(2)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"),
+						(ignoredId, ignoredSelection, ignoredCount) -> null);
+		try {
+			step.holdObjectFailureBudgetAdmission();
+			step.start();
+			assertThrows(
+							IntegrityTerminalException.class,
+							step::validateDeleteInventoryBeforeAdmission);
+			metrics.refreshLastSnapshot(true);
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(1, delete.verification().preValidationFailures());
+			assertTrue(delete.verification().preValidationComplete());
+			assertFalse(delete.verification().postVerificationComplete());
+			assertTrue(delete.verification().postVerificationSkipped());
+			assertTrue(delete.preValidationNanos() >= 0);
+			assertEquals(-1, delete.scheduledDeleteNanos());
+			assertEquals(-1, delete.postVerificationNanos());
+			assertEquals(2, driver.presenceCalls.get());
+			assertEquals(0, driver.scheduled.get());
+		} finally {
+			step.close();
+			assertDoesNotThrow(step::validateTerminalState,
+							"closed strict-pre evidence must retain its finalized completeness state");
+			metrics.close();
+		}
+		assertEquals(2, driver.presenceCalls.get(), "failed pre-validation must not run post-verification");
+	}
+
+	@Test
+	void distributedStrictPreValidationAbortSkipsPostOnLocallyPassingSlice(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "standalone-delete-distributed-strict-pre-abort-" + System.nanoTime();
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection,
+						"bucket,key,size,version_id\n"
+										+ "bucket,current,1,\n"
+										+ "bucket,exact,1,version-1\n");
+		final var config = config(2, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 2L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 1L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=2"));
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		config.val("load-op-delete-verificationTimeoutMillis", 1L);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		driver.presence = ignored -> DeleteVerificationProbe.Presence.PRESENT;
+		final var metrics = metrics();
+		final List<Path> artifactPaths = List.of(
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_METRICS_TOTAL.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_REQUESTS.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_VERIFICATION.getName(), stepId)));
+		for (final Path artifact : artifactPaths) {
+			Files.deleteIfExists(artifact);
+		}
+		final var step = new LoadStepContextImpl<>(
+						stepId,
+						generator(config, driver, new ManifestInput(2)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"));
+		try {
+			step.holdObjectFailureBudgetAdmission();
+			step.start();
+			step.validateDeleteInventoryBeforeAdmission();
+			step.skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+		} finally {
+			step.close();
+			metrics.close();
+		}
+		final var delete = metrics.lastSnapshot().deleteMetrics();
+		assertEquals(0, delete.verification().preValidationFailures());
+		assertTrue(delete.verification().preValidationComplete());
+		assertFalse(delete.verification().postVerificationComplete());
+		assertTrue(delete.verification().postVerificationSkipped());
+		assertEquals(-1, delete.postVerificationNanos());
+		assertEquals(2, driver.presenceCalls.get(),
+						"a locally passing slice must honor the distributed strict-pre abort");
+		assertDoesNotThrow(step::validateTerminalState);
+		assertEquals(3, Files.readAllLines(artifactPaths.get(2)).size());
+		assertEquals(3, Files.readAllLines(artifactPaths.get(3)).size());
+		assertTrue(Files.readString(artifactPaths.get(4)).contains(",unattempted,true,present,true,unattempted,"));
+		for (final Path artifact : artifactPaths) {
+			Files.deleteIfExists(artifact);
+		}
+	}
+
+	@Test
+	void postVerificationJoinsEveryOperationalOutcomeAndPublishesPhaseTiming(
+					@TempDir final Path temp) throws Exception {
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection,
+						"bucket,key,size,version_id\n"
+										+ "bucket,key-0,0,\n"
+										+ "bucket,key-1,1,version-1\n"
+										+ "bucket,key-2,2,\n");
+		final var config = config(3, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 3L);
+		config.val("load-op-delete-selectedCurrentKey", 2L);
+		config.val("load-op-delete-selectedExactVersion", 1L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=3"));
+		config.val("load-op-delete-postVerification", true);
+		config.val("load-op-delete-verificationTimeoutMillis", 1L);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		driver.presence = target -> switch (target.key()) {
+		case "key-0" -> DeleteVerificationProbe.Presence.ABSENT;
+		case "key-1" -> DeleteVerificationProbe.Presence.PRESENT;
+		default -> DeleteVerificationProbe.Presence.UNRESOLVED;
+		};
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-post-verify",
+						generator(config, driver, new ManifestInput(3)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"),
+						(ignoredId, ignoredSelection, ignoredCount) -> null);
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(1, delete.verification().acceptedAbsent());
+			assertEquals(1, delete.verification().acceptedPresent());
+			assertEquals(1, delete.verification().acceptedUnresolved());
+			assertEquals(2, delete.verification().correctnessFailures());
+			assertEquals(1, delete.verification().inconclusiveFailures());
+			assertTrue(delete.postVerificationNanos() >= 0);
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
 
 	@Test
 	void constructorDoesNotPublishCallbacksBeforeArtifactRecorderSucceeds(
@@ -129,7 +313,8 @@ class StandaloneDeleteEngineStepTest {
 						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_METRICS_TOTAL.getName(), stepId)),
 						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_REQUESTS.getName(), stepId)),
 						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId)),
-						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId)));
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_VERIFICATION.getName(), stepId)));
 		for (final Path artifact : artifactPaths) {
 			Files.deleteIfExists(artifact);
 		}
@@ -160,6 +345,7 @@ class StandaloneDeleteEngineStepTest {
 			assertTrue(objects.contains(",key-0,0,,accepted,"));
 			assertTrue(objects.contains(",key-3,3,,failed,"));
 			assertFalse(objects.contains("start_us"), "target rows must not fabricate object timing");
+			assertEquals(5, Files.readAllLines(artifactPaths.get(4)).size());
 			assertEquals(2, Files.readAllLines(artifactPaths.get(0)).size());
 		} finally {
 			step.close();
@@ -1359,7 +1545,8 @@ class StandaloneDeleteEngineStepTest {
 	}
 
 	private static final class DeterministicDeleteDriver extends AsyncRunnableBase
-					implements StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> {
+					implements StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation>,
+					DeleteVerificationProbe {
 		private final OperationLifecycleTracker<DeleteRequestOperation> lifecycle = new OperationLifecycleTracker<>();
 		private final DriverMode mode;
 		private final AtomicInteger scheduled = new AtomicInteger();
@@ -1372,6 +1559,8 @@ class StandaloneDeleteEngineStepTest {
 		private final CountDownLatch recoveryEntered = new CountDownLatch(1);
 		private final CountDownLatch recoveryRelease = new CountDownLatch(1);
 		private final PhaseConcurrencyProbe phaseConcurrency;
+		private final AtomicInteger presenceCalls = new AtomicInteger();
+		private volatile Function<DeleteTarget, Presence> presence = ignored -> Presence.PRESENT;
 		private volatile Output<DeleteRequestOperation> resultOutput;
 
 		private DeterministicDeleteDriver(final DriverMode mode) {
@@ -1411,6 +1600,12 @@ class StandaloneDeleteEngineStepTest {
 				return true;
 			}
 			return complete(operation, requestIndex);
+		}
+
+		@Override
+		public Presence presence(final DeleteTarget target) {
+			presenceCalls.incrementAndGet();
+			return presence.apply(target);
 		}
 
 		private boolean complete(final DeleteRequestOperation operation, final int requestIndex) {

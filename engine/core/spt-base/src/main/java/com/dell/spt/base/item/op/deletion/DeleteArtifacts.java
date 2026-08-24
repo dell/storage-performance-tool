@@ -20,6 +20,7 @@ public final class DeleteArtifacts {
 	public static final String METRICS_FILE_NAME = "delete.metrics.total.csv";
 	public static final String REQUESTS_FILE_NAME = "delete.requests.csv";
 	public static final String OBJECTS_FILE_NAME = "delete.objects.csv";
+	public static final String VERIFICATION_FILE_NAME = "delete.verification.csv";
 	public static final String RESIDUAL_FILE_NAME = "items.csv";
 	public static final String SELECTION_FILE_NAME = "verify-input.csv";
 	public static final String SELECTION_COMPLETION_FILE_NAME = "verify-input.complete.json";
@@ -39,6 +40,10 @@ public final class DeleteArtifacts {
 	public static final List<String> OBJECTS_HEADER = List.of(
 					"schema_version", "request_id", "target_id", "target_index", "bucket", "key",
 					"size", "version_id", "outcome", "error_classification", "error");
+	public static final List<String> VERIFICATION_HEADER = List.of(
+					"schema_version", "target_id", "target_index", "bucket", "key", "size", "version_id",
+					"operational_outcome", "pre_enabled", "pre_presence", "post_enabled", "post_presence",
+					"correctness_failure", "inconclusive", "residual");
 
 	private DeleteArtifacts() {}
 

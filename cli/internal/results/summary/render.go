@@ -91,7 +91,15 @@ func (r *Renderer) renderDeleteDetails(b *strings.Builder, summary *RunSummary) 
 		r.writeBullet(b, "Request duration", formatDeleteTiming(d.Timing.DurationDefinition, d.Timing.Duration))
 		r.writeBullet(b, "Not applicable", "object size, data moved, bandwidth, TTFB, object latency")
 		r.writeBullet(b, "Outcome terminology", d.OutcomeTerminology)
-		r.writeBullet(b, "Verification", d.Verification.Notice)
+		r.writeBullet(b, "Verification", fmt.Sprintf(
+			"pre-validation %t (complete %t), post-verification %t (complete %t, skipped %t), timeout %.3fs; verified absent %d, still present %d, unresolved %d, correctness failures %d, inconclusive %d, residual %d; %s",
+			d.Verification.PreValidationEnabled, d.Verification.PreValidationComplete,
+			d.Verification.PostVerificationEnabled, d.Verification.PostVerificationComplete,
+			d.Verification.PostVerificationSkipped,
+			d.Verification.TimeoutSeconds, d.Verification.VerifiedAbsent,
+			d.Verification.StillPresent, d.Verification.Unresolved,
+			d.Verification.CorrectnessFailures, d.Verification.InconclusiveFailures,
+			d.Verification.Residual, d.Verification.Notice))
 		if evidence := step.DeleteEvidence; evidence != nil {
 			r.writeBullet(b, "Recovery inventory", fmt.Sprintf(
 				"%d residual of %d frozen targets (pre-cleanup, conservative, idempotent)",

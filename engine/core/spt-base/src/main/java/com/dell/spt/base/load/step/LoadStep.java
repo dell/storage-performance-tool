@@ -67,6 +67,29 @@ public interface LoadStep extends Daemon {
 	/** Audits deterministic terminal accounting after the dispatched-operation drain. */
 	default void validateTerminalStateForStepStop() throws RemoteException {}
 
+	/** Starts idempotent full DELETE pre-validation while timed admission remains held. */
+	default void startDeleteInventoryPreValidation() throws RemoteException {}
+
+	/** Polls full DELETE pre-validation without holding a long-lived control-plane RPC. */
+	default boolean isDeleteInventoryPreValidationComplete() throws RemoteException {
+		return true;
+	}
+
+	/** Prevents post-verification after strict pre-validation failed on any distributed slice. */
+	default void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure()
+					throws RemoteException {
+		throw new RemoteException(
+						"worker does not support distributed strict pre-validation abort propagation");
+	}
+
+	/** Starts idempotent post-delete inventory verification after every dispatched request drains. */
+	default void verifyDeleteInventoryForStepStop() throws RemoteException {}
+
+	/** Polls post-delete verification without holding a long-lived control-plane RPC. */
+	default boolean isDeleteInventoryVerificationCompleteForStepStop() throws RemoteException {
+		return true;
+	}
+
 	/**
 	 * Returns worker-local duration validity evidence after operation admission has closed.
 	 * Compatibility implementations which do not provide evidence fail closed at the controller.

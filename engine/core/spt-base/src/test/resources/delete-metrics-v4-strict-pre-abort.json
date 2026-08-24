@@ -1,0 +1,46 @@
+[
+  {
+    "metrics_schema": 4,
+    "scope": "fleet",
+    "role": "aggregate",
+    "node_id": "entry",
+    "run_id": "strict-pre-abort-run",
+    "sample_ts": "2026-08-24T12:00:00Z",
+    "step_id": "delete-strict-pre-abort",
+    "op_type": "DELETE",
+    "timestamp": 1787572800000,
+    "elapsed_time_seconds": 0.25,
+    "test_state": 2,
+    "completion_percent": 100,
+    "operations": {"success_count": 0, "failed_count": 0, "corrupt_count": 0, "success_rate_last": 0.0, "failed_rate_last": 0.0},
+    "bandwidth": {"bytes_total": 0, "bytes_rate_last": 0.0},
+    "timing": {"latency_mean_us": 0.0, "duration_mean_us": 0.0},
+    "concurrency": {"current": 0.0, "mean": 0.0},
+    "nodes_count": 1,
+    "contributors_present": ["local"],
+    "delete_detail_expected": true,
+    "delete": {
+      "units": {"requests": "logical_api_requests", "objects": "object_identities", "batches": "logical_api_requests"},
+      "requests": {"attempted": 0, "full_success": 0, "partial": 0, "failed": 0, "unresolved": 0, "per_second": 0.0},
+      "objects": {"selected": 2, "attempted": 0, "accepted": 0, "failed": 0, "unattempted": 2, "unresolved": 0, "per_second": 0.0},
+      "batches": {"configured_size": 2, "actual_request_count": 0, "actual_object_count": 0, "mean_objects_per_request": 0.0, "full_batch_count": 0, "partial_batch_count": 0, "full_batch_percent": 0.0},
+      "completion": {"request_percent": 100.0, "object_percent": 100.0, "terminal_reconciled": true},
+      "versions": {"current_key": 1, "exact_version": 1},
+      "buckets": [{"bucket": "bucket", "selected": 2, "attempted": 0, "accepted": 0, "failed": 0}],
+      "phases": {"seed": null, "discovery": null, "pre_validation": 0.25, "scheduled_delete_seconds": 0.0, "drain_seconds": 0.0, "post_verification": null, "cleanup": null, "total_wall_seconds": 0.25},
+      "identity": {"mode": "batch", "configured_batch_size": 2, "selection_order": "canonical"},
+      "failure_policy": {"mode": "fixed", "outcome": "failed", "max_failed_objects": 100000, "max_failure_percent": 0.0, "grace_seconds": 30, "operational_failed_objects": 0, "excluded_failed_objects": 0, "observed_failure_percent": 0.0},
+      "timing": {
+        "latency_definition": "first_request_byte_sent_to_first_response_byte_received",
+        "duration_definition": "request_formulation_to_last_response_byte_received",
+        "latency": {"count": 0, "mean_us": 0.0, "min_us": 0, "p50_us": 0, "p90_us": 0, "p99_us": 0, "p999_us": 0, "max_us": 0, "overflow_count": 0},
+        "duration": {"count": 0, "mean_us": 0.0, "min_us": 0, "p50_us": 0, "p90_us": 0, "p99_us": 0, "p999_us": 0, "max_us": 0, "overflow_count": 0},
+        "object_latency": null
+      },
+      "performance": {"object_size": "not_applicable", "data_moved": "not_applicable", "bandwidth": "not_applicable", "ttfb": "not_applicable"},
+      "outcome_terminology": "accepted",
+      "verification": {"enabled": true, "pre_validation_enabled": true, "post_verification_enabled": true, "pre_validation_complete": true, "post_verification_complete": false, "post_verification_skipped": true, "timeout_seconds": 30.0, "pre_validation_failures": 2, "verified_absent": 0, "still_present": 0, "unresolved": 0, "accepted_absent": 0, "accepted_present": 0, "accepted_unresolved": 0, "failed_absent": 0, "failed_present": 0, "failed_unresolved": 0, "operational_unresolved_absent": 0, "operational_unresolved_present": 0, "operational_unresolved_unresolved": 0, "unattempted_absent": 0, "unattempted_present": 0, "unattempted_unresolved": 0, "correctness_failures": 0, "inconclusive_failures": 0, "residual": 0, "removal_confirmed": false, "notice": "Post-verification was skipped because strict pre-validation failed before timed DELETE admission."},
+      "terminal_reconciled": true
+    }
+  }
+]

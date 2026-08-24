@@ -31,6 +31,16 @@ public final class ObjectFailureBudgetController {
 		}
 		final ObjectFailureBudgetCounters counters = aggregation.counters;
 		final double observedPercent = observedPercent(counters);
+		if (aggregation.preValidationFailed > 0
+						|| aggregation.verificationCorrectnessFailed > 0
+						|| aggregation.verificationInconclusive > 0) {
+			return decision(
+							ObjectFailureBudgetOutcome.FAILED,
+							true,
+							counters,
+							"inventory validation, verification correctness, or inconclusive failures "
+											+ "are outside operational budget room");
+		}
 		if (counters.excludedFailedObjects() > 0) {
 			return decision(
 							ObjectFailureBudgetOutcome.FAILED,
@@ -122,6 +132,9 @@ public final class ObjectFailureBudgetController {
 		long unattempted = 0;
 		long unresolved = 0;
 		long fullSuccessfulRequests = 0;
+		long preValidationFailed = 0;
+		long verificationCorrectnessFailed = 0;
+		long verificationInconclusive = 0;
 		boolean terminalComplete = true;
 		try {
 			for (final DeleteObjectLifecycleSnapshot worker : workers) {
@@ -141,6 +154,12 @@ public final class ObjectFailureBudgetController {
 				unresolved = Math.addExact(unresolved, worker.unresolved());
 				fullSuccessfulRequests = Math.addExact(
 								fullSuccessfulRequests, worker.fullSuccessfulRequests());
+				preValidationFailed = Math.addExact(
+								preValidationFailed, worker.preValidationFailed());
+				verificationCorrectnessFailed = Math.addExact(
+								verificationCorrectnessFailed, worker.verificationCorrectnessFailed());
+				verificationInconclusive = Math.addExact(
+								verificationInconclusive, worker.verificationInconclusive());
 				terminalComplete &= worker.reconciled();
 			}
 		} catch (final ArithmeticException failure) {
@@ -157,7 +176,10 @@ public final class ObjectFailureBudgetController {
 										unresolved,
 										fullSuccessfulRequests,
 										terminalComplete),
-						null);
+						null,
+						preValidationFailed,
+						verificationCorrectnessFailed,
+						verificationInconclusive);
 	}
 
 	private static boolean validWorkerCounters(final DeleteObjectLifecycleSnapshot worker) {
@@ -169,6 +191,9 @@ public final class ObjectFailureBudgetController {
 						|| worker.unresolved() < 0
 						|| worker.protocolFailed() < 0
 						|| worker.fullSuccessfulRequests() < 0
+						|| worker.preValidationFailed() < 0
+						|| worker.verificationCorrectnessFailed() < 0
+						|| worker.verificationInconclusive() < 0
 						|| worker.protocolFailed() > worker.failed()) {
 			return false;
 		}
@@ -184,13 +209,13 @@ public final class ObjectFailureBudgetController {
 	private static Aggregation invalid(final String reason) {
 		return new Aggregation(
 						new ObjectFailureBudgetCounters(0, 0, 0, 0, 0, 0, 0, 0, false),
-						reason);
+						reason, 0, 0, 0);
 	}
 
 	private static Aggregation unavailable(final boolean completion, final String reason) {
 		return new Aggregation(
 						new ObjectFailureBudgetCounters(0, 0, 0, 0, 0, 0, 0, 0, !completion),
-						completion ? reason : null);
+						completion ? reason : null, 0, 0, 0);
 	}
 
 	private static double observedPercent(final ObjectFailureBudgetCounters counters) {
@@ -209,5 +234,10 @@ public final class ObjectFailureBudgetController {
 		return elapsed == null || elapsed.isNegative() ? Duration.ZERO : elapsed;
 	}
 
-	private record Aggregation(ObjectFailureBudgetCounters counters, String failureReason) {}
+	private record Aggregation(
+					ObjectFailureBudgetCounters counters,
+					String failureReason,
+					long preValidationFailed,
+					long verificationCorrectnessFailed,
+					long verificationInconclusive) {}
 }

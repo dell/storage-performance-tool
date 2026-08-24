@@ -319,7 +319,7 @@ func aggregateDeleteMetrics(
 			!compatibleDeleteFailurePolicy(first.FailurePolicy, metric.Delete.FailurePolicy) ||
 			first.FailurePolicy.Outcome != metric.Delete.FailurePolicy.Outcome ||
 			first.OutcomeTerminology != metric.Delete.OutcomeTerminology ||
-			first.Verification.Enabled != metric.Delete.Verification.Enabled {
+			!compatibleDeleteVerification(first.Verification, metric.Delete.Verification) {
 			return nil, false, false
 		}
 	}
@@ -352,6 +352,8 @@ func aggregateDeleteMetrics(
 	result.FailurePolicy.OperationalFailedObjects = 0
 	result.FailurePolicy.ExcludedFailedObjects = 0
 	result.FailurePolicy.ObservedFailurePercent = 0
+	resetDeleteVerificationCounters(&result.Verification)
+	result.Verification.RemovalConfirmed = true
 	buckets := make(map[string]DeleteBucketMetrics)
 	for _, nodeID := range nodesPresent {
 		item := nodeMetrics[nodeID].Delete
@@ -376,6 +378,7 @@ func aggregateDeleteMetrics(
 		result.Versions.ExactVersion += item.Versions.ExactVersion
 		result.FailurePolicy.OperationalFailedObjects += item.FailurePolicy.OperationalFailedObjects
 		result.FailurePolicy.ExcludedFailedObjects += item.FailurePolicy.ExcludedFailedObjects
+		addDeleteVerification(&result.Verification, item.Verification)
 		result.Phases.SeedSeconds = maxDeletePhase(result.Phases.SeedSeconds, item.Phases.SeedSeconds)
 		result.Phases.DiscoverySeconds = maxDeletePhase(result.Phases.DiscoverySeconds, item.Phases.DiscoverySeconds)
 		result.Phases.PreValidationSeconds = maxDeletePhase(result.Phases.PreValidationSeconds, item.Phases.PreValidationSeconds)
@@ -412,6 +415,8 @@ func aggregateDeleteMetrics(
 	if result.Requests.Attempted > 0 {
 		result.Completion.RequestPercent = float64(terminalRequests) * 100 /
 			float64(result.Requests.Attempted)
+	} else if result.TerminalReconciled {
+		result.Completion.RequestPercent = 100
 	}
 	accountedObjects := result.Objects.Accepted + result.Objects.Failed +
 		result.Objects.Unattempted + result.Objects.Unresolved
@@ -422,6 +427,61 @@ func aggregateDeleteMetrics(
 	result.Completion.TerminalReconciled = result.TerminalReconciled
 	result.Buckets = boundedDeleteBuckets(buckets)
 	return result, true, false
+}
+
+func compatibleDeleteVerification(first, next DeleteVerificationMetrics) bool {
+	return first.Enabled == next.Enabled &&
+		first.PreValidationEnabled == next.PreValidationEnabled &&
+		first.PostVerificationEnabled == next.PostVerificationEnabled &&
+		first.PreValidationComplete == next.PreValidationComplete &&
+		first.PostVerificationComplete == next.PostVerificationComplete &&
+		first.PostVerificationSkipped == next.PostVerificationSkipped &&
+		first.TimeoutSeconds == next.TimeoutSeconds && first.Notice == next.Notice
+}
+
+func resetDeleteVerificationCounters(verification *DeleteVerificationMetrics) {
+	verification.PreValidationFailures = 0
+	verification.VerifiedAbsent = 0
+	verification.StillPresent = 0
+	verification.Unresolved = 0
+	verification.AcceptedAbsent = 0
+	verification.AcceptedPresent = 0
+	verification.AcceptedUnresolved = 0
+	verification.FailedAbsent = 0
+	verification.FailedPresent = 0
+	verification.FailedUnresolved = 0
+	verification.OperationalUnresolvedAbsent = 0
+	verification.OperationalUnresolvedPresent = 0
+	verification.OperationalUnresolvedUnresolved = 0
+	verification.UnattemptedAbsent = 0
+	verification.UnattemptedPresent = 0
+	verification.UnattemptedUnresolved = 0
+	verification.CorrectnessFailures = 0
+	verification.InconclusiveFailures = 0
+	verification.Residual = 0
+}
+
+func addDeleteVerification(result *DeleteVerificationMetrics, item DeleteVerificationMetrics) {
+	result.PreValidationFailures += item.PreValidationFailures
+	result.VerifiedAbsent += item.VerifiedAbsent
+	result.StillPresent += item.StillPresent
+	result.Unresolved += item.Unresolved
+	result.AcceptedAbsent += item.AcceptedAbsent
+	result.AcceptedPresent += item.AcceptedPresent
+	result.AcceptedUnresolved += item.AcceptedUnresolved
+	result.FailedAbsent += item.FailedAbsent
+	result.FailedPresent += item.FailedPresent
+	result.FailedUnresolved += item.FailedUnresolved
+	result.OperationalUnresolvedAbsent += item.OperationalUnresolvedAbsent
+	result.OperationalUnresolvedPresent += item.OperationalUnresolvedPresent
+	result.OperationalUnresolvedUnresolved += item.OperationalUnresolvedUnresolved
+	result.UnattemptedAbsent += item.UnattemptedAbsent
+	result.UnattemptedPresent += item.UnattemptedPresent
+	result.UnattemptedUnresolved += item.UnattemptedUnresolved
+	result.CorrectnessFailures += item.CorrectnessFailures
+	result.InconclusiveFailures += item.InconclusiveFailures
+	result.Residual += item.Residual
+	result.RemovalConfirmed = result.RemovalConfirmed && item.RemovalConfirmed
 }
 
 func compatibleDeleteFailurePolicy(left, right DeleteFailurePolicy) bool {

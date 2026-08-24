@@ -9,8 +9,10 @@ package constants
 const (
 	ResultsManifestFileName = "index.json"
 	ResultsMetadataFileName = "spt_run_params.json"
-	// ResultsDeleteArtifactsVersion marks runs that require the complete DELETE evidence set.
-	ResultsDeleteArtifactsVersion   = 1
+	// ResultsDeleteArtifactsVersionV1 preserves Ticket 13 operational evidence compatibility.
+	ResultsDeleteArtifactsVersionV1 = 1
+	// ResultsDeleteArtifactsVersion adds selection-indexed verification evidence.
+	ResultsDeleteArtifactsVersion   = 2
 	ResultsPreparedDefaultsFileName = "defaults.yaml"
 	ResultsSummaryFilePrefix        = "spt_"
 	ResultsSummaryFileSuffix        = "_results_summary.txt"
@@ -33,6 +35,7 @@ const (
 	ResultsArtifactSuffixDeleteMetricsTotal    = "delete.metrics.total.csv"
 	ResultsArtifactSuffixDeleteRequests        = "delete.requests.csv"
 	ResultsArtifactSuffixDeleteObjects         = "delete.objects.csv"
+	ResultsArtifactSuffixDeleteVerification    = "delete.verification.csv"
 	ResultsArtifactSuffixDeleteCompletion      = "delete.complete.json"
 	ResultsArtifactSuffixWritten               = "written.csv"
 	ResultsArtifactSuffixWrittenCompletion     = "written.complete.json"

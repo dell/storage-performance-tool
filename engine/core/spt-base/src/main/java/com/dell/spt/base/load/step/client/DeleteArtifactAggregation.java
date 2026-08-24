@@ -38,7 +38,11 @@ import org.apache.commons.csv.CSVRecord;
 
 /** Validates and atomically publishes exact multi-node DELETE evidence with fixed working memory. */
 final class DeleteArtifactAggregation {
-	record NodeSource(Path totals, Path requests, Path objects, Path residual) {}
+	record NodeSource(Path totals, Path requests, Path objects, Path residual, Path verification) {
+		NodeSource(final Path totals, final Path requests, final Path objects, final Path residual) {
+			this(totals, requests, objects, residual, null);
+		}
+	}
 
 	private static final class CsvCursor implements AutoCloseable {
 		private final CSVParser parser;
@@ -93,6 +97,9 @@ final class DeleteArtifactAggregation {
 					.thenComparing(row -> row.get(2));
 	private static final Comparator<List<String>> OBJECT_MANIFEST_ORDER = (left, right) -> compareManifest(
 					left, 4, 5, 6, 7, right, 4, 5, 6, 7);
+	private static final Comparator<List<String>> VERIFICATION_TARGET_ORDER = Comparator.comparing(row -> row.get(1));
+	private static final Comparator<List<String>> VERIFICATION_MANIFEST_ORDER = (left, right) -> compareManifest(
+					left, 3, 4, 5, 6, right, 3, 4, 5, 6);
 	private static final Comparator<List<String>> MANIFEST_ORDER = (left, right) -> compareManifest(
 					left, 0, 1, 2, 3, right, 0, 1, 2, 3);
 
@@ -186,6 +193,11 @@ final class DeleteArtifactAggregation {
 		final List<Path> normalizedRequests = new ArrayList<>(sources.size());
 		final List<Path> objectSources = new ArrayList<>(sources.size());
 		final List<Path> residualSources = new ArrayList<>(sources.size());
+		final List<Path> verificationSources = new ArrayList<>(sources.size());
+		final boolean verificationEvidence = sources.stream().allMatch(source -> source.verification() != null);
+		if (!verificationEvidence && sources.stream().anyMatch(source -> source.verification() != null)) {
+			throw terminal(stepId, "DELETE verification evidence contributor set is incomplete", null);
+		}
 		for (int nodeIndex = 0; nodeIndex < sources.size(); nodeIndex++) {
 			final NodeSource source = sources.get(nodeIndex);
 			final List<String> totals = readSingleTotals(source.totals());
@@ -202,9 +214,12 @@ final class DeleteArtifactAggregation {
 			normalizedRequests.add(validated.normalizedRequests());
 			objectSources.add(source.objects());
 			residualSources.add(source.residual());
+			if (verificationEvidence) {
+				verificationSources.add(source.verification());
+			}
 		}
 
-		final Map<String, Path> staging = createStaging(outputDirectory);
+		final Map<String, Path> staging = createStaging(outputDirectory, verificationEvidence);
 		FailurePreservingCleanup.always(() -> {
 			final long requestRows = DeleteCsvExternalSorter.sort(
 							normalizedRequests, DeleteArtifacts.REQUESTS_HEADER, REQUEST_ORDER,
@@ -215,6 +230,13 @@ final class DeleteArtifactAggregation {
 			final long residualRows = DeleteCsvExternalSorter.sort(
 							residualSources, IntegrityManifestItemInput.HEADER, MANIFEST_ORDER,
 							staging.get(DeleteArtifacts.RESIDUAL_FILE_NAME), tempDirectory, "residual");
+			final long verificationRows = verificationEvidence
+							? DeleteCsvExternalSorter.sort(
+											verificationSources, DeleteArtifacts.VERIFICATION_HEADER,
+											VERIFICATION_TARGET_ORDER,
+											staging.get(DeleteArtifacts.VERIFICATION_FILE_NAME), tempDirectory,
+											"verification-target")
+							: 0;
 			final Path objectsByManifest = Files.createTempFile(tempDirectory, "objects-manifest-", ".csv");
 			DeleteCsvExternalSorter.sort(
 							objectSources, DeleteArtifacts.OBJECTS_HEADER, OBJECT_MANIFEST_ORDER,
@@ -223,6 +245,15 @@ final class DeleteArtifactAggregation {
 			DeleteCsvExternalSorter.sort(
 							objectSources, DeleteArtifacts.OBJECTS_HEADER, OBJECT_REQUEST_ORDER,
 							objectsByRequest, tempDirectory, "objects-request");
+			final Path verificationByManifest = verificationEvidence
+							? Files.createTempFile(tempDirectory, "verification-manifest-", ".csv")
+							: null;
+			if (verificationEvidence) {
+				DeleteCsvExternalSorter.sort(
+								verificationSources, DeleteArtifacts.VERIFICATION_HEADER,
+								VERIFICATION_MANIFEST_ORDER, verificationByManifest, tempDirectory,
+								"verification-manifest");
+			}
 
 			validateUnique(
 							stepId, staging.get(DeleteArtifacts.REQUESTS_FILE_NAME),
@@ -237,6 +268,16 @@ final class DeleteArtifactAggregation {
 							stepId, staging.get(DeleteArtifacts.REQUESTS_FILE_NAME), objectsByRequest);
 			validateResidual(
 							stepId, objectsByManifest, staging.get(DeleteArtifacts.RESIDUAL_FILE_NAME));
+			if (verificationEvidence) {
+				validateUnique(
+								stepId, staging.get(DeleteArtifacts.VERIFICATION_FILE_NAME),
+								DeleteArtifacts.VERIFICATION_HEADER, 1, "verification target");
+				validateVerification(
+								stepId, staging.get(DeleteArtifacts.OBJECTS_FILE_NAME),
+								staging.get(DeleteArtifacts.VERIFICATION_FILE_NAME),
+								verificationByManifest, staging.get(DeleteArtifacts.RESIDUAL_FILE_NAME),
+								objectRows, verificationRows);
+			}
 
 			final List<String> aggregateTotals = new ArrayList<>(identity);
 			for (final long counter : aggregateCounters) {
@@ -253,7 +294,8 @@ final class DeleteArtifactAggregation {
 							staging.get(DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME).toFile(),
 							retainedSelectionProvenance(selectionProvenance, selection));
 			writeCompletion(
-							staging, identity, nodeIds, requestRows, objectRows, residualRows);
+							staging, identity, nodeIds, requestRows, objectRows, residualRows,
+							verificationEvidence, verificationRows);
 			publishStaging(staging, outputDirectory);
 			return null;
 		}, () -> {
@@ -351,7 +393,7 @@ final class DeleteArtifactAggregation {
 		final long partialBatches = nonnegative(totals.get(21));
 		if (requestRows != attemptedRequests
 						|| objectRows != selected
-						|| residualRows != addExact(failed, unattempted, unresolved)
+						|| residualRows > selected
 						|| requestOutcomes[0] != nonnegative(totals.get(8))
 						|| requestOutcomes[1] != nonnegative(totals.get(9))
 						|| requestOutcomes[2] != nonnegative(totals.get(10))
@@ -501,27 +543,127 @@ final class DeleteArtifactAggregation {
 		try (CsvCursor objects = new CsvCursor(objectsByManifest, DeleteArtifacts.OBJECTS_HEADER);
 						CsvCursor residual = new CsvCursor(residualPath, IntegrityManifestItemInput.HEADER)) {
 			boolean hasResidual = residual.advance();
+			while (objects.advance() && hasResidual) {
+				final int comparison = compareManifest(
+								objects.current, 4, 5, 6, 7,
+								residual.current, 0, 1, 2, 3);
+				if (comparison > 0) {
+					throw terminal(stepId, "DELETE residual contains an identity outside selection", null);
+				}
+				if (comparison == 0) {
+					hasResidual = residual.advance();
+				}
+			}
+			if (hasResidual) {
+				throw terminal(stepId, "DELETE residual contains an identity outside selection", null);
+			}
+		}
+	}
+
+	private static void validateVerification(
+					final String stepId,
+					final Path objectsByTarget,
+					final Path verificationByTarget,
+					final Path verificationByManifest,
+					final Path residualPath,
+					final long objectRows,
+					final long verificationRows)
+					throws IOException {
+		if (objectRows != verificationRows) {
+			throw terminal(stepId, "DELETE verification does not cover every selected identity", null);
+		}
+		try (CsvCursor objects = new CsvCursor(objectsByTarget, DeleteArtifacts.OBJECTS_HEADER);
+						CsvCursor verification = new CsvCursor(
+										verificationByTarget, DeleteArtifacts.VERIFICATION_HEADER)) {
 			while (objects.advance()) {
-				if ("accepted".equals(objects.current.get(8))) {
+				if (!verification.advance()) {
+					throw terminal(stepId, "DELETE verification target evidence is incomplete", null);
+				}
+				validateVerificationRow(stepId, objects.current, verification.current);
+			}
+			if (verification.advance()) {
+				throw terminal(stepId, "DELETE verification target evidence exceeds selection", null);
+			}
+		}
+		try (CsvCursor verification = new CsvCursor(
+						verificationByManifest, DeleteArtifacts.VERIFICATION_HEADER);
+						CsvCursor residual = new CsvCursor(residualPath, IntegrityManifestItemInput.HEADER)) {
+			boolean hasResidual = residual.advance();
+			while (verification.advance()) {
+				final boolean expectedResidual = canonicalBoolean(
+								stepId, verification.current.get(14), "verification residual");
+				if (!expectedResidual) {
 					continue;
 				}
 				if (!hasResidual || compareManifest(
-								objects.current, 4, 5, 6, 7,
+								verification.current, 3, 4, 5, 6,
 								residual.current, 0, 1, 2, 3) != 0) {
-					throw terminal(
-									stepId,
-									"DELETE residual does not match failed/unattempted/unresolved targets",
-									null);
+					throw terminal(stepId, "DELETE residual disagrees with verification evidence", null);
 				}
 				hasResidual = residual.advance();
 			}
 			if (hasResidual) {
-				throw terminal(
-								stepId,
-								"DELETE residual does not match failed/unattempted/unresolved targets",
-								null);
+				throw terminal(stepId, "DELETE residual exceeds verification evidence", null);
 			}
 		}
+	}
+
+	private static void validateVerificationRow(
+					final String stepId, final List<String> object, final List<String> verification) {
+		if (verification.size() != DeleteArtifacts.VERIFICATION_HEADER.size()
+						|| !DeleteArtifacts.SCHEMA_VERSION.equals(verification.get(0))
+						|| !object.get(2).equals(verification.get(1))
+						|| !object.get(3).equals(verification.get(2))
+						|| !object.subList(4, 8).equals(verification.subList(3, 7))
+						|| !object.get(8).equals(verification.get(7))) {
+			throw terminal(stepId, "DELETE verification identity or operational outcome disagrees", null);
+		}
+		final boolean preEnabled = canonicalBoolean(
+						stepId, verification.get(8), "pre-verification enablement");
+		final String prePresence = verification.get(9);
+		final boolean postEnabled = canonicalBoolean(
+						stepId, verification.get(10), "post-verification enablement");
+		final String postPresence = verification.get(11);
+		if (!verificationPresence(prePresence) || !verificationPresence(postPresence)) {
+			throw terminal(stepId, "DELETE verification contains an invalid presence classification", null);
+		}
+		if (preEnabled == "disabled".equals(prePresence)
+						|| postEnabled == "disabled".equals(postPresence)) {
+			throw terminal(stepId, "DELETE verification enablement and presence disagree", null);
+		}
+		final String outcome = verification.get(7);
+		final boolean correctness = canonicalBoolean(
+						stepId, verification.get(12), "verification correctness");
+		final boolean inconclusive = canonicalBoolean(
+						stepId, verification.get(13), "verification inconclusive");
+		final boolean residual = canonicalBoolean(
+						stepId, verification.get(14), "verification residual");
+		final boolean expectedCorrectness = "accepted".equals(outcome)
+						&& postEnabled && !"unattempted".equals(postPresence)
+						&& !"absent".equals(postPresence);
+		final boolean expectedInconclusive = !"unattempted".equals(outcome)
+						&& "unresolved".equals(postPresence);
+		final boolean expectedResidual = postEnabled && !"unattempted".equals(postPresence)
+						? !"absent".equals(postPresence)
+						: !"accepted".equals(outcome);
+		if (correctness != expectedCorrectness || inconclusive != expectedInconclusive
+						|| residual != expectedResidual) {
+			throw terminal(stepId, "DELETE verification classifications do not reconcile", null);
+		}
+	}
+
+	private static boolean verificationPresence(final String value) {
+		return "disabled".equals(value) || "present".equals(value)
+						|| "absent".equals(value) || "unresolved".equals(value)
+						|| "unattempted".equals(value);
+	}
+
+	private static boolean canonicalBoolean(
+					final String stepId, final String value, final String field) {
+		if (!"true".equals(value) && !"false".equals(value)) {
+			throw terminal(stepId, "DELETE " + field + " is not canonical", null);
+		}
+		return Boolean.parseBoolean(value);
 	}
 
 	private static void validateUnique(
@@ -546,17 +688,11 @@ final class DeleteArtifactAggregation {
 		}
 	}
 
-	private static Map<String, Path> createStaging(final Path outputDirectory) throws IOException {
+	private static Map<String, Path> createStaging(
+					final Path outputDirectory, final boolean verificationEvidence) throws IOException {
 		final Map<String, Path> staging = new LinkedHashMap<>();
 		try {
-			for (final String name : List.of(
-							DeleteArtifacts.METRICS_FILE_NAME,
-							DeleteArtifacts.REQUESTS_FILE_NAME,
-							DeleteArtifacts.OBJECTS_FILE_NAME,
-							DeleteArtifacts.RESIDUAL_FILE_NAME,
-							DeleteArtifacts.SELECTION_FILE_NAME,
-							DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME,
-							DeleteArtifacts.COMPLETION_FILE_NAME)) {
+			for (final String name : artifactNames(verificationEvidence, true)) {
 				staging.put(name, Files.createTempFile(outputDirectory, "." + name + ".", ".staging"));
 			}
 			return staging;
@@ -578,10 +714,12 @@ final class DeleteArtifactAggregation {
 					final List<String> nodeIds,
 					final long requestRows,
 					final long objectRows,
-					final long residualRows)
+					final long residualRows,
+					final boolean verificationEvidence,
+					final long verificationRows)
 					throws IOException {
 		final Map<String, Object> completion = new LinkedHashMap<>();
-		completion.put("version", 1);
+		completion.put("version", verificationEvidence ? 2 : 1);
 		completion.put("status", "complete");
 		completion.put("schema_version", DeleteArtifacts.SCHEMA_VERSION);
 		completion.put("mode", identity.get(4));
@@ -591,14 +729,11 @@ final class DeleteArtifactAggregation {
 		completion.put("request_rows", requestRows);
 		completion.put("target_rows", objectRows);
 		completion.put("residual_rows", residualRows);
+		if (verificationEvidence) {
+			completion.put("verification_rows", verificationRows);
+		}
 		final Map<String, String> sha256 = new LinkedHashMap<>();
-		for (final String name : List.of(
-						DeleteArtifacts.METRICS_FILE_NAME,
-						DeleteArtifacts.REQUESTS_FILE_NAME,
-						DeleteArtifacts.OBJECTS_FILE_NAME,
-						DeleteArtifacts.RESIDUAL_FILE_NAME,
-						DeleteArtifacts.SELECTION_FILE_NAME,
-						DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME)) {
+		for (final String name : artifactNames(verificationEvidence, false)) {
 			sha256.put(name, sha256(staging.get(name)));
 		}
 		completion.put("sha256", sha256);
@@ -608,18 +743,31 @@ final class DeleteArtifactAggregation {
 
 	private static void publishStaging(
 					final Map<String, Path> staging, final Path outputDirectory) throws IOException {
-		for (final String name : List.of(
-						DeleteArtifacts.METRICS_FILE_NAME,
-						DeleteArtifacts.REQUESTS_FILE_NAME,
-						DeleteArtifacts.OBJECTS_FILE_NAME,
-						DeleteArtifacts.RESIDUAL_FILE_NAME,
-						DeleteArtifacts.SELECTION_FILE_NAME,
-						DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME)) {
+		final boolean verificationEvidence = staging.containsKey(DeleteArtifacts.VERIFICATION_FILE_NAME);
+		for (final String name : artifactNames(verificationEvidence, false)) {
 			publishRetrySafe(staging.get(name), outputDirectory.resolve(name));
 		}
 		publishRetrySafe(
 						staging.get(DeleteArtifacts.COMPLETION_FILE_NAME),
 						outputDirectory.resolve(DeleteArtifacts.COMPLETION_FILE_NAME));
+	}
+
+	private static List<String> artifactNames(
+					final boolean verificationEvidence, final boolean includeCompletion) {
+		final List<String> names = new ArrayList<>(List.of(
+						DeleteArtifacts.METRICS_FILE_NAME,
+						DeleteArtifacts.REQUESTS_FILE_NAME,
+						DeleteArtifacts.OBJECTS_FILE_NAME,
+						DeleteArtifacts.RESIDUAL_FILE_NAME,
+						DeleteArtifacts.SELECTION_FILE_NAME,
+						DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME));
+		if (verificationEvidence) {
+			names.add(DeleteArtifacts.VERIFICATION_FILE_NAME);
+		}
+		if (includeCompletion) {
+			names.add(DeleteArtifacts.COMPLETION_FILE_NAME);
+		}
+		return names;
 	}
 
 	private static IntegrityManifestCompletion validateSelectionProvenance(

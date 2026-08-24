@@ -148,6 +148,10 @@ func GenerateDeleteScenario(params Params) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	verification, err := resolveDeleteVerification(params)
+	if err != nil {
+		return "", err
+	}
 	duration := strings.TrimSpace(params.Duration)
 	if duration != "" && params.ObjectCount != 0 {
 		return "", fmt.Errorf("delete object count and duration are mutually exclusive")
@@ -163,10 +167,10 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		return "", fmt.Errorf("delete existing-prefix and explicit-manifest sources are mutually exclusive")
 	}
 	if params.DeleteExisting {
-		return generateExistingPrefixDeleteScenario(params, selectionOrder, failureBudget)
+		return generateExistingPrefixDeleteScenario(params, selectionOrder, failureBudget, verification)
 	}
 	if strings.TrimSpace(params.ItemsFile) == "" {
-		return generateSeededDeleteScenario(params, selectionOrder, failureBudget)
+		return generateSeededDeleteScenario(params, selectionOrder, failureBudget, verification)
 	}
 	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
 		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
@@ -183,6 +187,7 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		SelectionOrder: selectionOrder,
 		Duration:       duration,
 		FailureBudget:  failureBudget,
+		Verification:   verification,
 	})
 }
 
@@ -190,6 +195,7 @@ func generateExistingPrefixDeleteScenario(
 	params Params,
 	selectionOrder string,
 	failureBudget deleteFailureBudgetTemplateData,
+	verification deleteVerificationTemplateData,
 ) (string, error) {
 	if params.Cleanup {
 		return "", fmt.Errorf("delete existing-prefix mode cannot use cleanup because SPT did not create the selected objects")
@@ -244,6 +250,7 @@ func generateExistingPrefixDeleteScenario(
 		SelectionOrder: selectionOrder,
 		Duration:       strings.TrimSpace(params.Duration),
 		FailureBudget:  failureBudget,
+		Verification:   verification,
 	})
 }
 
@@ -251,6 +258,7 @@ func generateSeededDeleteScenario(
 	params Params,
 	selectionOrder string,
 	failureBudget deleteFailureBudgetTemplateData,
+	verification deleteVerificationTemplateData,
 ) (string, error) {
 	if strings.TrimSpace(params.Bucket) == "" {
 		return "", fmt.Errorf("delete seeded mode requires a bucket")
@@ -301,7 +309,27 @@ func generateSeededDeleteScenario(
 		SelectionOrder: selectionOrder,
 		Duration:       duration,
 		FailureBudget:  failureBudget,
+		Verification:   verification,
 	})
+}
+
+func resolveDeleteVerification(params Params) (deleteVerificationTemplateData, error) {
+	timeout := params.VerificationTimeout
+	if timeout == 0 {
+		timeout = DefaultDeleteVerificationTimeout
+	}
+	if timeout <= 0 || timeout%time.Millisecond != 0 {
+		return deleteVerificationTemplateData{}, fmt.Errorf("delete verification timeout must be a positive whole number of milliseconds")
+	}
+	postVerification := params.VerifyDelete
+	if params.ValidateDeleteInventory && !params.VerifyDeleteExplicit {
+		postVerification = true
+	}
+	return deleteVerificationTemplateData{
+		PreValidation:             params.ValidateDeleteInventory,
+		PostVerification:          postVerification,
+		VerificationTimeoutMillis: timeout.Milliseconds(),
+	}, nil
 }
 
 func resolveDeleteFailureBudget(params Params) (deleteFailureBudgetTemplateData, error) {

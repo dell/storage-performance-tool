@@ -17,6 +17,7 @@ class DeleteArtifactLoggerRegistrationTest {
 						Loggers.DELETE_REQUESTS.getName(), "delete.requests.csv",
 						Loggers.DELETE_OBJECTS.getName(), "delete.objects.csv",
 						Loggers.DELETE_RESIDUAL.getName(), "items.csv",
+						Loggers.DELETE_VERIFICATION.getName(), "delete.verification.csv",
 						Loggers.DELETE_SELECTION.getName(), "verify-input.csv",
 						Loggers.DELETE_SELECTION_COMPLETION.getName(), "verify-input.complete.json",
 						Loggers.DELETE_COMPLETION.getName(), "delete.complete.json");

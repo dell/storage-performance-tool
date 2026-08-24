@@ -160,6 +160,39 @@ func TestDeleteBatchSizeFlagIsDeleteOnly(t *testing.T) {
 	}
 }
 
+func TestDeleteVerificationFlagValidation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		workload   string
+		flag       string
+		value      string
+		wantDetail string
+	}{
+		{name: "validation enabled", workload: WorkloadTypeDelete, flag: flagValidateInventory, value: "true"},
+		{name: "post verification enabled", workload: WorkloadTypeDelete, flag: flagVerifyDelete, value: "true"},
+		{name: "millisecond timeout", workload: WorkloadTypeDelete, flag: flagVerificationTimeout, value: "1500ms"},
+		{name: "zero timeout", workload: WorkloadTypeDelete, flag: flagVerificationTimeout, value: "0", wantDetail: "greater than zero"},
+		{name: "sub-millisecond timeout", workload: WorkloadTypeDelete, flag: flagVerificationTimeout, value: "1500us", wantDetail: "whole milliseconds"},
+		{name: "validation is delete only", workload: WorkloadTypeRead, flag: flagValidateInventory, value: "true", wantDetail: "not supported for read"},
+		{name: "verification is delete only", workload: WorkloadTypeRead, flag: flagVerifyDelete, value: "true", wantDetail: "not supported for read"},
+		{name: "timeout is delete only", workload: WorkloadTypeRead, flag: flagVerificationTimeout, value: "15s", wantDetail: "not supported for read"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := deleteValidationCommand(deleteValidationCase{bucket: "owned", batchSize: 1})
+			if err := cmd.Flags().Set(test.flag, test.value); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateRunCommand(cmd, []string{test.workload})
+			if test.wantDetail == "" && err != nil {
+				t.Fatalf("ValidateRunCommand() error = %v", err)
+			}
+			if test.wantDetail != "" && (err == nil || !strings.Contains(err.Error(), test.wantDetail)) {
+				t.Fatalf("ValidateRunCommand() error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
+}
+
 func TestDeleteExistingSourceFlagsAreDeleteOnly(t *testing.T) {
 	for _, flag := range []string{flagDeleteExisting, flagAllowEmptyPrefix} {
 		cmd := deleteValidationCommand(deleteValidationCase{bucket: "b", batchSize: 2})
@@ -216,6 +249,9 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "")
 	cmd.Flags().Float64(flagMaxFailurePercent, 0, "")
 	cmd.Flags().Duration(flagFailureBudgetGrace, scenario.DefaultFailureBudgetGrace, "")
+	cmd.Flags().Bool(flagValidateInventory, false, "")
+	cmd.Flags().Bool(flagVerifyDelete, false, "")
+	cmd.Flags().Duration(flagVerificationTimeout, scenario.DefaultDeleteVerificationTimeout, "")
 	if test.deleteExisting {
 		_ = cmd.Flags().Set("delete-existing", "true")
 	}

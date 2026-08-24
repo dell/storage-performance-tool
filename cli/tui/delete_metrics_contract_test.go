@@ -580,6 +580,92 @@ func TestMetricsAggregatorUsesControllerFailureBudgetDenominator(t *testing.T) {
 	}
 }
 
+func TestMetricsAggregatorSumsEnabledDeleteVerificationClassifications(t *testing.T) {
+	nodeA := deleteNodeMetric("batch", 2, 1, 2)
+	nodeA.Delete.Verification = DeleteVerificationMetrics{
+		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+		PreValidationComplete: true, PostVerificationComplete: true,
+		TimeoutSeconds: 30, VerifiedAbsent: 2, AcceptedAbsent: 2,
+		RemovalConfirmed: true,
+	}
+	nodeA.Delete.Phases.PreValidationSeconds = float64Pointer(0.4)
+	nodeA.Delete.Phases.PostVerificationSeconds = float64Pointer(0.8)
+
+	nodeB := deleteNodeMetric("batch", 2, 1, 2)
+	nodeB.Delete.Verification = DeleteVerificationMetrics{
+		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+		PreValidationComplete: true, PostVerificationComplete: true,
+		TimeoutSeconds: 30, VerifiedAbsent: 1, StillPresent: 1,
+		AcceptedAbsent: 1, AcceptedPresent: 1, CorrectnessFailures: 1, Residual: 1,
+		RemovalConfirmed: false,
+	}
+	nodeB.Delete.Phases.PreValidationSeconds = float64Pointer(0.6)
+	nodeB.Delete.Phases.PostVerificationSeconds = float64Pointer(0.5)
+
+	got := NewMetricsAggregator().Aggregate(map[string]*PerformanceMetric{"a": nodeA, "b": nodeB})
+	if got == nil || got.Delete == nil {
+		t.Fatal("enabled DELETE verification metrics were not aggregated")
+	}
+	verification := got.Delete.Verification
+	if verification.VerifiedAbsent != 3 || verification.StillPresent != 1 ||
+		verification.AcceptedAbsent != 3 || verification.AcceptedPresent != 1 ||
+		verification.CorrectnessFailures != 1 || verification.Residual != 1 ||
+		verification.RemovalConfirmed {
+		t.Fatalf("aggregate verification classifications = %+v", verification)
+	}
+	if got.Delete.Phases.PreValidationSeconds == nil || *got.Delete.Phases.PreValidationSeconds != 0.6 ||
+		got.Delete.Phases.PostVerificationSeconds == nil || *got.Delete.Phases.PostVerificationSeconds != 0.8 {
+		t.Fatalf("aggregate verification phase timings = %+v", got.Delete.Phases)
+	}
+}
+
+func TestMetricsAggregatorPreservesStrictPreValidationAbortCompletion(t *testing.T) {
+	strictAbortNode := func(preValidationFailures int64) *PerformanceMetric {
+		node := deleteNodeMetric("single", 1, 1, 1)
+		zero, pre, total := 0.0, 0.25, 0.25
+		node.Delete.Requests = DeleteRequestMetrics{}
+		node.Delete.Objects = DeleteObjectMetrics{Selected: 1, Unattempted: 1}
+		node.Delete.Batches = DeleteBatchMetrics{ConfiguredSize: 1}
+		node.Delete.Completion = DeleteCompletionMetrics{
+			RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true,
+		}
+		node.Delete.Versions = DeleteVersionMetrics{CurrentKey: 1}
+		node.Delete.Buckets = []DeleteBucketMetrics{{Bucket: "bucket-b", Selected: 1}}
+		node.Delete.Phases = DeletePhaseMetrics{
+			PreValidationSeconds: &pre, ScheduledDeleteSeconds: &zero,
+			DrainSeconds: &zero, TotalWallSeconds: &total,
+		}
+		node.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeFailed
+		node.Delete.Timing.Latency = testTimingStat(0, 0)
+		node.Delete.Timing.Duration = testTimingStat(0, 0)
+		node.Delete.Verification = DeleteVerificationMetrics{
+			Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+			PreValidationComplete: true, PostVerificationSkipped: true,
+			TimeoutSeconds: 30, PreValidationFailures: preValidationFailures,
+			Notice: deletemetrics.PostVerificationSkippedNotice,
+		}
+		return node
+	}
+
+	got := NewMetricsAggregator().Aggregate(map[string]*PerformanceMetric{
+		"passing-slice": strictAbortNode(0),
+		"failing-slice": strictAbortNode(1),
+	})
+	if got == nil || got.Delete == nil {
+		t.Fatalf("strict pre-validation abort was not aggregated: %+v", got)
+	}
+	if got.Delete.Verification.PreValidationFailures != 1 ||
+		!got.Delete.Verification.PostVerificationSkipped ||
+		got.Delete.Verification.PostVerificationComplete ||
+		got.Delete.Objects.Unattempted != 2 {
+		t.Fatalf("distributed strict pre-validation abort = %+v", got.Delete)
+	}
+}
+
+func float64Pointer(value float64) *float64 {
+	return &value
+}
+
 func deleteNodeMetric(mode string, batchSize int, requests, objects int64) *PerformanceMetric {
 	now := time.Now()
 	deleteMetrics := testDeleteMetrics(mode, batchSize, requests, objects)

@@ -28,6 +28,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
 import org.apache.logging.log4j.Level;
@@ -55,6 +61,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private final Object durationAdmissionClose = new Object();
 	private final Object durationDeadlineEnforcement = new Object();
 	private volatile boolean durationAdmissionClosedLocally;
+	private volatile CompletableFuture<Void> deletePreValidationTask;
+	private volatile CompletableFuture<Void> deletePostVerificationTask;
 
 	protected IntSupplier actualConcurrencyGauge(final int index, final OpType opType) {
 		return () -> stepContexts.get(index).activeOpCount();
@@ -86,6 +94,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		long unresolved = 0;
 		long protocolFailed = 0;
 		long fullSuccessfulRequests = 0;
+		long preValidationFailed = 0;
+		long verificationCorrectnessFailed = 0;
+		long verificationInconclusive = 0;
 		boolean reconciled = true;
 		for (final LoadStepContext context : currentContexts) {
 			if (context == null) {
@@ -104,6 +115,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			protocolFailed = Math.addExact(protocolFailed, snapshot.protocolFailed());
 			fullSuccessfulRequests = Math.addExact(
 							fullSuccessfulRequests, snapshot.fullSuccessfulRequests());
+			preValidationFailed = Math.addExact(preValidationFailed, snapshot.preValidationFailed());
+			verificationCorrectnessFailed = Math.addExact(
+							verificationCorrectnessFailed, snapshot.verificationCorrectnessFailed());
+			verificationInconclusive = Math.addExact(
+							verificationInconclusive, snapshot.verificationInconclusive());
 			reconciled &= snapshot.reconciled();
 		}
 		return new DeleteObjectLifecycleSnapshot(
@@ -115,6 +131,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						unresolved,
 						protocolFailed,
 						fullSuccessfulRequests,
+						preValidationFailed,
+						verificationCorrectnessFailed,
+						verificationInconclusive,
 						reconciled);
 	}
 
@@ -169,6 +188,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void resetDurationLifecycleForStart() {
+		deletePreValidationTask = null;
+		deletePostVerificationTask = null;
 		if (standaloneDeleteDurationMode()) {
 			cancelDurationDeadlineGuard();
 			cancelDurationDrainDeadlineGuard();
@@ -731,6 +752,130 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		durationTerminalValidationDelegated = true;
 		invokeDurationContextPhase(
 						"validate terminal state", LoadStepContext::validateTerminalState);
+	}
+
+	@Override
+	public final synchronized void startDeleteInventoryPreValidation() {
+		if (deletePreValidationTask == null) {
+			deletePreValidationTask = standaloneDeletePreValidationEnabled()
+							? startDeleteInventoryPhase(
+											"pre-validation", LoadStepContext::validateDeleteInventoryBeforeAdmission)
+							: CompletableFuture.completedFuture(null);
+		}
+	}
+
+	@Override
+	public final boolean isDeleteInventoryPreValidationComplete() {
+		return deleteInventoryPhaseComplete(
+						deletePreValidationTask, "pre-validation was not started");
+	}
+
+	@Override
+	public final synchronized void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure() {
+		invokeDurationContextPhase(
+						"record distributed strict pre-validation abort",
+						LoadStepContext::skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure,
+						true);
+	}
+
+	@Override
+	public final synchronized void verifyDeleteInventoryForStepStop() {
+		if (deletePostVerificationTask == null) {
+			deletePostVerificationTask = startDeleteInventoryPhase(
+							"post-verification", LoadStepContext::verifyDeleteInventoryAfterDrain);
+		}
+	}
+
+	@Override
+	public final boolean isDeleteInventoryVerificationCompleteForStepStop() {
+		final CompletableFuture<Void> task = deletePostVerificationTask;
+		try {
+			return deleteInventoryPhaseComplete(task, "post-verification was not started");
+		} catch (final RuntimeException failure) {
+			synchronized (this) {
+				if (deletePostVerificationTask == task) {
+					deletePostVerificationTask = null;
+				}
+			}
+			throw failure;
+		}
+	}
+
+	private CompletableFuture<Void> startDeleteInventoryPhase(
+					final String phase, final DurationContextPhase action) {
+		final CompletableFuture<Void> task = new CompletableFuture<>();
+		Thread.ofPlatform()
+						.daemon(true)
+						.name("spt-delete-" + phase + "-" + loadStepId())
+						.start(() -> {
+							try {
+								invokeUnboundedDeleteInventoryContextPhase(phase, action);
+								task.complete(null);
+							} catch (final Throwable failure) {
+								task.completeExceptionally(failure);
+							}
+						});
+		return task;
+	}
+
+	private void invokeUnboundedDeleteInventoryContextPhase(
+					final String phase, final DurationContextPhase action) {
+		final List<LoadStepContext> activeContexts = stepContexts.stream()
+						.filter(Objects::nonNull)
+						.toList();
+		if (activeContexts.isEmpty()) {
+			return;
+		}
+		IntegrityTerminalException phaseFailure = null;
+		try (ExecutorService executor = Executors.newThreadPerTaskExecutor(
+						Thread.ofPlatform().daemon().name("spt-delete-context-" + phase + "-", 0).factory())) {
+			final List<? extends Future<?>> tasks = activeContexts.stream()
+							.map(context -> executor.submit(() -> {
+								action.execute(context);
+								return null;
+							}))
+							.toList();
+			for (final Future<?> task : tasks) {
+				try {
+					task.get();
+				} catch (final ExecutionException failure) {
+					phaseFailure = appendTerminalFailure(
+									phaseFailure,
+									IntegrityTerminalException.Category.EXECUTION,
+									"Standalone DELETE failed " + phase + " across local input contexts",
+									failure.getCause());
+				} catch (final InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+					throw terminalFailure(
+									IntegrityTerminalException.Category.EXECUTION,
+									"Standalone DELETE " + phase + " was interrupted",
+									interrupted);
+				}
+			}
+		}
+		if (phaseFailure != null) {
+			throw phaseFailure;
+		}
+	}
+
+	private boolean deleteInventoryPhaseComplete(
+					final CompletableFuture<Void> task, final String missingMessage) {
+		if (task == null) {
+			throw new IllegalStateException(missingMessage);
+		}
+		if (!task.isDone()) {
+			return false;
+		}
+		try {
+			task.join();
+			return true;
+		} catch (final CompletionException failure) {
+			final Throwable cause = failure.getCause();
+			if (cause instanceof RuntimeException runtimeFailure) {
+				throw runtimeFailure;
+			}
+			throw new IllegalStateException("DELETE inventory phase failed", cause);
+		}
 	}
 
 	private synchronized void captureDurationTerminalValidation() {

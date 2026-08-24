@@ -77,6 +77,9 @@ load:
       seedMillis: long
       discoveryMillis: long
       workflowStartedEpochNanos: long
+      preValidation: boolean
+      postVerification: boolean
+      verificationTimeoutMillis: long
     failureBudget:
       mode: string
       maxFailedObjects: long

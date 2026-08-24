@@ -37,18 +37,22 @@ type Params struct {
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
 	// Standalone DELETE workload. The public workload remains registry-gated until qualification.
-	DeleteBatchSize        int
-	DeleteExisting         bool
-	AllowEmptyPrefix       bool
-	SelectionSourceCount   int
-	SelectionUniqueCount   int
-	SelectionSelectedCount int
-	SelectionSHA256        string
-	SelectionOrder         string
-	FailureBudgetMode      string
-	MaxFailedObjects       int64
-	MaxFailurePercent      float64
-	FailureBudgetGrace     time.Duration
+	DeleteBatchSize         int
+	DeleteExisting          bool
+	AllowEmptyPrefix        bool
+	SelectionSourceCount    int
+	SelectionUniqueCount    int
+	SelectionSelectedCount  int
+	SelectionSHA256         string
+	SelectionOrder          string
+	FailureBudgetMode       string
+	MaxFailedObjects        int64
+	MaxFailurePercent       float64
+	FailureBudgetGrace      time.Duration
+	ValidateDeleteInventory bool
+	VerifyDelete            bool
+	VerifyDeleteExplicit    bool
+	VerificationTimeout     time.Duration
 
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts  []FileMount

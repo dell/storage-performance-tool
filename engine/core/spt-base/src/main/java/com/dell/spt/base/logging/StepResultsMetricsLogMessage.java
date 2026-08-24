@@ -8,6 +8,8 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_DURATION_DEFINIT
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_LATENCY_DEFINITION_DISPLAY;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OBJECT_UNIT;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OUTCOME_ACCEPTED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_POST_VERIFICATION_NOTICE;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_POST_VERIFICATION_SKIPPED_NOTICE;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_TIMING_MARKER_SOURCE;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_VERIFICATION_NOTICE;
@@ -270,6 +272,16 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 		appendStandardQuantiles(buff, allMetrics.latencySnapshot(), lineSep);
 		buff.append("    Request Duration Quantiles [us]:").append(lineSep);
 		appendStandardQuantiles(buff, allMetrics.durationSnapshot(), lineSep);
+		final var verification = metrics.verification();
+		final boolean verificationEnabled = verification.preValidationEnabled()
+						|| verification.postVerificationEnabled();
+		final String verificationNotice = !verificationEnabled
+						? DELETE_VERIFICATION_NOTICE
+						: verification.postVerificationSkipped()
+										? DELETE_POST_VERIFICATION_SKIPPED_NOTICE
+										: verification.postVerificationEnabled() && !verification.preValidationEnabled()
+														? DELETE_POST_VERIFICATION_NOTICE
+														: "Full inventory validation and verification classifications are reported.";
 		buff
 						.append("    Performance:").append(lineSep)
 						.append("      Object Size:               N/A").append(lineSep)
@@ -279,9 +291,26 @@ public class StepResultsMetricsLogMessage extends LogMessageBase {
 						.append("      Object Latency:            N/A").append(lineSep)
 						.append("    Outcome Terminology:         ").append(DELETE_OUTCOME_ACCEPTED).append(lineSep)
 						.append("    Verification:").append(lineSep)
-						.append("      Enabled:                   false").append(lineSep)
-						.append("      Removal Confirmed:          false").append(lineSep)
-						.append("      Notice:                    ").append(DELETE_VERIFICATION_NOTICE).append(lineSep)
+						.append("      Enabled:                   ").append(verificationEnabled).append(lineSep)
+						.append("      Pre Validation:            ").append(verification.preValidationEnabled()).append(lineSep)
+						.append("      Pre Validation Complete:   ").append(verification.preValidationEnabled()
+										&& verification.preValidationComplete())
+						.append(lineSep)
+						.append("      Post Verification:         ").append(verification.postVerificationEnabled()).append(lineSep)
+						.append("      Post Verification Complete: ").append(verification.postVerificationEnabled()
+										&& verification.postVerificationComplete())
+						.append(lineSep)
+						.append("      Post Verification Skipped: ").append(verification.postVerificationSkipped()).append(lineSep)
+						.append("      Timeout Seconds:           ").append(verification.timeoutMillis() / 1_000.0).append(lineSep)
+						.append("      Pre Validation Failures:   ").append(verification.preValidationFailures()).append(lineSep)
+						.append("      Verified Absent:           ").append(verification.verifiedAbsent()).append(lineSep)
+						.append("      Still Present:             ").append(verification.stillPresent()).append(lineSep)
+						.append("      Unresolved:                ").append(verification.unresolved()).append(lineSep)
+						.append("      Correctness Failures:      ").append(verification.correctnessFailures()).append(lineSep)
+						.append("      Inconclusive Failures:     ").append(verification.inconclusiveFailures()).append(lineSep)
+						.append("      Residual:                  ").append(verification.residualCount()).append(lineSep)
+						.append("      Removal Confirmed:         ").append(verification.removalConfirmed()).append(lineSep)
+						.append("      Notice:                    ").append(verificationNotice).append(lineSep)
 						.append("    Terminal Reconciled:         ").append(metrics.reconciled()).append(lineSep);
 		if (!metrics.buckets().isEmpty()) {
 			buff.append("    Buckets:").append(lineSep);

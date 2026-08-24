@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -100,6 +101,31 @@ final class DeleteMetricsSnapshotTest {
 		assertEquals(-1, aggregate.drainNanos());
 		assertEquals(-1, aggregate.totalWallNanos());
 		assertEquals("running", aggregate.failureOutcome());
+	}
+
+	@Test
+	void aggregatesTheFullVerificationClassificationMatrix() {
+		final var nodeA = snapshot("single", 1, 1, 1, 1, 0, "bucket-a")
+						.toBuilder()
+						.verification(new DeleteVerificationSummary(
+										true, true, true, true, false, 30_000, 0, 1, 0, 0,
+										1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+						.build();
+		final var nodeB = snapshot("single", 1, 1, 1, 1, 0, "bucket-b")
+						.toBuilder()
+						.verification(new DeleteVerificationSummary(
+										true, true, true, true, false, 30_000, 0, 0, 1, 1,
+										0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+						.build();
+
+		final var verification = DeleteMetricsSnapshot.aggregate(List.of(nodeA, nodeB)).verification();
+
+		assertEquals(1, verification.verifiedAbsent());
+		assertEquals(1, verification.stillPresent());
+		assertEquals(1, verification.unresolved());
+		assertEquals(2, verification.correctnessFailures());
+		assertEquals(1, verification.inconclusiveFailures());
+		assertEquals(2, verification.residualCount());
 	}
 
 	private static DeleteMetricsSnapshot snapshot(

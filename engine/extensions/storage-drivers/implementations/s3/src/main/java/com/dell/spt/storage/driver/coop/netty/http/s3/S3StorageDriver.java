@@ -36,6 +36,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.logging.LogUtil;
@@ -105,7 +106,7 @@ import org.xml.sax.SAXException;
 /** Created by kurila on 01.08.16. */
 public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				extends HttpStorageDriverBase<I, O>
-				implements com.dell.spt.base.storage.driver.ListDiscoveryProbe {
+				implements com.dell.spt.base.storage.driver.ListDiscoveryProbe, DeleteVerificationProbe {
 
 	private static final String REDACTED_HEADER_VALUE = "<redacted>";
 	static final String DELETE_FAILURE_MESSAGE = "S3 DELETE request failed at the transport or service boundary";
@@ -957,6 +958,57 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return uri.toString();
 		} finally {
 			uri.setLength(0);
+		}
+	}
+
+	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
+	@Override
+	public Presence presence(final DeleteTarget target) {
+		final String objectUri = standaloneObjectUri(target.bucket(), target);
+		final String uri = target.versionId() == null
+						? objectUri
+						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		final String nodeAddr = storageNodeAddrs[0];
+		headers.set(HttpHeaderNames.HOST, nodeAddr);
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		applyDynamicHeaders(headers);
+		applySharedHeaders(headers);
+		final String bucketPath = SLASH + target.bucket();
+		applyAuthHeaders(
+						headers,
+						HttpMethod.HEAD,
+						uri,
+						pathToCredMap.getOrDefault(bucketPath, this.credential));
+		final FullHttpRequest request = new DefaultFullHttpRequest(
+						HTTP_1_1,
+						HttpMethod.HEAD,
+						uri,
+						Unpooled.EMPTY_BUFFER,
+						headers,
+						EmptyHttpHeaders.INSTANCE);
+		FullHttpResponse response = null;
+		try {
+			response = executeHttpRequest(request, false);
+			if (response == null) {
+				return Presence.UNRESOLVED;
+			}
+			if (response.status().code() == 404) {
+				return Presence.ABSENT;
+			}
+			return HttpStatusClass.SUCCESS.equals(response.status().codeClass())
+							? Presence.PRESENT
+							: Presence.UNRESOLVED;
+		} catch (final InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			return Presence.UNRESOLVED;
+		} catch (final ConnectException failure) {
+			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", failure.toString());
+			return Presence.UNRESOLVED;
+		} finally {
+			if (response != null) {
+				response.release();
+			}
 		}
 	}
 

@@ -398,6 +398,7 @@ func TestBuildScenarioParams(t *testing.T) {
 				FailureBudgetMode:   scenario.FailureBudgetModeFixed,
 				MaxFailedObjects:    scenario.DefaultMaxFailedObjects,
 				FailureBudgetGrace:  scenario.DefaultFailureBudgetGrace,
+				VerificationTimeout: scenario.DefaultDeleteVerificationTimeout,
 				ObjectDataDedupable: true,
 			},
 			wantErr: false,

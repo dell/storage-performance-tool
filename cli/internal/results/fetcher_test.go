@@ -140,6 +140,7 @@ func TestDefaultArtifactsRegisterCompleteDeleteEvidence(t *testing.T) {
 		"delete.metrics.total.csv":   "DeleteMetricsTotal",
 		"delete.requests.csv":        "DeleteRequests",
 		"delete.objects.csv":         "DeleteObjects",
+		"delete.verification.csv":    "DeleteVerification",
 		"items.csv":                  "DeleteResidual",
 		"verify-input.csv":           "DeleteSelection",
 		"verify-input.complete.json": "DeleteSelectionCompletion",
