@@ -425,6 +425,45 @@ to its node view. Missing, duplicate, partial, stale, or malformed terminal rows
 artifact and the DELETE command with the workload-failure exit code instead of silently storing
 incomplete metrics; run metadata records the capture error and omits DELETE metrics.
 
+### Standalone DELETE topology and recovery contract
+
+Standalone DELETE uses three distinct command routes while the public workload gate remains closed:
+
+- No `--test-hosts`, or one local host, uses the local Docker/controller route. Only this route runs
+  the controller's local API-port conflict check.
+- One non-local host uses the remote orchestrator. It skips local Docker and controller-port
+  preflight; that host runs the entry engine and owns the API used for submission and results.
+- Two or more hosts use the distributed entry/worker route. The first ready host is the entry and
+  every other ready host is an additional worker. The command never falls back to the local runner.
+
+Seeded output, an explicit manifest, or guarded existing-prefix discovery is canonicalized and
+frozen before the timed DELETE step. The entry scatters the frozen input with one persistent
+round-robin position across input read boundaries, so each nonempty identity has exactly one owner.
+Workers assemble batches locally. A worker may therefore emit a partial tail even when the global
+selected count is divisible by the configured batch size; request and object totals are always
+aggregated from terminal worker evidence and are never derived from the global count.
+
+Guarded existing-prefix deletion performs immutable image inspection after hosts connect and before
+the launcher or auto-results monitor starts. `--integrity-runtime-identity-tier=image` requires one
+image ID across the execution participants; `payload` additionally requires the same canonical
+`/opt/spt` hash. A mismatch stops before destructive discovery or DELETE submission. Release or
+comparison evidence should also record the CLI identity, immutable image reference/ID, and payload
+identity described by the repository's distributed image gate.
+
+The controller is the only failure-policy authority. Every worker publishes terminal request and
+object counters; the controller aggregates them, closes admission on deadline or budget breach, and
+drains already-dispatched requests within the shared bound. Missing, duplicate, conflicting, or
+non-reconciling contributors fail closed. Worker-local percentage decisions are not accepted, and a
+budget-triggered drain may honestly finish above the configured threshold.
+
+Aggregate and per-node schema-v4 metrics retain the stable contributor and request identities used
+by `delete.requests.csv` and `delete.objects.csv`. The entry validates every node artifact and
+publishes canonical totals, selection evidence, traces, reconciliation rows, and the pre-cleanup
+residual exactly once. `delete.complete.json` is the commit record. If cancellation, entry/worker
+failure, verification timeout, or cleanup failure prevents that commit, retain the fetched source
+files and `items.csv` as recovery evidence, but do not present them as a complete benchmark. Cleanup
+runs after evidence is frozen and cannot rewrite the measured verdict or residual inventory.
+
 All-version discovery requires the target's list-version permission
 (`s3:ListBucketVersions` in AWS IAM). Authorization failure is fatal and never
 falls back to current-version discovery. SPT follows version pagination,
@@ -513,7 +552,7 @@ spt run write \
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
 | `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
-| `--integrity-runtime-identity-tier` | `image` | Verification only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
+| `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |

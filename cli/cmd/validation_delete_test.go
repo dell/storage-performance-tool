@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
 )
@@ -207,6 +208,41 @@ func TestDeleteExistingSourceFlagsAreDeleteOnly(t *testing.T) {
 	}
 }
 
+func TestDeleteExistingAcceptsDistributedRuntimeIdentityTier(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existing   bool
+		tier       string
+		wantDetail string
+	}{
+		{name: "payload proof for guarded prefix", existing: true, tier: constants.IntegrityRuntimeIdentityTierPayload},
+		{name: "unknown proof tier", existing: true, tier: "unknown", wantDetail: "must be"},
+		{name: "seeded DELETE has no distributed identity gate", tier: constants.IntegrityRuntimeIdentityTierPayload, wantDetail: "not supported"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := deleteValidationCommand(deleteValidationCase{bucket: "owned", batchSize: 1})
+			if test.existing {
+				if err := cmd.Flags().Set(flagDeleteExisting, "true"); err != nil {
+					t.Fatal(err)
+				}
+				if err := cmd.Flags().Set("prefix", "guarded/"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := cmd.Flags().Set(flagIntegrityRuntimeIdentityTier, test.tier); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateRunCommand(cmd, []string{WorkloadTypeDelete})
+			if test.wantDetail == "" && err != nil {
+				t.Fatalf("ValidateRunCommand() error = %v", err)
+			}
+			if test.wantDetail != "" && (err == nil || !strings.Contains(err.Error(), test.wantDetail)) {
+				t.Fatalf("ValidateRunCommand() error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
+}
+
 func TestDeleteExistingRejectsAllVersionAndEmptySelectionOverrides(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -262,6 +298,7 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, "")
 	cmd.Flags().String(flagVersions, scenario.VersionsCurrent, "")
 	cmd.Flags().Bool("allow-empty-selection", false, "")
+	cmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "")
 	_ = cmd.Flags().Set(flagDeleteBatchSize, strconv.Itoa(test.batchSize))
 	cmd.Flags().Int("object-count", 0, "")
 	cmd.Flags().String("duration", test.duration, "")

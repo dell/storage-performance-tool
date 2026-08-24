@@ -557,7 +557,7 @@ Executes a benchmark test with the specified workload type.
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
 - `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
-- `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
+- `--integrity-runtime-identity-tier`: Distributed verification or guarded existing-prefix DELETE runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
 - `--cleanup`: Best-effort deletion of SPT-created objects after test completion. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
