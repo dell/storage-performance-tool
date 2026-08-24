@@ -1986,7 +1986,7 @@ Available workload types:
 			if err != nil {
 				return fmt.Errorf("failed to connect to required hosts: %w", err)
 			}
-			if verificationRun {
+			if scenario.RequiresIntegrityRuntimeIdentity(params) {
 				if _, err := prepareDistributedIntegrityRuntimeIdentityFunc(ctx, orchestrator, sptImage); err != nil {
 					return err
 				}
@@ -2153,7 +2153,7 @@ func init() {
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
-	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
+	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification or guarded-prefix DELETE identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")

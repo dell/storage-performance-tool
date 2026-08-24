@@ -190,6 +190,12 @@ func validateReadPhasePauseFlag(cmd *cobra.Command, workloadType string) error {
 
 func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) error {
 	verification := workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify
+	deleteExisting := false
+	if flag := cmd.Flags().Lookup(flagDeleteExisting); flag != nil {
+		deleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	}
+	requiresRuntimeIdentity := verification ||
+		(workloadType == WorkloadTypeDelete && deleteExisting)
 	changed := func(name string) bool {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
@@ -217,10 +223,12 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		if changed("integrity-max-console-failures") {
 			return fmt.Errorf(ErrFlagNotSupported, "--integrity-max-console-failures", workloadType)
 		}
-		if changed(flagIntegrityRuntimeIdentityTier) {
+		if changed(flagIntegrityRuntimeIdentityTier) && !requiresRuntimeIdentity {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagIntegrityRuntimeIdentityTier, workloadType)
 		}
-		return nil
+		if !requiresRuntimeIdentity {
+			return nil
+		}
 	}
 	identityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
 	switch identityTier {
@@ -228,6 +236,9 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	default:
 		return fmt.Errorf("--%s must be %q or %q", flagIntegrityRuntimeIdentityTier,
 			constants.IntegrityRuntimeIdentityTierImage, constants.IntegrityRuntimeIdentityTierPayload)
+	}
+	if !verification {
+		return nil
 	}
 	if flag := cmd.Flags().Lookup("auto-results"); flag != nil {
 		enabled, _ := cmd.Flags().GetBool("auto-results")
