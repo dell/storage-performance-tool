@@ -30,6 +30,9 @@ public final class StandaloneDeleteConfig {
 	private static final String SEED_MILLIS_KEY = "seedMillis";
 	private static final String DISCOVERY_MILLIS_KEY = "discoveryMillis";
 	private static final String WORKFLOW_STARTED_EPOCH_NANOS_KEY = "workflowStartedEpochNanos";
+	private static final String PRE_VALIDATION_KEY = "preValidation";
+	private static final String POST_VERIFICATION_KEY = "postVerification";
+	private static final String VERIFICATION_TIMEOUT_MILLIS_KEY = "verificationTimeoutMillis";
 	private static final String OUTPUT_FILE_KEY = "output-file";
 
 	private final boolean enabled;
@@ -43,6 +46,9 @@ public final class StandaloneDeleteConfig {
 	private final long seedMillis;
 	private final long discoveryMillis;
 	private final long workflowStartedEpochNanos;
+	private final boolean preValidation;
+	private final boolean postVerification;
+	private final long verificationTimeoutMillis;
 
 	private StandaloneDeleteConfig(
 					final boolean enabled,
@@ -55,7 +61,10 @@ public final class StandaloneDeleteConfig {
 					final Map<String, Long> selectedBuckets,
 					final long seedMillis,
 					final long discoveryMillis,
-					final long workflowStartedEpochNanos) {
+					final long workflowStartedEpochNanos,
+					final boolean preValidation,
+					final boolean postVerification,
+					final long verificationTimeoutMillis) {
 		this.enabled = enabled;
 		this.batchSize = batchSize;
 		this.durationMode = durationMode;
@@ -67,6 +76,9 @@ public final class StandaloneDeleteConfig {
 		this.seedMillis = seedMillis;
 		this.discoveryMillis = discoveryMillis;
 		this.workflowStartedEpochNanos = workflowStartedEpochNanos;
+		this.preValidation = preValidation;
+		this.postVerification = postVerification;
+		this.verificationTimeoutMillis = verificationTimeoutMillis;
 	}
 
 	/** Parses the optional standalone DELETE node, preserving disabled compatibility if absent. */
@@ -114,7 +126,10 @@ public final class StandaloneDeleteConfig {
 							selectedBuckets(deleteConfig),
 							optionalLong(deleteConfig, SEED_MILLIS_KEY, -1),
 							optionalLong(deleteConfig, DISCOVERY_MILLIS_KEY, -1),
-							optionalLong(deleteConfig, WORKFLOW_STARTED_EPOCH_NANOS_KEY, -1));
+							optionalLong(deleteConfig, WORKFLOW_STARTED_EPOCH_NANOS_KEY, -1),
+							optionalBoolean(deleteConfig, PRE_VALIDATION_KEY, false),
+							optionalBoolean(deleteConfig, POST_VERIFICATION_KEY, false),
+							optionalLong(deleteConfig, VERIFICATION_TIMEOUT_MILLIS_KEY, 30_000));
 		} catch (final NoSuchElementException e) {
 			// Compatibility with extension-supplied schemas created before this optional node.
 			return disabled();
@@ -124,7 +139,16 @@ public final class StandaloneDeleteConfig {
 	private static StandaloneDeleteConfig disabled() {
 		return new StandaloneDeleteConfig(
 						false, 0, false, DELETE_SELECTION_ORDER_CANONICAL,
-						-1, -1, -1, Map.of(), -1, -1, -1);
+						-1, -1, -1, Map.of(), -1, -1, -1, false, false, 30_000);
+	}
+
+	private static boolean optionalBoolean(
+					final Config config, final String key, final boolean fallback) {
+		try {
+			return config.boolVal(key);
+		} catch (final RuntimeException ignored) {
+			return fallback;
+		}
 	}
 
 	private static String optionalString(final Config config, final String key, final String fallback) {
@@ -257,6 +281,21 @@ public final class StandaloneDeleteConfig {
 		return workflowStartedEpochNanos;
 	}
 
+	/** Returns whether strict full inventory validation runs before timed DELETE. */
+	public boolean preValidation() {
+		return preValidation;
+	}
+
+	/** Returns whether full absence verification runs after bounded drain. */
+	public boolean postVerification() {
+		return postVerification;
+	}
+
+	/** Returns the independent retry timeout for each enabled verification phase. */
+	public long verificationTimeoutMillis() {
+		return verificationTimeoutMillis;
+	}
+
 	/** Validates operation-type, item-type, recycle, retry, and cardinality settings. */
 	public void validateSettings(
 					final OpType opType,
@@ -281,6 +320,10 @@ public final class StandaloneDeleteConfig {
 		if (retry) {
 			throw new IllegalConfigurationException(
 							"Standalone DELETE does not support SPT operation retries");
+		}
+		if ((preValidation || postVerification) && verificationTimeoutMillis <= 0) {
+			throw new IllegalConfigurationException(
+							"load-op-delete-verificationTimeoutMillis must be positive when verification is enabled");
 		}
 	}
 
@@ -309,6 +352,10 @@ public final class StandaloneDeleteConfig {
 		final var driver = (StorageDriver<?, ?>) operationOutput;
 		if (!driver.supportsStandaloneDeleteRequests()) {
 			throw unsupportedDriver();
+		}
+		if ((preValidation || postVerification) && !(driver instanceof DeleteVerificationProbe)) {
+			throw new IllegalConfigurationException(
+							"Configured storage driver does not support standalone DELETE verification");
 		}
 	}
 

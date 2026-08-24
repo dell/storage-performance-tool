@@ -113,16 +113,17 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		MetadataPath: metadataPath,
 	}
 	if params.DeleteArtifactsVersion != 0 &&
+		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersionV1 &&
 		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersion {
 		return data, fmt.Errorf("unsupported DELETE artifact version %d", params.DeleteArtifactsVersion)
 	}
 	deleteArtifactSteps := stringSet(params.DeleteArtifactStepIDs)
-	if params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion &&
+	if params.DeleteArtifactsVersion > 0 &&
 		(len(deleteArtifactSteps) == 0 || len(deleteArtifactSteps) != len(params.DeleteArtifactStepIDs) ||
 			contains(deleteArtifactSteps, "")) {
 		return data, fmt.Errorf("DELETE artifact step identity is missing or invalid")
 	}
-	if params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion {
+	if params.DeleteArtifactsVersion > 0 {
 		manifestStepCounts := make(map[string]int, len(manifest.Steps))
 		for i := range manifest.Steps {
 			manifestStepCounts[manifest.Steps[i].StepID]++
@@ -184,9 +185,11 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			}
 		}
 
-		deleteArtifactsExpected := params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion &&
+		deleteArtifactsExpected := params.DeleteArtifactsVersion > 0 &&
 			contains(deleteArtifactSteps, sm.StepID)
-		deleteEvidence, durableDelete, deleteErr := loadDeleteEvidence(ctx, runDir, sm, deleteArtifactsExpected)
+		deleteEvidence, durableDelete, deleteErr := loadDeleteEvidence(
+			ctx, runDir, sm, params.DeleteArtifactsVersion, deleteArtifactsExpected,
+		)
 		if deleteErr != nil {
 			step.Status = StepStatusError
 			step.Notes = append(step.Notes, fmt.Sprintf("DELETE artifact validation error: %v", deleteErr))

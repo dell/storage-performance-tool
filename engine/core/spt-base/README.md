@@ -145,6 +145,32 @@ before that deadline as an invalid run. The CLI sizes seeded duration inventory 
 `--seed-objects` (2,500 by default); manifest and prefix modes use their frozen selections without
 recycling. Recycle and engine retries remain forbidden in both count and duration modes.
 
+`load.op.delete.preValidation` and `load.op.delete.postVerification` are shipped off, while
+`load.op.delete.verificationTimeoutMillis` defaults to `30000` and must be positive whenever either
+phase is enabled. The CLI applies its tri-state policy before scenario generation: inventory
+validation enables both phases unless post-verification was explicitly disabled. Each phase HEADs
+the complete frozen inventory once, then uses its own timeout to settle retryable observations.
+Pre-validation retries unresolved probes and requires every current-key or exact-version identity
+to be present before timed admission. Post-verification retries present and unresolved probes.
+If any distributed slice fails strict pre-validation, the controller propagates the abort to every
+slice so locally passing slices also skip post-verification and retain conservative residuals.
+Current-key HEAD permits older versions to remain; exact-version HEAD permits other versions to
+remain. The Netty S3 and inherited s3-rdma HTTP paths and the AWS S3 adapter all implement this
+neutral presence probe.
+
+Post-verification joins selection-indexed observations to the immutable target outcome ledger.
+Accepted-and-present is a correctness failure, accepted-and-unresolved is correctness plus
+inconclusive, and failed outcomes retain their operational classification without double-counting.
+Unattempted outcomes remain distinct, as do dispatched operations whose transport outcome is
+unresolved; each is cross-classified against absent, present, or probe-unresolved observations.
+Verification failures are outside operational failure-budget room. The DELETE metrics snapshot and
+schema-v4 output carry the full observation matrix and phase timing. When present, post-verification
+refines residual `items.csv` to identities observed present or unresolved; without it, failed,
+unresolved, and unattempted targets remain conservative recovery input. Absence proves causal removal
+only when strict pre-validation also succeeded. Artifact-set completion v2 adds a selection-indexed
+`delete.verification.csv` v1 companion without changing the DELETE totals, request trace, or target
+reconciliation v1 schemas; artifact-set v1 remains readable only as unverified compatibility evidence.
+
 A `DeleteRequestOperation` represents one logical API request and owns an immutable ordered list of 1 through 1,000
 canonical targets. Every target has the same bucket and effective credential and snapshots its key, size, and optional
 requested version. The inherited `item()` method projects only the first target for extension compatibility; request

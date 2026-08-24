@@ -55,7 +55,7 @@
       },
       "performance": {"object_size": "not_applicable", "data_moved": "not_applicable", "bandwidth": "not_applicable", "ttfb": "not_applicable"},
       "outcome_terminology": "accepted",
-      "verification": {"enabled": false, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
+      "verification": {"enabled": false, "pre_validation_enabled": false, "post_verification_enabled": false, "pre_validation_complete": false, "post_verification_complete": false, "post_verification_skipped": false, "timeout_seconds": 30.0, "pre_validation_failures": 0, "verified_absent": 0, "still_present": 0, "unresolved": 0, "accepted_absent": 0, "accepted_present": 0, "accepted_unresolved": 0, "failed_absent": 0, "failed_present": 0, "failed_unresolved": 0, "operational_unresolved_absent": 0, "operational_unresolved_present": 0, "operational_unresolved_unresolved": 0, "unattempted_absent": 0, "unattempted_present": 0, "unattempted_unresolved": 0, "correctness_failures": 0, "inconclusive_failures": 0, "residual": 0, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
       "terminal_reconciled": true
     }
   },
@@ -92,7 +92,7 @@
       "timing": {"latency_definition": "first_request_byte_sent_to_first_response_byte_received", "duration_definition": "request_formulation_to_last_response_byte_received", "latency": null, "duration": null, "object_latency": null},
       "performance": {"object_size": "not_applicable", "data_moved": "not_applicable", "bandwidth": "not_applicable", "ttfb": "not_applicable"},
       "outcome_terminology": "accepted",
-      "verification": {"enabled": false, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
+      "verification": {"enabled": false, "pre_validation_enabled": false, "post_verification_enabled": false, "pre_validation_complete": false, "post_verification_complete": false, "post_verification_skipped": false, "timeout_seconds": 30.0, "pre_validation_failures": 0, "verified_absent": 0, "still_present": 0, "unresolved": 0, "accepted_absent": 0, "accepted_present": 0, "accepted_unresolved": 0, "failed_absent": 0, "failed_present": 0, "failed_unresolved": 0, "operational_unresolved_absent": 0, "operational_unresolved_present": 0, "operational_unresolved_unresolved": 0, "unattempted_absent": 0, "unattempted_present": 0, "unattempted_unresolved": 0, "correctness_failures": 0, "inconclusive_failures": 0, "residual": 0, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
       "terminal_reconciled": true
     }
   },
@@ -129,7 +129,7 @@
       "timing": {"latency_definition": "first_request_byte_sent_to_first_response_byte_received", "duration_definition": "request_formulation_to_last_response_byte_received", "latency": null, "duration": null, "object_latency": null},
       "performance": {"object_size": "not_applicable", "data_moved": "not_applicable", "bandwidth": "not_applicable", "ttfb": "not_applicable"},
       "outcome_terminology": "accepted",
-      "verification": {"enabled": false, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
+      "verification": {"enabled": false, "pre_validation_enabled": false, "post_verification_enabled": false, "pre_validation_complete": false, "post_verification_complete": false, "post_verification_skipped": false, "timeout_seconds": 30.0, "pre_validation_failures": 0, "verified_absent": 0, "still_present": 0, "unresolved": 0, "accepted_absent": 0, "accepted_present": 0, "accepted_unresolved": 0, "failed_absent": 0, "failed_present": 0, "failed_unresolved": 0, "operational_unresolved_absent": 0, "operational_unresolved_present": 0, "operational_unresolved_unresolved": 0, "unattempted_absent": 0, "unattempted_present": 0, "unattempted_unresolved": 0, "correctness_failures": 0, "inconclusive_failures": 0, "residual": 0, "removal_confirmed": false, "notice": "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal."},
       "terminal_reconciled": true
     }
   }

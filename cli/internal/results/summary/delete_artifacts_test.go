@@ -59,6 +59,9 @@ func TestLoaderValidatesCompleteDeleteEvidenceAndRendersRecoveryInventory(t *tes
 		constants.ResultsArtifactSuffixDeleteObjects: "schema_version,request_id,target_id,target_index,bucket,key,size,version_id,outcome,error_classification,error\n" +
 			"1,request-1,target-1,0,b,a,1,,accepted,none,\n" +
 			"1,request-1,target-2,1,b,b,1,,failed,operational,failure\n",
+		constants.ResultsArtifactSuffixDeleteVerification: strings.Join(deleteVerificationColumns, ",") + "\n" +
+			"1,target-1,0,b,a,1,,accepted,false,disabled,false,disabled,false,false,false\n" +
+			"1,target-2,1,b,b,1,,failed,false,disabled,false,disabled,false,false,true\n",
 		constants.ResultsArtifactSuffixItems:       "bucket,key,size,version_id\nb,b,1,\n",
 		constants.ResultsArtifactSuffixVerifyInput: "bucket,key,size,version_id\nb,a,1,\nb,b,1,\n",
 	}
@@ -90,10 +93,10 @@ func TestLoaderValidatesCompleteDeleteEvidenceAndRendersRecoveryInventory(t *tes
 		})
 	}
 	deleteCompletion, err := json.Marshal(map[string]any{
-		"version": 1, "status": "complete", "schema_version": "1", "mode": "batch",
+		"version": 2, "status": "complete", "schema_version": "1", "mode": "batch",
 		"configured_batch_size": 2, "selection_order": "canonical",
 		"contributors": []string{"local"}, "request_rows": 1, "target_rows": 2,
-		"residual_rows": 1, "sha256": sha,
+		"residual_rows": 1, "verification_rows": 2, "sha256": sha,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -305,6 +308,119 @@ func TestValidateDeleteEvidenceRowsReconcilesOutcomesToTotalsAndContributors(t *
 	totals.Objects.Failed = 1
 	if _, err := validateDeleteEvidenceRows(context.Background(), paths, []string{"local", "local"}, totals); err == nil {
 		t.Fatal("duplicate contributor identity should fail closed")
+	}
+}
+
+func TestDeleteVerificationEvidenceJoinsEveryOperationalOutcomeToResidualIdentity(t *testing.T) {
+	temp := t.TempDir()
+	objectsPath := filepath.Join(temp, "delete.objects.csv")
+	verificationPath := filepath.Join(temp, "delete.verification.csv")
+	residualPath := filepath.Join(temp, "items.csv")
+	objects := strings.Join(deleteObjectColumns, ",") + "\n" +
+		"1,request-1,target-1,0,b,a,1,,accepted,none,\n" +
+		"1,request-2,target-2,1,b,b,1,,failed,operational,failure\n" +
+		"1,request-3,target-3,2,b,c,1,,unresolved,none,\n" +
+		"1,,target-4,3,b,d,1,,unattempted,none,\n"
+	verification := strings.Join(deleteVerificationColumns, ",") + "\n" +
+		"1,target-1,0,b,a,1,,accepted,true,present,true,absent,false,false,false\n" +
+		"1,target-2,1,b,b,1,,failed,true,present,true,absent,false,false,false\n" +
+		"1,target-3,2,b,c,1,,unresolved,true,present,true,unresolved,false,true,true\n" +
+		"1,target-4,3,b,d,1,,unattempted,true,present,true,present,false,false,true\n"
+	residual := "bucket,key,size,version_id\nb,c,1,\nb,d,1,\n"
+	for path, content := range map[string]string{
+		objectsPath: objects, verificationPath: verification, residualPath: residual,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, rows, err := validateDeleteVerificationEvidence(
+		context.Background(), verificationPath, objectsPath, residualPath,
+	)
+	if err != nil {
+		t.Fatalf("validate verification evidence: %v", err)
+	}
+	if rows != 4 || got.AcceptedAbsent != 1 || got.FailedAbsent != 1 ||
+		got.OperationalUnresolvedUnresolved != 1 || got.UnattemptedPresent != 1 ||
+		got.CorrectnessFailures != 0 || got.InconclusiveFailures != 1 || got.Residual != 2 {
+		t.Fatalf("verification evidence = rows %d, metrics %+v", rows, got)
+	}
+
+	if err := os.WriteFile(residualPath, []byte("bucket,key,size,version_id\nb,d,1,\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := validateDeleteVerificationEvidence(
+		context.Background(), verificationPath, objectsPath, residualPath,
+	); err == nil || !strings.Contains(err.Error(), "residual disagrees") {
+		t.Fatalf("wrong residual identity was accepted: %v", err)
+	}
+}
+
+func TestDeleteVerificationEvidenceCannotConfirmRemovalWithUnobservedEnabledPhases(t *testing.T) {
+	temp := t.TempDir()
+	objectsPath := filepath.Join(temp, "delete.objects.csv")
+	verificationPath := filepath.Join(temp, "delete.verification.csv")
+	residualPath := filepath.Join(temp, "items.csv")
+	contents := map[string]string{
+		objectsPath: strings.Join(deleteObjectColumns, ",") + "\n" +
+			"1,request-1,target-1,0,b,a,1,,accepted,none,\n",
+		verificationPath: strings.Join(deleteVerificationColumns, ",") + "\n" +
+			"1,target-1,0,b,a,1,,accepted,true,unattempted,true,unattempted,false,false,false\n",
+		residualPath: "bucket,key,size,version_id\n",
+	}
+	for path, content := range contents {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, _, err := validateDeleteVerificationEvidence(
+		context.Background(), verificationPath, objectsPath, residualPath,
+	)
+	if err != nil {
+		t.Fatalf("validate incomplete enabled phases: %v", err)
+	}
+	if got.RemovalConfirmed {
+		t.Fatal("unobserved enabled phases claimed causal removal")
+	}
+	if got.PreValidationComplete || got.PostVerificationComplete || got.PostVerificationSkipped {
+		t.Fatalf("unobserved phases were reported complete or skipped: %+v", got)
+	}
+}
+
+func TestDeleteVerificationEvidenceDerivesStrictPreValidationAbort(t *testing.T) {
+	temp := t.TempDir()
+	objectsPath := filepath.Join(temp, "delete.objects.csv")
+	verificationPath := filepath.Join(temp, "delete.verification.csv")
+	residualPath := filepath.Join(temp, "items.csv")
+	contents := map[string]string{
+		objectsPath: strings.Join(deleteObjectColumns, ",") + "\n" +
+			"1,,target-1,0,b,a,1,,unattempted,none,\n" +
+			"1,,target-2,1,b,b,1,version-1,unattempted,none,\n",
+		verificationPath: strings.Join(deleteVerificationColumns, ",") + "\n" +
+			"1,target-1,0,b,a,1,,unattempted,true,absent,true,unattempted,false,false,true\n" +
+			"1,target-2,1,b,b,1,version-1,unattempted,true,absent,true,unattempted,false,false,true\n",
+		residualPath: "bucket,key,size,version_id\n" +
+			"b,a,1,\n" +
+			"b,b,1,version-1\n",
+	}
+	for path, content := range contents {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, rows, err := validateDeleteVerificationEvidence(
+		context.Background(), verificationPath, objectsPath, residualPath,
+	)
+	if err != nil {
+		t.Fatalf("validate strict pre-validation abort evidence: %v", err)
+	}
+	if rows != 2 || !got.PreValidationComplete || got.PostVerificationComplete ||
+		!got.PostVerificationSkipped || got.PreValidationFailures != 2 || got.Residual != 0 ||
+		got.RemovalConfirmed {
+		t.Fatalf("strict pre-validation abort evidence = rows %d, metrics %+v", rows, got)
 	}
 }
 
@@ -591,7 +707,7 @@ func TestLoaderRejectsExplicitUnsupportedDeleteArtifactVersion(t *testing.T) {
 	}})
 	writeManifest(t, runDir, manifest)
 	writeParams(t, runDir, &RunParams{
-		WorkloadType: "delete", ExpectedStepIDs: []string{stepID}, DeleteArtifactsVersion: 2,
+		WorkloadType: "delete", ExpectedStepIDs: []string{stepID}, DeleteArtifactsVersion: 3,
 	})
 
 	if _, err := NewLoader().Load(context.Background(), runDir); err == nil ||
@@ -773,6 +889,47 @@ func TestPreferDeleteTotalsPreservesRatesAndRejectsConflictingSchemaV4Evidence(t
 	}
 }
 
+func TestPreferDeleteTotalsKeepsConservativeResidualWhenStrictPreValidationSkipsPost(t *testing.T) {
+	verification := deletemetrics.Verification{
+		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+		PreValidationComplete: true, PostVerificationSkipped: true,
+		TimeoutSeconds: 30, PreValidationFailures: 2,
+		Notice: deletemetrics.PostVerificationSkippedNotice,
+	}
+	existing := &deletemetrics.Metrics{
+		Units: deletemetrics.Units{
+			Requests: deletemetrics.RequestUnit, Objects: deletemetrics.ObjectUnit,
+			Batches: deletemetrics.RequestUnit,
+		},
+		Objects:            deletemetrics.Objects{Selected: 2, Unattempted: 2},
+		Batches:            deletemetrics.Batches{ConfiguredSize: 2},
+		Completion:         deletemetrics.Completion{RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true},
+		Versions:           deletemetrics.Versions{CurrentKey: 1, ExactVersion: 1},
+		Buckets:            []deletemetrics.Bucket{{Bucket: "b", Selected: 2}},
+		Identity:           deletemetrics.Identity{Mode: constants.DeleteIdentityModeBatch, ConfiguredBatchSize: 2, SelectionOrder: constants.DeleteSelectionOrderCanonical},
+		Verification:       verification,
+		TerminalReconciled: true,
+	}
+	durableValue := *existing
+	rawVerification := verification
+	rawVerification.TimeoutSeconds = 0
+	rawVerification.Notice = ""
+	evidence := &DeleteArtifactEvidence{
+		ResidualRows: 2,
+		Versions:     existing.Versions,
+		Buckets:      append([]deletemetrics.Bucket(nil), existing.Buckets...),
+		Verification: &rawVerification,
+	}
+
+	merged, err := preferDeleteTotalsV1(existing, &durableValue, evidence)
+	if err != nil {
+		t.Fatalf("prefer strict pre-validation abort evidence: %v", err)
+	}
+	if merged.Verification.Residual != 0 || evidence.ResidualRows != 2 {
+		t.Fatalf("verification and recovery residuals lost their distinct meanings: metrics=%+v evidence=%+v", merged.Verification, evidence)
+	}
+}
+
 func TestLoaderFailsClosedOnDeleteNodeSourceWithoutAggregateCompletion(t *testing.T) {
 	runDir := t.TempDir()
 	const stepID = "mt-001-delete"
@@ -868,7 +1025,7 @@ func writeMatchingDeleteParams(t *testing.T, runDir, stepID string) {
 	t.Helper()
 	writeParams(t, runDir, &RunParams{
 		WorkloadType: "delete", ResultsRoot: runDir, ExpectedStepIDs: []string{stepID},
-		DeleteArtifactsVersion: constants.ResultsDeleteArtifactsVersion,
+		DeleteArtifactsVersion: constants.ResultsDeleteArtifactsVersionV1,
 		DeleteArtifactStepIDs:  []string{stepID},
 		DeleteMetrics: map[string]*deletemetrics.Metrics{stepID: {
 			Units: deletemetrics.Units{

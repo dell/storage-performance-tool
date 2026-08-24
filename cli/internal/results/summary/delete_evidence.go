@@ -30,6 +30,12 @@ var deleteObjectColumns = []string{
 	"size", "version_id", "outcome", "error_classification", "error",
 }
 
+var deleteVerificationColumns = []string{
+	"schema_version", "target_id", "target_index", "bucket", "key", "size", "version_id",
+	"operational_outcome", "pre_enabled", "pre_presence", "post_enabled", "post_presence",
+	"correctness_failure", "inconclusive", "residual",
+}
+
 var canonicalManifestColumns = []string{"bucket", "key", "size", "version_id"}
 
 const (
@@ -37,17 +43,22 @@ const (
 	deleteOutcomeFailed      = "failed"
 	deleteOutcomeUnattempted = "unattempted"
 	deleteOutcomeUnresolved  = "unresolved"
+	deletePresenceDisabled   = "disabled"
+	deletePresenceAbsent     = "absent"
+	deletePresencePresent    = "present"
+	canonicalBooleanTrue     = "true"
 	deleteRequestFullSuccess = "full_success"
 	deleteRequestPartial     = "partial"
 )
 
-var deleteNodeSourcePattern = regexp.MustCompile(`^(delete\.metrics\.total|delete\.requests|delete\.objects)\.node-[0-9]{3}\.csv$`)
+var deleteNodeSourcePattern = regexp.MustCompile(`^(delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification)\.node-[0-9]{3}\.csv$`)
 
 // DeleteArtifactEvidence summarizes a hash-bound, fully reconciled DELETE artifact set.
 type DeleteArtifactEvidence struct {
 	RequestRows         int64
 	TargetRows          int64
 	ResidualRows        int64
+	VerificationRows    int64
 	SelectionRows       int64
 	SelectionSourceRows int64
 	SelectionUniqueRows int64
@@ -59,6 +70,7 @@ type DeleteArtifactEvidence struct {
 	ProtocolFailures    int64
 	Versions            deletemetrics.Versions
 	Buckets             []deletemetrics.Bucket
+	Verification        *deletemetrics.Verification
 }
 
 type deleteCompletionV1 struct {
@@ -72,6 +84,7 @@ type deleteCompletionV1 struct {
 	RequestRows         int64             `json:"request_rows"`
 	TargetRows          int64             `json:"target_rows"`
 	ResidualRows        int64             `json:"residual_rows"`
+	VerificationRows    *int64            `json:"verification_rows,omitempty"`
 	SHA256              map[string]string `json:"sha256"`
 }
 
@@ -79,6 +92,7 @@ func loadDeleteEvidence(
 	ctx context.Context,
 	runDir string,
 	sm *results.StepManifest,
+	deleteArtifactsVersion int,
 	standaloneDeleteExpected bool,
 ) (*DeleteArtifactEvidence, *deletemetrics.Metrics, error) {
 	triggerSuffixes := []string{
@@ -115,8 +129,13 @@ func loadDeleteEvidence(
 		constants.ResultsArtifactSuffixItems,
 		constants.ResultsArtifactSuffixVerifyInput,
 		constants.ResultsArtifactSuffixVerifyInputCompletion,
-		constants.ResultsArtifactSuffixDeleteCompletion,
 	}
+	requireVerification := deleteArtifactsVersion >= constants.ResultsDeleteArtifactsVersion ||
+		findArtifactEntry(sm, constants.ResultsArtifactSuffixDeleteVerification) != nil
+	if requireVerification {
+		required = append(required, constants.ResultsArtifactSuffixDeleteVerification)
+	}
+	required = append(required, constants.ResultsArtifactSuffixDeleteCompletion)
 	paths := make(map[string]string, len(required))
 	for _, suffix := range required {
 		entry := findArtifactEntry(sm, suffix)
@@ -130,11 +149,21 @@ func loadDeleteEvidence(
 	if err != nil {
 		return nil, nil, err
 	}
-	if completion.Version != 1 || completion.Status != "complete" ||
+	expectedCompletionVersion := 1
+	if requireVerification {
+		expectedCompletionVersion = 2
+	}
+	if completion.Version != expectedCompletionVersion || completion.Status != "complete" ||
 		completion.SchemaVersion != deleteTotalsSchemaVersion ||
 		completion.RequestRows < 0 || completion.TargetRows < 0 || completion.ResidualRows < 0 ||
 		len(completion.Contributors) == 0 {
 		return nil, nil, fmt.Errorf("DELETE completion record is incompatible or incomplete")
+	}
+	if requireVerification && (completion.VerificationRows == nil || *completion.VerificationRows < 0) {
+		return nil, nil, fmt.Errorf("DELETE completion record is missing verification row evidence")
+	}
+	if !requireVerification && completion.VerificationRows != nil {
+		return nil, nil, fmt.Errorf("DELETE v1 completion unexpectedly contains verification row evidence")
 	}
 	expectedHashes := required[:len(required)-1]
 	if len(completion.SHA256) != len(expectedHashes) {
@@ -181,9 +210,13 @@ func loadDeleteEvidence(
 		counts.requests != totals.Requests.Attempted || counts.objects != totals.Objects.Selected {
 		return nil, nil, fmt.Errorf("DELETE artifact row counts do not match terminal totals and completion")
 	}
+	if requireVerification && counts.verification != *completion.VerificationRows {
+		return nil, nil, fmt.Errorf("DELETE verification row count does not match completion")
+	}
 	return &DeleteArtifactEvidence{
 		RequestRows: completion.RequestRows, TargetRows: completion.TargetRows,
 		ResidualRows: completion.ResidualRows, SelectionRows: counts.selection,
+		VerificationRows:    counts.verification,
 		SelectionSourceRows: int64(selectionMarker.SourceRecordCount),
 		SelectionUniqueRows: int64(selectionMarker.UniqueRecordCount),
 		SelectionSHA256:     selectionMarker.ManifestSHA256,
@@ -194,6 +227,7 @@ func loadDeleteEvidence(
 		ProtocolFailures:    counts.protocolFailures,
 		Versions:            counts.versions,
 		Buckets:             append([]deletemetrics.Bucket(nil), counts.buckets...),
+		Verification:        counts.verificationSummary,
 	}, totals, nil
 }
 
@@ -201,11 +235,13 @@ type deleteEvidenceCounts struct {
 	requests            int64
 	objects             int64
 	residual            int64
+	verification        int64
 	selection           int64
 	operationalFailures int64
 	protocolFailures    int64
 	versions            deletemetrics.Versions
 	buckets             []deletemetrics.Bucket
+	verificationSummary *deletemetrics.Verification
 }
 
 type deleteManifestIdentity struct {
@@ -324,15 +360,9 @@ func validateDeleteEvidenceRows(
 	if err != nil {
 		return counts, err
 	}
-	expectedResidual, err := sumDeleteTotals(
-		totals.Objects.Failed, totals.Objects.Unattempted, totals.Objects.Unresolved,
-	)
-	if err != nil {
-		return counts, err
-	}
 	if counts.requests != totals.Requests.Attempted || counts.objects != totals.Objects.Selected ||
 		counts.selection != totals.Objects.Selected || requestTargets != totals.Objects.Attempted ||
-		counts.residual != expectedResidual {
+		counts.residual > totals.Objects.Selected {
 		return counts, fmt.Errorf("DELETE artifact row counts do not reconcile to terminal totals")
 	}
 
@@ -377,6 +407,16 @@ func validateDeleteEvidenceRows(
 	}
 	if err := reconcileDeleteResidual(ctx, residualPath, objectsByManifest); err != nil {
 		return counts, err
+	}
+	if verificationPath := paths[constants.ResultsArtifactSuffixDeleteVerification]; verificationPath != "" {
+		verification, verificationRows, verifyErr := validateDeleteVerificationEvidence(
+			ctx, verificationPath, objectPath, residualPath,
+		)
+		if verifyErr != nil {
+			return counts, verifyErr
+		}
+		counts.verification = verificationRows
+		counts.verificationSummary = verification
 	}
 	return counts, nil
 }

@@ -54,6 +54,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 	private final Path requestsPath;
 	private final Path objectsPath;
 	private final Path residualPath;
+	private final Path verificationPath;
 	private final Path rawRequestsPath;
 	private final Path rawObjectsPath;
 	private final ArrayBlockingQueue<DeleteRequestOperation> terminalQueue;
@@ -109,11 +110,13 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		final Path initializedRequests;
 		final Path initializedObjects;
 		final Path initializedResidual;
+		final Path initializedVerification;
 		try {
 			initializedTotals = loggerPath(Loggers.DELETE_METRICS_TOTAL);
 			initializedRequests = loggerPath(Loggers.DELETE_REQUESTS);
 			initializedObjects = loggerPath(Loggers.DELETE_OBJECTS);
 			initializedResidual = loggerPath(Loggers.DELETE_RESIDUAL);
+			initializedVerification = loggerPath(Loggers.DELETE_VERIFICATION);
 			final Path directory = initializedTotals.toAbsolutePath().getParent();
 			Files.createDirectories(directory);
 			initializedRawRequests = stagingFileFactory.create(
@@ -131,6 +134,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		requestsPath = initializedRequests;
 		objectsPath = initializedObjects;
 		residualPath = initializedResidual;
+		verificationPath = initializedVerification;
 		rawRequestsPath = initializedRawRequests;
 		rawObjectsPath = initializedRawObjects;
 		writerThread = new Thread(this::writeTerminals, "spt-delete-artifacts-" + stepId);
@@ -153,6 +157,23 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 	/** Completes and retry-safely publishes node evidence after admission closure and bounded drain. */
 	public synchronized void finish(
 					final OperationLifecycleSnapshot<?> lifecycle, final DeleteMetricsSnapshot metrics) {
+		finish(lifecycle, metrics, null, null);
+	}
+
+	/** Completes evidence, refining residual identities when post-verification is available. */
+	public synchronized void finish(
+					final OperationLifecycleSnapshot<?> lifecycle,
+					final DeleteMetricsSnapshot metrics,
+					final DeleteVerificationReport postVerification) {
+		finish(lifecycle, metrics, null, postVerification);
+	}
+
+	/** Completes evidence with selection-indexed validation and verification observations. */
+	public synchronized void finish(
+					final OperationLifecycleSnapshot<?> lifecycle,
+					final DeleteMetricsSnapshot metrics,
+					final DeleteVerificationReport preValidation,
+					final DeleteVerificationReport postVerification) {
 		if (finished) {
 			return;
 		}
@@ -161,17 +182,24 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		Path finalRequests = null;
 		Path finalObjects = null;
 		Path finalResidual = null;
+		Path finalVerification = null;
 		Path finalTotals = null;
 		try {
 			final Path directory = totalsPath.toAbsolutePath().getParent();
 			finalRequests = Files.createTempFile(directory, ".delete.requests.", ".final");
 			finalObjects = Files.createTempFile(directory, ".delete.objects.", ".final");
 			finalResidual = Files.createTempFile(directory, ".items.", ".final");
+			finalVerification = Files.createTempFile(directory, ".delete.verification.", ".final");
 			finalTotals = Files.createTempFile(directory, ".delete.metrics.total.", ".final");
 			Files.copy(rawRequestsPath, finalRequests, StandardCopyOption.REPLACE_EXISTING);
 			Files.copy(rawObjectsPath, finalObjects, StandardCopyOption.REPLACE_EXISTING);
 			appendUnresolved(lifecycle, finalRequests, finalObjects);
-			writeResidualAndUnattemptedRows(finalObjects, finalResidual);
+			writeResidualUnattemptedAndVerificationRows(
+							finalObjects, finalResidual, finalVerification,
+							metrics != null && metrics.verification().preValidationEnabled(),
+							metrics != null && metrics.verification().postVerificationEnabled(),
+							metrics != null && metrics.verification().postVerificationSkipped(),
+							preValidation, postVerification);
 			initializeArtifact(finalTotals, DeleteArtifacts.METRICS_HEADER);
 			if (metrics != null) {
 				append(finalTotals, metricsRow(metrics));
@@ -180,6 +208,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 			publishRetrySafe(finalRequests, requestsPath);
 			publishRetrySafe(finalObjects, objectsPath);
 			publishRetrySafe(finalResidual, residualPath);
+			publishRetrySafe(finalVerification, verificationPath);
 			final Throwable failure = asynchronousFailure.get();
 			if (failure != null) {
 				throw new IllegalStateException("DELETE artifact recording is incomplete", failure);
@@ -196,6 +225,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 			deleteQuietly(finalRequests);
 			deleteQuietly(finalObjects);
 			deleteQuietly(finalResidual);
+			deleteQuietly(finalVerification);
 			deleteQuietly(finalTotals);
 		}
 	}
@@ -273,12 +303,28 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		}
 	}
 
-	private void writeResidualAndUnattemptedRows(
-					final Path finalObjectsPath, final Path finalResidualPath) throws IOException {
+	private void writeResidualUnattemptedAndVerificationRows(
+					final Path finalObjectsPath,
+					final Path finalResidualPath,
+					final Path finalVerificationPath,
+					final boolean preValidationEnabled,
+					final boolean postVerificationEnabled,
+					final boolean postVerificationSkipped,
+					final DeleteVerificationReport preValidation,
+					final DeleteVerificationReport postVerification) throws IOException {
 		if (!Files.isRegularFile(selectionManifest)) {
 			throw new IOException("DELETE frozen selection is missing: " + selectionManifest);
 		}
+		if (preValidationEnabled && !completeReport(preValidation, DeleteVerificationPhase.PRE_DELETE)) {
+			throw new IOException("DELETE pre-validation evidence is incomplete");
+		}
+		final boolean postExpected = postVerificationEnabled && !postVerificationSkipped
+						&& (!preValidationEnabled || preValidation.successful());
+		if (postExpected && !completeReport(postVerification, DeleteVerificationPhase.POST_DELETE)) {
+			throw new IOException("DELETE post-verification evidence is incomplete");
+		}
 		initializeArtifact(finalResidualPath, IntegrityManifestItemInput.HEADER);
+		initializeArtifact(finalVerificationPath, DeleteArtifacts.VERIFICATION_HEADER);
 		final Path statusPath = Files.createTempFile("spt-delete-status-", ".bin");
 		try {
 			try (final var status = new RandomAccessFile(statusPath.toFile(), "rw")) {
@@ -286,6 +332,10 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 				readRecordedTargetStatuses(finalObjectsPath, status);
 				try (CSVPrinter objects = appendPrinter(finalObjectsPath);
 								CSVPrinter residual = appendPrinter(finalResidualPath);
+								CSVPrinter verification = appendPrinter(finalVerificationPath);
+								var statusInput = new java.io.BufferedInputStream(Files.newInputStream(statusPath));
+								var prePresence = preValidation == null ? null : preValidation.cursor();
+								var postPresence = postVerification == null ? null : postVerification.cursor();
 								var selection = new IntegrityManifestItemInput(selectionManifest)) {
 					long selectionIndex = 0;
 					for (IntegrityManifestDataItem item = selection.get(); item != null; item = selection.get()) {
@@ -293,18 +343,51 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 							throw new IOException("DELETE selection contains more rows than its frozen count");
 						}
 						final DeleteTarget target = new DeleteTarget(item, selectionIndex);
-						status.seek(selectionIndex);
-						byte outcome = status.readByte();
+						final int recordedOutcome = statusInput.read();
+						if (recordedOutcome < 0) {
+							throw new IOException("DELETE operational outcome storage ended early");
+						}
+						final byte outcome = (byte) recordedOutcome;
 						if (outcome == STATUS_UNSEEN) {
 							printTarget(
 											objects, "", target, DeleteTargetOutcome.UNATTEMPTED,
 											DeleteFailureClassification.NONE, "");
 						}
-						if (outcome != STATUS_ACCEPTED) {
+						final DeleteVerificationProbe.Presence observedPostPresence = postPresence == null
+										? null
+										: postPresence.next();
+						final boolean retainResidual = observedPostPresence == null
+										? outcome != STATUS_ACCEPTED
+										: observedPostPresence != DeleteVerificationProbe.Presence.ABSENT;
+						if (retainResidual) {
 							residual.printRecord(
 											target.bucket(), target.key(), target.size(),
 											target.versionId() == null ? "" : target.versionId());
 						}
+						final DeleteVerificationProbe.Presence observedPrePresence = prePresence == null
+										? null
+										: prePresence.next();
+						final boolean correctnessFailure = outcome == STATUS_ACCEPTED
+										&& observedPostPresence != null
+										&& observedPostPresence != DeleteVerificationProbe.Presence.ABSENT;
+						final boolean inconclusive = outcome != STATUS_UNSEEN
+										&& observedPostPresence == DeleteVerificationProbe.Presence.UNRESOLVED;
+						verification.printRecord(
+										DeleteArtifacts.SCHEMA_VERSION,
+										DeleteArtifacts.targetId(target),
+										target.selectionIndex(),
+										target.bucket(),
+										target.key(),
+										target.size(),
+										target.versionId() == null ? "" : target.versionId(),
+										operationalOutcome(outcome),
+										preValidationEnabled,
+										presence(preValidationEnabled, observedPrePresence),
+										postVerificationEnabled,
+										presence(postVerificationEnabled, observedPostPresence),
+										correctnessFailure,
+										inconclusive,
+										retainResidual);
 						selectionIndex++;
 					}
 					if (selectionIndex != selectedCount) {
@@ -317,6 +400,29 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		} finally {
 			Files.deleteIfExists(statusPath);
 		}
+	}
+
+	private boolean completeReport(
+					final DeleteVerificationReport report, final DeleteVerificationPhase phase) {
+		return report != null && report.completePass() && report.phase() == phase
+						&& report.selected() == selectedCount;
+	}
+
+	private static String operationalOutcome(final byte status) {
+		return switch (status) {
+		case STATUS_ACCEPTED -> "accepted";
+		case STATUS_FAILED -> "failed";
+		case STATUS_UNRESOLVED -> "unresolved";
+		default -> "unattempted";
+		};
+	}
+
+	private static String presence(
+					final boolean enabled, final DeleteVerificationProbe.Presence presence) {
+		if (!enabled) {
+			return "disabled";
+		}
+		return presence == null ? "unattempted" : presence.name().toLowerCase(Locale.ROOT);
 	}
 
 	private void readRecordedTargetStatuses(

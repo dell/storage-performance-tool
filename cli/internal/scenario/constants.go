@@ -135,6 +135,9 @@ const (
 // DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.
 const DefaultFailureBudgetGrace = 30 * time.Second
 
+// DefaultDeleteVerificationTimeout bounds each enabled DELETE verification phase independently.
+const DefaultDeleteVerificationTimeout = 30 * time.Second
+
 // DefaultReadPhasePauseSeconds preserves the historical pause between read
 // scenario phases while allowing qualification runs to request a longer settle.
 const DefaultReadPhasePauseSeconds = 10

@@ -111,6 +111,157 @@ func TestValidateTerminalRequiresTimingForResponseBackedSuccessButAllowsPreRespo
 	}
 }
 
+func TestValidateTerminalAcceptsPostVerificationMatrixAndRequiresCausalNotice(t *testing.T) {
+	metrics := validTerminalMetrics()
+	post := 0.5
+	metrics.Phases.PostVerificationSeconds = &post
+	metrics.Verification = Verification{
+		Enabled: true, PostVerificationEnabled: true, PostVerificationComplete: true,
+		TimeoutSeconds: 30,
+		VerifiedAbsent: 1, AcceptedAbsent: 1, Notice: PostVerificationNotice,
+	}
+	if err := ValidateTerminal(metrics); err != nil {
+		t.Fatalf("valid post-verification evidence was rejected: %v", err)
+	}
+
+	metrics.Verification.Notice = "absence means removed"
+	if err := ValidateTerminal(metrics); err == nil {
+		t.Fatal("post-verification without the causal-evidence notice was accepted")
+	}
+}
+
+func TestValidateTerminalKeepsOperationallyUnresolvedTargetsOutOfUnattempted(t *testing.T) {
+	metrics := validTerminalMetrics()
+	setTerminalLifecycle(metrics, 0, 0, 0, 0, 1)
+	metrics.FailurePolicy.Outcome = OutcomeFailed
+	post := 0.5
+	metrics.Phases.PostVerificationSeconds = &post
+	metrics.Verification = Verification{
+		Enabled: true, PostVerificationEnabled: true, PostVerificationComplete: true,
+		TimeoutSeconds: 30,
+		VerifiedAbsent: 1, OperationalUnresolvedAbsent: 1,
+		Notice: PostVerificationNotice,
+	}
+
+	if err := ValidateTerminal(metrics); err != nil {
+		t.Fatalf("operationally unresolved target was folded into another lifecycle row: %v", err)
+	}
+}
+
+func TestValidateTerminalKeepsCorrectnessFailuresOutsideOperationalBudgetRoom(t *testing.T) {
+	metrics := validTerminalMetrics()
+	pre, post := 0.25, 0.5
+	metrics.Phases.PreValidationSeconds = &pre
+	metrics.Phases.PostVerificationSeconds = &post
+	metrics.FailurePolicy.Outcome = OutcomeFailed
+	metrics.Verification = Verification{
+		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+		PreValidationComplete: true, PostVerificationComplete: true,
+		TimeoutSeconds: 30, StillPresent: 1, AcceptedPresent: 1,
+		CorrectnessFailures: 1, Residual: 1,
+		Notice: "Full inventory validation and verification classifications are reported.",
+	}
+	if err := ValidateTerminal(metrics); err != nil {
+		t.Fatalf("classified correctness failure was rejected as malformed: %v", err)
+	}
+	metrics.FailurePolicy.Outcome = OutcomeCompletedCleanly
+	if err := ValidateTerminal(metrics); err == nil {
+		t.Fatal("verification correctness failure was accepted as a clean terminal outcome")
+	}
+}
+
+func TestValidateTerminalAcceptsStrictPreValidationAbortWithPostSkipped(t *testing.T) {
+	metrics := validTerminalMetrics()
+	pre, zero, total := 0.25, 0.0, 0.25
+	metrics.Requests = Requests{}
+	metrics.Objects = Objects{Selected: 1, Unattempted: 1}
+	metrics.Batches = Batches{ConfiguredSize: 1}
+	metrics.Completion = Completion{
+		RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true,
+	}
+	metrics.Versions = Versions{CurrentKey: 1}
+	metrics.Buckets = []Bucket{{Bucket: "bucket-a", Selected: 1}}
+	metrics.Phases = Phases{
+		PreValidationSeconds: &pre, ScheduledDeleteSeconds: &zero,
+		DrainSeconds: &zero, TotalWallSeconds: &total,
+	}
+	metrics.FailurePolicy.Outcome = OutcomeFailed
+	metrics.Timing.Latency = validTimingStat(0)
+	metrics.Timing.Duration = validTimingStat(0)
+	metrics.Verification = Verification{
+		Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+		PreValidationComplete: true, PostVerificationSkipped: true,
+		TimeoutSeconds: 30, PreValidationFailures: 1,
+		Notice: PostVerificationSkippedNotice,
+	}
+
+	if err := ValidateTerminal(metrics); err != nil {
+		t.Fatalf("strict pre-validation abort evidence was rejected: %v", err)
+	}
+	metrics.Verification.PreValidationFailures = 0
+	if err := ValidateTerminal(metrics); err != nil {
+		t.Fatalf("coordinator-propagated strict pre-validation abort was rejected: %v", err)
+	}
+}
+
+func TestValidateTerminalRejectsInconsistentStrictPreValidationAbortStates(t *testing.T) {
+	validStrictAbort := func() *Metrics {
+		metrics := validTerminalMetrics()
+		pre, zero, total := 0.25, 0.0, 0.25
+		metrics.Requests = Requests{}
+		metrics.Objects = Objects{Selected: 1, Unattempted: 1}
+		metrics.Batches = Batches{ConfiguredSize: 1}
+		metrics.Completion = Completion{
+			RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true,
+		}
+		metrics.Versions = Versions{CurrentKey: 1}
+		metrics.Buckets = []Bucket{{Bucket: "bucket-a", Selected: 1}}
+		metrics.Phases = Phases{
+			PreValidationSeconds: &pre, ScheduledDeleteSeconds: &zero,
+			DrainSeconds: &zero, TotalWallSeconds: &total,
+		}
+		metrics.FailurePolicy.Outcome = OutcomeFailed
+		metrics.Timing.Latency = validTimingStat(0)
+		metrics.Timing.Duration = validTimingStat(0)
+		metrics.Verification = Verification{
+			Enabled: true, PreValidationEnabled: true, PostVerificationEnabled: true,
+			PreValidationComplete: true, PostVerificationSkipped: true,
+			TimeoutSeconds: 30, PreValidationFailures: 1,
+			Notice: PostVerificationSkippedNotice,
+		}
+		return metrics
+	}
+
+	tests := map[string]func(*Metrics){
+		"enabled post phase neither completes nor skips": func(metrics *Metrics) {
+			metrics.Verification.PostVerificationSkipped = false
+			metrics.Verification.Notice = "Full inventory validation and verification classifications are reported."
+		},
+		"skipped phase follows attempted work": func(metrics *Metrics) {
+			metrics.Requests = Requests{Attempted: 1, FullSuccess: 1}
+			metrics.Objects = Objects{Selected: 1, Attempted: 1, Accepted: 1}
+			metrics.Batches = Batches{
+				ConfiguredSize: 1, ActualRequestCount: 1, ActualObjectCount: 1,
+				MeanObjectsPerRequest: 1, FullBatchCount: 1, FullBatchPercent: 100,
+			}
+			metrics.Buckets = []Bucket{{
+				Bucket: "bucket-a", Selected: 1, Attempted: 1, Accepted: 1,
+			}}
+			metrics.Timing.Latency = validTimingStat(1)
+			metrics.Timing.Duration = validTimingStat(1)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			metrics := validStrictAbort()
+			mutate(metrics)
+			if err := ValidateTerminal(metrics); err == nil {
+				t.Fatal("inconsistent strict pre-validation abort was accepted")
+			}
+		})
+	}
+}
+
 func validTerminalMetrics() *Metrics {
 	scheduled := 1.0
 	drain := 0.25

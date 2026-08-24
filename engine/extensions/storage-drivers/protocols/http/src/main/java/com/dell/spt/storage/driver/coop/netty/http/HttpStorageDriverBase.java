@@ -135,6 +135,13 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 	protected FullHttpResponse executeHttpRequest(final FullHttpRequest request)
 					throws InterruptedException, ConnectException {
+		return executeHttpRequest(request, true);
+	}
+
+	/** Executes a synchronous control request with caller-selected timeout log severity. */
+	protected FullHttpResponse executeHttpRequest(
+					final FullHttpRequest request, final boolean warnOnTimeout)
+					throws InterruptedException, ConnectException {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final FullHttpResponse resp;
@@ -161,7 +168,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							});
 			channel.writeAndFlush(request).sync();
 			if (null == (resp = fullRespSync.poll(netTimeoutMilliSec, TimeUnit.MILLISECONDS))) {
-				Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				if (warnOnTimeout) {
+					Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				} else {
+					Loggers.MSG.debug("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				}
 			}
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");

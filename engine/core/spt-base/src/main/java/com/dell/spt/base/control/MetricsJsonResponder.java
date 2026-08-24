@@ -391,7 +391,7 @@ final class MetricsJsonResponder {
 						+ snapshot.objectUnattempted() + snapshot.objectUnresolved();
 		final ObjectNode completion = objectMapper.createObjectNode();
 		completion.put("request_percent", snapshot.requestAttempted() == 0
-						? 0.0
+						? snapshot.reconciled() ? 100.0 : 0.0
 						: terminalRequests * 100.0 / snapshot.requestAttempted());
 		completion.put("object_percent", snapshot.objectSelected() == 0
 						? 0.0
@@ -465,9 +465,58 @@ final class MetricsJsonResponder {
 		delete.put("outcome_terminology", DELETE_OUTCOME_ACCEPTED);
 
 		final ObjectNode verification = objectMapper.createObjectNode();
-		verification.put("enabled", false);
-		verification.put("removal_confirmed", false);
-		verification.put("notice", DELETE_VERIFICATION_NOTICE);
+		final var verificationMetrics = snapshot.verification();
+		final boolean verificationEnabled = verificationMetrics.preValidationEnabled()
+						|| verificationMetrics.postVerificationEnabled();
+		verification.put("enabled", verificationEnabled);
+		verification.put("pre_validation_enabled", verificationMetrics.preValidationEnabled());
+		verification.put("post_verification_enabled", verificationMetrics.postVerificationEnabled());
+		verification.put(
+						"pre_validation_complete",
+						verificationMetrics.preValidationEnabled()
+										&& verificationMetrics.preValidationComplete());
+		verification.put(
+						"post_verification_complete",
+						verificationMetrics.postVerificationEnabled()
+										&& verificationMetrics.postVerificationComplete());
+		verification.put("post_verification_skipped", verificationMetrics.postVerificationSkipped());
+		verification.put("timeout_seconds", verificationMetrics.timeoutMillis() / 1_000.0);
+		verification.put("pre_validation_failures", verificationMetrics.preValidationFailures());
+		verification.put("verified_absent", verificationMetrics.verifiedAbsent());
+		verification.put("still_present", verificationMetrics.stillPresent());
+		verification.put("unresolved", verificationMetrics.unresolved());
+		verification.put("accepted_absent", verificationMetrics.acceptedAbsent());
+		verification.put("accepted_present", verificationMetrics.acceptedPresent());
+		verification.put("accepted_unresolved", verificationMetrics.acceptedUnresolved());
+		verification.put("failed_absent", verificationMetrics.failedAbsent());
+		verification.put("failed_present", verificationMetrics.failedPresent());
+		verification.put("failed_unresolved", verificationMetrics.failedUnresolved());
+		verification.put(
+						"operational_unresolved_absent",
+						verificationMetrics.operationalUnresolvedAbsent());
+		verification.put(
+						"operational_unresolved_present",
+						verificationMetrics.operationalUnresolvedPresent());
+		verification.put(
+						"operational_unresolved_unresolved",
+						verificationMetrics.operationalUnresolvedUnresolved());
+		verification.put("unattempted_absent", verificationMetrics.unattemptedAbsent());
+		verification.put("unattempted_present", verificationMetrics.unattemptedPresent());
+		verification.put("unattempted_unresolved", verificationMetrics.unattemptedUnresolved());
+		verification.put("correctness_failures", verificationMetrics.correctnessFailures());
+		verification.put("inconclusive_failures", verificationMetrics.inconclusiveFailures());
+		verification.put("residual", verificationMetrics.residualCount());
+		verification.put("removal_confirmed", verificationMetrics.removalConfirmed());
+		verification.put(
+						"notice",
+						!verificationEnabled
+										? DELETE_VERIFICATION_NOTICE
+										: verificationMetrics.postVerificationSkipped()
+														? MetricsConstants.DELETE_POST_VERIFICATION_SKIPPED_NOTICE
+														: verificationMetrics.postVerificationEnabled()
+																		&& !verificationMetrics.preValidationEnabled()
+																						? MetricsConstants.DELETE_POST_VERIFICATION_NOTICE
+																						: "Full inventory validation and verification classifications are reported.");
 		delete.set("verification", verification);
 		delete.put("terminal_reconciled", snapshot.reconciled());
 		jsonObj.set("delete", delete);

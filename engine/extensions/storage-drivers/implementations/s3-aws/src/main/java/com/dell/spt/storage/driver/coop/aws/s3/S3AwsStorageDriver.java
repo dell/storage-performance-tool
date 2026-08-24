@@ -20,6 +20,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -78,7 +79,7 @@ import java.util.stream.Collectors;
  * Comparable to the legacy REST implementation in com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver
  */
 public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends NioStorageDriverBase<I, O>
-				implements ListDiscoveryProbe {
+				implements ListDiscoveryProbe, DeleteVerificationProbe {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 
@@ -978,6 +979,32 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 		return client;
+	}
+
+	/** Checks the requested current-key or exact-version identity with an SDK HEAD call. */
+	@Override
+	public Presence presence(final DeleteTarget target) {
+		final var request = HeadObjectRequest.builder()
+						.bucket(target.bucket())
+						.key(target.key());
+		if (target.versionId() != null) {
+			request.versionId(target.versionId());
+		}
+		try {
+			deleteClient(target.versionId() != null).headObject(request.build()).join();
+			return Presence.PRESENT;
+		} catch (final RuntimeException failure) {
+			Throwable cause = failure;
+			while (cause.getCause() != null && cause != cause.getCause()) {
+				cause = cause.getCause();
+			}
+			if (cause instanceof NoSuchKeyException
+							|| cause instanceof S3Exception s3Failure && s3Failure.statusCode() == 404) {
+				return Presence.ABSENT;
+			}
+			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
+			return Presence.UNRESOLVED;
+		}
 	}
 
 	CompletableFuture<Void> deleteObject(final O op) {

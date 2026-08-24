@@ -76,6 +76,15 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 	/** Fails closed after resources stop if standalone DELETE terminal accounting is incomplete. */
 	default void validateTerminalState() {}
 
+	/** Runs idempotent full post-delete verification after the dispatched-operation drain. */
+	default void verifyDeleteInventoryAfterDrain() {}
+
+	/** Runs full strict inventory validation while operation admission remains held. */
+	default void validateDeleteInventoryBeforeAdmission() {}
+
+	/** Records a distributed strict-pre abort so this locally passing slice skips post-verification. */
+	default void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure() {}
+
 	/** Closes scheduling and driver admission without waiting for dispatched operations. */
 	default void closeOperationAdmissionForStepStop() {}
 

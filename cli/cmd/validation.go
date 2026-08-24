@@ -380,6 +380,9 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 	maxFailedObjectsFlag := cmd.Flags().Lookup(flagMaxFailedObjects)
 	maxFailurePercentFlag := cmd.Flags().Lookup(flagMaxFailurePercent)
 	failureBudgetGraceFlag := cmd.Flags().Lookup(flagFailureBudgetGrace)
+	validateInventoryFlag := cmd.Flags().Lookup(flagValidateInventory)
+	verifyDeleteFlag := cmd.Flags().Lookup(flagVerifyDelete)
+	verificationTimeoutFlag := cmd.Flags().Lookup(flagVerificationTimeout)
 	if workloadType != WorkloadTypeDelete {
 		if batchFlag != nil && batchFlag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteBatchSize, workloadType)
@@ -390,7 +393,10 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		if allowEmptyPrefixFlag != nil && allowEmptyPrefixFlag.Changed {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagAllowEmptyPrefix, workloadType)
 		}
-		for _, flag := range []*pflag.Flag{maxFailedObjectsFlag, maxFailurePercentFlag, failureBudgetGraceFlag} {
+		for _, flag := range []*pflag.Flag{
+			maxFailedObjectsFlag, maxFailurePercentFlag, failureBudgetGraceFlag,
+			validateInventoryFlag, verifyDeleteFlag, verificationTimeoutFlag,
+		} {
 			if flag != nil && flag.Changed {
 				return fmt.Errorf(ErrFlagNotSupported, "--"+flag.Name, workloadType)
 			}
@@ -426,6 +432,15 @@ func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error 
 		if failureBudgetGraceFlag.Changed &&
 			(maxFailurePercentFlag == nil || !maxFailurePercentFlag.Changed || maxFailurePercent <= 0) {
 			return errors.New("--failure-budget-grace requires a positive --max-failure-percent")
+		}
+	}
+	if verificationTimeoutFlag != nil {
+		verificationTimeout, _ := cmd.Flags().GetDuration(flagVerificationTimeout)
+		if verificationTimeout <= 0 {
+			return errors.New("--verification-timeout must be greater than zero")
+		}
+		if verificationTimeout%time.Millisecond != 0 {
+			return errors.New("--verification-timeout must use whole milliseconds")
 		}
 	}
 	if autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds"); autoTerminate > 0 {

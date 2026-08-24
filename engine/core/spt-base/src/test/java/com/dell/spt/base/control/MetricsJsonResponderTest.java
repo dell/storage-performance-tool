@@ -8,6 +8,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.TerminalStepEntry;
@@ -141,6 +142,80 @@ public class MetricsJsonResponderTest {
 							actual.get("delete").get(field).toString(),
 							field);
 		}
+	}
+
+	@Test
+	void engineApiMatchesStrictPreValidationAbortFixture() throws Exception {
+		final JsonNode expected = new ObjectMapper().readTree(
+						MetricsJsonResponderTest.class.getResourceAsStream(
+										"/delete-metrics-v4-strict-pre-abort.json"))
+						.get(0).get("delete");
+		final DeleteMetricsSnapshot delete = DeleteMetricsSnapshot.builder(2)
+						.identity("batch", "canonical")
+						.requests(0, 0, 0, 0, 0, 0)
+						.objects(2, 0, 0, 0, 2, 0, 0)
+						.batches(0, 0, 0, 0)
+						.versions(1, 1)
+						.bucket("bucket", 2, 0, 0, 0)
+						.phases(-1, -1, 250_000_000L, 0, 0, -1, -1, 250_000_000L)
+						.failurePolicy("fixed", 100_000, 0, 30, 0, 0)
+						.failureOutcome("failed")
+						.verification(new DeleteVerificationSummary(
+										true, true, true, false, true, 30_000, 2, 0, 0, 0,
+										0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+						.reconciled(true)
+						.build();
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(0, 0, 250);
+		when(snapshot.deleteMetrics()).thenReturn(delete);
+		final DistributedMetricsContext context = mockDistributedContext(
+						"delete-strict-pre-abort", OpType.DELETE, snapshot,
+						Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+		final MetricsManager manager = mock(MetricsManager.class);
+		when(manager.getDistributedContexts()).thenReturn(Set.of(context));
+		when(manager.getAllContexts()).thenReturn(Set.of());
+		when(manager.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode actual = new MetricsJsonResponder(manager, defaultConfig())
+						.buildClusterMetrics(false).get(0).get("delete");
+
+		assertEquals(expected.toString(), actual.toString());
+	}
+
+	@Test
+	void engineApiPublishesTheCompleteVerificationClassificationMatrix() {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(2L, 1L, 2_000L);
+		when(snapshot.deleteMetrics()).thenReturn(deleteMetricsSnapshot().toBuilder()
+						.verification(new DeleteVerificationSummary(
+										true, true, true, true, false, 30_000, 0, 4, 1, 1,
+										3, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0))
+						.build());
+		final DistributedMetricsContext context = mockDistributedContext(
+						"delete-verified", OpType.DELETE, snapshot,
+						Map.of(MetricsConstants.METADATA_DELETE_METRICS, Boolean.TRUE));
+		final MetricsManager manager = mock(MetricsManager.class);
+		when(manager.getDistributedContexts()).thenReturn(Set.of(context));
+		when(manager.getAllContexts()).thenReturn(Set.of());
+		when(manager.getTerminalSteps()).thenReturn(List.of());
+
+		final JsonNode verification = new MetricsJsonResponder(manager, defaultConfig())
+						.buildClusterMetrics(false).get(0).get("delete").get("verification");
+
+		assertTrue(verification.get("enabled").asBoolean());
+		assertTrue(verification.get("pre_validation_enabled").asBoolean());
+		assertTrue(verification.get("post_verification_enabled").asBoolean());
+		assertTrue(verification.get("pre_validation_complete").asBoolean());
+		assertTrue(verification.get("post_verification_complete").asBoolean());
+		assertFalse(verification.get("post_verification_skipped").asBoolean());
+		assertEquals(30.0, verification.get("timeout_seconds").asDouble());
+		assertEquals(3, verification.get("accepted_absent").asLong());
+		assertEquals(1, verification.get("accepted_present").asLong());
+		assertEquals(1, verification.get("accepted_unresolved").asLong());
+		assertEquals(1, verification.get("failed_absent").asLong());
+		assertEquals(0, verification.get("operational_unresolved_absent").asLong());
+		assertEquals(2, verification.get("correctness_failures").asLong());
+		assertEquals(1, verification.get("inconclusive_failures").asLong());
+		assertEquals(2, verification.get("residual").asLong());
+		assertFalse(verification.get("removal_confirmed").asBoolean());
 	}
 
 	@Test

@@ -56,6 +56,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private final boolean integrityModeEnabled;
 	private final boolean standaloneDeleteDurationMode;
 	private final boolean standaloneDeleteEnabled;
+	private final boolean standaloneDeletePreValidationEnabled;
+	private final boolean standaloneDeletePostVerificationEnabled;
 	private final Map<String, RetainedDurationPhase<?>> retainedDurationPhases = new HashMap<>();
 	private volatile long startTimeSec = -1;
 
@@ -81,6 +83,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						this.config.configVal("load"));
 		this.standaloneDeleteEnabled = standaloneDelete.enabled();
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
+		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
+		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
@@ -363,6 +367,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	protected final boolean standaloneDeleteEnabled() {
 		return standaloneDeleteEnabled;
+	}
+
+	protected final boolean standaloneDeletePreValidationEnabled() {
+		return standaloneDeletePreValidationEnabled;
+	}
+
+	protected final boolean standaloneDeletePostVerificationEnabled() {
+		return standaloneDeletePostVerificationEnabled;
 	}
 
 	@FunctionalInterface

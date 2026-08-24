@@ -18,6 +18,7 @@ public interface Loggers {
 	Logger DELETE_OBJECTS = LogManager.getLogger(BASE + "DeleteObjects");
 	Logger DELETE_REQUESTS = LogManager.getLogger(BASE + "DeleteRequests");
 	Logger DELETE_RESIDUAL = LogManager.getLogger(BASE + "DeleteResidual");
+	Logger DELETE_VERIFICATION = LogManager.getLogger(BASE + "DeleteVerification");
 	Logger DELETE_SELECTION = LogManager.getLogger(BASE + "DeleteSelection");
 	Logger DELETE_SELECTION_COMPLETION = LogManager.getLogger(BASE + "DeleteSelectionCompletion");
 	Logger ERR = LogManager.getLogger(BASE + "Errors");
@@ -45,6 +46,9 @@ public interface Loggers {
 					Map.entry(DELETE_OBJECTS.getName().substring(BASE.length()), "DELETE Target Reconciliation v1"),
 					Map.entry(DELETE_REQUESTS.getName().substring(BASE.length()), "DELETE Request Trace v1"),
 					Map.entry(DELETE_RESIDUAL.getName().substring(BASE.length()), "DELETE Residual Inventory"),
+					Map.entry(
+									DELETE_VERIFICATION.getName().substring(BASE.length()),
+									"DELETE Verification Evidence v1"),
 					Map.entry(DELETE_SELECTION.getName().substring(BASE.length()), "DELETE Frozen Selection"),
 					Map.entry(
 									DELETE_SELECTION_COMPLETION.getName().substring(BASE.length()),

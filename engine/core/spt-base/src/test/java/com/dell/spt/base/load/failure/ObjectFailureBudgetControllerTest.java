@@ -120,6 +120,19 @@ class ObjectFailureBudgetControllerTest {
 										.outcome());
 	}
 
+	@Test
+	void operationalBudgetRoomCannotExcuseVerificationCorrectnessOrInconclusiveFailures() {
+		final var controller = new ObjectFailureBudgetController(
+						ObjectFailureBudgetConfig.fixed(100));
+		for (final var worker : List.of(
+						new DeleteObjectLifecycleSnapshot(1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, true),
+						new DeleteObjectLifecycleSnapshot(1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, true))) {
+			final var decision = controller.evaluate(List.of(worker), Duration.ZERO, true);
+			assertEquals(ObjectFailureBudgetOutcome.FAILED, decision.outcome());
+			assertTrue(decision.reason().contains("outside operational budget"));
+		}
+	}
+
 	private static DeleteObjectLifecycleSnapshot worker(
 					final long attempted, final long accepted, final long operationalFailed) {
 		return workerWithSuccessRequests(attempted, accepted, operationalFailed, accepted > 0 ? 1 : 0);

@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
@@ -146,6 +147,37 @@ final class S3RdmaDeleteRequestContractTest {
 			assertNull(request.rdmaToken());
 			assertEquals(0, availableTransport.getRegisterCount());
 		}
+	}
+
+	@Test
+	void verificationUsesInheritedHttpHeadWithoutRdmaHardware() throws Exception {
+		final Config config = config();
+		final var unavailableTransport = new FakeRdmaTransport(rdmaConfig(config)) {
+			@Override
+			public boolean init(
+							final String endpoint, final String accessKey, final String secretKey) {
+				setAvailable(false);
+				return false;
+			}
+		};
+		try (final var driver = newDriver(config, ignored -> unavailableTransport)) {
+			driver.start();
+			assertTrue(driver instanceof DeleteVerificationProbe);
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT,
+							driver.presence(target("current key", null)));
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT,
+							driver.presence(target("exact/key", "v+1/=")));
+		}
+
+		final List<CapturedRequest> heads = requests.stream()
+						.filter(request -> "HEAD".equals(request.method())).toList();
+		assertEquals(2, heads.size());
+		assertEquals("/bucket/current%20key", heads.get(0).rawPath());
+		assertNull(heads.get(0).rawQuery());
+		assertEquals("/bucket/exact/key", heads.get(1).rawPath());
+		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
+		assertTrue(heads.stream().allMatch(request -> request.rdmaToken() == null));
+		assertEquals(0, unavailableTransport.getRegisterCount());
 	}
 
 	@Test

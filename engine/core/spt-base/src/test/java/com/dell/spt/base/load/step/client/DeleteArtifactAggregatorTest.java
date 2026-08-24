@@ -62,7 +62,8 @@ class DeleteArtifactAggregatorTest {
 						DeleteArtifacts.METRICS_FILE_NAME,
 						DeleteArtifacts.REQUESTS_FILE_NAME,
 						DeleteArtifacts.OBJECTS_FILE_NAME,
-						DeleteArtifacts.RESIDUAL_FILE_NAME)) {
+						DeleteArtifacts.RESIDUAL_FILE_NAME,
+						DeleteArtifacts.VERIFICATION_FILE_NAME)) {
 			assertFalse(Files.readString(DeleteArtifactAggregator.nodeSourcePath(output.resolve(artifact), 0)).isBlank());
 			assertFalse(Files.readString(DeleteArtifactAggregator.nodeSourcePath(output.resolve(artifact), 1)).isBlank());
 		}
@@ -114,7 +115,8 @@ class DeleteArtifactAggregatorTest {
 		when(remote.readFromFile(remoteArtifacts.totals().toString(), totals.length))
 						.thenThrow(new EOFException());
 		for (final Path path : List.of(
-						remoteArtifacts.requests(), remoteArtifacts.objects(), remoteArtifacts.residual())) {
+						remoteArtifacts.requests(), remoteArtifacts.objects(), remoteArtifacts.residual(),
+						remoteArtifacts.verification())) {
 			final byte[] bytes = Files.readAllBytes(path);
 			when(remote.readFromFile(path.toString(), 0)).thenReturn(bytes);
 			when(remote.readFromFile(path.toString(), bytes.length)).thenThrow(new EOFException());
@@ -169,7 +171,8 @@ class DeleteArtifactAggregatorTest {
 											path(Loggers.DELETE_METRICS_TOTAL, stepId),
 											path(Loggers.DELETE_REQUESTS, stepId),
 											path(Loggers.DELETE_OBJECTS, stepId),
-											path(Loggers.DELETE_RESIDUAL, stepId))),
+											path(Loggers.DELETE_RESIDUAL, stepId),
+											path(Loggers.DELETE_VERIFICATION, stepId))),
 							List.of("local"), selection, selectionCompletion);
 
 			for (final String artifact : List.of(
@@ -177,8 +180,13 @@ class DeleteArtifactAggregatorTest {
 							DeleteArtifacts.REQUESTS_FILE_NAME,
 							DeleteArtifacts.OBJECTS_FILE_NAME,
 							DeleteArtifacts.RESIDUAL_FILE_NAME,
+							DeleteArtifacts.VERIFICATION_FILE_NAME,
 							DeleteArtifacts.SELECTION_FILE_NAME)) {
-				assertEquals(fixture(artifact), Files.readString(output.resolve(artifact)));
+				if (DeleteArtifacts.VERIFICATION_FILE_NAME.equals(artifact)) {
+					assertEquals(3, Files.readAllLines(output.resolve(artifact)).size());
+				} else {
+					assertEquals(fixture(artifact), Files.readString(output.resolve(artifact)));
+				}
 			}
 			assertEquals(
 							fixture(DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME).strip(),
@@ -189,7 +197,8 @@ class DeleteArtifactAggregatorTest {
 			recorder.close();
 			for (final var logger : List.of(
 							Loggers.DELETE_METRICS_TOTAL, Loggers.DELETE_REQUESTS,
-							Loggers.DELETE_OBJECTS, Loggers.DELETE_RESIDUAL)) {
+							Loggers.DELETE_OBJECTS, Loggers.DELETE_RESIDUAL,
+							Loggers.DELETE_VERIFICATION)) {
 				Files.deleteIfExists(path(logger, stepId));
 			}
 		}
@@ -266,6 +275,8 @@ class DeleteArtifactAggregatorTest {
 		when(manager.logFileName(Loggers.DELETE_REQUESTS.getName(), "step")).thenReturn(artifacts.requests().toString());
 		when(manager.logFileName(Loggers.DELETE_OBJECTS.getName(), "step")).thenReturn(artifacts.objects().toString());
 		when(manager.logFileName(Loggers.DELETE_RESIDUAL.getName(), "step")).thenReturn(artifacts.residual().toString());
+		when(manager.logFileName(Loggers.DELETE_VERIFICATION.getName(), "step"))
+						.thenReturn(artifacts.verification().toString());
 	}
 
 	private static NodeArtifacts nodeArtifacts(final Path dir, final int index, final String node) {
@@ -273,7 +284,8 @@ class DeleteArtifactAggregatorTest {
 						dir.resolve(DeleteArtifacts.METRICS_FILE_NAME),
 						dir.resolve(DeleteArtifacts.REQUESTS_FILE_NAME),
 						dir.resolve(DeleteArtifacts.OBJECTS_FILE_NAME),
-						dir.resolve(DeleteArtifacts.RESIDUAL_FILE_NAME), index, node);
+						dir.resolve(DeleteArtifacts.RESIDUAL_FILE_NAME),
+						dir.resolve(DeleteArtifacts.VERIFICATION_FILE_NAME), index, node);
 	}
 
 	private static void write(final NodeArtifacts artifacts) throws Exception {
@@ -282,10 +294,13 @@ class DeleteArtifactAggregatorTest {
 		Files.writeString(artifacts.requests(), artifacts.requestsText());
 		Files.writeString(artifacts.objects(), artifacts.objectsText());
 		Files.writeString(artifacts.residual(), artifacts.residualText());
+		Files.writeString(artifacts.verification(), artifacts.verificationText());
 	}
 
 	private static void serve(final FileManager manager, final NodeArtifacts artifacts) throws Exception {
-		for (final Path path : List.of(artifacts.totals(), artifacts.requests(), artifacts.objects(), artifacts.residual())) {
+		for (final Path path : List.of(
+						artifacts.totals(), artifacts.requests(), artifacts.objects(), artifacts.residual(),
+						artifacts.verification())) {
 			final byte[] bytes = Files.readAllBytes(path);
 			when(manager.readFromFile(path.toString(), 0)).thenReturn(bytes);
 			when(manager.readFromFile(path.toString(), bytes.length)).thenThrow(new EOFException());
@@ -298,7 +313,7 @@ class DeleteArtifactAggregatorTest {
 	}
 
 	private record NodeArtifacts(
-			Path totals, Path requests, Path objects, Path residual, int index, String node) {
+			Path totals, Path requests, Path objects, Path residual, Path verification, int index, String node) {
 		String requestId() { return "request-" + index; }
 		String acceptedId() { return "target-" + index + "-a"; }
 		String failedId() { return "target-" + index + "-b"; }
@@ -319,6 +334,13 @@ class DeleteArtifactAggregatorTest {
 		}
 		String residualText() {
 			return "bucket,key,size,version_id\n" + secondKey() + "," + secondKey() + ",1,\n";
+		}
+		String verificationText() {
+			return String.join(",", DeleteArtifacts.VERIFICATION_HEADER) + "\n"
+					+ "1," + acceptedId() + "," + (index * 2) + "," + firstKey() + "," + firstKey()
+					+ ",1,,accepted,false,disabled,false,disabled,false,false,false\n"
+					+ "1," + failedId() + "," + (index * 2 + 1) + "," + secondKey() + "," + secondKey()
+					+ ",1,,failed,false,disabled,false,disabled,false,false,true\n";
 		}
 	}
 }

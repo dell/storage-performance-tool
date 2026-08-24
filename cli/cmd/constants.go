@@ -22,6 +22,9 @@ const (
 	flagMaxFailedObjects             = "max-failed-objects"
 	flagMaxFailurePercent            = "max-failure-percent"
 	flagFailureBudgetGrace           = "failure-budget-grace"
+	flagValidateInventory            = "validate-inventory"
+	flagVerifyDelete                 = "verify"
+	flagVerificationTimeout          = "verification-timeout"
 )
 
 // Workload type constants

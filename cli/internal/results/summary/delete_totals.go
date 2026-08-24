@@ -103,7 +103,7 @@ func parseDeleteTotalsV1(path string) (*deletemetrics.Metrics, error) {
 		value("selection_order") != constants.DeleteSelectionOrderCanonical {
 		return nil, fmt.Errorf("DELETE totals v1 result identity is incompatible")
 	}
-	reconciled := value("terminal_reconciled") == "true"
+	reconciled := value("terminal_reconciled") == canonicalBooleanTrue
 	if !reconciled {
 		return nil, fmt.Errorf("DELETE totals v1 terminal evidence is incomplete")
 	}
@@ -211,6 +211,30 @@ func preferDeleteTotalsV1(
 		existing.FailurePolicy.OperationalFailedObjects != evidence.OperationalFailures ||
 		existing.FailurePolicy.ExcludedFailedObjects != evidence.ProtocolFailures {
 		return nil, fmt.Errorf("DELETE raw and schema-v4 failure classifications conflict")
+	}
+	expectedResidual, err := sumDeleteTotals(
+		existing.Objects.Failed, existing.Objects.Unattempted, existing.Objects.Unresolved,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if existing.Verification.PostVerificationComplete {
+		expectedResidual = existing.Verification.Residual
+	}
+	if evidence.ResidualRows != expectedResidual {
+		return nil, fmt.Errorf("DELETE residual artifact conflicts with verification classifications")
+	}
+	if evidence.Verification == nil {
+		if existing.Verification.Enabled {
+			return nil, fmt.Errorf("DELETE verification artifact is missing for enabled verification")
+		}
+	} else {
+		rawVerification := *evidence.Verification
+		rawVerification.TimeoutSeconds = existing.Verification.TimeoutSeconds
+		rawVerification.Notice = existing.Verification.Notice
+		if rawVerification != existing.Verification {
+			return nil, fmt.Errorf("DELETE raw and schema-v4 verification classifications conflict")
+		}
 	}
 	if existing.Versions != evidence.Versions {
 		return nil, fmt.Errorf("DELETE raw and schema-v4 version dimensions conflict")

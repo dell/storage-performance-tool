@@ -114,7 +114,8 @@ class StandaloneDeleteConfigurationTest {
 		final var config = TestConfigBuilder.config();
 		final var parsed = CliArgUtil.parseArgs(
 						"--load-op-delete-standalone", "--load-op-delete-batchSize=17",
-						"--load-op-delete-duration");
+						"--load-op-delete-duration", "--load-op-delete-preValidation",
+						"--load-op-delete-postVerification", "--load-op-delete-verificationTimeoutMillis=1250");
 		parsed.forEach(config::val);
 
 		final var standalone = StandaloneDeleteConfig.from(config.configVal("load"));
@@ -122,6 +123,9 @@ class StandaloneDeleteConfigurationTest {
 		assertTrue(standalone.enabled());
 		assertEquals(17, standalone.batchSize());
 		assertTrue(standalone.durationMode());
+		assertTrue(standalone.preValidation());
+		assertTrue(standalone.postVerification());
+		assertEquals(1_250, standalone.verificationTimeoutMillis());
 	}
 
 	@Test

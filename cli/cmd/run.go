@@ -2119,6 +2119,9 @@ func init() {
 	runCmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "Maximum operational DELETE object failures permitted; the budget trips only above this object count")
 	runCmd.Flags().Float64(flagMaxFailurePercent, 0, "Maximum cumulative operational DELETE object failure percentage (0-100); mutually exclusive with --max-failed-objects")
 	runCmd.Flags().Duration(flagFailureBudgetGrace, scenario.DefaultFailureBudgetGrace, "Measured-phase grace before evaluating a positive DELETE failure percentage")
+	runCmd.Flags().Bool(flagValidateInventory, false, "Strictly require every selected DELETE identity to exist before the timed phase; enables post-verification unless --verify is explicitly false")
+	runCmd.Flags().Bool(flagVerifyDelete, false, "Verify the full applicable DELETE inventory after timing (default false)")
+	runCmd.Flags().Duration(flagVerificationTimeout, scenario.DefaultDeleteVerificationTimeout, "Independent timeout for each enabled DELETE pre-validation or post-verification phase")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
@@ -2370,6 +2373,20 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 		if cmd.Flags().Lookup(flagFailureBudgetGrace) != nil {
 			params.FailureBudgetGrace, _ = cmd.Flags().GetDuration(flagFailureBudgetGrace)
+		}
+		if flag := cmd.Flags().Lookup(flagValidateInventory); flag != nil {
+			params.ValidateDeleteInventory, _ = cmd.Flags().GetBool(flagValidateInventory)
+		}
+		if flag := cmd.Flags().Lookup(flagVerifyDelete); flag != nil {
+			params.VerifyDelete, _ = cmd.Flags().GetBool(flagVerifyDelete)
+			params.VerifyDeleteExplicit = flag.Changed
+		}
+		if params.ValidateDeleteInventory && !params.VerifyDeleteExplicit {
+			params.VerifyDelete = true
+		}
+		params.VerificationTimeout = scenario.DefaultDeleteVerificationTimeout
+		if cmd.Flags().Lookup(flagVerificationTimeout) != nil {
+			params.VerificationTimeout, _ = cmd.Flags().GetDuration(flagVerificationTimeout)
 		}
 	}
 	params.AllowEmptySelection, _ = cmd.Flags().GetBool("allow-empty-selection")

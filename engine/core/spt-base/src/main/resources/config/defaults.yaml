@@ -70,6 +70,10 @@ load:
       selectedBuckets: []
       seedMillis: -1
       discoveryMillis: -1
+      workflowStartedEpochNanos: -1
+      preValidation: false
+      postVerification: false
+      verificationTimeoutMillis: 30000
     # Controller-level object-unit failure policy. Existing limit.fail fields retain their
     # legacy failed-operation meanings and are not used as this budget.
     failureBudget:

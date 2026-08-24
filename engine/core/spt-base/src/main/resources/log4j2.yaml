@@ -124,6 +124,14 @@ Configuration:
         PatternLayout:
           header: "bucket,key,size,version_id\n"
           pattern: "%m%n"
+      - name: deleteVerificationFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.verification.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,target_id,target_index,bucket,key,size,version_id,operational_outcome,pre_enabled,pre_presence,post_enabled,post_presence,correctness_failure,inconclusive,residual\n"
+          pattern: "%m%n"
       - name: deleteSelectionFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}verify-input.csv"
         Policies:
@@ -272,6 +280,11 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: deleteResidualFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteVerification
+        level: INFO
+        AppenderRef:
+          ref: deleteVerificationFile
         additivity: false
       - name: com.dell.spt.base.logging.DeleteSelection
         level: INFO

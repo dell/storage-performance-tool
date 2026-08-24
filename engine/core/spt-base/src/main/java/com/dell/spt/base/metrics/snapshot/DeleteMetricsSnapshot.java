@@ -6,6 +6,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SI
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -87,6 +88,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 	private final long excludedFailedObjects;
 	private final double observedFailurePercent;
 	private final boolean reconciled;
+	private final DeleteVerificationSummary verification;
 
 	private DeleteMetricsSnapshot(final Builder builder) {
 		configuredBatchSize = builder.configuredBatchSize;
@@ -129,6 +131,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		excludedFailedObjects = builder.excludedFailedObjects;
 		observedFailurePercent = builder.observedFailurePercent;
 		reconciled = builder.reconciled;
+		verification = builder.verification;
 	}
 
 	/** Returns a builder for one configured DELETE batch size. */
@@ -174,6 +177,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 										operationalFailedObjects,
 										excludedFailedObjects)
 						.failureOutcome(failureOutcome)
+						.verification(verification)
 						.reconciled(reconciled);
 		buckets.forEach(bucket -> builder.bucket(
 						bucket.bucket(), bucket.selected(), bucket.attempted(), bucket.accepted(), bucket.failed()));
@@ -218,6 +222,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		long cleanupNanos = -1;
 		long totalNanos = -1;
 		boolean reconciled = true;
+		final List<DeleteVerificationSummary> verification = new ArrayList<>(snapshots.size());
 		for (final DeleteMetricsSnapshot snapshot : snapshots) {
 			if (snapshot == null) {
 				throw new IllegalArgumentException("DELETE metrics snapshot must not be null");
@@ -267,6 +272,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 			cleanupNanos = maxApplicable(cleanupNanos, snapshot.cleanupNanos);
 			totalNanos = maxApplicable(totalNanos, snapshot.totalWallNanos);
 			reconciled &= snapshot.reconciled;
+			verification.add(snapshot.verification);
 			for (final Bucket bucket : snapshot.buckets) {
 				result.bucket(bucket.bucket(), bucket.selected(), bucket.attempted(), bucket.accepted(), bucket.failed());
 			}
@@ -300,6 +306,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 										operationalFailedObjects,
 										excludedFailedObjects)
 						.failureOutcome(first.failureOutcome)
+						.verification(DeleteVerificationSummary.aggregate(verification))
 						.reconciled(reconciled)
 						.build();
 	}
@@ -545,6 +552,11 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		return reconciled;
 	}
 
+	/** Returns inventory validation and absence-verification classifications. */
+	public DeleteVerificationSummary verification() {
+		return verification;
+	}
+
 	/** Mutable builder for an immutable DELETE metrics snapshot. */
 	public static final class Builder {
 		private final int configuredBatchSize;
@@ -587,6 +599,7 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		private long excludedFailedObjects;
 		private double observedFailurePercent;
 		private boolean reconciled;
+		private DeleteVerificationSummary verification = DeleteVerificationSummary.disabled();
 
 		private Builder(final int configuredBatchSize) {
 			if (configuredBatchSize < 1) {
@@ -720,6 +733,12 @@ public final class DeleteMetricsSnapshot implements Serializable {
 		/** Sets the live or controller-owned terminal failure-budget outcome. */
 		public Builder failureOutcome(final String outcome) {
 			failureOutcome = Objects.requireNonNull(outcome, "outcome");
+			return this;
+		}
+
+		/** Sets full DELETE inventory validation and verification classifications. */
+		public Builder verification(final DeleteVerificationSummary verification) {
+			this.verification = Objects.requireNonNull(verification, "verification");
 			return this;
 		}
 

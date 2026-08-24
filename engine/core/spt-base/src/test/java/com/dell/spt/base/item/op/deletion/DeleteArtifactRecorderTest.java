@@ -125,6 +125,94 @@ class DeleteArtifactRecorderTest {
 		}
 	}
 
+	@Test
+	void postVerificationRefinesResidualToPresentAndUnresolvedEvenForUnattemptedTargets(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "delete-recorder-verified-" + System.nanoTime();
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(
+						selection,
+						"bucket,key,size,version_id\n"
+										+ "bucket,absent,1,\n"
+										+ "bucket,present,1,\n"
+										+ "bucket,unresolved,1,version-3\n");
+		final var recorder = new DeleteArtifactRecorder(stepId, selection, 3);
+		final var post = new DeleteVerificationReport(
+						DeleteVerificationPhase.POST_DELETE,
+						new DeleteVerificationProbe.Presence[]{
+								DeleteVerificationProbe.Presence.ABSENT,
+								DeleteVerificationProbe.Presence.PRESENT,
+								DeleteVerificationProbe.Presence.UNRESOLVED
+						},
+						true,
+						1);
+		try {
+			recorder.finish(
+							new OperationLifecycleSnapshot<>(0, 0, 0, 0, 0, 0, 0, List.of(), List.of()),
+							DeleteMetricsSnapshot.builder(1)
+											.objects(3, 0, 0, 0, 3, 0, 0)
+											.verification(DeleteVerificationSummary.classify(
+															false, true, 30_000, null, post, new int[]{0, 0, 0
+															}))
+											.reconciled(true)
+											.build(),
+							post);
+			final String residual = Files.readString(path(Loggers.DELETE_RESIDUAL, stepId));
+			assertFalse(residual.contains(",absent,"));
+			assertTrue(residual.contains(",present,"));
+			assertTrue(residual.contains(",unresolved,"));
+			assertEquals(3, residual.lines().count());
+			final String verification = Files.readString(
+							path(Loggers.DELETE_OBJECTS, stepId).resolveSibling("delete.verification.csv"));
+			assertTrue(verification.contains(",absent,1,,unattempted,false,disabled,true,absent,false,false,false"));
+			assertTrue(verification.contains(",present,1,,unattempted,false,disabled,true,present,false,false,true"));
+			assertTrue(verification.contains(",unresolved,1,version-3,unattempted,false,disabled,true,unresolved,false,false,true"));
+			assertEquals(4, verification.lines().count());
+		} finally {
+			post.close();
+			recorder.close();
+			cleanup(stepId);
+		}
+	}
+
+	@Test
+	void distributedStrictPreAbortPublishesConservativeArtifactsForLocallyPassingSlice(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "delete-recorder-distributed-pre-abort-" + System.nanoTime();
+		final Path selection = selection(temp);
+		final var recorder = new DeleteArtifactRecorder(stepId, selection, 1);
+		final var pre = new DeleteVerificationReport(
+						DeleteVerificationPhase.PRE_DELETE,
+						new DeleteVerificationProbe.Presence[]{
+								DeleteVerificationProbe.Presence.PRESENT
+						},
+						true,
+						1);
+		final var verification = DeleteVerificationSummary.classify(
+						true, true, 30_000, pre, null, new int[]{0
+						})
+						.withPostVerificationSkipped();
+		try {
+			recorder.finish(
+							new OperationLifecycleSnapshot<>(0, 0, 0, 0, 0, 0, 0, List.of(), List.of()),
+							DeleteMetricsSnapshot.builder(1)
+											.objects(1, 0, 0, 0, 1, 0, 0)
+											.verification(verification)
+											.reconciled(true)
+											.build(),
+							pre,
+							null);
+
+			assertTrue(Files.readString(path(Loggers.DELETE_RESIDUAL, stepId)).contains(",key,1,"));
+			final String evidence = Files.readString(path(Loggers.DELETE_VERIFICATION, stepId));
+			assertTrue(evidence.contains(",key,1,,unattempted,true,present,true,unattempted,false,false,true"));
+		} finally {
+			pre.close();
+			recorder.close();
+			cleanup(stepId);
+		}
+	}
+
 	private static Path selection(final Path temp) throws IOException {
 		final Path selection = temp.resolve("verify-input.csv");
 		Files.writeString(selection, "bucket,key,size,version_id\nbucket,key,1,\n");
@@ -163,7 +251,8 @@ class DeleteArtifactRecorderTest {
 	private static void cleanup(final String stepId) throws IOException {
 		for (final var logger : List.of(
 						Loggers.DELETE_METRICS_TOTAL, Loggers.DELETE_REQUESTS,
-						Loggers.DELETE_OBJECTS, Loggers.DELETE_RESIDUAL)) {
+						Loggers.DELETE_OBJECTS, Loggers.DELETE_RESIDUAL,
+						Loggers.DELETE_VERIFICATION)) {
 			Files.deleteIfExists(path(logger, stepId));
 		}
 	}

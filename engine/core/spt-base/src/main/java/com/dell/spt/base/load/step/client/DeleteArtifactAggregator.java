@@ -21,7 +21,8 @@ import java.util.Locale;
 
 /** Collects per-node DELETE evidence and publishes the canonical aggregate last. */
 final class DeleteArtifactAggregator implements AutoCloseable {
-	private record SourceNames(String totals, String requests, String objects, String residual) {}
+	private record SourceNames(
+					String totals, String requests, String objects, String residual, String verification) {}
 
 	private final String stepId;
 	private final List<FileManager> fileManagers;
@@ -52,13 +53,15 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 							fileManager.logFileName(Loggers.DELETE_METRICS_TOTAL.getName(), stepId),
 							fileManager.logFileName(Loggers.DELETE_REQUESTS.getName(), stepId),
 							fileManager.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId),
-							fileManager.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId)));
+							fileManager.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId),
+							fileManager.logFileName(Loggers.DELETE_VERIFICATION.getName(), stepId)));
 		}
 		final SourceNames local = sourceNames.get(0);
 		this.outputDirectory = requireLocalCanonical(local.totals(), DeleteArtifacts.METRICS_FILE_NAME).getParent();
 		requireSameOutput(local.requests(), DeleteArtifacts.REQUESTS_FILE_NAME);
 		requireSameOutput(local.objects(), DeleteArtifacts.OBJECTS_FILE_NAME);
 		requireSameOutput(local.residual(), DeleteArtifacts.RESIDUAL_FILE_NAME);
+		requireSameOutput(local.verification(), DeleteArtifacts.VERIFICATION_FILE_NAME);
 	}
 
 	@Override
@@ -85,7 +88,8 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 							collect(nodeIndex, names.totals(), DeleteArtifacts.METRICS_FILE_NAME),
 							collect(nodeIndex, names.requests(), DeleteArtifacts.REQUESTS_FILE_NAME),
 							collect(nodeIndex, names.objects(), DeleteArtifacts.OBJECTS_FILE_NAME),
-							collect(nodeIndex, names.residual(), DeleteArtifacts.RESIDUAL_FILE_NAME)));
+							collect(nodeIndex, names.residual(), DeleteArtifacts.RESIDUAL_FILE_NAME),
+							collect(nodeIndex, names.verification(), DeleteArtifacts.VERIFICATION_FILE_NAME)));
 		}
 		DeleteArtifactAggregation.publish(
 						stepId, outputDirectory, sources, contributorIds, selection, selectionCompletion);

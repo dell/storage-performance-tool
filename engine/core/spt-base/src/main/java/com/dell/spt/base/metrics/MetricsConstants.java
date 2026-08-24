@@ -80,6 +80,14 @@ public interface MetricsConstants {
 	/** Required notice when removal verification is disabled. */
 	String DELETE_VERIFICATION_NOTICE = "Verification disabled; results describe logical DELETE API outcomes, "
 					+ "not confirmed object removal.";
+
+	/** Causal-evidence caveat when post-verification runs without strict pre-validation. */
+	String DELETE_POST_VERIFICATION_NOTICE = "Post-run absence does not prove this run removed a "
+					+ "previously existing object because pre-validation was disabled.";
+
+	/** Explanation for an enabled post phase that strict pre-validation prevented from starting. */
+	String DELETE_POST_VERIFICATION_SKIPPED_NOTICE = "Post-verification was skipped because strict "
+					+ "pre-validation failed before timed DELETE admission.";
 	//
 	String METADATA_STEP_ID = "load_step_id";
 	String METADATA_OP_TYPE = "load_op_type";

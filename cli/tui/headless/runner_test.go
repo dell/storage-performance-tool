@@ -570,6 +570,63 @@ func TestDeleteMetricsCrossViewFixtureKeepsEngineAPIHeadlessStoredAggregatePerNo
 	}
 }
 
+func TestStrictPreValidationAbortFixtureReachesGoHeadlessAndStoredViews(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate strict pre-validation fixture source")
+	}
+	fixturePath := filepath.Clean(filepath.Join(
+		filepath.Dir(sourceFile),
+		"../../../engine/core/spt-base/src/test/resources/delete-metrics-v4-strict-pre-abort.json"))
+	payload, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read strict pre-validation fixture: %v", err)
+	}
+	fleet, err := tui.NewSptAPIClient("").ParseFleetJSONMetrics(string(payload))
+	if err != nil || len(fleet) != 1 || fleet[0].Delete == nil {
+		t.Fatalf("parse strict pre-validation fixture: metrics=%+v err=%v", fleet, err)
+	}
+	metric := fleet[0]
+	if metric.Partial {
+		t.Fatalf("valid strict pre-validation abort was marked partial: %+v", metric.Delete)
+	}
+	if err := deletemetrics.ValidateTerminal(metric.Delete); err != nil {
+		t.Fatalf("strict pre-validation abort failed shared validation: %v", err)
+	}
+	if !metric.Delete.Verification.PreValidationComplete ||
+		metric.Delete.Verification.PostVerificationComplete ||
+		!metric.Delete.Verification.PostVerificationSkipped ||
+		metric.Delete.Phases.PostVerificationSeconds != nil {
+		t.Fatalf("strict pre-validation abort phase state = %+v", metric.Delete)
+	}
+	human := formatMetricsMessage(*metric)
+	for _, expected := range []string{
+		"pre_validation=true", "pre_validation_complete=true",
+		"post_verification=true", "post_verification_complete=false",
+		"post_verification_skipped=true", deletemetrics.PostVerificationSkippedNotice,
+	} {
+		if !strings.Contains(human, expected) {
+			t.Fatalf("headless strict-abort view omitted %q: %s", expected, human)
+		}
+	}
+	report := resultsummary.NewRenderer(resultsummary.RenderOptions{}).FullReport(
+		&resultsummary.RunSummary{
+			RunID: "strict-pre-abort",
+			Steps: []resultsummary.StepSummary{{
+				PhaseLabel: "Delete", Operation: "DELETE", Delete: metric.Delete,
+			}},
+		})
+	for _, expected := range []string{
+		"pre-validation true (complete true)",
+		"post-verification true (complete false, skipped true)",
+		deletemetrics.PostVerificationSkippedNotice,
+	} {
+		if !strings.Contains(report, expected) {
+			t.Fatalf("stored strict-abort view omitted %q:\n%s", expected, report)
+		}
+	}
+}
+
 func TestHeadlessRunner_MetricsOutputIncludesAvailableTTFB(t *testing.T) {
 	mockDocker := &tui.MockDockerManager{}
 	tmpDir := t.TempDir()

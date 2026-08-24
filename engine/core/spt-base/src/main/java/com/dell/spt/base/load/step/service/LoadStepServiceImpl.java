@@ -210,6 +210,32 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	}
 
 	@Override
+	public final void verifyDeleteInventoryForStepStop() throws RemoteException {
+		localLoadStep.verifyDeleteInventoryForStepStop();
+	}
+
+	@Override
+	public final void startDeleteInventoryPreValidation() throws RemoteException {
+		localLoadStep.startDeleteInventoryPreValidation();
+	}
+
+	@Override
+	public final boolean isDeleteInventoryPreValidationComplete() throws RemoteException {
+		return localLoadStep.isDeleteInventoryPreValidationComplete();
+	}
+
+	@Override
+	public final void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure()
+					throws RemoteException {
+		localLoadStep.skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure();
+	}
+
+	@Override
+	public final boolean isDeleteInventoryVerificationCompleteForStepStop() throws RemoteException {
+		return localLoadStep.isDeleteInventoryVerificationCompleteForStepStop();
+	}
+
+	@Override
 	public final DurationAwaitStatus durationAwaitStatus() throws RemoteException {
 		return localLoadStep.durationAwaitStatus();
 	}

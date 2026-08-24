@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
 import com.dell.spt.base.Constants;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
@@ -150,8 +151,71 @@ public class StepResultsMetricsLogMessageTest extends StepResultsMetricsLogMessa
 		assertTrue(text.contains("P99.9:"));
 		assertTrue(text.contains("Operations Duration [us]:    " + System.lineSeparator() + "    N/A"));
 		assertTrue(text.contains("Operations Latency [us]:     " + System.lineSeparator() + "    N/A"));
-		assertTrue(text.contains("Removal Confirmed:          false"));
+		assertTrue(text.contains("Removal Confirmed:         false"));
 		assertTrue(text.contains(DELETE_VERIFICATION_NOTICE));
 		assertFalse(text.contains("Removed:"));
+	}
+
+	@Test
+	void deleteOutputPublishesVerificationCorrectnessAndResidualEvidence() throws Exception {
+		final var delete = DeleteMetricsSnapshot.builder(1)
+						.requests(3, 2, 0, 1, 0, 3.0)
+						.objects(3, 3, 2, 1, 0, 0, 3.0)
+						.verification(new DeleteVerificationSummary(
+										true, true, true, true, false, 30_000, 0, 2, 1, 1,
+										1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+						.build();
+		final var snapshot = new DistributedAllMetricsSnapshotImpl(
+						SNAPSHOT.durationSnapshot(), SNAPSHOT.latencySnapshot(), SNAPSHOT.ttfbSnapshot(),
+						SNAPSHOT.concurrencySnapshot(), SNAPSHOT.failsSnapshot(), SNAPSHOT.corruptSnapshot(),
+						SNAPSHOT.successSnapshot(), SNAPSHOT.byteSnapshot(), SNAPSHOT.nodeCount(),
+						SNAPSHOT.elapsedTimeMillis(), delete);
+		final var output = new StringBuilder();
+		new StepResultsMetricsLogMessage(
+						OpType.DELETE, "delete-verified", 1, snapshot, latencies, durations)
+						.formatTo(output);
+		final String text = output.toString();
+
+		new ObjectMapper(new YAMLFactory()).readValue(text, Object[].class);
+		assertTrue(text.contains("Pre Validation:            true"));
+		assertTrue(text.contains("Pre Validation Complete:   true"));
+		assertTrue(text.contains("Post Verification:         true"));
+		assertTrue(text.contains("Post Verification Complete: true"));
+		assertTrue(text.contains("Post Verification Skipped: false"));
+		assertTrue(text.contains("Correctness Failures:      1"));
+		assertTrue(text.contains("Inconclusive Failures:     1"));
+		assertTrue(text.contains("Residual:                  2"));
+		assertTrue(text.contains("Removal Confirmed:         false"));
+	}
+
+	@Test
+	void deleteOutputExplainsStrictPreValidationAbortAndSkippedPostPhase() throws Exception {
+		final var delete = DeleteMetricsSnapshot.builder(1)
+						.objects(1, 0, 0, 0, 1, 0, 0)
+						.versions(1, 0)
+						.bucket("bucket", 1, 0, 0, 0)
+						.phases(-1, -1, 10, 0, 0, -1, -1, 10)
+						.failureOutcome("failed")
+						.verification(new DeleteVerificationSummary(
+										true, true, true, false, true, 30_000, 1, 0, 0, 0,
+										0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+						.reconciled(true)
+						.build();
+		final var snapshot = new DistributedAllMetricsSnapshotImpl(
+						SNAPSHOT.durationSnapshot(), SNAPSHOT.latencySnapshot(), SNAPSHOT.ttfbSnapshot(),
+						SNAPSHOT.concurrencySnapshot(), SNAPSHOT.failsSnapshot(), SNAPSHOT.corruptSnapshot(),
+						SNAPSHOT.successSnapshot(), SNAPSHOT.byteSnapshot(), SNAPSHOT.nodeCount(),
+						SNAPSHOT.elapsedTimeMillis(), delete);
+		final var output = new StringBuilder();
+		new StepResultsMetricsLogMessage(
+						OpType.DELETE, "delete-strict-pre-abort", 1, snapshot, latencies, durations)
+						.formatTo(output);
+		final String text = output.toString();
+
+		new ObjectMapper(new YAMLFactory()).readValue(text, Object[].class);
+		assertTrue(text.contains("Pre Validation Complete:   true"));
+		assertTrue(text.contains("Post Verification Complete: false"));
+		assertTrue(text.contains("Post Verification Skipped: true"));
+		assertTrue(text.contains(MetricsConstants.DELETE_POST_VERIFICATION_SKIPPED_NOTICE));
 	}
 }

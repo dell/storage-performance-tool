@@ -63,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -128,6 +129,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final Object standaloneDeleteStopCoordination = new Object();
 	private volatile boolean standaloneDeleteStopInProgress;
 	private volatile boolean standaloneDeleteStopCoordinated;
+	private volatile boolean deletePostVerificationGloballySkipped;
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
@@ -203,6 +205,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr);
+			validateDeleteInventoriesBeforeAdmission();
 			initAndStartMetricsAggregator(config.configVal("output-metrics"));
 			if (standaloneDeleteEnabled() && !standaloneDeleteDurationMode()) {
 				prepareCountFailureBudgetMonitoring();
@@ -258,6 +261,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			failureBudgetStartedNanos = Long.MIN_VALUE;
 			standaloneDeleteStopInProgress = false;
 			standaloneDeleteStopCoordinated = false;
+			deletePostVerificationGloballySkipped = false;
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
 			failureBudgetMetricsOutputDeferred = false;
@@ -601,6 +605,187 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	void validateDeleteInventoriesBeforeAdmission() {
+		if (!standaloneDeletePreValidationEnabled()) {
+			return;
+		}
+		// Post-verification remains globally closed until every pre-validation slice
+		// has completed successfully. Any unexpected coordinator failure therefore
+		// fails closed even when abort propagation cannot reach a peer.
+		deletePostVerificationGloballySkipped = standaloneDeletePostVerificationEnabled();
+		try {
+			coordinateDeleteInventoryPhase(
+							"pre-validation",
+							LoadStep::startDeleteInventoryPreValidation,
+							LoadStep::isDeleteInventoryPreValidationComplete,
+							IntegrityTerminalException.Category.INPUT);
+		} catch (final IntegrityTerminalException failure) {
+			propagateStrictPreValidationAbort(failure);
+			throw failure;
+		}
+		deletePostVerificationGloballySkipped = false;
+	}
+
+	private void propagateStrictPreValidationAbort(final IntegrityTerminalException phaseFailure) {
+		if (!standaloneDeletePostVerificationEnabled()) {
+			return;
+		}
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(Objects::nonNull)
+						.toList();
+		final DurationPhaseAttempt result = invokeStepSlicePhase(
+						activeSlices,
+						LoadStep::skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure,
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-pre-abort-");
+		for (final Throwable propagationFailure : result.failures()) {
+			phaseFailure.addSuppressed(terminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"failed to propagate strict pre-validation abort to every distributed slice",
+							propagationFailure));
+		}
+		if (!result.completedAll() && result.failures().isEmpty()) {
+			phaseFailure.addSuppressed(terminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"timed out propagating strict pre-validation abort to every distributed slice",
+							new java.util.concurrent.TimeoutException(
+											"distributed strict pre-validation abort propagation exceeded its deadline")));
+		}
+		if (result.interrupted()) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private void coordinateDeleteInventoryPhase(
+					final String phase,
+					final StepSlicePhase starter,
+					final DeleteInventoryPhaseCompletion completion,
+					final IntegrityTerminalException.Category category) {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(Objects::nonNull)
+						.toList();
+		if (activeSlices.isEmpty()) {
+			return;
+		}
+		final String threadNamePrefix = "spt-delete-" + phase + "-";
+		// A terminal result from one slice must not release the distributed barrier
+		// while another slice is still completing its mandatory inventory pass.
+		final Map<LoadStep, Throwable> terminalSliceFailures = Collections.synchronizedMap(
+						new IdentityHashMap<>());
+		final DurationPhaseAttempt startResult = invokeRetainedDurationPhase(
+						"distributed-delete-" + phase + "-start",
+						activeSlices,
+						slice -> {
+							try {
+								starter.execute(slice);
+							} catch (final InterruptedException interrupted) {
+								Thread.currentThread().interrupt();
+								throw interrupted;
+							} catch (final Exception failure) {
+								terminalSliceFailures.putIfAbsent(slice, failure);
+							}
+						},
+						durationStopPhaseDeadlineNanos(),
+						threadNamePrefix);
+		throwDeleteInventoryPhaseFailure(phase, category, startResult, false);
+		while (true) {
+			final DurationPhaseAttempt completionResult = invokeRetainedDurationPhase(
+							"distributed-delete-" + phase + "-completion",
+							activeSlices,
+							slice -> {
+								if (terminalSliceFailures.containsKey(slice)) {
+									return;
+								}
+								try {
+									if (!completion.complete(slice)) {
+										throw DeleteInventoryPhasePending.INSTANCE;
+									}
+								} catch (final DeleteInventoryPhasePending pending) {
+									throw pending;
+								} catch (final InterruptedException interrupted) {
+									Thread.currentThread().interrupt();
+									throw interrupted;
+								} catch (final Exception failure) {
+									terminalSliceFailures.putIfAbsent(slice, failure);
+								}
+							},
+							durationStopPhaseDeadlineNanos(),
+							threadNamePrefix);
+			throwDeleteInventoryPhaseFailure(phase, category, completionResult, true);
+			if (completionResult.completedAll()) {
+				throwDeleteInventoryTerminalFailures(phase, category, terminalSliceFailures);
+				return;
+			}
+			try {
+				TimeUnit.NANOSECONDS.sleep(DURATION_DRAIN_POLL_NANOS);
+			} catch (final InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw terminalFailure(
+								category,
+								"Standalone DELETE " + phase + " was interrupted",
+								interrupted);
+			}
+		}
+	}
+
+	private void throwDeleteInventoryTerminalFailures(
+					final String phase,
+					final IntegrityTerminalException.Category category,
+					final Map<LoadStep, Throwable> terminalSliceFailures) {
+		final List<Throwable> failures;
+		synchronized (terminalSliceFailures) {
+			failures = List.copyOf(terminalSliceFailures.values());
+		}
+		IntegrityTerminalException phaseFailure = null;
+		for (final Throwable failure : failures) {
+			phaseFailure = appendTerminalFailure(
+							phaseFailure,
+							category,
+							"Standalone DELETE " + phase + " failed across distributed slices",
+							failure);
+		}
+		if (phaseFailure != null) {
+			throw phaseFailure;
+		}
+	}
+
+	private void throwDeleteInventoryPhaseFailure(
+					final String phase,
+					final IntegrityTerminalException.Category category,
+					final DurationPhaseAttempt result,
+					final boolean allowPending) {
+		IntegrityTerminalException phaseFailure = null;
+		for (final Throwable failure : result.failures()) {
+			if (allowPending && failure == DeleteInventoryPhasePending.INSTANCE) {
+				continue;
+			}
+			phaseFailure = appendTerminalFailure(
+							phaseFailure,
+							category,
+							"Standalone DELETE " + phase + " failed across distributed slices",
+							failure);
+		}
+		if (!result.completedAll() && phaseFailure == null
+						&& result.failures().stream().noneMatch(failure -> failure == DeleteInventoryPhasePending.INSTANCE)) {
+			phaseFailure = terminalFailure(
+							category,
+							"Standalone DELETE " + phase + " did not complete across distributed slices",
+							new TimeoutException("DELETE verification control-plane call exceeded its deadline"));
+		}
+		if (phaseFailure != null) {
+			throw phaseFailure;
+		}
+	}
+
+	private static final class DeleteInventoryPhasePending extends Exception {
+		private static final long serialVersionUID = 1L;
+		private static final DeleteInventoryPhasePending INSTANCE = new DeleteInventoryPhasePending();
+
+		private DeleteInventoryPhasePending() {
+			super("DELETE inventory phase remains active", null, false, false);
+		}
+	}
+
 	static void requireMatchingRunId(final LoadStep stepSlice, final long expectedRunId) {
 		if (expectedRunId <= 0L) {
 			throw new IntegrityTerminalException(
@@ -847,7 +1032,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			return;
 		}
-		if (standaloneDeleteDurationMode()) {
+		if (standaloneDeleteEnabled()) {
 			coordinateDurationStop();
 			return;
 		}
@@ -862,7 +1047,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void coordinateDurationStop() {
 		synchronized (standaloneDeleteStopCoordination) {
-			coordinateStandaloneDeleteStopOnce(failureBudgetFailure == null);
+			coordinateStandaloneDeleteStopOnce(
+							standaloneDeleteDurationMode() && failureBudgetFailure == null);
 		}
 	}
 
@@ -972,6 +1158,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			restoreDurationStopInterrupt(interrupted);
 			return;
 		}
+		if (standaloneDeletePostVerificationEnabled() && !deletePostVerificationGloballySkipped) {
+			try {
+				coordinateDeleteInventoryPhase(
+								"post-verification",
+								LoadStep::verifyDeleteInventoryForStepStop,
+								LoadStep::isDeleteInventoryVerificationCompleteForStepStop,
+								IntegrityTerminalException.Category.EXECUTION);
+			} catch (final RuntimeException failure) {
+				recordDurationStopFailure("verify DELETE inventory", failure);
+				restoreDurationStopInterrupt(interrupted);
+				return;
+			}
+		}
 		final DurationPhaseAttempt validationResult = invokeRetainedDurationPhase(
 						"distributed-terminal-validation",
 						activeSlices,
@@ -1079,6 +1278,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@FunctionalInterface
 	private interface StepSlicePhase {
 		void execute(LoadStep slice) throws Exception;
+	}
+
+	@FunctionalInterface
+	private interface DeleteInventoryPhaseCompletion {
+		boolean complete(LoadStep slice) throws Exception;
 	}
 
 	@Override

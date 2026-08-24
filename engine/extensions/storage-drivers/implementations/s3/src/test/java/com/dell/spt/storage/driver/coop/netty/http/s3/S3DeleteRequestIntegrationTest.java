@@ -28,6 +28,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.github.akurilov.commons.io.Input;
@@ -73,6 +74,7 @@ final class S3DeleteRequestIntegrationTest {
 	private volatile String multiDeleteResponse;
 	private volatile String listResponse;
 	private volatile Function<CapturedRequest, String> listResponseFactory;
+	private volatile Function<CapturedRequest, Integer> headResponseStatus = ignored -> 200;
 	private volatile int multiDeleteStatus = 200;
 	private final AtomicInteger putResponseCount = new AtomicInteger();
 
@@ -118,6 +120,31 @@ final class S3DeleteRequestIntegrationTest {
 			assertEquals("/bucket/exact/key", request.rawPath());
 			assertEquals("versionId=v%2B1%2F%3D", request.rawQuery());
 		}
+	}
+
+	@Test
+	void verificationHeadClassifiesCurrentExactAbsentAndUnresolvedThroughRealNettyPath()
+					throws Exception {
+		headResponseStatus = request -> request.rawPath().contains("absent") ? 404
+						: request.rawPath().contains("unresolved") ? 503 : 200;
+		try (final var driver = newDriver()) {
+			driver.start();
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT,
+							driver.presence(target("current key", null)));
+			assertEquals(DeleteVerificationProbe.Presence.ABSENT,
+							driver.presence(target("absent", "v+1/=")));
+			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
+							driver.presence(target("unresolved", null)));
+		}
+
+		final List<CapturedRequest> heads = requests.stream()
+						.filter(request -> "HEAD".equals(request.method())).toList();
+		assertEquals(3, heads.size());
+		assertEquals("/bucket/current%20key", heads.get(0).rawPath());
+		assertNull(heads.get(0).rawQuery());
+		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
+		assertTrue(heads.stream().allMatch(
+						request -> request.authorization().startsWith(S3Api.AUTH_V4_PREFIX)));
 	}
 
 	@Test
@@ -244,6 +271,62 @@ final class S3DeleteRequestIntegrationTest {
 		assertTrue(body.contains("<Key>alpha</Key>"));
 		assertTrue(body.contains("<Key>comma,key</Key>"));
 		assertTrue(body.contains("<VersionId>version-comma</VersionId>"));
+	}
+
+	@Test
+	void strictPreValidationFailureStopsBeforeTimedDeleteOnTheRealDriver(
+					@TempDir final Path tempDir) throws Exception {
+		final Path manifest = copyContractResource(tempDir, "verify-input.csv");
+		copyContractResource(tempDir, "verify-input.complete.json");
+		final String stepId = tempDir.getFileName() + "-pre-validation";
+		final String scenario = contractScenarioText()
+						.replace("/spt-input/items/verify-input.csv", manifest.toString())
+						.replace("mt-001-20260822.120000.000-delete", stepId)
+						.replace("\"standalone\": true,", "\"standalone\": true, \"preValidation\": true, \"verificationTimeoutMillis\": 25,");
+		headResponseStatus = ignored -> 404;
+
+		final Config config = scenarioConfig(777L);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, Extension.load(classLoader), config, metrics);
+			final RuntimeException failure = assertThrows(
+							RuntimeException.class,
+							() -> new RunImpl("strict pre-validation canary", scenario, engine, 777L).run());
+			assertNotNull(IntegrityTerminalException.find(failure));
+		}
+
+		assertEquals(2, requests.stream().filter(request -> "HEAD".equals(request.method())).count());
+		assertEquals(0, requests.stream().filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method())).count());
+	}
+
+	@Test
+	void postVerificationCorrectnessFailureCannotUseOperationalBudgetRoom(
+					@TempDir final Path tempDir) throws Exception {
+		final Path manifest = copyContractResource(tempDir, "verify-input.csv");
+		copyContractResource(tempDir, "verify-input.complete.json");
+		final String stepId = tempDir.getFileName() + "-post-verification";
+		final String scenario = contractScenarioText()
+						.replace("/spt-input/items/verify-input.csv", manifest.toString())
+						.replace("mt-001-20260822.120000.000-delete", stepId)
+						.replace("\"standalone\": true,", "\"standalone\": true, \"postVerification\": true, \"verificationTimeoutMillis\": 15,");
+		headResponseStatus = ignored -> 200;
+
+		final Config config = scenarioConfig(777L);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, Extension.load(classLoader), config, metrics);
+			final RuntimeException failure = assertThrows(
+							RuntimeException.class,
+							() -> new RunImpl("post-verification correctness canary", scenario, engine, 777L).run());
+			final var terminal = IntegrityTerminalException.find(failure);
+			assertNotNull(terminal);
+			assertTrue(terminal.getMessage().contains("outside operational budget room"));
+		}
+
+		assertEquals(1, requests.stream().filter(request -> "POST".equals(request.method()) && "delete".equals(request.rawQuery())).count());
+		assertTrue(requests.stream().filter(request -> "HEAD".equals(request.method())).count() >= 2);
 	}
 
 	@Test
@@ -789,7 +872,7 @@ final class S3DeleteRequestIntegrationTest {
 			}
 			exchange.sendResponseHeaders(200, -1);
 		} else if ("HEAD".equals(request.method())) {
-			exchange.sendResponseHeaders(200, -1);
+			exchange.sendResponseHeaders(headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(request.method())) {
 			exchange.sendResponseHeaders(204, -1);
 		} else if ("POST".equals(request.method()) && "delete".equals(request.rawQuery())) {

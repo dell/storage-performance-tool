@@ -114,6 +114,9 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--max-failed-objects` | | `100000` | Standalone DELETE operational failed-object budget. Permits exactly this many failed targets and trips only when the global count is greater; zero is strict. Mutually exclusive with `--max-failure-percent` |
 | `--max-failure-percent` | | *(unset)* | Alternative cumulative operational failed-object percentage, inclusive from 0 through 100. Zero is enforced immediately; positive values are evaluated after the grace period and at completion |
 | `--failure-budget-grace` | | `30s` | Measured-phase delay before evaluating a positive `--max-failure-percent`; whole seconds only, and an explicit value is accepted only with a positive percentage budget |
+| `--validate-inventory` | | `false` | Internal standalone DELETE only. Require every selected current-key or exact-version identity to be present before timing; also enables post-verification unless `--verify=false` is explicit |
+| `--verify` | | `false` | Internal standalone DELETE only. Verify the full frozen inventory after DELETE drain; by itself it does not enable pre-validation |
+| `--verification-timeout` | | `30s` | Independent positive whole-millisecond settle timeout for each enabled DELETE validation or verification phase |
 | `--allow-empty-selection` | | `false` | `read-verify` only. Allow a clean empty discovery/input selection to succeed |
 | `--defer-verification` | | `false` | `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify`; incompatible with `--cleanup` (env: `SPT_DEFER_VERIFICATION`) |
 | `--versions` | | `current` | `read-verify` bucket/prefix discovery only. `current` uses ordinary object listing; `all` uses `ListObjectVersions`, preserves exact version IDs, and excludes delete markers. Omit with `--items-file` |
@@ -213,6 +216,55 @@ if it exhausts before the requested deadline. Existing-prefix mode rejects
 `--versions=all`, delete-marker selection, and `--cleanup`. Keep the exact namespace
 quiescent for the entire run: a concurrent writer can replace a frozen current-key identity before
 the timed DELETE reaches it. The public workload registry remains gated.
+
+Inventory validation and absence verification are optional and operate on the complete frozen
+selection, never a sample. Their flag truth table is:
+
+| `--validate-inventory` | `--verify` | Pre-validation | Post-verification |
+|---|---|---|---|
+| omitted | omitted | off | off |
+| omitted | true | off | on |
+| true | omitted | on | on |
+| true | false | on | off |
+| true | true | on | on |
+
+Each enabled phase makes one complete pass. Its independent `--verification-timeout` starts with
+that pass; after the pass, unresolved probes are retried, and post-verification also retries
+still-present identities until the phase deadline. A complete pass is never truncated merely to
+meet the settle deadline, so a slow full inventory can make wall time exceed the configured timeout.
+Strict pre-validation requires every selected identity to be present and stops before timed DELETE
+admission on absent or unresolved input. When that happens with post-verification configured, the
+post phase remains enabled but is reported as skipped: `pre_validation_complete=true`,
+`post_verification_complete=false`, and `post_verification_skipped=true`. Its phase duration is
+`null`, no post classifications are fabricated, and the residual inventory remains conservative.
+For distributed runs, one slice's strict failure propagates this skipped-post state to every slice,
+including slices whose local pre-validation passed, before shutdown or artifact finalization.
+
+A manifest row without `version_id` uses a HEAD of the current object: older historical versions may
+remain. A row with `version_id` HEADs that exact version: other versions may remain. Post-verification
+joins every observation to its timed outcome. Accepted-and-absent is verified success;
+accepted-and-present is a correctness failure; accepted-and-unresolved is both correctness and
+inconclusive. Failed-and-present remains an operational failure and residual without a second
+correctness failure. Failed-and-absent remains operationally failed but is removed from the residual.
+Failed-and-unresolved remains operationally failed and uncertain. Unattempted identities retain their
+own absent, present, or unresolved classifications and are never relabeled as correctness failures.
+An operationally unresolved dispatched target likewise remains distinct from unattempted and is
+cross-classified as absent, present, or probe-unresolved.
+Operational failure-budget room cannot excuse validation, correctness, or inconclusive failures.
+
+With post-verification, the pre-cleanup residual `items.csv` contains exactly selected identities
+observed present or unresolved; identities observed absent are excluded regardless of their API
+outcome. Without it, the residual remains conservative (failed, unresolved, and unattempted). Output
+uses *accepted* for successful logical DELETE API outcomes. Only post-verification establishes
+post-run absence, and without successful pre-validation even absence does not prove that this run
+removed an object which existed beforehand.
+
+Stored DELETE artifact sets use completion version 2 when verification evidence is available. The
+additive `delete.verification.csv` v1 companion has one canonical `target_id`/`target_index` row for
+every frozen selection identity and joins the operational outcome, pre/post observation, correctness,
+inconclusive, and residual classifications. The existing DELETE totals, request trace, and target
+reconciliation files remain schema v1. Stored artifact-set version 1 remains readable for runs made
+before verification evidence existed, but it cannot substantiate enabled verification.
 
 Count and duration are mutually exclusive. A duration run must retain enough live identities to
 schedule logical DELETE requests until the deadline; early exhaustion invalidates the result and
@@ -321,11 +373,14 @@ failed transport phases. Both retain p50, p90, p99, and p99.9. Object latency,
 object size, data moved, bandwidth, and TTFB are N/A. Phase fields distinguish seed, discovery,
 pre-validation, scheduled DELETE, drain, post-verification, cleanup, and total wall time; unavailable
 phases remain unset rather than zero. Live JSON serializes an unmeasured phase as `null`; numeric
-zero is reserved for an applicable interval actually measured as zero. The current workflow leaves
-pre-validation unset because
-manifest parsing and selection staging are not inventory validation. `accepted` is the required outcome term. Unless verification is
-enabled by the later verification contract, it describes a logical API result and does not confirm
-object removal. Schema v4 removes or renames no schema v2/v3 field, so the existing TUI continues to
+zero is reserved for an applicable interval actually measured as zero. Enabled validation and
+verification report their measured phase durations. Schema v4's `verification` object reports the
+flag state, phase completion/skipped state, timeout, pre-validation failures, aggregate
+absent/present/unresolved observations,
+accepted/failed/unattempted observation matrices, correctness and inconclusive failures, residual
+count, causal notice, and removal-confirmed state. `accepted` is the required outcome term. When
+verification is disabled, it describes a logical API result and does not confirm object removal.
+Schema v4 removes or renames no schema v2/v3 field, so the existing TUI continues to
 show logical request rate/count while safely ignoring additional detail.
 
 The failure-policy observation is operationally failed objects divided by accepted plus

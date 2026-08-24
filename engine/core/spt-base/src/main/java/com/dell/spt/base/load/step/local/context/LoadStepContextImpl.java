@@ -25,9 +25,16 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteArtifactRecorder;
+import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.item.op.deletion.DeleteOperationalOutcomeLedger;
 import com.dell.spt.base.item.op.deletion.DeletePhaseTimingSnapshot;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationPhase;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationReport;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.shard.ListShard;
@@ -58,6 +65,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.rmi.RemoteException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -167,6 +175,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
 	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
 	private final DeleteArtifactRecorder deleteArtifactRecorder;
+	private final Path deleteSelectionManifest;
+	private final DeleteOperationalOutcomeLedger deleteTargetOutcomes;
+	private final AtomicReference<DeleteVerificationReport> deletePreValidationReport = new AtomicReference<>();
+	private final AtomicReference<DeleteVerificationReport> deletePostVerificationReport = new AtomicReference<>();
+	private final AtomicReference<DeleteVerificationSummary> deleteFinalVerificationSummary = new AtomicReference<>();
+	private final AtomicBoolean deletePostVerificationStarted = new AtomicBoolean();
+	private final AtomicBoolean deletePostVerificationSkipped = new AtomicBoolean();
+	private final Object deletePostVerificationPhaseLock = new Object();
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -364,12 +380,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: null;
 		this.standaloneDeleteEnabled = standaloneDelete.enabled();
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
-		final String deleteSelectionManifest;
+		final String deleteSelectionManifestValue;
 		if (standaloneDelete.enabled() && itemConfig != null && standaloneDelete.selected() >= 0) {
 			final Config inputConfig = itemConfig.configVal("input");
-			deleteSelectionManifest = inputConfig == null ? null : inputConfig.stringVal("file");
+			deleteSelectionManifestValue = inputConfig == null ? null : inputConfig.stringVal("file");
 		} else {
-			deleteSelectionManifest = null;
+			deleteSelectionManifestValue = null;
+		}
+		this.deleteSelectionManifest = deleteSelectionManifestValue == null
+						|| deleteSelectionManifestValue.isBlank()
+										? null
+										: Path.of(deleteSelectionManifestValue).toAbsolutePath().normalize();
+		if ((standaloneDelete.preValidation() || standaloneDelete.postVerification())
+						&& (standaloneDelete.selected() < 0
+										|| this.deleteSelectionManifest == null)) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE verification requires a frozen manifest and exact count");
 		}
 		standaloneDelete.validateSettings(opType, itemType, this.recycleFlag, this.retryFlag);
 		if (standaloneDelete.enabled() && !operationLifecycle.isEnabled()) {
@@ -383,6 +409,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (standaloneDelete.enabled() && !driver.supportsStandaloneDeleteRequests()) {
 			throw new IllegalConfigurationException(
 							"Configured storage driver does not support standalone DELETE requests");
+		}
+		if ((standaloneDelete.preValidation() || standaloneDelete.postVerification())
+						&& !(driver instanceof DeleteVerificationProbe)) {
+			throw new IllegalConfigurationException(
+							"Configured storage driver does not support standalone DELETE verification");
 		}
 		if (this.retryFlag) {
 			if (this.retryLimit < 0) {
@@ -424,10 +455,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.waitOpFinishBeforeStop = opConfig.boolVal("wait-finish");
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
-		this.deleteArtifactRecorder = deleteSelectionManifest == null || deleteSelectionManifest.isBlank()
+		this.deleteArtifactRecorder = this.deleteSelectionManifest == null
 						? null
 						: deleteArtifactRecorderFactory.create(
-										id, Path.of(deleteSelectionManifest), standaloneDelete.selected());
+										id, this.deleteSelectionManifest, standaloneDelete.selected());
+		try {
+			this.deleteTargetOutcomes = standaloneDelete.postVerification()
+							? DeleteOperationalOutcomeLedger.create(standaloneDelete.selected())
+							: null;
+		} catch (final IOException failure) {
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
+			throw new IllegalConfigurationException(
+							"Unable to allocate bounded DELETE operational outcome storage", failure);
+		}
 		try {
 			if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
 				this.metricsCtx.metadata().put(
@@ -449,6 +491,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (deleteArtifactRecorder != null) {
 				deleteArtifactRecorder.close();
 			}
+			closeDeleteVerificationStorage();
 			throw failure;
 		}
 	}
@@ -1226,6 +1269,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		operationDrainComplete.set(false);
 		durationIntervalStarted.set(false);
 		objectFailureBudgetAdmissionReleased.set(false);
+		deletePreValidationReport.set(null);
+		deletePostVerificationReport.set(null);
+		deletePostVerificationStarted.set(false);
+		deletePostVerificationSkipped.set(false);
 		operationLifecycle.reset();
 		if (standaloneDeleteEnabled) {
 			final long deleteStepStartedEpochNanos = DurationTime.monotonicEpochNanos();
@@ -1278,6 +1325,121 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			throw new IllegalStateException(id + ": object failure-budget admission must be held before start");
 		}
 		objectFailureBudgetAdmissionHeld.set(true);
+	}
+
+	@Override
+	public final void validateDeleteInventoryBeforeAdmission() {
+		if (!standaloneDeleteConfig.preValidation()) {
+			return;
+		}
+		final DeleteVerificationReport report;
+		try {
+			report = DeleteInventoryVerifier.verify(
+							deleteSelectionManifest,
+							standaloneDeleteConfig.selected(),
+							DeleteVerificationPhase.PRE_DELETE,
+							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
+							(DeleteVerificationProbe) driver);
+		} catch (final Exception failure) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							id,
+							"Standalone DELETE pre-validation could not complete its full inventory pass",
+							failure);
+		}
+		deletePreValidationReport.set(report);
+		if (!report.successful()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							id,
+							"Standalone DELETE strict pre-validation failed for "
+											+ report.failureCount() + " selected identity/identities before timing",
+							null);
+		}
+	}
+
+	@Override
+	public final void verifyDeleteInventoryAfterDrain() {
+		final DeleteVerificationReport preValidation = deletePreValidationReport.get();
+		if (!claimDeletePostVerification(preValidation)) {
+			return;
+		}
+		final DeleteVerificationReport report;
+		try {
+			report = DeleteInventoryVerifier.verify(
+							deleteSelectionManifest,
+							standaloneDeleteConfig.selected(),
+							DeleteVerificationPhase.POST_DELETE,
+							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
+							(DeleteVerificationProbe) driver);
+		} catch (final Exception failure) {
+			deletePostVerificationStarted.set(false);
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification could not complete its full inventory pass",
+							failure);
+		}
+		deletePostVerificationReport.set(report);
+		deleteWorkflowCompletedEpochNanos.set(DurationTime.monotonicEpochNanos());
+	}
+
+	private boolean claimDeletePostVerification(final DeleteVerificationReport preValidation) {
+		synchronized (deletePostVerificationPhaseLock) {
+			return standaloneDeleteConfig.postVerification()
+							&& !deletePostVerificationSkipped.get()
+							&& (!standaloneDeleteConfig.preValidation()
+											|| (preValidation != null && preValidation.successful()))
+							&& deletePostVerificationReport.get() == null
+							&& deletePostVerificationStarted.compareAndSet(false, true);
+		}
+	}
+
+	@Override
+	public final void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure() {
+		if (!standaloneDeleteConfig.preValidation() || !standaloneDeleteConfig.postVerification()) {
+			return;
+		}
+		synchronized (deletePostVerificationPhaseLock) {
+			if (deletePostVerificationStarted.get() || deletePostVerificationReport.get() != null
+							|| deleteFinalVerificationSummary.get() != null) {
+				throw new IllegalStateException(
+								id + ": distributed strict pre-validation abort arrived after post-verification started");
+			}
+			deletePostVerificationSkipped.set(true);
+		}
+	}
+
+	private DeleteVerificationSummary deleteVerificationSummary() {
+		final var finalSummary = deleteFinalVerificationSummary.get();
+		if (finalSummary != null) {
+			return finalSummary;
+		}
+		if (!standaloneDeleteConfig.preValidation() && !standaloneDeleteConfig.postVerification()) {
+			return DeleteVerificationSummary.disabled();
+		}
+		final var summary = DeleteVerificationSummary.classify(
+						standaloneDeleteConfig.preValidation(),
+						standaloneDeleteConfig.postVerification(),
+						standaloneDeleteConfig.verificationTimeoutMillis(),
+						deletePreValidationReport.get(),
+						deletePostVerificationReport.get(),
+						standaloneDeleteConfig.selected(),
+						deleteTargetOutcomes);
+		return deletePostVerificationSkipped.get()
+						? summary.withPostVerificationSkipped()
+						: summary;
+	}
+
+	private DeleteVerificationSummary finalizeDeleteVerificationSummary() {
+		synchronized (deleteFinalVerificationSummary) {
+			var finalSummary = deleteFinalVerificationSummary.get();
+			if (finalSummary == null) {
+				finalSummary = deleteVerificationSummary();
+				deleteFinalVerificationSummary.set(finalSummary);
+			}
+			return finalSummary;
+		}
 	}
 
 	@Override
@@ -1423,6 +1585,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final var attempted = accepted + failed + unresolved;
 		final var reconciled = selected == accepted + failed + unattempted + unresolved
 						&& attempted == accepted + failed + unresolved;
+		final var verification = deleteVerificationSummary();
 		return new DeleteObjectLifecycleSnapshot(
 						selected,
 						attempted,
@@ -1432,6 +1595,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						unresolved,
 						terminalCounters.protocolFailed(),
 						terminalCounters.fullSuccessfulRequests(),
+						verification.preValidationFailures(),
+						verification.correctnessFailures(),
+						verification.inconclusiveFailures(),
 						reconciled);
 	}
 
@@ -1505,6 +1671,26 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (!standaloneDeleteEnabled) {
 			return;
 		}
+		final var verification = deleteVerificationSummary();
+		if (standaloneDeleteConfig.preValidation()
+						&& !verification.preValidationComplete()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE pre-validation evidence is incomplete",
+							null);
+		}
+		if (standaloneDeleteConfig.postVerification()
+						&& !verification.postVerificationSkipped()
+						&& (!standaloneDeleteConfig.preValidation()
+										|| verification.preValidationFailures() == 0)
+						&& !verification.postVerificationComplete()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification evidence is incomplete",
+							null);
+		}
 		final var objects = deleteObjectLifecycle();
 		if (objects.unresolved() > 0) {
 			throw new IntegrityTerminalException(
@@ -1542,6 +1728,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		final var result = deleteOperation.deleteResult();
 		deleteObjectLifecycleCounters.recordTerminal(result);
+		if (deleteTargetOutcomes != null) {
+			for (final var targetResult : result.targetResults()) {
+				final long selectionIndex = targetResult.target().selectionIndex();
+				if (selectionIndex >= 0 && selectionIndex < standaloneDeleteConfig.selected()) {
+					deleteTargetOutcomes.markTerminal(
+									selectionIndex,
+									targetResult.outcome() == DeleteTargetOutcome.ACCEPTED);
+				}
+			}
+		}
 		final var metrics = resolveMetrics(operation.type());
 		final long requestDuration = standaloneDeleteRequestDuration(deleteOperation);
 		final long requestLatency = standaloneDeleteRequestLatency(deleteOperation);
@@ -1583,6 +1779,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		deleteObjectLifecycleCounters.recordDispatch(
 						deleteOperation.deleteRequest(), standaloneDeleteConfig.batchSize());
+		if (deleteTargetOutcomes != null) {
+			for (final var target : deleteOperation.deleteRequest().targets()) {
+				final long selectionIndex = target.selectionIndex();
+				if (selectionIndex >= 0 && selectionIndex < standaloneDeleteConfig.selected()) {
+					deleteTargetOutcomes.markDispatched(selectionIndex);
+				}
+			}
+		}
 	}
 
 	private DeleteMetricsSnapshot deleteMetricsSnapshot() {
@@ -1613,8 +1817,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: 0.0;
 		final long operationalFailedObjects = Math.subtractExact(
 						objects.failed(), objects.protocolFailed());
-		// Strict inventory pre-validation is introduced by the later verification contract.
-		final long preValidationNanos = -1;
+		final var verification = deleteVerificationSummary();
+		final var preReport = deletePreValidationReport.get();
+		final var postReport = deletePostVerificationReport.get();
+		final long preValidationNanos = preReport == null ? -1 : preReport.elapsedNanos();
+		final long postVerificationNanos = postReport == null ? -1 : postReport.elapsedNanos();
 		final long seedNanos = optionalPhaseNanos(standaloneDeleteConfig.seedMillis());
 		final long discoveryNanos = optionalPhaseNanos(standaloneDeleteConfig.discoveryMillis());
 		final long totalWallNanos = currentDeleteWorkflowNanos();
@@ -1659,7 +1866,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 										preValidationNanos,
 										scheduledPhaseMeasured ? phaseTiming.scheduledNanos() : -1,
 										drainAndTotalMeasured ? phaseTiming.drainNanos() : -1,
-										-1,
+										postVerificationNanos,
 										-1,
 										drainAndTotalMeasured ? totalWallNanos : -1)
 						.failurePolicy(
@@ -1669,6 +1876,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 										deleteFailurePolicy.grace().toSeconds(),
 										operationalFailedObjects,
 										objects.protocolFailed())
+						.verification(verification)
 						.reconciled(objects.reconciled());
 
 		final var bucketMetrics = new TreeMap<String, long[]>();
@@ -1917,12 +2125,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		return currentFailure;
 	}
 
+	private void verifyDeleteInventoryForDirectLifecycle() {
+		// Pre-validation is a distributed barrier. Its post phase is therefore started
+		// only by the controller after every slice has passed; a worker-local shutdown
+		// must not race a global strict-pre abort into issuing HEAD requests.
+		if (!standaloneDeleteConfig.preValidation()) {
+			verifyDeleteInventoryAfterDrain();
+		}
+	}
+
 	@Override
 	protected final void doShutdown() {
 		// Close both admission gates before retry settlement or recovery. Only operations
 		// already past actual driver dispatch remain drain-eligible.
 		prepareOperationDrain();
 		drainDispatchedOperations();
+		verifyDeleteInventoryForDirectLifecycle();
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
@@ -1937,15 +2155,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
 		prepareOperationDrain();
 		drainDispatchedOperations();
+		verifyDeleteInventoryForDirectLifecycle();
+		finalizeDeleteVerificationSummary();
 
 		RuntimeException artifactFailure = null;
 		if (deleteArtifactRecorder != null) {
 			try {
-				deleteArtifactRecorder.finish(operationLifecycle.snapshot(), deleteMetricsSnapshot());
+				deleteArtifactRecorder.finish(
+								operationLifecycle.snapshot(),
+								deleteMetricsSnapshot(),
+								deletePreValidationReport.get(),
+								deletePostVerificationReport.get());
 			} catch (final RuntimeException failure) {
 				artifactFailure = failure;
 			}
 		}
+		artifactFailure = appendRecoveryFailure(artifactFailure, closeDeleteVerificationStorage());
 
 		driver.stop();
 		if (artifactFailure != null) {
@@ -2024,6 +2249,34 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 
 		Loggers.MSG.debug("{}: interrupted the load step context", id);
+	}
+
+	private RuntimeException closeDeleteVerificationStorage() {
+		RuntimeException failure = null;
+		for (final DeleteVerificationReport report : new DeleteVerificationReport[]{
+				deletePreValidationReport.get(), deletePostVerificationReport.get()
+		}) {
+			if (report == null) {
+				continue;
+			}
+			try {
+				report.close();
+			} catch (final IOException closeFailure) {
+				failure = appendRecoveryFailure(
+								failure,
+								new IllegalStateException("Failed to release DELETE verification evidence", closeFailure));
+			}
+		}
+		if (deleteTargetOutcomes != null) {
+			try {
+				deleteTargetOutcomes.close();
+			} catch (final IOException closeFailure) {
+				failure = appendRecoveryFailure(
+								failure,
+								new IllegalStateException("Failed to release DELETE operational outcome storage", closeFailure));
+			}
+		}
+		return failure;
 	}
 
 	private void markListSuccess(
