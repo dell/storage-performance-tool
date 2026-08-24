@@ -337,8 +337,19 @@ controller publishes its authoritative terminal outcome before results capture. 
 `metrics.total.csv` layout remains unchanged and
 request-based. Auto-results captures complete terminal schema-v4 DELETE detail into the existing
 stored run-metadata model before engine shutdown, and the loader carries that model through aggregate
-and rendered summaries. It does not add a raw/versioned DELETE metrics artifact; that dedicated
-persistence contract remains later work. Capture accepts only the exact run cluster and expected
+and rendered summaries. Auto-results also fetches the committed raw DELETE evidence set:
+`delete.metrics.total.csv` v1, one-row-per-invocation `delete.requests.csv` v1,
+per-target `delete.objects.csv` v1, the pre-cleanup residual `items.csv`, frozen
+`verify-input.csv` plus its provenance completion record, and the final `delete.complete.json`.
+The loader prefers DELETE totals v1 for request/object/batch detail while leaving ordinary and older
+result sets compatible. It verifies every completion hash, selection source/unique/selected count,
+producer identity, request link, target identity, and residual row before rendering recovery counts.
+The request and batch unit is `logical_api_requests`; the object unit is `object_identities`.
+Single/batch mode, configured batch size, and `canonical` selection order form the merge identity.
+Missing or conflicting terminal evidence leaves the step incomplete; successfully fetched evidence
+remains available for recovery and is never silently promoted to a complete result. The residual is
+the conservative measured-phase inventory before optional cleanup, not the seed inventory, and is
+safe to reuse as idempotent retry input. Capture accepts only the exact run cluster and expected
 DELETE steps after their units, counters, timing populations, and terminal reconciliation validate.
 Distributed runs require the authoritative fleet view; only a declared single-node run may fall back
 to its node view. Missing, duplicate, partial, stale, or malformed terminal rows fail the results

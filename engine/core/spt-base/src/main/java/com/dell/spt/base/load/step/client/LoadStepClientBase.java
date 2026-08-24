@@ -107,6 +107,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
+	private final List<AutoCloseable> deleteArtifactAggregators = new ArrayList<>();
 	private final List<AutoCloseable> storageAuthFileSlicers = new ArrayList<>();
 	private final static int MAX_SLEEP_TIME_MILLIS = 120_000; // 2min.
 	private volatile IntegrityTerminalException durationStopFailure;
@@ -179,6 +180,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								1 + configuredNodeAddrs.size());
 			}
 			initFileManagers(nodeAddrs, fileMgrs);
+			initDeleteArtifactAggregator(nodeAddrs);
 			final var sliceCount = 1 + nodeAddrs.size();
 			// init the base/shared config slices
 			final var configSlices = sliceConfig(
@@ -211,6 +213,40 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							"{}: load step client started, additional nodes: {}", loadStepId(),
 							Arrays.toString(nodeAddrs.toArray()));
 		}
+	}
+
+	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
+		if (!supportsStandaloneDeleteArtifactAggregation()
+						|| !standaloneDeleteEnabled()
+						|| !deleteArtifactAggregators.isEmpty()) {
+			return;
+		}
+		final String itemInputFile = config.configVal("item").configVal("input").stringVal("file");
+		if (itemInputFile == null || itemInputFile.isBlank()) {
+			throw terminalFailure(
+							IntegrityTerminalException.Category.INPUT,
+							"Standalone DELETE artifact finalization requires a frozen selection manifest",
+							null);
+		}
+		final java.nio.file.Path selection = java.nio.file.Path.of(itemInputFile).toAbsolutePath().normalize();
+		try {
+			deleteArtifactAggregators.add(new DeleteArtifactAggregator(
+							loadStepId(),
+							fileMgrs,
+							distributedContributorIds(config, nodeAddrs),
+							selection,
+							IntegrityManifestCompletion.completionPath(selection)));
+		} catch (final IOException e) {
+			throw terminalFailure(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							"failed to initialize DELETE artifact aggregation",
+							e);
+		}
+	}
+
+	/** Enables standalone DELETE finalization only for a load-step shape that owns this contract. */
+	protected boolean supportsStandaloneDeleteArtifactAggregation() {
+		return false;
 	}
 
 	private void resetDurationLifecycleForStart() {
@@ -1950,6 +1986,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
 				stepSlices.clear();
 			}
+			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
+			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
+				try {
+					deleteArtifactAggregator.close();
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					failedDeleteArtifactAggregators.add(deleteArtifactAggregator);
+					terminalCause = appendTerminalFailure(
+									terminalCause,
+									IntegrityTerminalException.Category.AGGREGATION,
+									"failed to collect and publish DELETE artifacts",
+									e);
+				}
+			}
+			deleteArtifactAggregators.clear();
+			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
 					integrityLogFileAggregator.close();

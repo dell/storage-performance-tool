@@ -92,6 +92,15 @@ func (r *Renderer) renderDeleteDetails(b *strings.Builder, summary *RunSummary) 
 		r.writeBullet(b, "Not applicable", "object size, data moved, bandwidth, TTFB, object latency")
 		r.writeBullet(b, "Outcome terminology", d.OutcomeTerminology)
 		r.writeBullet(b, "Verification", d.Verification.Notice)
+		if evidence := step.DeleteEvidence; evidence != nil {
+			r.writeBullet(b, "Recovery inventory", fmt.Sprintf(
+				"%d residual of %d frozen targets (pre-cleanup, conservative, idempotent)",
+				evidence.ResidualRows, evidence.SelectionRows))
+			r.writeBullet(b, "Artifact evidence", fmt.Sprintf(
+				"%d requests, %d targets, %d contributors; selection %s/%s sha256 %s",
+				evidence.RequestRows, evidence.TargetRows, len(evidence.Contributors),
+				evidence.SelectionProducer, evidence.SelectionProducerID, evidence.SelectionSHA256))
+		}
 		if len(d.Buckets) > 0 {
 			for _, bucket := range d.Buckets {
 				r.writeBullet(b, "Bucket "+bucket.Bucket, fmt.Sprintf("selected %d, attempted %d, accepted %d, failed %d", bucket.Selected, bucket.Attempted, bucket.Accepted, bucket.Failed))

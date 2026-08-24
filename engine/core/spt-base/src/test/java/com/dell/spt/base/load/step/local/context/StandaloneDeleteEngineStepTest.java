@@ -28,6 +28,7 @@ import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -35,12 +36,16 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.io.EOFException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -52,9 +57,118 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class StandaloneDeleteEngineStepTest {
 	private static final int MULTI_INPUT_CONTEXT_COUNT = 10;
+
+	@Test
+	void constructorDoesNotPublishCallbacksBeforeArtifactRecorderSucceeds(
+					@TempDir final Path temp) throws Exception {
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection, "bucket,key,size,version_id\nbucket,key,1,\n");
+		final var config = config(1, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 1L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=1"));
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var metrics = metrics();
+		final AtomicBoolean recorderAttempted = new AtomicBoolean();
+		try {
+			assertThrows(
+							IllegalStateException.class,
+							() -> new LoadStepContextImpl<>(
+											"standalone-delete-rejected-recorder",
+											generator(config, driver, new ManifestInput(1)),
+											driver,
+											metrics,
+											null,
+											config.configVal("load"),
+											false,
+											com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+											null,
+											config.configVal("item"),
+											(ignoredId, ignoredSelection, ignoredCount) -> {
+												recorderAttempted.set(true);
+												throw new IllegalStateException("injected recorder initialization failure");
+											}));
+			assertTrue(recorderAttempted.get());
+			assertNull(driver.resultOutput, "rejected context escaped to the storage driver");
+			assertFalse(
+							metrics.metadata().containsKey(
+											com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS),
+							"rejected context escaped through metrics metadata");
+		} finally {
+			metrics.close();
+		}
+	}
+
+	@Test
+	void realStepPersistsOneLogicalRequestRowEveryTargetAndOnlyResidualIdentities(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "standalone-delete-artifact-canary-" + System.nanoTime();
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(
+						selection,
+						"bucket,key,size,version_id\n"
+										+ "bucket,key-0,0,\n"
+										+ "bucket,key-1,1,\n"
+										+ "bucket,key-2,2,\n"
+										+ "bucket,key-3,3,\n");
+		final var config = config(2, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 4L);
+		config.val("load-op-delete-selectedCurrentKey", 4L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=4"));
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var metrics = metrics();
+		final List<Path> artifactPaths = List.of(
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_METRICS_TOTAL.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_REQUESTS.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId)),
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_RESIDUAL.getName(), stepId)));
+		for (final Path artifact : artifactPaths) {
+			Files.deleteIfExists(artifact);
+		}
+		final var step = new LoadStepContextImpl<>(
+						stepId,
+						generator(config, driver, new ManifestInput(4)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"));
+
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			LogUtil.flushAll();
+
+			assertEquals(2, Files.readAllLines(artifactPaths.get(1)).size() - 1);
+			assertEquals(4, Files.readAllLines(artifactPaths.get(2)).size() - 1);
+			final List<String> residual = Files.readAllLines(artifactPaths.get(3));
+			assertEquals(2, residual.size());
+			assertEquals("bucket,key-3,3,", residual.get(1));
+			final String objects = Files.readString(artifactPaths.get(2));
+			assertTrue(objects.contains(",key-0,0,,accepted,"));
+			assertTrue(objects.contains(",key-3,3,,failed,"));
+			assertFalse(objects.contains("start_us"), "target rows must not fabricate object timing");
+			assertEquals(2, Files.readAllLines(artifactPaths.get(0)).size());
+		} finally {
+			step.close();
+			metrics.close();
+			for (final Path artifact : artifactPaths) {
+				Files.deleteIfExists(artifact);
+			}
+		}
+	}
 
 	@Test
 	void batchSizeOneExecutesOneRequestAndOnePermitPerSelectedIdentity() throws Exception {

@@ -25,6 +25,8 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
@@ -33,10 +35,13 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class StandaloneDeleteConfigurationTest {
 
@@ -51,6 +56,57 @@ class StandaloneDeleteConfigurationTest {
 		} finally {
 			generator.close();
 		}
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void legacySevenArgumentNullConstructorRemainsSourceCompatible() throws Exception {
+		final LoadStepContextImpl context = new LoadStepContextImpl(
+						"legacy-null-constructor",
+						mock(LoadGenerator.class),
+						supportedDriver(),
+						mock(MetricsContext.class),
+						TestConfigBuilder.config().configVal("load"),
+						false,
+						null);
+		context.close();
+	}
+
+	@Test
+	void rejectedContextNeverStartsDeleteArtifactRecorder(@TempDir final Path temp) throws Exception {
+		final String stepId = "standalone-delete-rejected-" + System.nanoTime();
+		final Path selection = temp.resolve("verify-input.csv");
+		Files.writeString(selection, "bucket,key,size,version_id\nbucket,key,1,\n");
+		final Config config = standaloneConfig();
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-delete-selected", 1L);
+		config.val("load-op-delete-selectedCurrentKey", 1L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("bucket=1"));
+		final var unsupported = supportedDriver();
+		when(unsupported.supportsStandaloneDeleteRequests()).thenReturn(false);
+		final Path artifactDirectory = Path.of(
+						FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId)).getParent();
+		final long stagingBefore = privateDeleteStagingCount(artifactDirectory);
+
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> new LoadStepContextImpl(
+										stepId,
+										mock(LoadGenerator.class),
+										unsupported,
+										mock(MetricsContext.class),
+										null,
+										config.configVal("load"),
+										false,
+										com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+										null,
+										config.configVal("item")));
+
+		assertFalse(Thread.getAllStackTraces().keySet().stream()
+						.anyMatch(thread -> thread.isAlive() && thread.getName().equals("spt-delete-artifacts-" + stepId)));
+		assertEquals(stagingBefore, privateDeleteStagingCount(artifactDirectory));
 	}
 
 	@Test
@@ -310,6 +366,15 @@ class StandaloneDeleteConfigurationTest {
 		config.val("load-step-limit-time", "0s");
 		config.val("item-output-file", "");
 		return config;
+	}
+
+	private static long privateDeleteStagingCount(final Path directory) throws Exception {
+		if (!Files.isDirectory(directory)) {
+			return 0;
+		}
+		try (final var paths = Files.list(directory)) {
+			return paths.filter(path -> path.getFileName().toString().endsWith(".recording")).count();
+		}
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"

@@ -48,6 +48,8 @@ type runMetadata struct {
 	DiscoveredStepIDs       []string                                                `json:"discoveredStepIds,omitempty"`
 	DeleteMetrics           map[string]*deletemetrics.Metrics                       `json:"deleteMetrics,omitempty"`
 	DeleteMetricsError      string                                                  `json:"deleteMetricsError,omitempty"`
+	DeleteArtifactsVersion  int                                                     `json:"deleteArtifactsVersion,omitempty"`
+	DeleteArtifactStepIDs   []string                                                `json:"deleteArtifactStepIds,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
 	CLI                     runCLIInfo                                              `json:"cli"`
@@ -186,6 +188,10 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 		CLI:                  cliInfo,
 		AutoTerminateSeconds: in.AutoTerminateSeconds,
 	}
+	if in.WorkloadType == scenario.WorkloadTypeDelete {
+		meta.DeleteArtifactsVersion = constants.ResultsDeleteArtifactsVersion
+		meta.DeleteArtifactStepIDs = plannedDeleteArtifactStepIDs(expected)
+	}
 
 	if len(in.HostInfos) > 1 {
 		meta.MultiHost = &runMultiHostMetadata{
@@ -207,6 +213,17 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	}
 
 	return meta
+}
+
+func plannedDeleteArtifactStepIDs(stepIDs []string) []string {
+	deleteSteps := make([]string, 0, 1)
+	for _, stepID := range stepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if strings.HasSuffix(strings.ToLower(stepID), "-delete") {
+			deleteSteps = append(deleteSteps, stepID)
+		}
+	}
+	return deleteSteps
 }
 
 func snapshotResultsOptions(opts ResultsOptions) resultsOptionsSnapshot {

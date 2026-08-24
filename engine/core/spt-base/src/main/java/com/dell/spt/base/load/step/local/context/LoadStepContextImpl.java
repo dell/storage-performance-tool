@@ -21,21 +21,21 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
-import com.dell.spt.base.item.op.list.ListOperation;
-import com.dell.spt.base.item.op.list.shard.ListShard;
-import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
-import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteArtifactRecorder;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.item.op.deletion.DeletePhaseTimingSnapshot;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
+import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.item.op.list.shard.ListShard;
+import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
-import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.failure.ObjectFailureBudgetConfig;
+import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.DurationTime;
@@ -46,6 +46,7 @@ import com.dell.spt.base.logging.OperationTraceCsvLogMessage;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -55,6 +56,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -62,13 +64,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.SplittableRandom;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -76,7 +79,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
-import java.util.SplittableRandom;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -164,6 +166,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicLong deleteWorkflowCompletedEpochNanos = new AtomicLong();
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
 	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
+	private final DeleteArtifactRecorder deleteArtifactRecorder;
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -200,6 +203,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@FunctionalInterface
 	interface RetryScheduler {
 		Future<?> schedule(long delayMillis, Runnable task);
+	}
+
+	@FunctionalInterface
+	interface DeleteArtifactRecorderFactory {
+		DeleteArtifactRecorder create(String stepId, Path selectionManifest, long selectedCount);
 	}
 
 	// Not final: package-private test seam (see setRetryScheduler) swaps this for a
@@ -253,7 +261,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final String immutableListRootPrefix) {
 		this(
 						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag,
-						shardMetricsRecorder, immutableListRootPrefix);
+						shardMetricsRecorder, immutableListRootPrefix, null);
 	}
 
 	/**
@@ -286,24 +294,56 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder,
 					final String immutableListRootPrefix) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix,
+					final Config explicitItemConfig) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix, explicitItemConfig,
+						DeleteArtifactRecorder::new);
+	}
+
+	LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix,
+					final Config explicitItemConfig,
+					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
-		this.driver.operationResultOutput(this);
 		final var driverLifecycle = driver.operationLifecycle();
 		this.operationLifecycle = driverLifecycle == null
 						? OperationLifecycleTracker.disabled()
 						: driverLifecycle;
-		if (this.generator != null) {
-			this.generator.operationLifecycle(this.operationLifecycle);
-		}
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
 		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);
 		final Config opConfig = loadConfig.configVal("op");
-		final Config itemConfig = loadConfig.configVal("item");
+		final Config itemConfig = explicitItemConfig != null
+						? explicitItemConfig
+						: loadConfig.configVal("item");
 		final Config recycleConfig = opConfig.configVal("recycle");
 		final var itemTypeStr = itemConfig != null ? itemConfig.stringVal("type") : null;
 		final ItemType itemType = itemTypeStr != null ? ItemType.valueOf(itemTypeStr.toUpperCase(Locale.ROOT)) : null;
@@ -324,6 +364,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: null;
 		this.standaloneDeleteEnabled = standaloneDelete.enabled();
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
+		final String deleteSelectionManifest;
+		if (standaloneDelete.enabled() && itemConfig != null && standaloneDelete.selected() >= 0) {
+			final Config inputConfig = itemConfig.configVal("input");
+			deleteSelectionManifest = inputConfig == null ? null : inputConfig.stringVal("file");
+		} else {
+			deleteSelectionManifest = null;
+		}
 		standaloneDelete.validateSettings(opType, itemType, this.recycleFlag, this.retryFlag);
 		if (standaloneDelete.enabled() && !operationLifecycle.isEnabled()) {
 			throw new IllegalConfigurationException(
@@ -377,17 +424,32 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.waitOpFinishBeforeStop = opConfig.boolVal("wait-finish");
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
-		if (standaloneDelete.enabled()) {
-			operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
-			operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
-			this.metricsCtx.metadata().put(
-							com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS,
-							(java.util.function.Supplier<DeleteMetricsSnapshot>) this::deleteMetricsSnapshot);
-		}
-		if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
-			this.metricsCtx.metadata().put(
-							com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
-							this.listShardMetricsRecorder);
+		this.deleteArtifactRecorder = deleteSelectionManifest == null || deleteSelectionManifest.isBlank()
+						? null
+						: deleteArtifactRecorderFactory.create(
+										id, Path.of(deleteSelectionManifest), standaloneDelete.selected());
+		try {
+			if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
+				this.metricsCtx.metadata().put(
+								com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
+								this.listShardMetricsRecorder);
+			}
+			if (this.generator != null) {
+				this.generator.operationLifecycle(this.operationLifecycle);
+			}
+			if (standaloneDelete.enabled()) {
+				this.metricsCtx.metadata().put(
+								com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS,
+								(java.util.function.Supplier<DeleteMetricsSnapshot>) this::deleteMetricsSnapshot);
+				operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
+				operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
+			}
+			this.driver.operationResultOutput(this);
+		} catch (final RuntimeException | Error failure) {
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
+			throw failure;
 		}
 	}
 
@@ -1493,6 +1555,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			metrics.markFail(requestDuration, requestLatency);
 		}
 		counterResults.increment();
+		if (deleteArtifactRecorder != null) {
+			deleteArtifactRecorder.recordTerminal(deleteOperation);
+		}
 	}
 
 	private static long standaloneDeleteRequestLatency(final DeleteRequestOperation operation) {
@@ -1873,7 +1938,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		prepareOperationDrain();
 		drainDispatchedOperations();
 
+		RuntimeException artifactFailure = null;
+		if (deleteArtifactRecorder != null) {
+			try {
+				deleteArtifactRecorder.finish(operationLifecycle.snapshot(), deleteMetricsSnapshot());
+			} catch (final RuntimeException failure) {
+				artifactFailure = failure;
+			}
+		}
+
 		driver.stop();
+		if (artifactFailure != null) {
+			throw artifactFailure;
+		}
 
 		if (latestSuccOpResultByItem != null && opsResultsOutput != null) {
 			try {
@@ -2221,6 +2298,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				listShardMetricsRecorder.emitSummary(id);
 			}
 			generator.close();
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
 			try {
 				driver.close();
 			} catch (final IOException e) {

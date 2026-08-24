@@ -140,10 +140,12 @@ public class LinearLoadStepLocal
 									generator,
 									driver,
 									metricsContexts.get(0),
+									null,
 									loadConfig,
 									outputConfig.boolVal("metrics-trace-persist"),
 									shardMetrics,
-									immutableListRootPrefix);
+									immutableListRootPrefix,
+									itemConfig);
 					stepContexts.add(stepCtx);
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");

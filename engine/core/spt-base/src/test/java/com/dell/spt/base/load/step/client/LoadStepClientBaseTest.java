@@ -14,6 +14,7 @@ import com.dell.spt.base.load.step.service.LoadStepService;
 import com.dell.spt.base.load.step.service.LoadStepServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.deletion.DeleteArtifacts;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -554,6 +555,36 @@ class LoadStepClientBaseTest {
 		verify(slice).shutdown();
 		verify(slice).stop();
 		verify(slice).close();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void durationAggregationFailureRetainsAggregatorUntilCanonicalCompletionPublishes() throws Exception {
+		final Config config = durationConfig();
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		addStepSlice(client, mock(LoadStep.class));
+		final AtomicInteger attempts = new AtomicInteger();
+		final AtomicInteger publications = new AtomicInteger();
+		final Path completion = tempDir.resolve(DeleteArtifacts.COMPLETION_FILE_NAME);
+		addDeleteArtifactAggregator(client, () -> {
+			if (attempts.incrementAndGet() == 1) {
+				throw new IOException("transient DELETE aggregation failure");
+			}
+			Files.writeString(completion, "complete\n");
+			publications.incrementAndGet();
+		});
+
+		assertDoesNotThrow(client::stop);
+		final var failure = assertThrows(IntegrityTerminalException.class, client::close);
+		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertFalse(Files.exists(completion));
+
+		assertDoesNotThrow(client::close);
+		assertDoesNotThrow(client::close);
+		assertEquals(2, attempts.get());
+		assertEquals(1, publications.get());
+		assertEquals("complete\n", Files.readString(completion));
 		assertTrue(client.isClosed());
 	}
 
@@ -3449,6 +3480,18 @@ class LoadStepClientBaseTest {
 					final LoadStepClientBase<?> client, final AutoCloseable aggregator) {
 		try {
 			final Field field = LoadStepClientBase.class.getDeclaredField("itemOutputFileAggregators");
+			field.setAccessible(true);
+			((List<AutoCloseable>) field.get(client)).add(aggregator);
+		} catch (final ReflectiveOperationException e) {
+			throw new LinkageError(e.getMessage(), e);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void addDeleteArtifactAggregator(
+					final LoadStepClientBase<?> client, final AutoCloseable aggregator) {
+		try {
+			final Field field = LoadStepClientBase.class.getDeclaredField("deleteArtifactAggregators");
 			field.setAccessible(true);
 			((List<AutoCloseable>) field.get(client)).add(aggregator);
 		} catch (final ReflectiveOperationException e) {

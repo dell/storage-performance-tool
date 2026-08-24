@@ -51,6 +51,7 @@ type StepData struct {
 	Manifest          *results.StepManifest
 	Metrics           *MetricsTotals
 	Delete            *deletemetrics.Metrics
+	DeleteEvidence    *DeleteArtifactEvidence
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -111,6 +112,29 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		ManifestPath: manifestPath,
 		MetadataPath: metadataPath,
 	}
+	if params.DeleteArtifactsVersion != 0 &&
+		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersion {
+		return data, fmt.Errorf("unsupported DELETE artifact version %d", params.DeleteArtifactsVersion)
+	}
+	deleteArtifactSteps := stringSet(params.DeleteArtifactStepIDs)
+	if params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion &&
+		(len(deleteArtifactSteps) == 0 || len(deleteArtifactSteps) != len(params.DeleteArtifactStepIDs) ||
+			contains(deleteArtifactSteps, "")) {
+		return data, fmt.Errorf("DELETE artifact step identity is missing or invalid")
+	}
+	if params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion {
+		manifestStepCounts := make(map[string]int, len(manifest.Steps))
+		for i := range manifest.Steps {
+			manifestStepCounts[manifest.Steps[i].StepID]++
+		}
+		for stepID := range deleteArtifactSteps {
+			if manifestStepCounts[stepID] != 1 {
+				return data, fmt.Errorf(
+					"DELETE artifact step identity %q does not resolve exactly once in fetched manifest", stepID,
+				)
+			}
+		}
+	}
 
 	data.StepOrder = make([]string, 0, len(manifest.Steps))
 
@@ -157,6 +181,27 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			step.MissingRequired = appendUnique(step.MissingRequired, constants.ResultsArtifactSuffixMetricsTotal)
 			if metricsEntry != nil && metricsEntry.Status != fileStatusOK && metricsEntry.Error != "" {
 				step.Notes = append(step.Notes, metricsEntry.Error)
+			}
+		}
+
+		deleteArtifactsExpected := params.DeleteArtifactsVersion == constants.ResultsDeleteArtifactsVersion &&
+			contains(deleteArtifactSteps, sm.StepID)
+		deleteEvidence, durableDelete, deleteErr := loadDeleteEvidence(ctx, runDir, sm, deleteArtifactsExpected)
+		if deleteErr != nil {
+			step.Status = StepStatusError
+			step.Notes = append(step.Notes, fmt.Sprintf("DELETE artifact validation error: %v", deleteErr))
+			stepErrs = append(stepErrs, fmt.Errorf("step %s: %w", sm.StepID, deleteErr))
+		} else if deleteEvidence != nil {
+			step.DeleteEvidence = deleteEvidence
+			if deleteArtifactsExpected && step.Delete == nil {
+				deleteErr = fmt.Errorf("schema-v4 DELETE metrics unavailable")
+			} else {
+				step.Delete, deleteErr = preferDeleteTotalsV1(step.Delete, durableDelete, deleteEvidence)
+			}
+			if deleteErr != nil {
+				step.Status = StepStatusError
+				step.Notes = append(step.Notes, fmt.Sprintf("DELETE totals validation error: %v", deleteErr))
+				stepErrs = append(stepErrs, fmt.Errorf("step %s: %w", sm.StepID, deleteErr))
 			}
 		}
 
@@ -219,7 +264,7 @@ func (l *Loader) loadRunParams(path string) (*RunParams, error) {
 
 func (l *Loader) categorizeMissing(sm *results.StepManifest) (required []string, optional []string) {
 	for _, file := range sm.Files {
-		suffix, spec := l.matchSuffix(file.Name)
+		suffix, spec := l.matchStepSuffix(sm.StepID, file.Name)
 		if spec == nil {
 			continue
 		}
@@ -241,19 +286,32 @@ func (l *Loader) categorizeMissing(sm *results.StepManifest) (required []string,
 	return required, optional
 }
 
-func (l *Loader) matchSuffix(name string) (string, *results.ArtifactSpec) {
+func (l *Loader) matchStepSuffix(stepID, name string) (string, *results.ArtifactSpec) {
 	for suffix, spec := range l.artifactBySuffix {
-		if strings.HasSuffix(name, suffix) {
+		if name == stepID+"."+suffix {
 			return suffix, spec
 		}
 	}
-	return "", nil
+	return l.matchSuffix(name)
+}
+
+func (l *Loader) matchSuffix(name string) (string, *results.ArtifactSpec) {
+	var bestSuffix string
+	var bestSpec *results.ArtifactSpec
+	for suffix, spec := range l.artifactBySuffix {
+		if strings.HasSuffix(name, suffix) && len(suffix) > len(bestSuffix) {
+			bestSuffix = suffix
+			bestSpec = spec
+		}
+	}
+	return bestSuffix, bestSpec
 }
 
 func (l *Loader) findMetricsEntry(sm *results.StepManifest) *results.FileStatus {
+	expectedName := sm.StepID + "." + constants.ResultsArtifactSuffixMetricsTotal
 	for i := range sm.Files {
 		fs := &sm.Files[i]
-		if strings.HasSuffix(fs.Name, constants.ResultsArtifactSuffixMetricsTotal) {
+		if fs.Name == expectedName {
 			return fs
 		}
 	}
@@ -320,28 +378,30 @@ func removeString(list []string, value string) []string {
 
 // RunParams mirrors the structure of spt_run_params.json for ingestion purposes.
 type RunParams struct {
-	GeneratedAt        time.Time                         `json:"generatedAt"`
-	WorkloadType       string                            `json:"workloadType"`
-	SptImage           string                            `json:"sptImage"`
-	APIPort            string                            `json:"apiPort"`
-	BaseURL            string                            `json:"baseUrl"`
-	TraceFile          string                            `json:"traceFile"`
-	TraceAuto          bool                              `json:"traceAuto"`
-	Label              string                            `json:"label"`
-	ResultsDir         string                            `json:"resultsDir"`
-	ResultsRoot        string                            `json:"resultsRoot"`
-	ScenarioFile       string                            `json:"scenarioFile"`
-	ScenarioStoredPath string                            `json:"scenarioStoredPath"`
-	ScenarioParams     ScenarioParams                    `json:"scenarioParams"`
-	Hosts              []RunHost                         `json:"hosts"`
-	TestHosts          string                            `json:"testHosts"`
-	ExpectedStepIDs    []string                          `json:"expectedStepIds"`
-	ActualStepIDs      []string                          `json:"actualStepIds"`
-	DiscoveredStepIDs  []string                          `json:"discoveredStepIds"`
-	DeleteMetrics      map[string]*deletemetrics.Metrics `json:"deleteMetrics,omitempty"`
-	ResultsOptions     RunResultsOptions                 `json:"resultsOptions"`
-	CLI                RunCLI                            `json:"cli"`
-	MultiHost          RunMultiHost                      `json:"multiHost"`
+	GeneratedAt            time.Time                         `json:"generatedAt"`
+	WorkloadType           string                            `json:"workloadType"`
+	SptImage               string                            `json:"sptImage"`
+	APIPort                string                            `json:"apiPort"`
+	BaseURL                string                            `json:"baseUrl"`
+	TraceFile              string                            `json:"traceFile"`
+	TraceAuto              bool                              `json:"traceAuto"`
+	Label                  string                            `json:"label"`
+	ResultsDir             string                            `json:"resultsDir"`
+	ResultsRoot            string                            `json:"resultsRoot"`
+	ScenarioFile           string                            `json:"scenarioFile"`
+	ScenarioStoredPath     string                            `json:"scenarioStoredPath"`
+	ScenarioParams         ScenarioParams                    `json:"scenarioParams"`
+	Hosts                  []RunHost                         `json:"hosts"`
+	TestHosts              string                            `json:"testHosts"`
+	ExpectedStepIDs        []string                          `json:"expectedStepIds"`
+	ActualStepIDs          []string                          `json:"actualStepIds"`
+	DiscoveredStepIDs      []string                          `json:"discoveredStepIds"`
+	DeleteMetrics          map[string]*deletemetrics.Metrics `json:"deleteMetrics,omitempty"`
+	DeleteArtifactsVersion int                               `json:"deleteArtifactsVersion,omitempty"`
+	DeleteArtifactStepIDs  []string                          `json:"deleteArtifactStepIds,omitempty"`
+	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
+	CLI                    RunCLI                            `json:"cli"`
+	MultiHost              RunMultiHost                      `json:"multiHost"`
 }
 
 // ScenarioParams captures key scenario tunables stored with the run.

@@ -1,0 +1,14 @@
+{
+  "version" : 2,
+  "status" : "complete",
+  "run_id" : 777,
+  "producer_kind" : "cli_stager",
+  "producer_id" : "spt-cli-items-stager-v1",
+  "artifact" : "verify-input.csv",
+  "source_record_count" : 3,
+  "unique_record_count" : 2,
+  "selected_record_count" : 2,
+  "excluded_delete_marker_count" : 0,
+  "manifest_bytes" : 78,
+  "manifest_sha256" : "088b04fe666fc012df083ea10c64399bc889db5140d427baf23d8eea37ec1d9b"
+}

@@ -28,6 +28,11 @@ public class LinearLoadStepClient
 	}
 
 	@Override
+	protected boolean supportsStandaloneDeleteArtifactAggregation() {
+		return true;
+	}
+
+	@Override
 	protected void init()
 					throws IllegalStateException {
 
