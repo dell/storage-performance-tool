@@ -12,6 +12,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.PathItem;
+import com.dell.spt.base.item.VersionedItem;
 import com.dell.spt.base.item.io.DataItemInputStream;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
@@ -46,6 +47,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
@@ -104,6 +106,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private static final String KEY_MPU_ABORT = "mpuAbort";
 	private static final String KEY_MPU_FAILURE = "mpuFailure";
 	private static final String DELETE_TRANSPORT_FAILURE = "AWS SDK DELETE request failed";
+	private static final char LEGACY_VERSION_SEPARATOR = '~';
+	private static final Pattern LEGACY_VERSION_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]+");
+
+	private record VersionedObjectIdentity(String key, String versionId) {}
 
 	private final S3AsyncClient s3AsyncClient;
 	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
@@ -709,11 +715,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			};
 		}
 
-		final int tildePos = itemName.lastIndexOf('~');
+		final int tildePos = itemName.lastIndexOf(LEGACY_VERSION_SEPARATOR);
 		if (tildePos > 0) {
-			// Check if this looks like a version ID (contains only alphanumeric and special chars)
 			final String potentialVersionId = itemName.substring(tildePos + 1);
-			if (potentialVersionId.matches("[a-zA-Z0-9._-]+")) {
+			if (LEGACY_VERSION_ID_PATTERN.matcher(potentialVersionId).matches()) {
 				return new String[]{itemName.substring(0, tildePos), potentialVersionId
 				};
 			}
@@ -721,6 +726,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		return new String[]{itemName, null
 		};
+	}
+
+	private VersionedObjectIdentity resolveVersionedObjectIdentity(final O op, final String key) {
+		final String requestedVersionId = op.requestedVersionId();
+		final String normalizedVersionId = requestedVersionId == null || requestedVersionId.isEmpty()
+						? null
+						: requestedVersionId;
+		// Structured identity is authoritative; the name carrier is only a legacy fallback.
+		if (integrityMetadataEnabled() || op.item() instanceof VersionedItem || requestedVersionId != null) {
+			return new VersionedObjectIdentity(key, normalizedVersionId);
+		}
+		final String[] legacyVersion = extractVersionId(key);
+		return new VersionedObjectIdentity(legacyVersion[0], legacyVersion[1]);
 	}
 
 	CompletableFuture<Void> execute(final O op) {
@@ -902,27 +920,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private CompletableFuture<Void> readObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
-
-		final String key;
-		final String versionId;
-		if (integrityMetadataEnabled()) {
-			key = bk[1];
-			versionId = op.requestedVersionId();
-		} else {
-			// Preserve the legacy key~version carrier outside metadata mode.
-			final String[] versionInfo = extractVersionId(bk[1]);
-			key = versionInfo[0];
-			versionId = versionInfo[1];
-		}
+		final VersionedObjectIdentity identity = resolveVersionedObjectIdentity(op, bk[1]);
 
 		var reqBuilder = GetObjectRequest.builder()
 						.bucket(bk[0])
-						.key(key);
-		if (versionId != null && !versionId.isEmpty()) {
-			reqBuilder.versionId(versionId);
+						.key(identity.key());
+		if (identity.versionId() != null) {
+			reqBuilder.versionId(identity.versionId());
 		}
 
-		final S3AsyncClient readClient = versionId == null || versionId.isEmpty()
+		final S3AsyncClient readClient = identity.versionId() == null
 						? s3AsyncClient
 						: exactVersionS3Client();
 		try (var response = readClient.getObject(
@@ -1027,14 +1034,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 							"Standalone DELETE requests cannot enter the representative-item request builder"));
 		}
 		final var bk = resolveBucketAndKey(op);
-		final String versionId = op.requestedVersionId();
+		final VersionedObjectIdentity identity = resolveVersionedObjectIdentity(op, bk[1]);
 		final var request = DeleteObjectRequest.builder()
 						.bucket(bk[0])
-						.key(bk[1]);
-		if (versionId != null && !versionId.isEmpty()) {
-			request.versionId(versionId);
+						.key(identity.key());
+		if (identity.versionId() != null) {
+			request.versionId(identity.versionId());
 		}
-		return deleteClient(versionId != null).deleteObject(request.build())
+		return deleteClient(identity.versionId() != null).deleteObject(request.build())
 						.thenApply(response -> null);
 	}
 
@@ -1152,12 +1159,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private CompletableFuture<Void> headObject(final O op) {
 		final var bk = resolveBucketAndKey(op);
-
-		return s3AsyncClient.headObject(
-						HeadObjectRequest.builder()
-										.bucket(bk[0])
-										.key(bk[1])
-										.build())
+		final VersionedObjectIdentity identity = resolveVersionedObjectIdentity(op, bk[1]);
+		final var request = HeadObjectRequest.builder()
+						.bucket(bk[0])
+						.key(identity.key());
+		if (identity.versionId() != null) {
+			request.versionId(identity.versionId());
+		}
+		return deleteClient(identity.versionId() != null).headObject(request.build())
 						.thenApply(response -> null);
 	}
 
