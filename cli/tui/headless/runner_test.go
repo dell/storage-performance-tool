@@ -405,7 +405,7 @@ func TestHeadlessRunner_MetricsJSONOmitsUnavailableTTFB(t *testing.T) {
 	}
 }
 
-func TestHeadlessRunnerDeleteMetricsExposeAcceptedOutcomesAndNotApplicableFields(t *testing.T) {
+func TestHeadlessRunnerDeleteMetricsKeepLiveOutputCompactAndStructuredOutputComplete(t *testing.T) {
 	mockDocker := &tui.MockDockerManager{}
 	traceFile := filepath.Join(t.TempDir(), "delete-metrics.log")
 	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
@@ -450,6 +450,18 @@ func TestHeadlessRunnerDeleteMetricsExposeAcceptedOutcomesAndNotApplicableFields
 			},
 		},
 	}
+	human := formatMetricsMessage(metric)
+	const wantHuman = "ops/sec=3 latency=10µs type=DELETE success=1 failed=2"
+	if human != wantHuman {
+		t.Fatalf("DELETE live metrics = %q, want %q", human, wantHuman)
+	}
+	for _, unwanted := range []string{
+		"units=", "selected=", "buckets=", "latency_stats=", "verification=",
+	} {
+		if strings.Contains(human, unwanted) {
+			t.Fatalf("DELETE live metrics contain detailed field %q: %s", unwanted, human)
+		}
+	}
 	runner.outputMetrics(metric)
 	runner.outputMetricsJSON(metric)
 
@@ -458,30 +470,16 @@ func TestHeadlessRunnerDeleteMetricsExposeAcceptedOutcomesAndNotApplicableFields
 		t.Fatalf("read trace: %v", err)
 	}
 	got := string(content)
-	for _, want := range []string{
-		"accepted=170", "failed_objects=5", "policy=fixed", "Verification disabled",
-		"units=requests:logical_api_requests,objects:object_identities,batches:logical_api_requests",
-		"failure_budget_outcome=completed_within_failure_budget",
-		"operational_failed_objects=3", "excluded_failed_objects=2",
-		"object_size=N/A", "data_moved=N/A", "bandwidth=N/A", "ttfb=N/A",
-		"mean_batch=58.333", "full_batch_pct=33.333", "current_keys=150", "exact_versions=25",
-		"request_completion_pct=100.000", "bucket-a(selected:175", "object_latency=N/A",
-		`latency_definition="first_request_byte_sent_to_first_response_byte_received"`, "terminal_reconciled=true",
-		"latency_stats=count:3", "p999_us:40", "duration_stats=count:3", "p999_us:80",
-		"partial=true", "nodes=2", "nodes_present=remote-node:1099", "contributors_present=local",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("DELETE headless output missing %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "removed=") {
-		t.Fatalf("unverified DELETE output claims removal:\n%s", got)
+	if !strings.Contains(got, "[METRICS] "+wantHuman) {
+		t.Fatalf("DELETE live metrics missing compact summary:\n%s", got)
 	}
 	for _, want := range []string{
 		`"delete":`, `"outcome_terminology":"accepted"`,
 		`"object_size":"not_applicable"`, `"removal_confirmed":false`,
 		`"partial":true`, `"nodes_count":2`, `"nodes_present":["remote-node:1099"]`,
 		`"contributors_present":["local"]`,
+		`"accepted":170`, `"failed":5`, `"mode":"fixed"`,
+		`"outcome":"completed_within_failure_budget"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("DELETE headless JSON output missing %q:\n%s", want, got)
@@ -534,18 +532,11 @@ func TestDeleteMetricsCrossViewFixtureKeepsEngineAPIHeadlessStoredAggregatePerNo
 	}
 	for _, metric := range append(nodes, fleet[0]) {
 		human := formatMetricsMessage(*metric)
-		expectedOutcome := deletemetrics.OutcomeRunning
-		if metric.Scope == "fleet" {
-			expectedOutcome = want.FailurePolicy.Outcome
-		}
-		for _, expected := range []string{
-			"units=requests:logical_api_requests,objects:object_identities,batches:logical_api_requests",
-			"outcome_terminology=accepted",
-			"failure_budget_outcome=" + expectedOutcome,
-		} {
-			if !strings.Contains(human, expected) {
-				t.Fatalf("headless per-node/aggregate view omitted %q: %s", expected, human)
-			}
+		expected := fmt.Sprintf("ops/sec=%d latency=%s type=%s success=%d failed=%d",
+			metric.OpsPerSec, formatOptionalMicros(deleteTimingMicros(metric.Delete.Timing.Latency)),
+			metric.OpType, metric.SuccessCount, metric.FailedCount)
+		if human != expected {
+			t.Fatalf("headless per-node/aggregate summary = %q, want %q", human, expected)
 		}
 	}
 	if fleet[0].OpsPerSec != 3 || fleet[0].SuccessCount != 2 || fleet[0].FailedCount != 1 {
@@ -600,13 +591,21 @@ func TestStrictPreValidationAbortFixtureReachesGoHeadlessAndStoredViews(t *testi
 		t.Fatalf("strict pre-validation abort phase state = %+v", metric.Delete)
 	}
 	human := formatMetricsMessage(*metric)
+	if !strings.Contains(human, "type=DELETE") || strings.Contains(human, "pre_validation=") {
+		t.Fatalf("strict-abort live metrics are not compact: %s", human)
+	}
+	encoded, err := marshalMetricsJSON(*metric, "aggregate", "")
+	if err != nil {
+		t.Fatalf("encode strict-abort headless JSON: %v", err)
+	}
+	structured := string(encoded)
 	for _, expected := range []string{
-		"pre_validation=true", "pre_validation_complete=true",
-		"post_verification=true", "post_verification_complete=false",
-		"post_verification_skipped=true", deletemetrics.PostVerificationSkippedNotice,
+		`"pre_validation_enabled":true`, `"pre_validation_complete":true`,
+		`"post_verification_enabled":true`, `"post_verification_complete":false`,
+		`"post_verification_skipped":true`, deletemetrics.PostVerificationSkippedNotice,
 	} {
-		if !strings.Contains(human, expected) {
-			t.Fatalf("headless strict-abort view omitted %q: %s", expected, human)
+		if !strings.Contains(structured, expected) {
+			t.Fatalf("structured headless strict-abort view omitted %q: %s", expected, structured)
 		}
 	}
 	report := resultsummary.NewRenderer(resultsummary.RenderOptions{}).FullReport(
@@ -875,7 +874,8 @@ func TestMultiHostHeadlessRunnerEmitsAggregateAndPerNodeDeleteMetrics(t *testing
 	trace := string(content)
 	if !strings.Contains(trace, "view=aggregate") ||
 		!strings.Contains(trace, "view=node contributor=entry") ||
-		!strings.Contains(trace, "object_size=N/A") {
+		!strings.Contains(trace, "type=DELETE success=0 failed=0") ||
+		strings.Contains(trace, "object_size=") {
 		t.Fatalf("multi-host DELETE views missing: %q", trace)
 	}
 }
