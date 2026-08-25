@@ -1,28 +1,48 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.config.ConstantValueInputImpl;
+import com.dell.spt.base.integrity.IntegrityCsvFormat;
+import com.dell.spt.base.integrity.IntegrityInputProvenance;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactoryImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.io.CsvItemInput;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationsBuilderImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection;
+import com.dell.spt.base.load.generator.LoadGeneratorImpl;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.file.FileManagerImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
+import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import com.github.akurilov.commons.io.Output;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -32,6 +52,8 @@ import static org.mockito.Mockito.*;
 
 @DisplayName("ItemInputFileSlicer & ItemOutputFileAggregator")
 class ItemFileSlicerAggregatorTest {
+	private static final long RUN_ID = 25L;
+	private static final String PRODUCER_ID = "ticket-25-canonical-stager";
 
 	private final List<Path> filesToCleanup = new ArrayList<>();
 
@@ -178,6 +200,244 @@ class ItemFileSlicerAggregatorTest {
 											+ "bucket,omega,3,version-omega\n",
 							captured.get(1).toString(StandardCharsets.UTF_8));
 		}
+	}
+
+	@Test
+	void strictSlicerKeepsOneOwnerRoundRobinAcrossNonDivisibleInputReads() throws Exception {
+		final String manifest = "bucket,key,size,version_id\n"
+						+ "bucket,alpha,8,\n"
+						+ "bucket,bravo,7,version-bravo\n"
+						+ "bucket,charlie,6,\n"
+						+ "bucket,delta,5,version-delta\n"
+						+ "bucket,echo,4,\n"
+						+ "bucket,foxtrot,3,version-foxtrot\n"
+						+ "bucket,golf,2,\n"
+						+ "bucket,hotel,1,version-hotel\n";
+
+		try (final var slicing = strictSlicing("canonical-non-divisible", manifest, 3, 2)) {
+			assertCanonicalSlice(
+							slicing,
+							0,
+							"bucket,key,size,version_id\n"
+											+ "bucket,alpha,8,\n"
+											+ "bucket,delta,5,version-delta\n"
+											+ "bucket,golf,2,\n",
+							3,
+							2,
+							1);
+			assertCanonicalSlice(
+							slicing,
+							1,
+							"bucket,key,size,version_id\n"
+											+ "bucket,bravo,7,version-bravo\n"
+											+ "bucket,echo,4,\n"
+											+ "bucket,hotel,1,version-hotel\n",
+							3,
+							1,
+							2);
+			assertCanonicalSlice(
+							slicing,
+							2,
+							"bucket,key,size,version_id\n"
+											+ "bucket,charlie,6,\n"
+											+ "bucket,foxtrot,3,version-foxtrot\n",
+							2,
+							1,
+							1);
+			assertExactOneOwner(slicing, manifest);
+		}
+	}
+
+	@Test
+	void strictSlicerMakesSparseWorkersHeaderOnlyAndImmediatelyExhausted() throws Exception {
+		final String manifest = "bucket,key,size,version_id\n"
+						+ "bucket,only,1,\n";
+		final String header = "bucket,key,size,version_id\n";
+
+		try (final var slicing = strictSlicing("canonical-sparse", manifest, 3, 2)) {
+			assertCanonicalSlice(slicing, 0, manifest, 1, 1, 0);
+			assertCanonicalSlice(slicing, 1, header, 0, 0, 0);
+			assertCanonicalSlice(slicing, 2, header, 0, 0, 0);
+			assertExactOneOwner(slicing, manifest);
+
+			final Path headerOnlySlice = Files.createTempFile("spt-delete-header-only-", ".csv");
+			Files.write(headerOnlySlice, slicing.captured().get(1).toByteArray());
+			filesToCleanup.add(headerOnlySlice);
+			@SuppressWarnings("unchecked")
+			final Output<DeleteRequestOperation> output = mock(Output.class);
+			final var operationsBuilder = new OperationsBuilderImpl<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>>(1);
+			operationsBuilder.opType(OpType.DELETE)
+							.credentialInput(new ConstantValueInputImpl<>(Credential.NONE));
+			try (final var input = new IntegrityManifestItemInput(headerOnlySlice);
+							final var generator = new LoadGeneratorImpl<IntegrityManifestDataItem, DeleteRequestOperation>(
+											input,
+											new DeleteRequestAssembler(operationsBuilder, 100),
+											List.of(),
+											output,
+											2,
+											0,
+											100,
+											false,
+											false)) {
+				final long beforeExhaustion = System.nanoTime();
+				generator.start();
+				assertTrue(generator.await(1, TimeUnit.SECONDS));
+				final long afterExhaustion = System.nanoTime();
+
+				assertEquals(0, generator.consumedItemCount());
+				assertEquals(0, generator.generatedOpCount());
+				assertTrue(generator.schedulingExhaustionNanos().isPresent());
+				assertTrue(generator.schedulingExhaustedAtNanos() >= beforeExhaustion);
+				assertTrue(generator.schedulingExhaustedAtNanos() <= afterExhaustion);
+				verifyNoInteractions(output);
+			}
+		}
+	}
+
+	@Test
+	void strictSingleSlicePreservesCanonicalManifestAndProvenance() throws Exception {
+		final String manifest = "bucket,key,size,version_id\n"
+						+ "bucket,alpha,4,\n"
+						+ "bucket,bravo,3,version-bravo\n"
+						+ "bucket,\"comma,key\",2,\n"
+						+ "bucket,delta,1,version-delta\n";
+
+		try (final var slicing = strictSlicing("canonical-single", manifest, 1, 3)) {
+			assertCanonicalSlice(slicing, 0, manifest, 4, 2, 2);
+			assertExactOneOwner(slicing, manifest);
+			final IntegrityManifestCompletion validated = IntegrityManifestCompletion.validate(
+							slicing.source(), RUN_ID, IntegrityInputProvenance.CLI_STAGER, PRODUCER_ID);
+			assertEquals(4, validated.sourceRecordCount());
+			assertEquals(4, validated.uniqueRecordCount());
+			assertEquals(4, validated.selectedRecordCount());
+			assertEquals(slicing.sourceCompletion().manifestBytes(), validated.manifestBytes());
+			assertEquals(slicing.sourceCompletion().manifestSha256(), validated.manifestSha256());
+			assertEquals(sha256(manifest), validated.manifestSha256());
+			assertEquals(validated.manifestSha256(), sha256(slicing.csv(0)));
+		}
+	}
+
+	private StrictSlicing strictSlicing(
+					final String stepId,
+					final String manifest,
+					final int sliceCount,
+					final int readBatchSize) throws Exception {
+		final Path source = Files.createTempFile("spt-delete-canonical-", ".csv");
+		Files.writeString(source, manifest, StandardCharsets.UTF_8);
+		filesToCleanup.add(source);
+		final long selected = StandaloneDeleteSelection.fromManifest(source.toString()).selected();
+		final IntegrityManifestCompletion completion = IntegrityManifestCompletion.create(
+						source,
+						RUN_ID,
+						IntegrityManifestCompletion.PRODUCER_CLI_STAGER,
+						PRODUCER_ID,
+						selected,
+						selected,
+						selected);
+		completion.publish(source);
+		filesToCleanup.add(IntegrityManifestCompletion.completionPath(source));
+
+		final List<FileManager> fileMgrs = new ArrayList<>(sliceCount);
+		final List<ByteArrayOutputStream> captured = new ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
+			final FileManager fileMgr = mock(FileManager.class);
+			final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+			when(fileMgr.newTmpFileName()).thenReturn(stepId + "-slice-" + i);
+			doAnswer(invocation -> {
+				bytes.write(invocation.<byte[]> getArgument(1));
+				return null;
+			}).when(fileMgr).writeToFile(anyString(), any(byte[].class));
+			fileMgrs.add(fileMgr);
+			captured.add(bytes);
+		}
+		final Config baseConfig = TestConfigBuilder.config();
+		baseConfig.val("run-id", RUN_ID);
+		baseConfig.val("storage-integrity-input-provenance", IntegrityInputProvenance.CLI_STAGER.value());
+		baseConfig.val("storage-integrity-input-expectedProducerId", PRODUCER_ID);
+		baseConfig.val("load-op-type", "delete");
+		baseConfig.val("load-op-delete-standalone", true);
+		final List<Config> configSlices = new ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
+			configSlices.add(new BasicConfig(baseConfig));
+		}
+
+		final ItemInputFileSlicer slicer;
+		try (final var input = new IntegrityManifestItemInput(source)) {
+			slicer = new ItemInputFileSlicer(
+							stepId, fileMgrs, configSlices, input, readBatchSize, true);
+		}
+		return new StrictSlicing(source, completion, configSlices, captured, slicer);
+	}
+
+	private static void assertCanonicalSlice(
+					final StrictSlicing slicing,
+					final int sliceIndex,
+					final String expectedCsv,
+					final long expectedSelected,
+					final long expectedCurrentKey,
+					final long expectedExactVersion) throws Exception {
+		final String actualCsv = slicing.csv(sliceIndex);
+		assertEquals(expectedCsv, actualCsv);
+		final List<List<String>> identities = manifestIdentities(actualCsv);
+		assertEquals(expectedSelected, identities.size());
+		final Config config = slicing.configSlices().get(sliceIndex);
+		assertEquals(expectedSelected, config.longVal("load-op-delete-selected"));
+		assertEquals(expectedCurrentKey, config.longVal("load-op-delete-selectedCurrentKey"));
+		assertEquals(expectedExactVersion, config.longVal("load-op-delete-selectedExactVersion"));
+		assertEquals(List.of("bucket=" + expectedSelected), config.listVal("load-op-delete-selectedBuckets"));
+		assertEquals("canonical", config.stringVal("load-op-delete-selectionOrder"));
+		assertEquals(RUN_ID, config.longVal("run-id"));
+		assertEquals(
+						IntegrityInputProvenance.CLI_STAGER.value(),
+						config.stringVal("storage-integrity-input-provenance"));
+		assertEquals(PRODUCER_ID, config.stringVal("storage-integrity-input-expectedProducerId"));
+	}
+
+	private static void assertExactOneOwner(
+					final StrictSlicing slicing, final String sourceManifest) throws Exception {
+		final Set<List<String>> expected = new LinkedHashSet<>(manifestIdentities(sourceManifest));
+		final Set<List<String>> union = new LinkedHashSet<>();
+		for (int i = 0; i < slicing.captured().size(); i++) {
+			for (final List<String> identity : manifestIdentities(slicing.csv(i))) {
+				assertTrue(union.add(identity), "identity has more than one slice owner: " + identity);
+			}
+		}
+		assertEquals(expected, union, "slice union must equal the frozen canonical selection");
+		final IntegrityManifestCompletion validated = IntegrityManifestCompletion.validate(
+						slicing.source(), RUN_ID, IntegrityInputProvenance.CLI_STAGER, PRODUCER_ID);
+		assertEquals(expected.size(), validated.selectedRecordCount());
+		assertEquals(sha256(sourceManifest), validated.manifestSha256());
+		assertEquals(slicing.sourceCompletion().manifestSha256(), validated.manifestSha256());
+	}
+
+	private static List<List<String>> manifestIdentities(final String manifest) throws Exception {
+		final var records = IntegrityCsvFormat.RFC4180_LF.parse(new StringReader(manifest)).getRecords();
+		assertFalse(records.isEmpty());
+		assertEquals(IntegrityManifestItemInput.HEADER, records.get(0).toList());
+		return records.stream().skip(1).map(record -> List.copyOf(record.toList())).toList();
+	}
+
+	private static String sha256(final String value) throws Exception {
+		return HexFormat.of().formatHex(
+						MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+	}
+
+	private record StrictSlicing(
+					Path source,
+					IntegrityManifestCompletion sourceCompletion,
+					List<Config> configSlices,
+					List<ByteArrayOutputStream> captured,
+					ItemInputFileSlicer slicer) implements AutoCloseable {
+
+	private String csv(final int sliceIndex) {
+		return captured.get(sliceIndex).toString(StandardCharsets.UTF_8);
+	}
+
+	@Override
+	public void close() {
+		slicer.close();
+	}
+
 	}
 
 	@Test
