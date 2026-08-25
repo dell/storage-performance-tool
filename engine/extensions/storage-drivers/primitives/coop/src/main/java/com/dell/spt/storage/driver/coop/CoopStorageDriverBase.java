@@ -796,6 +796,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	/** Wakes dispatch after a subclass recovery path returns concurrency capacity. */
+	protected final void signalDispatchCapacityAvailable() {
+		signalDispatch();
+	}
+
 	/** @deprecated always returns {@code false}; direct fast recycle was removed */
 	@Deprecated
 	protected boolean isFastRecycleEnabled() {

@@ -7,6 +7,7 @@ import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
@@ -192,22 +193,15 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				}
 			} catch (final Throwable cause) {
 				throwUncheckedIfInterrupted(cause);
-				LogUtil.exception(Level.ERROR, cause, "I/O worker failure");
+				logOperationFailure(cause, "I/O worker failure");
 			} finally {
+				var recoveredCapacity = false;
 				opBuffLock.lock();
 				try {
-					if (!isAdmissionOpen()) {
-						for (var i = processedCount; i < opLocalBuff.size(); i++) {
-							final var op = opLocalBuff.get(i);
-							if (PENDING.equals(op.status())) {
-								resolveStoppedLocalOperation(op);
-							} else if (ACTIVE.equals(op.status())) {
-								opActiveBuff.add(op);
-							} else {
-								concurrencyThrottle.release();
-								handleCompletedSafely(op);
-							}
-						}
+					// A worker-level failure may leave a suffix in this local buffer even while
+					// admission remains open. Transfer or recover every owner before clearing it.
+					for (var i = processedCount; i < opLocalBuff.size(); i++) {
+						recoveredCapacity |= recoverUnprocessedLocalOperation(opLocalBuff.get(i));
 					}
 					final var activeSize = opActiveBuff.size();
 					if (activeSize > 0) {
@@ -226,7 +220,64 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					opBuffLock.unlock();
 					opLocalBuff.clear();
 				}
+				if (recoveredCapacity && isAdmissionOpen()) {
+					signalDispatchCapacityAvailable();
+				}
 			}
+		}
+
+		private boolean recoverUnprocessedLocalOperation(final O op) {
+			final var lifecycle = operationLifecycle();
+			final var lifecycleState = lifecycle.stateOf(op);
+			switch (lifecycleState) {
+			case NEW, GENERATOR_BUFFERED, DRIVER_QUEUED:
+				concurrencyThrottle.release();
+				lifecycle.unattempted(op);
+				return true;
+			case DISPATCHED:
+				return recoverDispatchedLocalOperation(op);
+			case COMPLETING:
+				concurrencyThrottle.release();
+				lifecycle.unresolved(op);
+				return true;
+			case TERMINAL, UNATTEMPTED, UNRESOLVED:
+				// A concurrent lifecycle decision already retained the evidence, but this
+				// worker-local owner still holds the permit acquired by submit().
+				concurrencyThrottle.release();
+				return true;
+			}
+			throw new AssertionError("Unhandled operation lifecycle state: " + lifecycleState);
+		}
+
+		private boolean recoverDispatchedLocalOperation(final O op) {
+			final Operation.Status status;
+			try {
+				status = op.status();
+			} catch (final Throwable cause) {
+				concurrencyThrottle.release();
+				operationLifecycle().unresolved(op);
+				logOperationFailure(cause, "I/O operation state recovery failure");
+				return true;
+			}
+			if (ACTIVE.equals(status)) {
+				// Transport work from an earlier invocation remains eligible for bounded drain.
+				opActiveBuff.add(op);
+				return false;
+			}
+			concurrencyThrottle.release();
+			if (PENDING.equals(status)) {
+				// Dispatch ownership was published, but worker failure prevented a trustworthy
+				// transport/result outcome. It cannot be reclassified as unattempted.
+				operationLifecycle().unresolved(op);
+				return true;
+			}
+			handleCompletedSafely(op);
+			final var recoveredState = operationLifecycle().stateOf(op);
+			if (recoveredState == OperationLifecycleState.DISPATCHED
+							|| recoveredState == OperationLifecycleState.COMPLETING) {
+				operationLifecycle().unresolved(op);
+			}
+			return true;
 		}
 
 		private void resolveStoppedLocalOperation(final O op) {
@@ -281,7 +332,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		if (operationFailureReported.compareAndSet(false, true)) {
 			LogUtil.exception(
 							Level.ERROR, cause,
-							message + "; further per-operation failures are logged at DEBUG");
+							message + "; further I/O failures are logged at DEBUG");
 		} else {
 			LogUtil.exception(Level.DEBUG, cause, message);
 		}
