@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
@@ -54,6 +55,69 @@ import org.junit.jupiter.api.Test;
  */
 @SuppressWarnings("unchecked")
 class CoopStorageDriverBaseTest {
+	private static final class RefusingOnceMockDriver
+					extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
+		private final List<Operation<DataItem>> submitAttempts = new ArrayList<>();
+		private Operation<DataItem> refusedOnce;
+
+		private RefusingOnceMockDriver(
+						final String stepId, final DataInput dataInput, final Config storageConfig,
+						final int batchSize) throws Exception {
+			super(stepId, dataInput, storageConfig, false, batchSize);
+		}
+
+		private void refuseOnce(final Operation<DataItem> op) {
+			refusedOnce = op;
+		}
+
+		@Override
+		protected boolean submit(final Operation<DataItem> op) {
+			submitAttempts.add(op);
+			if (op == refusedOnce) {
+				refusedOnce = null;
+				return false;
+			}
+			return super.submit(op);
+		}
+	}
+
+	private static final class PausingMockDriver
+					extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
+		private final AtomicInteger singleSubmitAttempts = new AtomicInteger();
+		private final CountDownLatch firstAccepted = new CountDownLatch(1);
+		private final CountDownLatch continueAfterFirst = new CountDownLatch(1);
+
+		private PausingMockDriver(
+						final String stepId, final DataInput dataInput, final Config storageConfig,
+						final int batchSize) throws Exception {
+			super(stepId, dataInput, storageConfig, false, batchSize);
+		}
+
+		@Override
+		protected boolean submit(final Operation<DataItem> op) {
+			singleSubmitAttempts.incrementAndGet();
+			final var accepted = super.submit(op);
+			if (accepted && firstAccepted.getCount() > 0) {
+				firstAccepted.countDown();
+				try {
+					continueAfterFirst.await();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+			}
+			return accepted;
+		}
+
+		private int submitRange(
+						final List<Operation<DataItem>> ops, final int from, final int to) {
+			return super.submit(ops, from, to);
+		}
+
+		private int submitAll(final List<Operation<DataItem>> ops) {
+			return super.submit(ops);
+		}
+	}
 
 	private static class CapturingAppender extends AbstractAppender {
 		private final List<LogEvent> events = Collections.synchronizedList(new ArrayList<>());
@@ -159,6 +223,159 @@ class CoopStorageDriverBaseTest {
 			Thread.sleep(10);
 		}
 		assertTrue(condition.getAsBoolean(), failureMessage);
+	}
+
+	@Test
+	void mockRangeSubmitReportsAcceptedPrefixAndRecoversRefusedSuffixInOrder() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 3);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new PausingMockDriver(
+						"partial-range-submit-step", dataInput, storageConfig, 3);
+		final var completedNames = Collections.synchronizedList(new ArrayList<String>());
+		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
+		when(resultOutput.put(any(Operation.class))).thenAnswer(invocation -> {
+			final Operation<DataItem> completed = invocation.getArgument(0);
+			completedNames.add(completed.item().name());
+			return true;
+		});
+		driver.operationResultOutput(resultOutput);
+		final List<Operation<DataItem>> ops = List.of(
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("outside-range", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("accepted", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("refused", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("not-resubmitted", 0, 1), null, "/bucket", null));
+		for (var i = 1; i < ops.size(); i++) {
+			assertTrue(driver.operationLifecycle().driverQueued(ops.get(i)));
+		}
+		final var acceptedCount = new AtomicInteger(-1);
+		try {
+			driver.start();
+			final var submitting = Thread.ofVirtual().start(
+							() -> acceptedCount.set(driver.submitRange(ops, 1, ops.size())));
+			assertTrue(driver.firstAccepted.await(2, TimeUnit.SECONDS));
+
+			driver.closeAdmission();
+			driver.continueAfterFirst.countDown();
+			submitting.join();
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, ops.get(2).lifecycle().state());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, ops.get(3).lifecycle().state());
+			final var recovered = driver.recoverQueuedOperations();
+
+			assertEquals(1, acceptedCount.get());
+			assertEquals(2, driver.singleSubmitAttempts.get(),
+							"range submission must stop at the first refused operation");
+			assertEquals(List.of("/bucket/accepted"), completedNames);
+			assertEquals(OperationLifecycleState.NEW, ops.get(0).lifecycle().state());
+			assertEquals(OperationLifecycleState.TERMINAL, ops.get(1).lifecycle().state());
+			assertEquals(2, recovered.size());
+			assertTrue(recovered.stream().anyMatch(op -> op == ops.get(2)));
+			assertTrue(recovered.stream().anyMatch(op -> op == ops.get(3)));
+			assertEquals(OperationLifecycleState.UNATTEMPTED, ops.get(2).lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, ops.get(3).lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().snapshot().dispatched());
+			assertEquals(1, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(2, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			driver.continueAfterFirst.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void mockListSubmitStopsAtFirstRefusalBeforeDispatch() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 3);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new PausingMockDriver(
+						"closed-list-submit-step", dataInput, storageConfig, 3);
+		final List<Operation<DataItem>> ops = List.of(
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("first-refused", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("second-not-submitted", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("third-not-submitted", 0, 1), null, "/bucket", null));
+		for (final var op : ops) {
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+		}
+		try {
+			driver.start();
+			driver.closeAdmission();
+
+			assertEquals(0, driver.submitAll(ops));
+			assertEquals(1, driver.singleSubmitAttempts.get(),
+							"list submission must stop immediately after the first refusal");
+			final var recovered = driver.recoverQueuedOperations();
+			assertEquals(ops.size(), recovered.size());
+			for (final var op : ops) {
+				assertTrue(recovered.stream().anyMatch(recoveredOp -> recoveredOp == op));
+			}
+			assertTrue(ops.stream().allMatch(
+							op -> op.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
+			assertEquals(0, driver.operationLifecycle().snapshot().dispatched());
+			assertEquals(0, driver.operationLifecycle().snapshot().terminal());
+			assertEquals(3, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			driver.continueAfterFirst.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	void dispatcherRetriesExactRefusedSuffixInOrderWithoutDuplicateTerminalOutcome() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 3);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new RefusingOnceMockDriver(
+						"ordered-suffix-retry-step", dataInput, storageConfig, 3);
+		final List<Operation<DataItem>> completed = new ArrayList<>();
+		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
+		when(resultOutput.put(any(Operation.class))).thenAnswer(invocation -> {
+			completed.add(invocation.getArgument(0));
+			return true;
+		});
+		driver.operationResultOutput(resultOutput);
+		final List<Operation<DataItem>> ops = List.of(
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("accepted", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("refused-once", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("retained-tail", 0, 1), null, "/bucket", null));
+		for (final var op : ops) {
+			assertTrue(driver.operationLifecycle().driverQueued(op));
+		}
+		driver.refuseOnce(ops.get(1));
+		final BlockingQueue<Operation<DataItem>> inOpQueue = new ArrayBlockingQueue<>(3);
+		final BlockingQueue<Operation<DataItem>> childOpQueue = new ArrayBlockingQueue<>(3);
+		inOpQueue.addAll(ops);
+		final var dispatchLock = new ReentrantLock();
+		try (final var executor = new VirtualThreadExecutor();
+						final var dispatchTask = new OperationDispatchTask<>(
+										executor, driver, inOpQueue, childOpQueue, "ordered-suffix-retry-step", 3,
+										dispatchLock, dispatchLock.newCondition(), 3)) {
+			driver.start();
+
+			dispatchTask.doWork();
+
+			assertEquals(2, driver.submitAttempts.size());
+			assertSame(ops.get(0), driver.submitAttempts.get(0));
+			assertSame(ops.get(1), driver.submitAttempts.get(1));
+			assertEquals(OperationLifecycleState.TERMINAL, ops.get(0).lifecycle().state());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, ops.get(1).lifecycle().state());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, ops.get(2).lifecycle().state());
+
+			dispatchTask.doWork();
+
+			assertEquals(4, driver.submitAttempts.size());
+			assertSame(ops.get(1), driver.submitAttempts.get(2));
+			assertSame(ops.get(2), driver.submitAttempts.get(3));
+			assertEquals(
+							List.of("/bucket/accepted", "/bucket/refused-once", "/bucket/retained-tail"),
+							completed.stream().map(completedOp -> completedOp.item().name()).toList());
+			for (final var op : ops) {
+				assertEquals(OperationLifecycleState.TERMINAL, op.lifecycle().state());
+			}
+			assertEquals(3, driver.operationLifecycle().snapshot().dispatched());
+			assertEquals(3, driver.operationLifecycle().snapshot().terminal());
+		} finally {
+			driver.close();
+		}
 	}
 
 	@Test
