@@ -44,6 +44,7 @@ import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
@@ -830,6 +831,93 @@ class StandaloneDeleteEngineStepTest {
 							delete.objectAttempted() / scheduledSeconds,
 							delete.objectsPerSecond(),
 							0.000_001);
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void standaloneDeletePreparationCompletesBeforeAdmissionAndRateClock() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new PreparationAwareDeleteDriver(TimeUnit.MILLISECONDS.toNanos(200));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-preparation-boundary",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+
+			final var delete = metrics.lastSnapshot().deleteMetrics();
+			assertEquals(1, driver.preparationCount.get());
+			assertTrue(driver.preparationObservedStartedDriver.get());
+			assertTrue(driver.dispatchObservedPreparation.get());
+			assertTrue(
+							delete.totalWallNanos() - delete.scheduledDeleteNanos() - delete.drainNanos() >= TimeUnit.MILLISECONDS.toNanos(150),
+							"preparation must remain visible in total workflow wall time");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void standaloneDeleteWithoutPreparationCapabilityKeepsExistingCountTiming() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new StartDelayedDeleteDriver(TimeUnit.MILLISECONDS.toNanos(200));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-existing-driver-timing",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			metrics.refreshLastSnapshot(true);
+
+			assertTrue(
+							metrics.lastSnapshot().deleteMetrics().scheduledDeleteNanos() >= TimeUnit.MILLISECONDS.toNanos(150),
+							"non-preparable drivers must retain the existing count-mode rate interval");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
+	void standaloneDeletePreparationFailureClosesStartedDriverBeforeAdmission() throws Exception {
+		final var config = config(1, 10);
+		final var preparationFailure = new IllegalStateException("injected preparation failure");
+		final var driver = new PreparationAwareDeleteDriver(0, preparationFailure);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-preparation-failure",
+						generator(config, driver, new ManifestInput(1)),
+						driver,
+						metrics,
+						config.configVal("load"),
+						false);
+
+		try {
+			assertSame(preparationFailure, assertThrows(IllegalStateException.class, step::start));
+			assertEquals(1, driver.preparationCount.get());
+			assertTrue(driver.preparationObservedStartedDriver.get());
+			assertTrue(driver.isClosed(), "a failed prepared driver must not escape the rejected context");
+			assertEquals(0, driver.scheduledOpCount());
+			assertEquals(0, step.deletePhaseTiming().scheduledNanos());
 		} finally {
 			step.close();
 			metrics.close();
@@ -1645,7 +1733,7 @@ class StandaloneDeleteEngineStepTest {
 		DEFAULT, HOLD, TRANSPORT_FAILURE, PROTOCOL_DEFECT, NATIVE_TRANSPORT_TIMING, BLOCK_TERMINAL_PUBLICATION, COMPLETE_DURING_DRAIN, COMPLETE_AFTER_DEADLINE_DURING_RECOVERY
 	}
 
-	private static final class DeterministicDeleteDriver extends AsyncRunnableBase
+	private static class DeterministicDeleteDriver extends AsyncRunnableBase
 					implements StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation>,
 					DeleteVerificationProbe {
 		private final OperationLifecycleTracker<DeleteRequestOperation> lifecycle = new OperationLifecycleTracker<>();
@@ -1899,5 +1987,65 @@ class StandaloneDeleteEngineStepTest {
 
 		@Override
 		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+	}
+
+	private static final class PreparationAwareDeleteDriver extends DeterministicDeleteDriver
+					implements StandaloneDeletePreparable {
+		private final long preparationDelayNanos;
+		private final RuntimeException preparationFailure;
+		private final AtomicInteger preparationCount = new AtomicInteger();
+		private final AtomicBoolean preparationObservedStartedDriver = new AtomicBoolean();
+		private final AtomicBoolean preparationComplete = new AtomicBoolean();
+		private final AtomicBoolean dispatchObservedPreparation = new AtomicBoolean();
+
+		private PreparationAwareDeleteDriver(final long preparationDelayNanos) {
+			this(preparationDelayNanos, null);
+		}
+
+		private PreparationAwareDeleteDriver(
+						final long preparationDelayNanos, final RuntimeException preparationFailure) {
+			super(DriverMode.DEFAULT);
+			this.preparationDelayNanos = preparationDelayNanos;
+			this.preparationFailure = preparationFailure;
+		}
+
+		@Override
+		public void prepareStandaloneDelete() {
+			preparationCount.incrementAndGet();
+			preparationObservedStartedDriver.set(isStarted());
+			final long deadlineNanos = System.nanoTime() + preparationDelayNanos;
+			long remainingNanos;
+			while ((remainingNanos = deadlineNanos - System.nanoTime()) > 0) {
+				LockSupport.parkNanos(remainingNanos);
+			}
+			if (preparationFailure != null) {
+				throw preparationFailure;
+			}
+			preparationComplete.set(true);
+		}
+
+		@Override
+		public boolean put(final DeleteRequestOperation operation) {
+			dispatchObservedPreparation.set(preparationComplete.get());
+			return super.put(operation);
+		}
+	}
+
+	private static final class StartDelayedDeleteDriver extends DeterministicDeleteDriver {
+		private final long startDelayNanos;
+
+		private StartDelayedDeleteDriver(final long startDelayNanos) {
+			super(DriverMode.DEFAULT);
+			this.startDelayNanos = startDelayNanos;
+		}
+
+		@Override
+		protected void doStart() {
+			final long deadlineNanos = System.nanoTime() + startDelayNanos;
+			long remainingNanos;
+			while ((remainingNanos = deadlineNanos - System.nanoTime()) > 0) {
+				LockSupport.parkNanos(remainingNanos);
+			}
+		}
 	}
 }

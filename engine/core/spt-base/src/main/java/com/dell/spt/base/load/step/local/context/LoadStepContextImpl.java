@@ -56,6 +56,7 @@ import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -1256,6 +1257,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected void doStart() throws IllegalStateException {
+		final boolean standaloneDeletePreparationRequired = standaloneDeleteEnabled && driver instanceof StandaloneDeletePreparable;
 		if (!startedOnce.compareAndSet(false, true)) {
 			throw new IllegalStateException(
 							id + ": load-step context instances cannot be restarted; create a new context");
@@ -1283,16 +1285,20 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 															? configuredWorkflowStartedEpochNanos
 															: deleteStepStartedEpochNanos);
 			deleteScheduledStartedNanos.set(
-							standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()
-											? 0
-											: System.nanoTime());
+							standaloneDeleteDurationMode
+											|| objectFailureBudgetAdmissionHeld.get()
+											|| standaloneDeletePreparationRequired
+															? 0
+															: System.nanoTime());
 			deleteScheduledDeadlineNanos.set(0);
 			deleteAdmissionClosedNanos.set(0);
 			deleteDrainCompletedNanos.set(0);
 			deleteWorkflowCompletedEpochNanos.set(0);
 			deleteDrainTimestampRecorded.set(false);
 		}
-		if (standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
+		if (standaloneDeleteDurationMode
+						|| objectFailureBudgetAdmissionHeld.get()
+						|| standaloneDeletePreparationRequired) {
 			generator.holdAdmission();
 		} else {
 			generator.openAdmission();
@@ -1306,13 +1312,38 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
+		prepareStandaloneDelete();
 		if (!standaloneDeleteDurationMode && !objectFailureBudgetAdmissionHeld.get()) {
 			try {
+				if (standaloneDeletePreparationRequired) {
+					deleteScheduledStartedNanos.set(System.nanoTime());
+					generator.openAdmission();
+				}
 				generator.start();
 			} catch (final IllegalStateException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
 			}
+		}
+	}
+
+	private void prepareStandaloneDelete() {
+		if (!standaloneDeleteEnabled || !(driver instanceof StandaloneDeletePreparable preparable)) {
+			return;
+		}
+		try {
+			preparable.prepareStandaloneDelete();
+		} catch (final Throwable preparationFailure) {
+			throwUncheckedIfInterrupted(preparationFailure);
+			try {
+				driver.close();
+			} catch (final Throwable closeFailure) {
+				throwUncheckedIfInterrupted(closeFailure);
+				if (closeFailure != preparationFailure) {
+					preparationFailure.addSuppressed(closeFailure);
+				}
+			}
+			throwUnchecked(preparationFailure);
 		}
 	}
 

@@ -34,6 +34,7 @@ import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -158,7 +159,7 @@ final class S3AwsDeleteRequestIntegrationTest {
 	}
 
 	@Test
-	void realFactoryCreatesOneTimingResourceSetForCurrentAndExactDelete() throws Exception {
+	void realFactoryPreparesOneTimingResourceSetBeforeCurrentAndExactDelete() throws Exception {
 		final var standaloneResourceCreations = new AtomicInteger();
 		final var factory = new S3AwsStorageDriverFactory<IntegrityManifestDataItem, DeleteRequestOperation>(
 						configuration -> {
@@ -175,6 +176,10 @@ final class S3AwsDeleteRequestIntegrationTest {
 						false,
 						16)) {
 			assertEquals(0, standaloneResourceCreations.get());
+			assertTrue(driver instanceof StandaloneDeletePreparable);
+			driver.start();
+			((StandaloneDeletePreparable) driver).prepareStandaloneDelete();
+			assertEquals(1, standaloneResourceCreations.get());
 
 			final DeleteRequestOperation current = execute(
 							driver, operation(target("factory-current", null)));

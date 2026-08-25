@@ -30,6 +30,7 @@ import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.storage.driver.coop.nio.NioStorageDriverBase;
 import com.github.akurilov.confuse.Config;
 
@@ -84,7 +85,7 @@ import java.util.stream.Collectors;
  * Comparable to the legacy REST implementation in com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver
  */
 public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends NioStorageDriverBase<I, O>
-				implements ListDiscoveryProbe, DeleteVerificationProbe {
+				implements ListDiscoveryProbe, DeleteVerificationProbe, StandaloneDeletePreparable {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 
@@ -1875,6 +1876,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	public boolean supportsStandaloneDeleteRequests() {
 		return true;
+	}
+
+	@Override
+	public void prepareStandaloneDelete() {
+		standaloneDeleteClient(false);
 	}
 
 	@Override

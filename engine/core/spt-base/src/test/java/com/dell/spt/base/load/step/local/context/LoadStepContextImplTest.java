@@ -47,6 +47,7 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
 import com.dell.spt.base.storage.Credential;
@@ -90,6 +91,7 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 import static org.mockito.Mockito.inOrder;
 
 /* Alot of the functionality from ItemInputFactoryTest is used here since need an ItemInputFactory */
@@ -146,6 +148,37 @@ public class LoadStepContextImplTest {
 		assertDoesNotThrow(() -> stepCtx.doClose());
 		assertDoesNotThrow(() -> stepCtx.doStop());
 		Assertions.assertTrue(stepCtx.isDone());
+	}
+
+	@Test
+	void ordinaryContextDoesNotInvokeStandaloneDeletePreparation() throws Exception {
+		testConfig.val("load-op-retry", false);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(
+						StorageDriver.class,
+						withSettings().extraInterfaces(StandaloneDeletePreparable.class));
+		when(driver.operationLifecycle()).thenReturn(new OperationLifecycleTracker<>());
+		doNothing().when(driver).operationResultOutput(any());
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		when(generator.isNothingPendingRetry()).thenReturn(true);
+		final var context = new LoadStepContextImpl<>(
+						"ordinary-preparation-boundary",
+						generator,
+						driver,
+						null,
+						testConfig.configVal("load"),
+						false);
+
+		try {
+			context.start();
+			verify(driver).start();
+			verify((StandaloneDeletePreparable) driver, never()).prepareStandaloneDelete();
+			verify(generator).openAdmission();
+			verify(generator).start();
+		} finally {
+			context.close();
+		}
 	}
 
 	@Test
