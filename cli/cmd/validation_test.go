@@ -251,7 +251,7 @@ func TestValidateDurationOrCount(t *testing.T) {
 			name:        "neither specified",
 			objectCount: 0,
 			duration:    "",
-			wantErr:     false, // This is now allowed - defaults to 100 objects
+			wantErr:     false, // Workload-specific preparation resolves the omitted bounds.
 		},
 		{
 			name:        "both specified",
@@ -511,7 +511,7 @@ func newIntegrityValidationCommand(t *testing.T) *cobra.Command {
 	cmd.Flags().String("object-size", "", "")
 	cmd.Flags().Float64("object-data-compressibility", 0, "")
 	cmd.Flags().Bool("object-data-dedupable", true, "")
-	cmd.Flags().Int("seed-objects", 2500, "")
+	cmd.Flags().Int("seed-objects", constants.DefaultSeedObjectCount, "")
 	cmd.Flags().Bool("create-prefix", false, "")
 	cmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "")
 	return cmd
@@ -811,7 +811,7 @@ func TestValidateRunCommand(t *testing.T) {
 			bucket:       "mybucket",
 			objectCount:  0,
 			duration:     "",
-			wantErr:      false, // This is now allowed - defaults to 100 objects
+			wantErr:      false, // Write preparation selects its workload-specific default.
 		},
 		{
 			name:         "both duration and count specified",
@@ -845,7 +845,7 @@ func TestValidateRunCommand(t *testing.T) {
 			bucket:       "",
 			objectCount:  0,
 			duration:     "",
-			wantErr:      false, // This is now allowed - defaults to 100 objects
+			wantErr:      false, // Mock preparation selects its workload-specific default.
 		},
 		{
 			name:         "valid list command",

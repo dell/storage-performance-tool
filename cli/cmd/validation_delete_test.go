@@ -126,7 +126,7 @@ func TestValidateDeleteManifestFlags(t *testing.T) {
 			name: "existing duration", bucket: "existing", prefix: "team/root/", prefixSet: true,
 			deleteExisting: true, duration: "1m", batchSize: 1,
 		},
-		{name: "seeded duration", bucket: "owned", batchSize: 100, duration: "1m", seedObjects: 2500},
+		{name: "seeded duration", bucket: "owned", batchSize: 100, duration: "1m", seedObjects: constants.DefaultSeedObjectCount},
 		{name: "seeded duration requires inventory", bucket: "owned", batchSize: 100, duration: "1m", seedObjects: -1, wantDetail: "--seed-objects"},
 		{name: "standalone delete rejects stable auto termination", bucket: "owned", batchSize: 100, autoTerminate: 5, wantDetail: "--auto-terminate-seconds"},
 		{name: "optional bucket assertion omitted", itemsFile: "delete.csv", batchSize: 1},
@@ -304,7 +304,7 @@ func deleteValidationCommand(test deleteValidationCase) *cobra.Command {
 	cmd.Flags().String("duration", test.duration, "")
 	seedObjects := test.seedObjects
 	if seedObjects == 0 {
-		seedObjects = scenario.DefaultDeleteObjectCount
+		seedObjects = constants.DefaultSeedObjectCount
 	}
 	cmd.Flags().Int("seed-objects", seedObjects, "")
 	cmd.Flags().Int("auto-terminate-seconds", test.autoTerminate, "")

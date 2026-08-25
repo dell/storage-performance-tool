@@ -116,8 +116,6 @@ const (
 const (
 	// MinDeleteBatchSize is the smallest valid standalone DELETE request size.
 	MinDeleteBatchSize = 1
-	// DefaultDeleteObjectCount is the finite seeded inventory used when no count is supplied.
-	DefaultDeleteObjectCount = 2500
 	// DefaultDeleteObjectSize is the explicit payload size for seeded DELETE inventories.
 	DefaultDeleteObjectSize = "1KiB"
 	// DefaultDeleteBatchSize is the default standalone DELETE request size.

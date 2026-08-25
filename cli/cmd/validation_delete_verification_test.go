@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
 )
@@ -63,7 +64,7 @@ func deleteVerificationCommand() *cobra.Command {
 	cmd.Flags().Bool("cleanup", false, "")
 	cmd.Flags().String(flagVersions, scenario.VersionsCurrent, "")
 	cmd.Flags().Bool(flagDeferVerification, false, "")
-	cmd.Flags().Int("seed-objects", scenario.DefaultDeleteObjectCount, "")
+	cmd.Flags().Int("seed-objects", constants.DefaultSeedObjectCount, "")
 	cmd.Flags().Bool("keep-scenario", false, "")
 	cmd.Flags().Bool("save-items", false, "")
 	cmd.Flags().String("items-file", "", "")

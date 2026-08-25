@@ -28,8 +28,8 @@ var scenarioGenerators = map[string]scenarioGenerator{
 	workload.Tables:      GenerateTablesScenario,
 }
 
-// GenerateScenario creates a JavaScript scenario from parameters. The workload registry controls
-// known names; command validation separately gates implementation slices which are not public yet.
+// GenerateScenario creates a JavaScript scenario from parameters. The workload registry is the
+// public support gate; every supported workload must have a registered scenario generator.
 func GenerateScenario(params Params) (string, error) {
 	spec, ok := workload.Lookup(params.WorkloadType)
 	if !ok {
@@ -122,7 +122,7 @@ func GenerateReadScenario(params Params) (string, error) {
 
 	seedCount := params.SeedCount
 	if seedCount <= 0 {
-		seedCount = 2500
+		seedCount = constants.DefaultSeedObjectCount
 	}
 
 	readShuffleBatchSize := 0
