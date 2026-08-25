@@ -127,6 +127,28 @@ func TestRendererStandaloneDeleteShowsNoFabricatedTransferMetrics(t *testing.T) 
 	}
 }
 
+func TestFormatSuccessCountUsesExplicitRowUnit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		unit string
+		want string
+	}{
+		{name: "legacy row", want: "200"},
+		{name: "LIST objects", unit: deletemetrics.ObjectUnit, want: "200 object identities"},
+		{name: "DELETE requests", unit: deletemetrics.RequestUnit, want: "200 logical API requests"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatSuccessCount(200, tc.unit); got != tc.want {
+				t.Fatalf("formatSuccessCount() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRendererStandaloneDeleteZeroTimingPopulationIsUnavailable(t *testing.T) {
 	summary := &RunSummary{
 		Workload: WorkloadSummary{Type: "delete"},

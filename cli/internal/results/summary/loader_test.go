@@ -160,6 +160,100 @@ func TestLoaderHydratesTerminalDeleteModelThroughAggregateAndRender(t *testing.T
 	}
 }
 
+func TestStoredListToDeleteSummaryLabelsSuccessUnitsWithoutChangingRates(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "delete-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		listStepID   = "mt-001-list"
+		deleteStepID = "mt-002-delete"
+	)
+	manifest := makeManifest(t, runDir, []stepFixture{
+		{
+			ID: listStepID,
+			MetricsContent: sampleMetricsCSV([]string{
+				`"2026-08-25T10:00:00Z",LIST,1,1,1,1,200,0,0,4,4,50,50,0,0,10,10,10,10,10,20,20,20,20,20,20`,
+			}),
+		},
+		{
+			ID: deleteStepID,
+			MetricsContent: sampleMetricsCSV([]string{
+				`"2026-08-25T10:00:04Z",DELETE,1,1,1,1,2,0,0,4,4,0.5,0.5,0,0,10,10,10,10,10,20,20,20,20,20,20`,
+			}),
+		},
+	})
+	manifest.Integrity = &results.IntegritySummary{
+		Complete:             true,
+		SelectionCountsValid: true,
+		SelectionSourceCount: 200,
+		SelectionUniqueCount: 200,
+		SelectionCount:       200,
+	}
+	writeManifest(t, runDir, manifest)
+	storedDelete := &deletemetrics.Metrics{
+		Units: deletemetrics.Units{
+			Requests: deletemetrics.RequestUnit,
+			Objects:  deletemetrics.ObjectUnit,
+			Batches:  deletemetrics.RequestUnit,
+		},
+		Requests:           deletemetrics.Requests{Attempted: 2, FullSuccess: 2, PerSecond: 0.5},
+		Objects:            deletemetrics.Objects{Selected: 200, Attempted: 200, Accepted: 200, PerSecond: 50},
+		Batches:            deletemetrics.Batches{ConfiguredSize: 100, ActualRequestCount: 2, ActualObjectCount: 200, MeanObjectsPerRequest: 100, FullBatchCount: 2, FullBatchPercent: 100},
+		Identity:           deletemetrics.Identity{Mode: "batch", ConfiguredBatchSize: 100, SelectionOrder: "canonical"},
+		OutcomeTerminology: deletemetrics.OutcomeAccepted,
+		TerminalReconciled: true,
+	}
+	writeParams(t, runDir, &RunParams{
+		WorkloadType:    "delete",
+		ExpectedStepIDs: []string{listStepID, deleteStepID},
+		DeleteMetrics:   map[string]*deletemetrics.Metrics{deleteStepID: storedDelete},
+	})
+
+	data, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := data.Steps[listStepID].Metrics.Rows[0].SuccessCount; got != 200 {
+		t.Fatalf("stored LIST success = %d, want 200 object identities", got)
+	}
+	if got := data.Steps[deleteStepID].Metrics.Rows[0].SuccessCount; got != 2 {
+		t.Fatalf("stored DELETE success = %d, want 2 logical API requests", got)
+	}
+	if got := data.Steps[deleteStepID].Delete.Objects.Accepted; got != 200 {
+		t.Fatalf("stored DELETE accepted objects = %d, want 200", got)
+	}
+
+	aggregated, err := Aggregate(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aggregated.Steps[0].Metrics.ThroughputAvgOps; got != 50 {
+		t.Fatalf("LIST rate = %v, want unchanged 50 objects/s", got)
+	}
+	if got := aggregated.Steps[1].Metrics.ThroughputAvgOps; got != 0.5 {
+		t.Fatalf("DELETE rate = %v, want unchanged 0.5 ops/s", got)
+	}
+	if got := aggregated.Steps[0].SuccessUnit; got != deletemetrics.ObjectUnit {
+		t.Fatalf("LIST success unit = %q, want %q", got, deletemetrics.ObjectUnit)
+	}
+	if got := aggregated.Steps[1].SuccessUnit; got != deletemetrics.RequestUnit {
+		t.Fatalf("DELETE success unit = %q, want %q", got, deletemetrics.RequestUnit)
+	}
+
+	table := NewRenderer(RenderOptions{}).performanceTable(aggregated)
+	for _, want := range []string{
+		"200 object identities",
+		"2 logical API requests",
+		"50.0 objects/s",
+		"0.50 ops/s",
+	} {
+		if !strings.Contains(table, want) {
+			t.Fatalf("stored LIST-to-DELETE summary omitted %q:\n%s", want, table)
+		}
+	}
+}
+
 func TestLoaderLoadMixedDistributionAndMultiRowMetrics(t *testing.T) {
 	t.Parallel()
 

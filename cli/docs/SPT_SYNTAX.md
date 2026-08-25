@@ -405,7 +405,10 @@ controller publishes its authoritative terminal outcome before results capture. 
 `metrics.total.csv` layout remains unchanged and
 request-based. Auto-results captures complete terminal schema-v4 DELETE detail into the existing
 stored run-metadata model before engine shutdown, and the loader carries that model through aggregate
-and rendered summaries. Auto-results also fetches the committed raw DELETE evidence set:
+and rendered summaries. In the stored summary's `Performance by Phase` table, LIST success counts
+are labeled as object identities and DELETE success counts are labeled as logical API requests;
+other operation rows retain their established count presentation. Rate cells remain `objects/s` for
+LIST and `ops/s` for DELETE. Auto-results also fetches the committed raw DELETE evidence set:
 `delete.metrics.total.csv` v1, one-row-per-invocation `delete.requests.csv` v1,
 per-target `delete.objects.csv` v1, selection-indexed `delete.verification.csv` v1, the pre-cleanup
 residual `items.csv`, frozen `verify-input.csv` plus its provenance completion record, and the final

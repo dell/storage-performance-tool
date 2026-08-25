@@ -33,6 +33,8 @@ const (
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
+	successObjectsLabel   = "object identities"
+	successRequestsLabel  = "logical API requests"
 )
 
 // NewRenderer builds a Renderer using the provided options.
@@ -361,7 +363,7 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		row := []string{
 			step.PhaseLabel,
 			sizeCell,
-			formatInt(m.SuccessCount),
+			formatSuccessCount(m.SuccessCount, step.SuccessUnit),
 			dataCell,
 			rateCell,
 			mixedLatencyCell(step, m),
@@ -374,6 +376,18 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		rows = append(rows, []string{notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func formatSuccessCount(count int64, unit string) string {
+	formatted := formatInt(count)
+	switch unit {
+	case deletemetrics.ObjectUnit:
+		return formatted + " " + successObjectsLabel
+	case deletemetrics.RequestUnit:
+		return formatted + " " + successRequestsLabel
+	default:
+		return formatted
+	}
 }
 
 func hasListStep(summary *RunSummary) bool {

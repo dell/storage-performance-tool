@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
@@ -380,6 +381,60 @@ func TestAggregateReadVerifyUsesCanonicalListCountsWithoutPayloadTransfer(t *tes
 	}
 	if summary.Totals.DataBytes != 64*constants.BytesPerMiB {
 		t.Fatalf("total data moved = %d, want READ payload only", summary.Totals.DataBytes)
+	}
+}
+
+func TestSuccessUnitForOperationLabelsOnlyListAndDelete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		operation string
+		want      string
+	}{
+		{operation: "LIST", want: deletemetrics.ObjectUnit},
+		{operation: "list", want: deletemetrics.ObjectUnit},
+		{operation: "DELETE", want: deletemetrics.RequestUnit},
+		{operation: "delete", want: deletemetrics.RequestUnit},
+		{operation: "CREATE", want: ""},
+		{operation: "READ", want: ""},
+		{operation: "STAT", want: ""},
+	}
+	for _, tc := range tests {
+		if got := successUnitForOperation(tc.operation); got != tc.want {
+			t.Errorf("successUnitForOperation(%q) = %q, want %q", tc.operation, got, tc.want)
+		}
+	}
+}
+
+func TestAggregateDerivesSuccessUnitAfterInferringMixedOperation(t *testing.T) {
+	t.Parallel()
+
+	const stepID = "mt-001-delete"
+	runData := &RunData{
+		StepOrder: []string{stepID},
+		Steps: map[string]*StepData{
+			stepID: {
+				StepID: stepID,
+				Status: StepStatusComplete,
+				Metrics: &MetricsTotals{Rows: []MetricsTotalsRow{
+					{Operation: "CREATE", SuccessCount: 100},
+					{Operation: "DELETE", SuccessCount: 100},
+				}},
+			},
+		},
+		Params: &RunParams{},
+	}
+
+	summary, err := Aggregate(runData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := summary.Steps[0]
+	if step.Operation != "MIXED" || !step.IsMixed {
+		t.Fatalf("inferred operation = %q (mixed %t), want MIXED", step.Operation, step.IsMixed)
+	}
+	if step.SuccessUnit != "" {
+		t.Fatalf("inferred mixed success unit = %q, want legacy unlabeled count", step.SuccessUnit)
 	}
 }
 
