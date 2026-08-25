@@ -103,6 +103,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final AtomicBoolean tlsHandshakeLogged = new AtomicBoolean(false);
 	private final AtomicBoolean channelFailureWarned = new AtomicBoolean(false);
 	private final AtomicBoolean connectionLeaseFailureWarned = new AtomicBoolean(false);
+	private final AtomicBoolean submissionFailureWarned = new AtomicBoolean(false);
 	protected final ChannelFutureListener reqSentCallback = this::sendFullRequestComplete;
 
 	@SuppressWarnings("unchecked")
@@ -429,7 +430,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				return false;
 			} catch (final Throwable thrown) {
 				throwUncheckedIfInterrupted(thrown);
-				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
+				logSubmissionFailure(thrown);
 				if (!dispatched) {
 					if (conn == null) {
 						concurrencyThrottle.release();
@@ -525,7 +526,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				break;
 			} catch (final Throwable thrown) {
 				throwUncheckedIfInterrupted(thrown);
-				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operations");
+				logSubmissionFailure(thrown);
 				if (!dispatched) {
 					if (conn != null) {
 						releaseUndispatchedConnection(conn, false);
@@ -571,6 +572,19 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 							"Failed to lease the connection for a load operation; further failures are logged at DEBUG");
 		} else {
 			LogUtil.exception(Level.DEBUG, failure, "Failed to lease the connection for a load operation");
+		}
+	}
+
+	private void logSubmissionFailure(final Throwable failure) {
+		// The submission loop may encounter the same underlying failure for every operation in a
+		// batch. Preserve one actionable warning per driver and retain later diagnostics at DEBUG.
+		if (submissionFailureWarned == null
+						|| submissionFailureWarned.compareAndSet(false, true)) {
+			LogUtil.exception(
+							Level.WARN, failure,
+							"Failed to submit the load operations; further failures are logged at DEBUG");
+		} else {
+			LogUtil.exception(Level.DEBUG, failure, "Failed to submit the load operations");
 		}
 	}
 

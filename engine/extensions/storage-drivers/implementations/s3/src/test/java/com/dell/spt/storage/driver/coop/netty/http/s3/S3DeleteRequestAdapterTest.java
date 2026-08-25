@@ -41,9 +41,11 @@ import io.netty.util.AttributeKey;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -53,6 +55,7 @@ import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 final class S3DeleteRequestAdapterTest {
+	private static final String CAPTURE_DRAIN_SENTINEL = "standalone-delete-log-capture-drained";
 
 	@Test
 	void oneCurrentTargetBuildsOrdinarySignedObjectDelete() throws Exception {
@@ -424,6 +427,38 @@ final class S3DeleteRequestAdapterTest {
 		}
 	}
 
+	@Test
+	void repeatedStandaloneDeleteRequestBuildFailuresEmitOneErrorThenDebug() throws Exception {
+		final var appender = new CapturingAppender();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(
+						Loggers.ERR.getName());
+		final Level originalLevel = logger.getLevel();
+		appender.start();
+		logger.addAppender(appender);
+		logger.setLevel(Level.DEBUG);
+		try {
+			try (final var driver = new DeleteDriver(config(false))) {
+				for (int attempt = 0; attempt < 3; attempt++) {
+					driver.sendThroughOrdinaryFallback(
+									operation(target("one-" + attempt, null), target("two-" + attempt, null)));
+				}
+			}
+			Loggers.ERR.debug(CAPTURE_DRAIN_SENTINEL);
+			assertTrue(appender.awaitRequestFailures(2, TimeUnit.SECONDS));
+			assertTrue(appender.awaitDrain(2, TimeUnit.SECONDS));
+		} finally {
+			logger.setLevel(originalLevel);
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+
+		final List<Level> requestFailureLevels = IntStream.range(0, appender.messages.size())
+						.filter(index -> appender.messages.get(index).startsWith("Send HTTP request failure"))
+						.mapToObj(appender.levels::get)
+						.toList();
+		assertEquals(List.of(Level.ERROR, Level.DEBUG, Level.DEBUG), requestFailureLevels);
+	}
+
 	private static void reconcile(
 					final DeleteDriver driver,
 					final DeleteRequestOperation operation,
@@ -468,6 +503,7 @@ final class S3DeleteRequestAdapterTest {
 	private static final class DeleteDriver
 					extends S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> {
 		private boolean suppressCompletion;
+		private boolean forceOrdinaryDeleteBuilder;
 
 		private DeleteDriver(final Config config) throws Exception {
 			super(
@@ -486,6 +522,24 @@ final class S3DeleteRequestAdapterTest {
 
 		private HttpRequest buildOrdinary(final DeleteRequestOperation operation) throws Exception {
 			return ordinaryObjectRequest(operation, "127.0.0.1:9024");
+		}
+
+		private void sendThroughOrdinaryFallback(final DeleteRequestOperation operation) {
+			forceOrdinaryDeleteBuilder = true;
+			try {
+				sendRequest(null, operation);
+			} finally {
+				forceOrdinaryDeleteBuilder = false;
+			}
+		}
+
+		@Override
+		protected HttpRequest httpRequest(
+						final DeleteRequestOperation operation, final String nodeAddr)
+						throws java.net.URISyntaxException {
+			return forceOrdinaryDeleteBuilder
+							? ordinaryObjectRequest(operation, nodeAddr)
+							: super.httpRequest(operation, nodeAddr);
 		}
 
 		private void finishTransportFailure(final DeleteRequestOperation operation) {
@@ -529,8 +583,10 @@ final class S3DeleteRequestAdapterTest {
 
 	private static final class CapturingAppender extends AbstractAppender {
 
-		private final List<String> messages = new ArrayList<>();
-		private final List<Level> levels = new ArrayList<>();
+		private final List<String> messages = new CopyOnWriteArrayList<>();
+		private final List<Level> levels = new CopyOnWriteArrayList<>();
+		private final CountDownLatch requestFailures = new CountDownLatch(3);
+		private final CountDownLatch drain = new CountDownLatch(1);
 
 		private CapturingAppender() {
 			super("delete-response-diagnostic-capture", null, null, true, Property.EMPTY_ARRAY);
@@ -538,8 +594,25 @@ final class S3DeleteRequestAdapterTest {
 
 		@Override
 		public void append(final LogEvent event) {
-			messages.add(event.getMessage().getFormattedMessage());
+			final String message = event.getMessage().getFormattedMessage();
+			messages.add(message);
 			levels.add(event.getLevel());
+			if (message.startsWith("Send HTTP request failure")) {
+				requestFailures.countDown();
+			}
+			if (CAPTURE_DRAIN_SENTINEL.equals(message)) {
+				drain.countDown();
+			}
+		}
+
+		private boolean awaitRequestFailures(final long timeout, final TimeUnit timeUnit)
+						throws InterruptedException {
+			return requestFailures.await(timeout, timeUnit);
+		}
+
+		private boolean awaitDrain(final long timeout, final TimeUnit timeUnit)
+						throws InterruptedException {
+			return drain.await(timeout, timeUnit);
 		}
 	}
 }

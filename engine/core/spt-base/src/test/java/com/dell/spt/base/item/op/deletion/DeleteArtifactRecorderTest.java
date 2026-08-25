@@ -81,7 +81,7 @@ class DeleteArtifactRecorderTest {
 	}
 
 	@Test
-	void writerFailureIsSurfacedAfterLifecycleAndNeverPublishesTotals(
+	void writerFailureIsSurfacedAfterLifecycleAndNeverPublishesCanonicalArtifacts(
 					@TempDir final Path temp) throws Exception {
 		final String stepId = "delete-recorder-failure-" + System.nanoTime();
 		final Path artifactDirectory = path(Loggers.DELETE_OBJECTS, stepId).getParent();
@@ -95,13 +95,62 @@ class DeleteArtifactRecorderTest {
 		recorder.recordTerminal(successfulOperation(true));
 		try {
 			assertThrows(IllegalStateException.class, () -> recorder.finish(lifecycle(), metrics()));
+			assertFalse(Files.exists(path(Loggers.DELETE_REQUESTS, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_OBJECTS, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_RESIDUAL, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_VERIFICATION, stepId)));
 			assertFalse(Files.exists(path(Loggers.DELETE_METRICS_TOTAL, stepId)));
-			assertTrue(Files.isRegularFile(path(Loggers.DELETE_OBJECTS, stepId)));
 		} finally {
 			recorder.close();
 		}
 		assertEquals(privateStagingBefore, privateStagingCount(artifactDirectory));
 		cleanup(stepId);
+	}
+
+	@Test
+	void interruptionIgnoringWriterCannotRacePublicationOrStagingCleanup(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "delete-recorder-stuck-writer-" + System.nanoTime();
+		final Path artifactDirectory = path(Loggers.DELETE_OBJECTS, stepId).getParent();
+		final long privateStagingBefore = privateStagingCount(artifactDirectory);
+		final CountDownLatch entered = new CountDownLatch(1);
+		final CountDownLatch interruptionIgnored = new CountDownLatch(1);
+		final CountDownLatch release = new CountDownLatch(1);
+		final DeleteArtifactRecorder recorder = new DeleteArtifactRecorder(
+						stepId, selection(temp), 1, 2, 25, operation -> {
+							entered.countDown();
+							while (release.getCount() != 0) {
+								try {
+									release.await(10, TimeUnit.MILLISECONDS);
+								} catch (final InterruptedException ignored) {
+									interruptionIgnored.countDown();
+								}
+							}
+						});
+		recorder.recordTerminal(successfulOperation(true));
+		assertTrue(entered.await(1, TimeUnit.SECONDS));
+
+		try {
+			assertThrows(IllegalStateException.class, () -> recorder.finish(lifecycle(), metrics()));
+			assertTrue(interruptionIgnored.await(1, TimeUnit.SECONDS));
+			assertFalse(Files.exists(path(Loggers.DELETE_REQUESTS, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_OBJECTS, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_RESIDUAL, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_VERIFICATION, stepId)));
+			assertFalse(Files.exists(path(Loggers.DELETE_METRICS_TOTAL, stepId)));
+			recorder.close();
+			assertEquals(privateStagingBefore + 2, privateStagingCount(artifactDirectory));
+		} finally {
+			release.countDown();
+			for (int i = 0; i < 100 && writerThreadAlive(stepId); i++) {
+				Thread.sleep(10);
+			}
+			recorder.close();
+			cleanup(stepId);
+		}
+
+		assertFalse(writerThreadAlive(stepId));
+		assertEquals(privateStagingBefore, privateStagingCount(artifactDirectory));
 	}
 
 	@Test
@@ -264,5 +313,11 @@ class DeleteArtifactRecorderTest {
 		try (final var paths = Files.list(directory)) {
 			return paths.filter(path -> path.getFileName().toString().endsWith(".recording")).count();
 		}
+	}
+
+	private static boolean writerThreadAlive(final String stepId) {
+		final String threadName = "spt-delete-artifacts-" + stepId;
+		return Thread.getAllStackTraces().keySet().stream()
+						.anyMatch(thread -> thread.isAlive() && threadName.equals(thread.getName()));
 	}
 }

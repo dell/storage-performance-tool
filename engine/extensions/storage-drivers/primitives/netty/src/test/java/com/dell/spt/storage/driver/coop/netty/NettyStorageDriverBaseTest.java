@@ -19,6 +19,8 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import com.github.akurilov.commons.io.Input;
@@ -33,6 +35,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +53,7 @@ class NettyStorageDriverBaseTest {
 		private final AtomicInteger sentRequestCount = new AtomicInteger();
 		private final AtomicReference<Operation<Item>> lastSentOperation = new AtomicReference<>();
 		private volatile boolean publishCompletion;
+		private volatile RuntimeException sendFailure;
 
 		protected TestNettyDriver(
 						final DataInput dataInput, final Config storageConfig) throws Exception {
@@ -71,6 +79,9 @@ class NettyStorageDriverBaseTest {
 
 		@Override
 		protected void sendRequest(final Channel channel, final Operation<Item> op) {
+			if (sendFailure != null) {
+				throw sendFailure;
+			}
 			sentRequestCount.incrementAndGet();
 			lastSentOperation.set(op);
 		}
@@ -370,6 +381,59 @@ class NettyStorageDriverBaseTest {
 		assertEquals(2, writes.get());
 		assertEquals(0, driver.activeOpCount());
 		assertEquals(OperationLifecycleState.TERMINAL, ops.get(1).lifecycle().state());
+	}
+
+	@Test
+	void repeatedBatchSubmissionFailuresWarnOnceAndDemoteSubsequentDiagnostics() throws Exception {
+		replaceDriver(3);
+		driver.sendFailure = new IllegalStateException("synthetic repeated submission failure");
+		final List<Operation<Item>> ops = List.of(
+						new OperationImpl<>(
+										0, OpType.NOOP, new DataItemImpl("warn-once-first", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.NOOP, new DataItemImpl("warn-once-second", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.NOOP, new DataItemImpl("warn-once-third", 0, 1), null, "/bucket", null));
+		for (final var op : ops) {
+			assertTrue(lifecycle.driverQueued(op));
+		}
+
+		final var capture = new CapturingAppender();
+		capture.start();
+		final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+		final var previousLevel = errLogger.getLevel();
+		errLogger.addAppender(capture);
+		errLogger.setLevel(Level.DEBUG);
+		try {
+			assertEquals(3, driver.submit(ops, 0, ops.size()));
+			LogUtil.flushAll();
+			assertEquals(1, capture.count(Level.WARN, "Failed to submit the load operations"));
+			assertEquals(2, capture.count(Level.DEBUG, "Failed to submit the load operations"));
+		} finally {
+			errLogger.removeAppender(capture);
+			errLogger.setLevel(previousLevel);
+			capture.stop();
+		}
+	}
+
+	private static final class CapturingAppender extends AbstractAppender {
+		private final List<LogEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+		private CapturingAppender() {
+			super("netty-submission-failure-capture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			events.add(event.toImmutable());
+		}
+
+		private long count(final Level level, final String messageFragment) {
+			return events.stream()
+							.filter(event -> level.equals(event.getLevel()))
+							.filter(event -> event.getMessage().getFormattedMessage().contains(messageFragment))
+							.count();
+		}
 	}
 
 	private static Config storageConfig(final int concurrencyLimit) {
