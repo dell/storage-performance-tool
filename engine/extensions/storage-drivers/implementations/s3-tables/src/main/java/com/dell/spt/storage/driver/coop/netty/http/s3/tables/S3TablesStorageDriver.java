@@ -128,6 +128,12 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		this.requestNewPathFunc = null;
 	}
 
+	/** S3 Tables uses its own control/data-plane modes, not first-class DELETE requests. */
+	@Override
+	public boolean supportsStandaloneDeleteRequests() {
+		return false;
+	}
+
 	@Override
 	protected String requestNewPath(final String path) {
 		return path;

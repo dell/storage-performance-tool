@@ -180,7 +180,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 			return;
 		}
 		closing.set(true);
-		awaitWriter();
+		requireCompleteWriterTermination();
 		Path finalRequests = null;
 		Path finalObjects = null;
 		Path finalResidual = null;
@@ -211,10 +211,6 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 			publishRetrySafe(finalObjects, objectsPath);
 			publishRetrySafe(finalResidual, residualPath);
 			publishRetrySafe(finalVerification, verificationPath);
-			final Throwable failure = asynchronousFailure.get();
-			if (failure != null) {
-				throw new IllegalStateException("DELETE artifact recording is incomplete", failure);
-			}
 			if (metrics == null) {
 				throw new IllegalStateException("DELETE artifact totals are unavailable");
 			}
@@ -249,18 +245,41 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		}
 	}
 
-	private void awaitWriter() {
+	private void requireCompleteWriterTermination() {
+		if (!awaitWriter()) {
+			throw new IllegalStateException(
+							"DELETE artifact writer termination could not be established",
+							asynchronousFailure.get());
+		}
+		final Throwable failure = asynchronousFailure.get();
+		if (failure != null) {
+			throw new IllegalStateException("DELETE artifact recording is incomplete", failure);
+		}
+	}
+
+	private boolean awaitWriter() {
+		boolean interrupted = false;
 		try {
 			writerThread.join(closeTimeoutMillis);
 		} catch (final InterruptedException e) {
-			Thread.currentThread().interrupt();
+			interrupted = true;
 			asynchronousFailure.compareAndSet(null, e);
 		}
 		if (writerThread.isAlive()) {
-			writerThread.interrupt();
 			asynchronousFailure.compareAndSet(
 							null, new IllegalStateException("DELETE artifact writer exceeded its bounded close time"));
+			writerThread.interrupt();
+			try {
+				writerThread.join(closeTimeoutMillis);
+			} catch (final InterruptedException e) {
+				interrupted = true;
+				asynchronousFailure.compareAndSet(null, e);
+			}
 		}
+		if (interrupted) {
+			Thread.currentThread().interrupt();
+		}
+		return !writerThread.isAlive();
 	}
 
 	private static void writeTerminal(
@@ -640,10 +659,9 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 	}
 
 	@Override
-	public void close() {
+	public synchronized void close() {
 		closing.set(true);
-		if (!finished) {
-			awaitWriter();
+		if (!finished && awaitWriter()) {
 			deletePrivateStaging();
 		}
 	}

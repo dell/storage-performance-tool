@@ -67,6 +67,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
@@ -86,6 +87,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					.build();
 	private final Map<String, Input<String>> headerNameInputs = new ConcurrentHashMap<>();
 	private final Map<String, Input<String>> headerValueInputs = new ConcurrentHashMap<>();
+	private final AtomicBoolean requestBuildFailureLogged = new AtomicBoolean(false);
 	protected final HttpHeaders sharedHeaders = new DefaultHttpHeaders();
 	protected final Map<String, String> dynamicHeaders = new HashMap<>();
 	private final Input<String> uriQueryInput;
@@ -497,9 +499,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
 				return;
 			}
-			if (!isStopped() && !isClosed()) {
-				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "Send HTTP request failure");
-			}
+			logRequestBuildFailure(e);
 		}
 		channel.write(LastHttpContent.EMPTY_LAST_CONTENT).addListener(reqSentCallback);
 		channel.flush();
@@ -511,9 +511,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 						|| deleteOperation.deleteResult() == null) {
 			return false;
 		}
-		if (!isStopped() && !isClosed()) {
-			LogUtil.trace(Loggers.ERR, Level.ERROR, requestFailure, "Send HTTP request failure");
-		}
+		logRequestBuildFailure(requestFailure);
 		try {
 			op.finishRequest();
 		} catch (final IllegalStateException e) {
@@ -529,6 +527,20 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							Level.DEBUG, completionFailure, "Load operation result publication failure");
 		}
 		return true;
+	}
+
+	private void logRequestBuildFailure(final Throwable failure) {
+		if (isStopped() || isClosed()) {
+			return;
+		}
+		// A malformed standalone batch can fail once per logical operation. Keep the first
+		// diagnostic actionable without flooding the error log during a sustained failure.
+		if (requestBuildFailureLogged == null
+						|| requestBuildFailureLogged.compareAndSet(false, true)) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, failure, "Send HTTP request failure");
+		} else {
+			LogUtil.trace(Loggers.ERR, Level.DEBUG, failure, "Send HTTP request failure");
+		}
 	}
 
 	void sendHttpRequestComplete(final ChannelFuture future) {

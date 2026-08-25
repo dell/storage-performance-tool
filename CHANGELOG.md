@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Standalone S3 DELETE benchmarking** — Added public `spt run delete` support with safe seeded inventories, explicit canonical manifests, and guarded existing-prefix selection; single- and batched requests retain exact-version identities and report logical-request and object-outcome units separately. Optional full inventory validation and post-delete absence verification distinguish accepted API outcomes from confirmed absence. Qualification covers real-constructor Netty and AWS S3 canaries, hardware-free inherited-HTTP S3 RDMA contracts, lifecycle and distributed-routing safety, and versioned result and recovery artifacts.
+
 ## [5.14.2] - 2026-08-13
 
 ### Changed
