@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
 import java.util.ArrayList;
 import java.util.List;
@@ -9,6 +10,36 @@ import org.xml.sax.helpers.DefaultHandler;
 
 /** Strict parser for the identity-bearing entries in an S3 DeleteObjects response. */
 final class DeleteObjectsXmlHandler extends DefaultHandler {
+
+	enum FailureClass {
+		ENTRY_LIMIT, INVALID_ENTRY, INVALID_STRUCTURE
+	}
+
+	enum StructuralContext {
+		DOCUMENT_END, DOCUMENT_ROOT, ENTRY_FIELD, RESULT_ENTRY, ROOT_CONTENT
+	}
+
+	static final class ParseFailure extends SAXException {
+
+		private final FailureClass failureClass;
+		private final StructuralContext structuralContext;
+
+		private ParseFailure(
+						final FailureClass failureClass,
+						final StructuralContext structuralContext) {
+			super("Rejected S3 multi-delete response: " + failureClass + '/' + structuralContext);
+			this.failureClass = failureClass;
+			this.structuralContext = structuralContext;
+		}
+
+		FailureClass failureClass() {
+			return failureClass;
+		}
+
+		StructuralContext structuralContext() {
+			return structuralContext;
+		}
+	}
 
 	private static final String ROOT = "DeleteResult";
 	private static final String DELETED = "Deleted";
@@ -57,20 +88,23 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 					final Attributes attributes) throws SAXException {
 		if (!rootSeen) {
 			if (!ROOT.equals(qName)) {
-				throw new SAXException("Expected S3 DeleteResult root but found " + qName);
+				throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.DOCUMENT_ROOT);
 			}
 			rootSeen = true;
 			return;
 		}
 		if (rootClosed) {
-			throw new SAXException("S3 multi-delete response contains content after its root");
+			throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.ROOT_CONTENT);
 		}
 		if (scalar != null) {
-			throw new SAXException("Nested element " + qName + " inside S3 multi-delete field " + scalar);
+			throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.ENTRY_FIELD);
 		}
 		if (entry == null) {
 			if (!DELETED.equals(qName) && !ERROR.equals(qName)) {
-				throw new SAXException("Unexpected S3 multi-delete result element " + qName);
+				throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.ROOT_CONTENT);
+			}
+			if (results.size() >= DeleteRequest.MAX_TARGET_COUNT) {
+				throw failure(FailureClass.ENTRY_LIMIT, StructuralContext.RESULT_ENTRY);
 			}
 			entry = qName;
 			key = null;
@@ -85,7 +119,7 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 						&& !MESSAGE.equals(qName)
 						&& !DELETE_MARKER.equals(qName)
 						&& !DELETE_MARKER_VERSION_ID.equals(qName)) {
-			throw new SAXException("Unexpected S3 multi-delete entry element " + qName);
+			throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.ENTRY_FIELD);
 		}
 		scalar = qName;
 		text.setLength(0);
@@ -109,7 +143,7 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 		}
 		if (qName.equals(entry)) {
 			if (key == null || key.isEmpty()) {
-				throw new SAXException("S3 multi-delete response entry is missing its key");
+				throw failure(FailureClass.INVALID_ENTRY, StructuralContext.RESULT_ENTRY);
 			}
 			results.add(DELETED.equals(entry)
 							? new DeleteTransportTargetResult(key, versionId, true, null)
@@ -119,18 +153,18 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 		}
 		if (ROOT.equals(qName)) {
 			if (entry != null || scalar != null) {
-				throw new SAXException("S3 multi-delete response closed with an incomplete entry");
+				throw failure(FailureClass.INVALID_ENTRY, StructuralContext.RESULT_ENTRY);
 			}
 			rootClosed = true;
 			return;
 		}
-		throw new SAXException("Unexpected S3 multi-delete closing element " + qName);
+		throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.ROOT_CONTENT);
 	}
 
 	@Override
 	public void endDocument() throws SAXException {
 		if (!rootSeen || !rootClosed) {
-			throw new SAXException("Incomplete S3 multi-delete response document");
+			throw failure(FailureClass.INVALID_STRUCTURE, StructuralContext.DOCUMENT_END);
 		}
 	}
 
@@ -156,9 +190,15 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 	private static String setOnce(
 					final String current, final String value, final String field) throws SAXException {
 		if (current != null) {
-			throw new SAXException("Duplicate " + field + " in S3 multi-delete response entry");
+			throw failure(FailureClass.INVALID_ENTRY, StructuralContext.ENTRY_FIELD);
 		}
 		return value;
+	}
+
+	private static ParseFailure failure(
+					final FailureClass failureClass,
+					final StructuralContext structuralContext) {
+		return new ParseFailure(failureClass, structuralContext);
 	}
 
 	private String errorMessage() {

@@ -11,13 +11,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
-import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -26,17 +32,24 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
+import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
-import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.util.AttributeKey;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.stream.IntStream;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 final class S3DeleteRequestAdapterTest {
@@ -157,6 +170,61 @@ final class S3DeleteRequestAdapterTest {
 	}
 
 	@Test
+	void maximumSizeResponseReconcilesAllThousandTargets() throws Exception {
+		final DeleteTarget[] targets = IntStream.range(0, DeleteRequest.MAX_TARGET_COUNT)
+						.mapToObj(index -> target("key-" + index, index % 2 == 0 ? null : "version-" + index))
+						.toArray(DeleteTarget[]::new);
+		final StringBuilder xml = new StringBuilder("<DeleteResult>");
+		for (int index = 0; index < targets.length; index++) {
+			xml.append("<Deleted><Key>key-").append(index).append("</Key>");
+			if (index % 2 != 0) {
+				xml.append("<VersionId>version-").append(index).append("</VersionId>");
+			}
+			xml.append("</Deleted>");
+		}
+		xml.append("</DeleteResult>");
+
+		try (final var driver = new DeleteDriver(config(false))) {
+			final var operation = operation(targets);
+			reconcile(driver, operation, xml.toString());
+
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, operation.deleteResult().outcome());
+			assertEquals(DeleteRequest.MAX_TARGET_COUNT, operation.deleteResult().acceptedObjectCount());
+		}
+	}
+
+	@Test
+	void standaloneVersionResponseHeaderPreservesCanonicalManifestItem() {
+		final var operation = operation(target("canonical-key", null));
+		final var handler = new S3ResponseHandler<IntegrityManifestDataItem, DeleteRequestOperation>(
+						null, false, true, null);
+		final var headers = new DefaultHttpHeaders();
+		headers.set("x-amz-version-id", "returned-version");
+
+		handler.handleResponseHeaders(null, operation, headers);
+
+		assertEquals("canonical-key", operation.item().name());
+		assertEquals("canonical-key", operation.deleteRequest().targets().getFirst().item().name());
+		assertEquals("returned-version", operation.returnedVersionId());
+	}
+
+	@Test
+	void legacySingleItemVersionResponseHeaderRetainsVersionCarrierBehavior() {
+		final Item item = new DataItemImpl("legacy-key", 0, 0);
+		final Operation<Item> operation = new OperationImpl<>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL);
+		final var handler = new S3ResponseHandler<Item, Operation<Item>>(
+						null, false, true, null);
+		final var headers = new DefaultHttpHeaders();
+		headers.set("x-amz-version-id", "returned-version");
+
+		handler.handleResponseHeaders(null, operation, headers);
+
+		assertEquals("legacy-key~returned-version", operation.item().name());
+		assertEquals("returned-version", operation.returnedVersionId());
+	}
+
+	@Test
 	void oversizedBatchResponseFailsClosedReleasesBufferAndClearsChannelState() throws Exception {
 		final int maxDeleteResponseBytes = 16 * 1024 * 1024;
 		try (final var driver = new DeleteDriver(config(false))) {
@@ -199,6 +267,64 @@ final class S3DeleteRequestAdapterTest {
 				channel.close();
 			}
 		}
+	}
+
+	@Test
+	void parserDiagnosticsAreSanitizedStructuralDebugAndBoundedOncePerFailureClass()
+					throws Exception {
+		final String sensitiveKey = "private-key-material-should-never-be-logged";
+		final StringBuilder oversizedXml = new StringBuilder("<DeleteResult>");
+		for (int index = 0; index < DeleteRequest.MAX_TARGET_COUNT; index++) {
+			oversizedXml.append("<Deleted><Key>key-").append(index).append("</Key></Deleted>");
+		}
+		oversizedXml.append("<Deleted><Key>").append(sensitiveKey)
+						.append("</Key></Deleted></DeleteResult>");
+		final String truncatedXml = "<DeleteResult><Deleted><Key>" + sensitiveKey
+						+ "</Key></Deleted>";
+		final var appender = new CapturingAppender();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(
+						Loggers.MSG.getName());
+		final Level originalLevel = logger.getLevel();
+		S3ResponseHandler.resetDeleteResponseDiagnosticsForTest();
+		appender.start();
+		logger.addAppender(appender);
+		logger.setLevel(Level.DEBUG);
+		try (final var driver = new DeleteDriver(config(false))) {
+			for (int attempt = 0; attempt < 2; attempt++) {
+				final var oversized = operation(target("one", null), target("two", null));
+				reconcile(driver, oversized, oversizedXml.toString());
+				assertEquals(DeleteRequestOutcome.FAILED, oversized.deleteResult().outcome());
+				assertEquals(DeleteFailureClassification.PROTOCOL,
+								oversized.deleteResult().failureClassification());
+
+				final var truncated = operation(target("one", null), target("two", null));
+				reconcile(driver, truncated, truncatedXml);
+				assertEquals(DeleteRequestOutcome.FAILED, truncated.deleteResult().outcome());
+				assertEquals(DeleteFailureClassification.PROTOCOL,
+								truncated.deleteResult().failureClassification());
+			}
+		} finally {
+			logger.setLevel(originalLevel);
+			logger.removeAppender(appender);
+			appender.stop();
+			S3ResponseHandler.resetDeleteResponseDiagnosticsForTest();
+		}
+
+		final List<String> diagnostics = appender.messages.stream()
+						.filter(message -> message.startsWith("S3 multi-delete response rejected:"))
+						.toList();
+		assertEquals(2, diagnostics.size());
+		assertTrue(diagnostics.stream().anyMatch(message -> message.contains("failure_class=ENTRY_LIMIT")
+						&& message.contains("structural_context=RESULT_ENTRY")));
+		assertTrue(diagnostics.stream().anyMatch(message -> message.contains("failure_class=MALFORMED_XML")
+						&& message.contains("structural_context=DOCUMENT")));
+		assertTrue(IntStream.range(0, appender.messages.size())
+						.filter(index -> appender.messages.get(index)
+										.startsWith("S3 multi-delete response rejected:"))
+						.allMatch(index -> Level.DEBUG.equals(appender.levels.get(index))));
+		assertTrue(diagnostics.stream().allMatch(message -> !message.contains(sensitiveKey)
+						&& !message.contains("<DeleteResult>")
+						&& !message.contains(CREDENTIAL.getUid())));
 	}
 
 	@Test
@@ -399,5 +525,21 @@ final class S3DeleteRequestAdapterTest {
 
 		@Override
 		public void close() {}
+	}
+
+	private static final class CapturingAppender extends AbstractAppender {
+
+		private final List<String> messages = new ArrayList<>();
+		private final List<Level> levels = new ArrayList<>();
+
+		private CapturingAppender() {
+			super("delete-response-diagnostic-capture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			messages.add(event.getMessage().getFormattedMessage());
+			levels.add(event.getLevel());
+		}
 	}
 }
