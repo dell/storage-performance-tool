@@ -84,6 +84,7 @@ type StepSummary struct {
 	StepID             string
 	PhaseLabel         string
 	Operation          string
+	SuccessUnit        string
 	Status             StepStatus
 	Metrics            *PhaseMetrics
 	IsMixed            bool
@@ -321,6 +322,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 		} else {
 			metrics = deriveMetrics(stepData, workload.ObjectSizeBytes)
 		}
+		summary.SuccessUnit = successUnitForOperation(summary.Operation)
 		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
 			normalizeListMetrics(metrics, integrity)
 		}
@@ -348,6 +350,17 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
+}
+
+func successUnitForOperation(operation string) string {
+	switch {
+	case strings.EqualFold(operation, workloadTypeList):
+		return deletemetrics.ObjectUnit
+	case strings.EqualFold(operation, reportOperationDelete):
+		return deletemetrics.RequestUnit
+	default:
+		return ""
+	}
 }
 
 func appendSeededDeleteCleanupPhase(steps []StepSummary, workload WorkloadSummary) {
