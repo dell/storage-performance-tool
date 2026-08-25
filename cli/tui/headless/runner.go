@@ -751,47 +751,9 @@ func (r *HeadlessRunner) outputMetrics(metric tui.PerformanceMetric) {
 
 func formatMetricsMessage(metric tui.PerformanceMetric) string {
 	if metric.Delete != nil {
-		deleteMetrics := metric.Delete
-		latency := formatOptionalMicros(deleteTimingMicros(deleteMetrics.Timing.Latency))
-		return fmt.Sprintf(
-			"ops/sec=%d latency=%s type=%s success=%d failed=%d partial=%t nodes=%d nodes_present=%s contributors_present=%s units=requests:%s,objects:%s,batches:%s requests=%d full_success=%d partial_requests=%d failed_requests=%d unresolved_requests=%d request_rate=%.3f selected=%d attempted_objects=%d accepted=%d failed_objects=%d unattempted_objects=%d unresolved_objects=%d object_rate=%.3f batches=%d batch_objects=%d mean_batch=%.3f full_batches=%d partial_batches=%d full_batch_pct=%.3f current_keys=%d exact_versions=%d request_completion_pct=%.3f object_completion_pct=%.3f mode=%s batch_size=%d selection_order=%s policy=%s failure_budget_outcome=%s max_failed_objects=%d max_failure_pct=%.3f grace_seconds=%d operational_failed_objects=%d excluded_failed_objects=%d observed_failure_pct=%.3f phases=%s buckets=%s latency_definition=%q latency_stats=%s duration_definition=%q duration_stats=%s object_latency=N/A object_size=N/A data_moved=N/A bandwidth=N/A ttfb=N/A outcome_terminology=%s terminal_reconciled=%t verification_enabled=%t pre_validation=%t pre_validation_complete=%t post_verification=%t post_verification_complete=%t post_verification_skipped=%t verification_timeout=%.3fs verified_absent=%d still_present=%d verification_unresolved=%d correctness_failures=%d inconclusive_failures=%d verification_residual=%d removal_confirmed=%t verification=%s",
-			metric.OpsPerSec, latency, metric.OpType, metric.SuccessCount, metric.FailedCount,
-			metric.Partial, metric.NodesCount, strings.Join(metric.NodesPresent, ","),
-			strings.Join(metric.ContributorsPresent, ","),
-			deleteMetrics.Units.Requests, deleteMetrics.Units.Objects, deleteMetrics.Units.Batches,
-			deleteMetrics.Requests.Attempted, deleteMetrics.Requests.FullSuccess, deleteMetrics.Requests.Partial,
-			deleteMetrics.Requests.Failed, deleteMetrics.Requests.Unresolved, deleteMetrics.Requests.PerSecond,
-			deleteMetrics.Objects.Selected, deleteMetrics.Objects.Attempted, deleteMetrics.Objects.Accepted,
-			deleteMetrics.Objects.Failed, deleteMetrics.Objects.Unattempted,
-			deleteMetrics.Objects.Unresolved, deleteMetrics.Objects.PerSecond,
-			deleteMetrics.Batches.ActualRequestCount, deleteMetrics.Batches.ActualObjectCount,
-			deleteMetrics.Batches.MeanObjectsPerRequest, deleteMetrics.Batches.FullBatchCount,
-			deleteMetrics.Batches.PartialBatchCount, deleteMetrics.Batches.FullBatchPercent,
-			deleteMetrics.Versions.CurrentKey, deleteMetrics.Versions.ExactVersion,
-			deleteMetrics.Completion.RequestPercent, deleteMetrics.Completion.ObjectPercent,
-			deleteMetrics.Identity.Mode, deleteMetrics.Identity.ConfiguredBatchSize,
-			deleteMetrics.Identity.SelectionOrder,
-			deleteMetrics.FailurePolicy.Mode, deleteMetrics.FailurePolicy.Outcome,
-			deleteMetrics.FailurePolicy.MaxFailedObjects,
-			deleteMetrics.FailurePolicy.MaxFailurePercent, deleteMetrics.FailurePolicy.GraceSeconds,
-			deleteMetrics.FailurePolicy.OperationalFailedObjects,
-			deleteMetrics.FailurePolicy.ExcludedFailedObjects,
-			deleteMetrics.FailurePolicy.ObservedFailurePercent,
-			formatDeletePhases(deleteMetrics.Phases), formatDeleteBuckets(deleteMetrics.Buckets),
-			deleteMetrics.Timing.LatencyDefinition, formatDeleteTimingStat(deleteMetrics.Timing.Latency),
-			deleteMetrics.Timing.DurationDefinition, formatDeleteTimingStat(deleteMetrics.Timing.Duration),
-			deleteMetrics.OutcomeTerminology, deleteMetrics.TerminalReconciled,
-			deleteMetrics.Verification.Enabled, deleteMetrics.Verification.PreValidationEnabled,
-			deleteMetrics.Verification.PreValidationComplete,
-			deleteMetrics.Verification.PostVerificationEnabled,
-			deleteMetrics.Verification.PostVerificationComplete,
-			deleteMetrics.Verification.PostVerificationSkipped,
-			deleteMetrics.Verification.TimeoutSeconds,
-			deleteMetrics.Verification.VerifiedAbsent, deleteMetrics.Verification.StillPresent,
-			deleteMetrics.Verification.Unresolved, deleteMetrics.Verification.CorrectnessFailures,
-			deleteMetrics.Verification.InconclusiveFailures, deleteMetrics.Verification.Residual,
-			deleteMetrics.Verification.RemovalConfirmed,
-			deleteMetrics.Verification.Notice)
+		latency := formatOptionalMicros(deleteTimingMicros(metric.Delete.Timing.Latency))
+		return fmt.Sprintf("ops/sec=%d latency=%s type=%s success=%d failed=%d",
+			metric.OpsPerSec, latency, metric.OpType, metric.SuccessCount, metric.FailedCount)
 	}
 	format := "ops/sec=%d latency=%dµs type=%s success=%d concurrency=%.1f"
 	args := []interface{}{metric.OpsPerSec, metric.MeanLatency, metric.OpType, metric.SuccessCount, metric.ConcurrencyMean}
@@ -815,43 +777,6 @@ func formatOptionalMicros(value *int64) string {
 		return notAvailableDisplay
 	}
 	return fmt.Sprintf("%dµs", *value)
-}
-
-func formatDeleteTimingStat(stat *tui.JSONTimingStat) string {
-	if stat == nil || stat.Count == 0 {
-		return notAvailableDisplay
-	}
-	return fmt.Sprintf("count:%d,mean_us:%.3f,min_us:%d,p50_us:%d,p90_us:%d,p99_us:%d,p999_us:%d,max_us:%d,overflow:%d",
-		stat.Count, stat.MeanUs, stat.MinUs, stat.P50Us, stat.P90Us, stat.P99Us,
-		stat.P999Us, stat.MaxUs, stat.OverflowCount)
-}
-
-func formatDeletePhases(phases tui.DeletePhaseMetrics) string {
-	return fmt.Sprintf(
-		"seed:%s,discovery:%s,pre_validation:%s,scheduled_delete:%s,drain:%s,post_verification:%s,cleanup:%s,total_wall:%s",
-		formatOptionalSeconds(phases.SeedSeconds), formatOptionalSeconds(phases.DiscoverySeconds),
-		formatOptionalSeconds(phases.PreValidationSeconds), formatOptionalSeconds(phases.ScheduledDeleteSeconds),
-		formatOptionalSeconds(phases.DrainSeconds), formatOptionalSeconds(phases.PostVerificationSeconds),
-		formatOptionalSeconds(phases.CleanupSeconds), formatOptionalSeconds(phases.TotalWallSeconds))
-}
-
-func formatOptionalSeconds(value *float64) string {
-	if value == nil {
-		return notAvailableDisplay
-	}
-	return fmt.Sprintf("%.3fs", *value)
-}
-
-func formatDeleteBuckets(buckets []tui.DeleteBucketMetrics) string {
-	if len(buckets) == 0 {
-		return "[]"
-	}
-	parts := make([]string, 0, len(buckets))
-	for _, bucket := range buckets {
-		parts = append(parts, fmt.Sprintf("%s(selected:%d,attempted:%d,accepted:%d,failed:%d)",
-			bucket.Bucket, bucket.Selected, bucket.Attempted, bucket.Accepted, bucket.Failed))
-	}
-	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // outputMetricsJSON outputs parsed metrics in JSON format
