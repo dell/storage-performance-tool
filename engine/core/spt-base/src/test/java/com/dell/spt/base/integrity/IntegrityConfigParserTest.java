@@ -1,10 +1,12 @@
 package com.dell.spt.base.integrity;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.config.CliArgUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import java.util.List;
@@ -168,12 +170,38 @@ class IntegrityConfigParserTest {
 		assertThrows(IllegalConfigurationException.class, () -> IntegrityConfig.validateLoadStep(disabled));
 	}
 
+	@Test
+	void guardedDiscoveryRejectsAllVersionsAfterDirectAndOverrideResolution() {
+		final var directScenario = guardedListStep();
+		directScenario.val("load-op-list-include_versions", true);
+		final var directFailure = assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(directScenario));
+		assertTrue(directFailure.getMessage().contains("current-key"));
+
+		final var overridden = guardedListStep();
+		CliArgUtil.parseArgs("--load-op-list-include_versions=true").forEach(overridden::val);
+		final var overrideFailure = assertThrows(
+						IllegalConfigurationException.class,
+						() -> IntegrityConfig.validateLoadStep(overridden));
+		assertTrue(overrideFailure.getMessage().contains("current-key"));
+	}
+
+	@Test
+	void unguardedAllVersionDiscoveryRemainsAllowed() {
+		final var unguarded = metadataStep("list");
+		unguarded.val("load-op-list-include_versions", true);
+
+		assertDoesNotThrow(() -> IntegrityConfig.validateLoadStep(unguarded));
+	}
+
 	private static com.github.akurilov.confuse.Config metadataStep(final String opType) {
 		final var config = TestConfigBuilder.config();
 		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		config.val("storage-integrity-input-provenance", "external");
 		config.val("load-op-type", opType);
+		config.val("load-op-list-include_versions", false);
 		return config;
 	}
 

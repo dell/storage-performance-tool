@@ -585,7 +585,7 @@ final class S3DeleteRequestIntegrationTest {
 						+ "<Contents><Key>guarded/bravo</Key><Size>8</Size></Contents>"
 						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
 		final String scenario = existingPrefixScenario(
-						manifest, listStep, deleteStep, 2);
+						manifest, listStep, deleteStep, 2, false);
 
 		final Config config = scenarioConfig(runId);
 		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
@@ -640,6 +640,32 @@ final class S3DeleteRequestIntegrationTest {
 	}
 
 	@Test
+	void guardedAllVersionConfigurationStopsBeforeListOrDelete(
+					@TempDir final Path tempDir) throws Exception {
+		final long runId = 908;
+		final String scenario = existingPrefixScenario(
+						tempDir.resolve("verify-input.csv"),
+						tempDir.getFileName() + "-list",
+						tempDir.getFileName() + "-delete",
+						2,
+						true);
+		final Config config = scenarioConfig(runId);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final var extensions = Extension.load(classLoader);
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		assertNotNull(engine, "default JavaScript engine must be available");
+
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, extensions, config, metrics);
+			final var failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> new RunImpl("hostile all-version guarded discovery", scenario, engine, runId).run());
+			assertTrue(failure.getMessage().contains("invalid storage.integrity configuration"));
+		}
+		assertTrue(requests.isEmpty(), "effective configuration must fail before LIST or DELETE activity");
+	}
+
+	@Test
 	void outOfPrefixDiscoveryResponseStopsBeforeAnyDeleteRequest(
 					@TempDir final Path tempDir) throws Exception {
 		final long runId = 903;
@@ -649,7 +675,7 @@ final class S3DeleteRequestIntegrationTest {
 						+ "<Contents><Key>outside/untrusted</Key><Size>8</Size></Contents>"
 						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
 		final String scenario = existingPrefixScenario(
-						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0);
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0, false);
 		final Config config = scenarioConfig(runId);
 		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 		final var extensions = Extension.load(classLoader);
@@ -693,7 +719,7 @@ final class S3DeleteRequestIntegrationTest {
 						+ "<CommonPrefixes><Prefix>outside/d/</Prefix></CommonPrefixes>"
 						+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
 		final String scenario = existingPrefixScenario(
-						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0)
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0, false)
 						.replace("\"limit\": {\"concurrency\": 1}", "\"limit\": {\"concurrency\": 4}");
 		final Config config = scenarioConfig(runId);
 		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
@@ -759,7 +785,7 @@ final class S3DeleteRequestIntegrationTest {
 			return pageBody + "<IsTruncated>false</IsTruncated></ListBucketResult>";
 		};
 		final String scenario = existingPrefixScenario(
-						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 2)
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 2, false)
 						.replace("\"limit\": {\"concurrency\": 1}", "\"limit\": {\"concurrency\": 4}")
 						.replace(
 										"\"include_versions\": false, \"max_keys\": 1000}",
@@ -805,7 +831,7 @@ final class S3DeleteRequestIntegrationTest {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		listResponse = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
 		final String scenario = existingPrefixScenario(
-						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0);
+						manifest, tempDir.getFileName() + "-list", tempDir.getFileName() + "-delete", 0, false);
 		final Config config = scenarioConfig(runId);
 		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 		final var extensions = Extension.load(classLoader);
@@ -826,7 +852,8 @@ final class S3DeleteRequestIntegrationTest {
 					final Path manifest,
 					final String listStep,
 					final String deleteStep,
-					final long maxCount) {
+					final long maxCount,
+					final boolean includeVersions) {
 		final String manifestPath = manifest.toString().replace("\\", "\\\\").replace("\"", "\\\"");
 		return """
 						var verifyInputFile = "%s";
@@ -842,7 +869,7 @@ final class S3DeleteRequestIntegrationTest {
 						    "output": {"file": verifyInputFile}},
 						  "load": {"batch": {"size": 1000}, "op": {"type": "list",
 						    "list": {"delimiter": "", "fetch_metadata": true,
-						      "include_versions": false, "max_keys": 1000},
+						      "include_versions": %s, "max_keys": 1000},
 						    "limit": {"count": 0, "rate": 0}, "wait": {"finish": true}},
 						    "step": {"id": "%s", "limit": {"size": 0, "time": 0}}},
 						  "output": {"metrics": {"summary": {"persist": true}}}
@@ -860,7 +887,8 @@ final class S3DeleteRequestIntegrationTest {
 						    "step": {"id": "%s"}},
 						  "output": {"metrics": {"summary": {"persist": true}}}
 						}).run();
-						""".formatted(manifestPath, maxCount, listStep, listStep, deleteStep);
+						""".formatted(
+						manifestPath, maxCount, includeVersions, listStep, listStep, deleteStep);
 	}
 
 	private Config scenarioConfig(final long runId) throws IOException {
