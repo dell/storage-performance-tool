@@ -286,6 +286,15 @@ final class S3DeleteRequestAdapterTest {
 			final var operation = operation(target("one", null), target("two", null));
 
 			assertThrows(IllegalArgumentException.class, () -> driver.buildOrdinary(operation));
+			assertEquals(DeleteRequestOutcome.FAILED, operation.deleteResult().outcome());
+			assertEquals(DeleteFailureClassification.PROTOCOL,
+							operation.deleteResult().failureClassification());
+			assertEquals(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CORRUPT,
+							operation.status());
+			assertEquals(2, operation.deleteResult().targetResults().size());
+			assertTrue(operation.deleteResult().targetResults().stream()
+							.allMatch(result -> result.outcome() == DeleteTargetOutcome.FAILED
+											&& result.failureClassification() == DeleteFailureClassification.PROTOCOL));
 		}
 	}
 

@@ -1019,7 +1019,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	CompletableFuture<Void> deleteObject(final O op) {
-		if (op instanceof DeleteRequestOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			if (deleteOperation.deleteResult() == null) {
+				deleteOperation.completeDelete(DeleteTransportResult.representativeItemFallthrough());
+			}
 			return CompletableFuture.failedFuture(new IllegalArgumentException(
 							"Standalone DELETE requests cannot enter the representative-item request builder"));
 		}

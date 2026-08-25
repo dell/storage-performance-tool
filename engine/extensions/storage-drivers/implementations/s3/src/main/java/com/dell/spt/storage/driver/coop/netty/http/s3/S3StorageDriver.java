@@ -878,7 +878,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	protected HttpRequest ordinaryObjectRequest(final O op, final String nodeAddr)
 					throws URISyntaxException {
-		if (op instanceof DeleteRequestOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			if (deleteOperation.deleteResult() == null) {
+				deleteOperation.completeDelete(DeleteTransportResult.representativeItemFallthrough());
+			}
 			throw new IllegalArgumentException(
 							"Standalone DELETE requests cannot enter the representative-item request builder");
 		}

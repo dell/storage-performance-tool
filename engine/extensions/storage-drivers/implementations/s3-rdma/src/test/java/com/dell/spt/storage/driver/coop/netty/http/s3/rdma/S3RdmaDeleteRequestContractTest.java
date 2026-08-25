@@ -4,7 +4,6 @@ import static com.dell.spt.base.Constants.APP_NAME;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
@@ -12,10 +11,12 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.TreeUtil;
@@ -31,6 +32,7 @@ import io.netty.handler.codec.http.HttpRequest;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
@@ -181,16 +183,33 @@ final class S3RdmaDeleteRequestContractTest {
 	}
 
 	@Test
-	void inheritedOrdinaryBuilderRejectsRepresentativeItemFallthrough() throws Exception {
+	void inheritedSubmitCompletesRepresentativeItemFallthroughWithoutDeleteEmission() throws Exception {
 		final Config config = config();
 		final var availableTransport = new FakeRdmaTransport(rdmaConfig(config));
 		try (final var driver = newDriver(config, ignored -> availableTransport)) {
+			driver.forceRepresentativeItemFallthrough();
 			final DeleteRequestOperation operation = operation(
 							target("first", null), target("second", null));
 
-			assertThrows(IllegalArgumentException.class, () -> driver.buildOrdinary(operation));
-			assertTrue(requests.isEmpty());
+			final DeleteRequestOperation result = execute(driver, operation);
+			awaitCompletionAccounting(driver);
+
+			assertTrue(
+							requests.stream().noneMatch(request -> "DELETE".equals(request.method())
+											|| "POST".equals(request.method())),
+							() -> "fallthrough emitted an object deletion request: " + requests);
 			assertEquals(0, availableTransport.getRegisterCount());
+			assertEquals(DeleteRequestOutcome.FAILED, result.deleteResult().outcome());
+			assertEquals(DeleteFailureClassification.PROTOCOL,
+							result.deleteResult().failureClassification());
+			assertEquals(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CORRUPT,
+							result.status());
+			assertEquals(2, result.deleteResult().targetResults().size());
+			assertTrue(result.deleteResult().targetResults().stream()
+							.allMatch(targetResult -> targetResult.outcome() == DeleteTargetOutcome.FAILED
+											&& targetResult.failureClassification() == DeleteFailureClassification.PROTOCOL));
+			assertEquals(1, driver.completedOpCount());
+			assertEquals(0, driver.activeOpCount());
 		}
 	}
 
@@ -357,6 +376,7 @@ final class S3RdmaDeleteRequestContractTest {
 
 	private static final class TestDriver
 					extends S3RdmaStorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> {
+		private boolean forceRepresentativeItemFallthrough;
 
 		private TestDriver(
 						final Config config,
@@ -372,8 +392,17 @@ final class S3RdmaDeleteRequestContractTest {
 							transportFactory);
 		}
 
-		private HttpRequest buildOrdinary(final DeleteRequestOperation operation) throws Exception {
-			return ordinaryObjectRequest(operation, "127.0.0.1");
+		private void forceRepresentativeItemFallthrough() {
+			forceRepresentativeItemFallthrough = true;
+		}
+
+		@Override
+		protected HttpRequest httpRequest(
+						final DeleteRequestOperation operation, final String nodeAddr)
+						throws URISyntaxException {
+			return forceRepresentativeItemFallthrough
+							? ordinaryObjectRequest(operation, nodeAddr)
+							: super.httpRequest(operation, nodeAddr);
 		}
 	}
 

@@ -494,12 +494,41 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
+			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
+				return;
+			}
 			if (!isStopped() && !isClosed()) {
 				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "Send HTTP request failure");
 			}
 		}
 		channel.write(LastHttpContent.EMPTY_LAST_CONTENT).addListener(reqSentCallback);
 		channel.flush();
+	}
+
+	private boolean completeReconciledDeleteAfterRequestBuildFailure(
+					final Channel channel, final O op, final Throwable requestFailure) {
+		if (!(op instanceof DeleteRequestOperation deleteOperation)
+						|| deleteOperation.deleteResult() == null) {
+			return false;
+		}
+		if (!isStopped() && !isClosed()) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, requestFailure, "Send HTTP request failure");
+		}
+		try {
+			op.finishRequest();
+		} catch (final IllegalStateException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
+		}
+		try {
+			complete(channel, op);
+		} catch (final Throwable completionFailure) {
+			throwUncheckedIfInterrupted(completionFailure);
+			// Driver completion releases transport ownership before result publication. Keep the
+			// reconciled protocol status if an extension-facing output rejects the terminal result.
+			LogUtil.exception(
+							Level.DEBUG, completionFailure, "Load operation result publication failure");
+		}
+		return true;
 	}
 
 	void sendHttpRequestComplete(final ChannelFuture future) {

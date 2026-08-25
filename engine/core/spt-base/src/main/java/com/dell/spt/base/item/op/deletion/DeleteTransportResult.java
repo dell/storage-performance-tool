@@ -8,6 +8,8 @@ public record DeleteTransportResult(
 			List<DeleteTransportTargetResult> targetResults,
 			Status failureStatus,
 			String failureMessage) {
+	private static final String REPRESENTATIVE_ITEM_FALLTHROUGH =
+				"Standalone DELETE reached the representative-item request builder";
 
 	public DeleteTransportResult {
 		targetResults = targetResults == null ? null : List.copyOf(targetResults);
@@ -29,6 +31,16 @@ public record DeleteTransportResult(
 	/** Creates one request-level operational transport failure. */
 	public static DeleteTransportResult failure(final Status status, final String message) {
 		return new DeleteTransportResult(List.of(), status, message);
+	}
+
+	/** Creates one request-level protocol failure without pretending to have target responses. */
+	public static DeleteTransportResult protocolFailure(final String message) {
+		return new DeleteTransportResult(null, null, message);
+	}
+
+	/** Creates the protocol failure for an impossible standalone representative-item fallthrough. */
+	public static DeleteTransportResult representativeItemFallthrough() {
+		return protocolFailure(REPRESENTATIVE_ITEM_FALLTHROUGH);
 	}
 
 	private static boolean isFailure(final Status status) {

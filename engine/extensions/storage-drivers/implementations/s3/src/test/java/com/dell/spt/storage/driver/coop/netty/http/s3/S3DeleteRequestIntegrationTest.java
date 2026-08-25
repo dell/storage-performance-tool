@@ -28,6 +28,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.deletion.SeededDeleteCleanupFinalizer;
 import com.dell.spt.base.load.step.ScenarioUtil;
@@ -41,10 +42,12 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.netty.handler.codec.http.HttpRequest;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -953,6 +956,31 @@ final class S3DeleteRequestIntegrationTest {
 		}
 	}
 
+	@Test
+	void representativeItemFallthroughCompletesWithoutEmittingOrLeakingTransportOwnership()
+					throws Exception {
+		try (final var driver = newFallthroughDriver()) {
+			final DeleteRequestOperation result = execute(
+							driver, operation(target("one", null), target("two", null)));
+			awaitCompletionAccounting(driver);
+
+			assertEquals(DeleteRequestOutcome.FAILED, result.deleteResult().outcome());
+			assertEquals(DeleteFailureClassification.PROTOCOL,
+							result.deleteResult().failureClassification());
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(2, result.deleteResult().targetResults().size());
+			assertTrue(result.deleteResult().targetResults().stream()
+							.allMatch(targetResult -> targetResult.outcome() == DeleteTargetOutcome.FAILED
+											&& targetResult.failureClassification() == DeleteFailureClassification.PROTOCOL));
+			assertTrue(
+							requests.stream().noneMatch(request -> "DELETE".equals(request.method())
+											|| "POST".equals(request.method())),
+							() -> "fallthrough emitted an object deletion request: " + requests);
+			assertEquals(1, driver.completedOpCount());
+			assertEquals(0, driver.activeOpCount());
+		}
+	}
+
 	private S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> newDriver()
 					throws Exception {
 		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
@@ -968,6 +996,29 @@ final class S3DeleteRequestIntegrationTest {
 						false,
 						config.intVal("load-batch-size"));
 		return driver;
+	}
+
+	private S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation> newFallthroughDriver()
+					throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		return new S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation>(
+						"delete-fallthrough-integration-test",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
+						config.configVal("storage"),
+						false,
+						config.intVal("load-batch-size")) {
+			@Override
+			protected HttpRequest httpRequest(
+							final DeleteRequestOperation operation, final String nodeAddr)
+							throws URISyntaxException {
+				return ordinaryObjectRequest(operation, nodeAddr);
+			}
+		};
 	}
 
 	private static DeleteRequestOperation execute(

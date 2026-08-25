@@ -112,6 +112,23 @@ class ObjectFailureBudgetControllerTest {
 	}
 
 	@Test
+	void protocolFailuresAreExcludedFromOperationalBudgetAndForceFailedCompletion() {
+		final var controller = new ObjectFailureBudgetController(
+						ObjectFailureBudgetConfig.fixed(Long.MAX_VALUE));
+
+		final var decision = controller.evaluate(
+						List.of(new DeleteObjectLifecycleSnapshot(2, 2, 0, 2, 0, 0, 2, 0, true)),
+						Duration.ZERO,
+						true);
+
+		assertEquals(ObjectFailureBudgetOutcome.FAILED, decision.outcome());
+		assertTrue(decision.stopScheduling());
+		assertEquals(0, decision.counters().operationalFailedObjects());
+		assertEquals(2, decision.counters().excludedFailedObjects());
+		assertTrue(decision.reason().contains("outside operational budget"));
+	}
+
+	@Test
 	void hundredPercentStillCannotValidateZeroAcceptedObjects() {
 		final var controller = new ObjectFailureBudgetController(
 						ObjectFailureBudgetConfig.percentage(100, Duration.ZERO));
