@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -374,8 +375,8 @@ func TestGenerateSeededDeleteScenarioUsesExplicitFiniteDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	configs := parseGeneratedScenarioConfigs(t, generated)
-	if got := generatedConfigValue(t, configs[0], "load", "op", "limit", "count"); got != float64(2500) {
-		t.Fatalf("default seed count = %#v, want 2500", got)
+	if got := generatedConfigValue(t, configs[0], "load", "op", "limit", "count"); got != float64(constants.DefaultSeedObjectCount) {
+		t.Fatalf("default seed count = %#v, want %d", got, constants.DefaultSeedObjectCount)
 	}
 	if got := generatedConfigValue(t, configs[0], "item", "data", "size"); got != "1KiB" {
 		t.Fatalf("default seed size = %#v, want 1KiB", got)
@@ -832,7 +833,7 @@ func TestGenerateDeleteDurationScenariosUseFiniteLiveInventoriesWithoutRecycle(t
 	}
 }
 
-func TestGenerateSeededDeleteDurationDefaultsToFinite2500IdentityInventory(t *testing.T) {
+func TestGenerateSeededDeleteDurationDefaultsToFiniteSeedInventory(t *testing.T) {
 	generated, err := GenerateDeleteScenario(Params{
 		WorkloadType: workload.Delete, RunID: 24, Bucket: "owned", Duration: "30s",
 		Threads: 1, DeleteBatchSize: DefaultDeleteBatchSize,
@@ -840,7 +841,7 @@ func TestGenerateSeededDeleteDurationDefaultsToFinite2500IdentityInventory(t *te
 	if err != nil {
 		t.Fatalf("GenerateDeleteScenario() error = %v", err)
 	}
-	if !strings.Contains(generated, `"limit": {"count": 2500}`) {
+	if !strings.Contains(generated, fmt.Sprintf(`"limit": {"count": %d}`, constants.DefaultSeedObjectCount)) {
 		t.Fatalf("seeded duration default inventory missing:\n%s", generated)
 	}
 }

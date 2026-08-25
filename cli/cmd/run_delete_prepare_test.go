@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
@@ -27,7 +28,7 @@ func TestBuildScenarioParamsResolvesSeededDeleteDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if params.ObjectCount != scenario.DefaultDeleteObjectCount ||
+	if params.ObjectCount != constants.DefaultSeedObjectCount ||
 		params.ObjectSize != scenario.DefaultDeleteObjectSize {
 		t.Fatalf("seeded DELETE defaults = count %d size %q", params.ObjectCount, params.ObjectSize)
 	}
@@ -142,6 +143,9 @@ func TestBuildSeededDeleteScenarioOwnsNamespaceAndOrdersFinitePhases(t *testing.
 func TestRunCmdGenerateOnlyPublicDeleteContainsPositiveTimedPhase(t *testing.T) {
 	t.Chdir(t.TempDir())
 	setDeleteRouteFlags(t, "127.0.0.1", "1")
+	setGlobalRunFlagForTest(t, "object-count", "0")
+	setGlobalRunFlagForTest(t, "object-size", "")
+	setGlobalRunFlagForTest(t, flagDeleteBatchSize, fmt.Sprint(scenario.DefaultDeleteBatchSize))
 	setGlobalRunFlagForTest(t, "generate-only", "true")
 
 	if err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete}); err != nil {
@@ -162,8 +166,9 @@ func TestRunCmdGenerateOnlyPublicDeleteContainsPositiveTimedPhase(t *testing.T) 
 	seed := strings.Index(scenarioJS, "CreateLoad.config")
 	deletePhase := strings.Index(scenarioJS, "DeleteLoad.config")
 	if seed < 0 || deletePhase <= seed ||
+		!strings.Contains(scenarioJS[:deletePhase], fmt.Sprintf(`"limit": {"count": %d}`, constants.DefaultSeedObjectCount)) ||
 		!strings.Contains(scenarioJS[deletePhase:], `"standalone": true`) {
-		t.Fatalf("public DELETE generate-only scenario lacks positive timed phase:\n%s", scenarioJS)
+		t.Fatalf("public DELETE generate-only scenario lacks the default seed inventory or positive timed phase:\n%s", scenarioJS)
 	}
 }
 
@@ -173,13 +178,19 @@ func TestRunDeleteHelpDocumentsPublicSafetyAndDefaults(t *testing.T) {
 		"delete: Measure DeleteObject or DeleteObjects performance against a frozen inventory.",
 		"DELETE is destructive",
 		"--delete-existing plus an exact --bucket and explicitly supplied --prefix",
-		fmt.Sprintf("defaults to %d seeded %s objects", scenario.DefaultDeleteObjectCount, scenario.DefaultDeleteObjectSize),
+		fmt.Sprintf("defaults to %d seeded %s objects", constants.DefaultSeedObjectCount, scenario.DefaultDeleteObjectSize),
 		fmt.Sprintf("batches %d targets per logical request", scenario.DefaultDeleteBatchSize),
 		"does not verify removal unless",
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("run help omitted public DELETE contract %q:\n%s", want, runCmd.Long)
 		}
+	}
+	seedObjects := runCmd.Flags().Lookup("seed-objects")
+	wantSeedDefault := fmt.Sprint(constants.DefaultSeedObjectCount)
+	if seedObjects == nil || seedObjects.DefValue != wantSeedDefault ||
+		!strings.Contains(runCmd.Flags().FlagUsages(), "(default "+wantSeedDefault+")") {
+		t.Fatalf("--seed-objects default/help = %#v, want authoritative seed default %s", seedObjects, wantSeedDefault)
 	}
 	for _, flag := range []string{
 		flagDeleteBatchSize, flagDeleteExisting, flagAllowEmptyPrefix,

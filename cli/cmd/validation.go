@@ -77,7 +77,7 @@ func ValidateDurationOrCount(cmd *cobra.Command) error {
 		return errors.New("--object-count must be >= 0")
 	}
 
-	// Only error if BOTH are specified - it's OK if neither is specified (will default to 100 objects)
+	// Workload-specific preparation resolves the omitted count or duration after validation.
 	if objectCount != 0 && duration != "" {
 		return errors.New("cannot specify both --object-count and --duration")
 	}

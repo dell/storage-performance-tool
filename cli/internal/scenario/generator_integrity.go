@@ -277,7 +277,7 @@ func generateSeededDeleteScenario(
 		}
 	}
 	if seedCount == 0 {
-		seedCount = DefaultDeleteObjectCount
+		seedCount = constants.DefaultSeedObjectCount
 	}
 	objectSize := strings.TrimSpace(params.ObjectSize)
 	if objectSize == "" {

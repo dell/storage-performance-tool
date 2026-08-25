@@ -1639,7 +1639,7 @@ that frozen inventory. --items-file selects an explicit canonical manifest. Exis
 eligible only with --delete-existing plus an exact --bucket and explicitly supplied --prefix;
 whole-bucket selection additionally requires --allow-empty-prefix. DELETE defaults to %d
 seeded %s objects, batches %d targets per logical request, and does not verify removal unless
---verify or --validate-inventory enables verification.`, scenario.DefaultDeleteObjectCount,
+--verify or --validate-inventory enables verification.`, constants.DefaultSeedObjectCount,
 		scenario.DefaultDeleteObjectSize, scenario.DefaultDeleteBatchSize),
 	Args:         cobra.ExactArgs(1), // Enforce that exactly one argument (workload type) is provided
 	SilenceUsage: true,               // Suppress usage on runtime errors; validation will re-enable
@@ -2165,7 +2165,7 @@ func init() {
 	runCmd.Flags().Int("mpu-concurrent-parts", 0, "Max concurrent parts in flight per multipart object (0 = unlimited)")
 
 	// Test Behavior Options
-	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks and duration-based standalone DELETE (default: 2500)")
+	runCmd.Flags().Int("seed-objects", constants.DefaultSeedObjectCount, "Number of objects to pre-create for read benchmarks and duration-based standalone DELETE")
 	runCmd.Flags().Bool("cleanup", false, "Best-effort deletion of SPT-created objects after the benchmark; DELETE permits this only for seeded mode")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
@@ -2580,7 +2580,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 			params.ObjectSize = scenario.DefaultDeleteObjectSize
 		}
 		if params.ObjectCount == 0 && strings.TrimSpace(params.Duration) == "" {
-			params.ObjectCount = scenario.DefaultDeleteObjectCount
+			params.ObjectCount = constants.DefaultSeedObjectCount
 		}
 	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
 		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
@@ -2801,7 +2801,7 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.WorkloadType == WorkloadTypeRead {
 		seedCount := params.SeedCount
 		if seedCount <= 0 {
-			seedCount = 2500
+			seedCount = constants.DefaultSeedObjectCount
 		}
 		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
 	}
@@ -2809,7 +2809,7 @@ func formatScenarioParams(params scenario.Params) string {
 		!params.DeleteExisting && strings.TrimSpace(params.ItemsFile) == "" {
 		seedCount := params.SeedCount
 		if seedCount <= 0 {
-			seedCount = scenario.DefaultDeleteObjectCount
+			seedCount = constants.DefaultSeedObjectCount
 		}
 		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
 	}
@@ -2936,7 +2936,7 @@ func warnSeedSize(params scenario.Params) {
 	}
 	seedCount := params.SeedCount
 	if seedCount <= 0 {
-		seedCount = 2500
+		seedCount = constants.DefaultSeedObjectCount
 	}
 	totalBytes := objBytes * int64(seedCount)
 	if totalBytes > seedSizeWarnBytes {
