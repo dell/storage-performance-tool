@@ -124,8 +124,8 @@ var integrityScenarioTemplates = template.Must(
 "integrity": {
       "mode": {{jsq integrityMode}}, "algorithm": {{jsq integrityAlgorithm}},
       "input": {"provenance": {{jsq .Provenance}}, "expectedProducerId": {{jsq .ExpectedProducerID}}}{{if .RequireExactOutputCount}},
-      "output": {"requireExactCount": true}{{end}}{{if .MaxCount}},
-      "selection": {"maxCount": {{.MaxCount}}{{if .RequireNonEmpty}}, "requireNonEmpty": true{{end}}}{{end}}
+      "output": {"requireExactCount": true}{{end}}{{if or .MaxCount .RequireNonEmpty}},
+      "selection": { {{if .MaxCount}}"maxCount": {{.MaxCount}}{{if .RequireNonEmpty}}, {{end}}{{end}}{{if .RequireNonEmpty}}"requireNonEmpty": true{{end}}}{{end}}
     }{{end}}
 {{define "storage"}}
 "storage": {

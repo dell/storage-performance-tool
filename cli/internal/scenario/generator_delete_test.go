@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -456,6 +457,65 @@ func TestGenerateExistingPrefixDeleteScenarioFreezesCurrentKeysBeforeTimedDelete
 	}
 	if !strings.Contains(generated, "Discovery is setup and excluded from DELETE request timing") {
 		t.Fatalf("scenario omitted untimed discovery contract:\n%s", generated)
+	}
+}
+
+func TestGenerateExistingPrefixDeleteAlwaysRequiresNonemptyDiscoveryIndependentlyFromCap(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		objectCount int
+		wantMax     float64
+	}{
+		{name: "uncapped zero", objectCount: 0, wantMax: 0},
+		{name: "capped", objectCount: 3, wantMax: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			generated, err := GenerateDeleteScenario(Params{
+				WorkloadType:    workload.Delete,
+				RunID:           882,
+				Bucket:          "existing-bucket",
+				Prefix:          "guarded/root/",
+				ObjectCount:     test.objectCount,
+				Threads:         1,
+				DeleteBatchSize: 1,
+				DeleteExisting:  true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			discovery := parseGeneratedScenarioConfigs(t, generated)[0]
+			if got := generatedConfigValue(
+				t, discovery, "storage", "integrity", "selection", "requireNonEmpty",
+			); got != true {
+				t.Fatalf("empty-discovery guard = %#v, want true", got)
+			}
+			if got := generatedConfigValue(
+				t, discovery, "storage", "integrity", "selection", "maxCount",
+			); got != test.wantMax {
+				t.Fatalf("selection cap = %#v, want %#v", got, test.wantMax)
+			}
+		})
+	}
+}
+
+func TestIntegrityTemplateRequiresNonemptySelectionWithoutMaxCount(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := integrityScenarioTemplates.ExecuteTemplate(
+		&rendered, "integrity", integrityTemplateData{RequireNonEmpty: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte("{"+rendered.String()+"}"), &config); err != nil {
+		t.Fatalf("parse rendered integrity config: %v\n%s", err, rendered.String())
+	}
+	if got := generatedConfigValue(
+		t, config, "integrity", "selection", "requireNonEmpty",
+	); got != true {
+		t.Fatalf("empty-discovery guard without maxCount = %#v, want true", got)
+	}
+	if _, ok := configPath(config, "integrity", "selection", "maxCount"); ok {
+		t.Fatalf("nil selection cap unexpectedly rendered maxCount:\n%s", rendered.String())
 	}
 }
 

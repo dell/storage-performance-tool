@@ -356,7 +356,7 @@ disabled by default:
 | `storage.integrity.input.provenance` | `none` | `none`, `engine_step`, `cli_stager`, or `external`; metadata READ/DELETE must choose a non-`none` source |
 | `storage.integrity.input.expectedProducerId` | empty | Exact producing step ID, or the CLI stager ID, when that provenance requires completion evidence |
 | `storage.integrity.selection.maxCount` | `0` | Deterministic maximum after LIST discovery; `0` selects all discovered records |
-| `storage.integrity.selection.requireNonEmpty` | `false` | Metadata LIST only. Fail before completion publication when the canonical selected inventory is empty; guarded existing-prefix DELETE enables it |
+| `storage.integrity.selection.requireNonEmpty` | `false` | Metadata LIST only and requires current-key discovery (`load.op.list.include_versions=false`). Fail before completion publication when the canonical selected inventory is empty; guarded existing-prefix DELETE enables it |
 
 `engine_step` requires the matching manifest completion JSON from the named
 CREATE or LIST step. `cli_stager` requires producer ID

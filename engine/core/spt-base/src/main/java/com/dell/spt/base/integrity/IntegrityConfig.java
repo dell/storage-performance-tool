@@ -135,6 +135,10 @@ public record IntegrityConfig(
 			throw excluded("storage.integrity.selection.requireNonEmpty is valid only for LIST");
 		}
 		if (requireNonEmptySelection) {
+			if (stepConfig.boolVal("load-op-list-include_versions")) {
+				throw excluded(
+						"guarded LIST discovery is current-key only and requires load.op.list.include_versions=false");
+			}
 			final String outputFile = stepConfig.stringVal("item-output-file");
 			if (outputFile == null || outputFile.isBlank()) {
 				throw excluded("storage.integrity.selection.requireNonEmpty requires item.output.file");
