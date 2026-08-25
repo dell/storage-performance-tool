@@ -35,6 +35,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.xml.parsers.ParserConfigurationException;
@@ -58,9 +59,18 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	private static final int DELETE_RESPONSE_INITIAL_BUFFER_BYTES = 4 * 1024;
 	private static final int MAX_DELETE_RESPONSE_BYTES = 16 * 1024 * 1024;
+	private static final AtomicIntegerArray DELETE_RESPONSE_DIAGNOSTICS = new AtomicIntegerArray(DeleteResponseDiagnosticClass.values().length);
 	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
+
+	private enum DeleteResponseDiagnosticClass {
+		BODY_LIMIT, EMPTY_BODY, ENTRY_LIMIT, INPUT_IO, INVALID_ENTRY, INVALID_STRUCTURE, MALFORMED_XML, PARSER_CONFIGURATION
+	}
+
+	private enum DeleteResponseStructuralContext {
+		DOCUMENT, RESPONSE_BUFFER, RESPONSE_STREAM, XML_PARSER
+	}
 
 	private static final class DeleteResponseBuffer implements AutoCloseable {
 		private ByteBuf content;
@@ -167,6 +177,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		return ACTIVE_LIST_SPOOLS.get();
 	}
 
+	static void resetDeleteResponseDiagnosticsForTest() {
+		for (int index = 0; index < DELETE_RESPONSE_DIAGNOSTICS.length(); index++) {
+			DELETE_RESPONSE_DIAGNOSTICS.set(index, 0);
+		}
+	}
+
 	private final S3StorageDriver<I, O> s3Driver;
 	private final boolean versioningEnabled;
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
@@ -224,7 +240,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			op.responseRequestId(requestId);
 		}
 		final boolean integrityEnabled = s3Driver != null && s3Driver.integrityMetadataEnabledForResponse();
-		if (versioningEnabled && !integrityEnabled && versionId != null) {
+		if (versioningEnabled
+						&& !integrityEnabled
+						&& versionId != null
+						&& !(op instanceof DeleteRequestOperation)) {
 			op.item().name(op.item().name() + "~" + versionId);
 		}
 		if (integrityEnabled
@@ -440,6 +459,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 		final DeleteResponseBuffer state = channel.attr(DELETE_RESPONSE_ATTR_KEY).getAndSet(null);
 		if (state == null || state.overflow || state.content == null || !state.content.isReadable()) {
+			logDeleteResponseDiagnostic(
+							state != null && state.overflow
+											? DeleteResponseDiagnosticClass.BODY_LIMIT
+											: DeleteResponseDiagnosticClass.EMPTY_BODY,
+							DeleteResponseStructuralContext.RESPONSE_BUFFER);
 			if (state != null) {
 				state.close();
 			}
@@ -460,9 +484,43 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		try (input) {
 			S3XmlParser.parse(input, xmlHandler);
 			return new DeleteTransportResult(xmlHandler.results(), null, null);
-		} catch (final IOException | ParserConfigurationException | SAXException ignored) {
+		} catch (final DeleteObjectsXmlHandler.ParseFailure failure) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.valueOf(failure.failureClass().name()),
+							failure.structuralContext());
+			return null;
+		} catch (final SAXException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.MALFORMED_XML,
+							DeleteResponseStructuralContext.DOCUMENT);
+			return null;
+		} catch (final ParserConfigurationException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.PARSER_CONFIGURATION,
+							DeleteResponseStructuralContext.XML_PARSER);
+			return null;
+		} catch (final IOException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.INPUT_IO,
+							DeleteResponseStructuralContext.RESPONSE_STREAM);
 			// The shared reconciler turns an absent neutral result into one conservative protocol failure.
 			return null;
+		}
+	}
+
+	/**
+	 * Response parsing is a request-frequency path. Emit at most one DEBUG diagnostic for each
+	 * fixed failure class during the process lifetime, and log only enum-backed structural context.
+	 */
+	private static void logDeleteResponseDiagnostic(
+					final DeleteResponseDiagnosticClass failureClass,
+					final Enum<?> structuralContext) {
+		if (Loggers.MSG.isDebugEnabled()
+						&& DELETE_RESPONSE_DIAGNOSTICS.compareAndSet(failureClass.ordinal(), 0, 1)) {
+			Loggers.MSG.debug(
+							"S3 multi-delete response rejected: failure_class={}, structural_context={}, emission_policy=once-per-process-per-failure-class",
+							failureClass,
+							structuralContext);
 		}
 	}
 
