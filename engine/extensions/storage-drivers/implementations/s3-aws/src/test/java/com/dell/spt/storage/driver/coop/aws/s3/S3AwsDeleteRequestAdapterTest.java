@@ -89,6 +89,27 @@ final class S3AwsDeleteRequestAdapterTest {
 	}
 
 	@Test
+	void standaloneTargetKeepsItsImmutableLiteralKeyAndExactVersion() throws Exception {
+		final S3AsyncClient primary = mock(S3AsyncClient.class);
+		final S3AsyncClient exact = mock(S3AsyncClient.class);
+		when(exact.deleteObject(any(DeleteObjectRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+		try (final var driver = driver(primary, exact)) {
+			final DeleteRequestOperation operation = operation(
+							target("canonical-key~literal", "canonical-version"));
+
+			driver.execute(operation).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> request = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(exact).deleteObject(request.capture());
+			verifyNoInteractions(primary);
+			assertEquals("canonical-key~literal", request.getValue().key());
+			assertEquals("canonical-version", request.getValue().versionId());
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, operation.deleteResult().outcome());
+		}
+	}
+
+	@Test
 	void batchUsesOneNonQuietExactVersionRequestAndReconcilesFullSuccess() throws Exception {
 		final S3AsyncClient primary = mock(S3AsyncClient.class);
 		final S3AsyncClient exact = mock(S3AsyncClient.class);
