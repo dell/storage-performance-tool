@@ -23,6 +23,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * ServiceLoader entry point for the AWS SDK based S3 storage driver.
@@ -34,6 +35,18 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriverFactory.class);
 	private static final String NAME = "s3-aws";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-aws.yaml";
+	private final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory;
+
+	/** Creates the ServiceLoader-compatible AWS S3 driver factory. */
+	public S3AwsStorageDriverFactory() {
+		this(S3AwsStandaloneDeleteResources::create);
+	}
+
+	S3AwsStorageDriverFactory(
+					final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory) {
+		this.standaloneDeleteResourcesFactory = Objects.requireNonNull(
+						standaloneDeleteResourcesFactory);
+	}
 
 	@Override
 	public String id() {
@@ -198,22 +211,15 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		final var constructionResources = new ConstructionResources();
 		try {
 			final S3AsyncClient s3AsyncClient = constructionResources.own(crtBuilder.build());
-			final var deleteHttpClient = constructionResources.own(
-							new DeleteTimingAsyncHttpClient(
-											CrtDeleteTimingAsyncHttpClient.builder()
-															.operationAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION)
-															.maxConcurrency(maxConcurrency)
-															.connectionTimeout(Duration.ofMillis(connectionTimeoutMs))
-															.build()));
-			final S3AsyncClient deleteS3Client = constructionResources.own(S3AsyncClient.builder()
-							.credentialsProvider(StaticCredentialsProvider.create(creds))
-							.region(Region.of(region))
-							.endpointOverride(URI.create(endpoint))
-							.forcePathStyle(pathStyle)
-							.httpClient(deleteHttpClient)
-							.build());
 			final String exactClientRegion = region;
 			final int exactClientMaxConcurrency = maxConcurrency;
+			final var standaloneDeleteConfiguration = new S3AwsStandaloneDeleteResources.Configuration(
+							StaticCredentialsProvider.create(creds),
+							Region.of(region),
+							URI.create(endpoint),
+							pathStyle,
+							maxConcurrency,
+							Duration.ofMillis(connectionTimeoutMs));
 			final S3AwsStorageDriver<I, O> driver = new S3AwsStorageDriver<>(
 							stepId,
 							dataInput,
@@ -234,8 +240,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 																.maxConcurrency(exactClientMaxConcurrency))
 												.build();
 							},
-							deleteS3Client,
-							deleteHttpClient,
+							() -> standaloneDeleteResourcesFactory.create(
+											standaloneDeleteConfiguration),
 							smallObjectThresholdBytes,
 							partSizeBytes);
 			constructionResources.release();

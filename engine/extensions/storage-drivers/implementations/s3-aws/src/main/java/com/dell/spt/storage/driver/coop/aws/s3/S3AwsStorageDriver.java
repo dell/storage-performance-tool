@@ -116,6 +116,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private volatile S3AsyncClient exactVersionS3Client;
 	private final S3AsyncClient standaloneDeleteS3Client;
 	private final SdkAsyncHttpClient standaloneDeleteHttpClient;
+	private final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources;
 	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
@@ -153,7 +154,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
-						exactVersionS3Client, null, null, null,
+						exactVersionS3Client, null, null, null, null,
 						smallObjectThresholdBytes, partSizeBytes);
 	}
 
@@ -169,7 +170,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
-						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null,
+						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null, null,
 						smallObjectThresholdBytes, partSizeBytes);
 	}
 
@@ -190,6 +191,26 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier),
 						Objects.requireNonNull(standaloneDeleteS3Client),
 						Objects.requireNonNull(standaloneDeleteHttpClient),
+						null,
+						smallObjectThresholdBytes, partSizeBytes);
+	}
+
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final Supplier<S3AwsStandaloneDeleteResources> standaloneDeleteResourcesSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null,
+						new S3AwsStandaloneDeleteResources.Lazy(
+										Objects.requireNonNull(standaloneDeleteResourcesSupplier)),
 						smallObjectThresholdBytes, partSizeBytes);
 	}
 
@@ -204,6 +225,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
 					final S3AsyncClient standaloneDeleteS3Client,
 					final SdkAsyncHttpClient standaloneDeleteHttpClient,
+					final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources,
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
@@ -218,6 +240,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.exactVersionS3ClientSupplier = exactVersionS3ClientSupplier;
 		this.standaloneDeleteS3Client = standaloneDeleteS3Client;
 		this.standaloneDeleteHttpClient = standaloneDeleteHttpClient;
+		this.lazyStandaloneDeleteResources = lazyStandaloneDeleteResources;
 		this.smallObjectThresholdBytes = smallObjectThresholdBytes;
 		this.partSizeBytes = partSizeBytes;
 
@@ -1152,9 +1175,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	private S3AsyncClient standaloneDeleteClient(final boolean exactVersion) {
-		return standaloneDeleteS3Client == null
-						? deleteClient(exactVersion)
-						: standaloneDeleteS3Client;
+		if (lazyStandaloneDeleteResources != null) {
+			return lazyStandaloneDeleteResources.client();
+		}
+		return standaloneDeleteS3Client == null ? deleteClient(exactVersion) : standaloneDeleteS3Client;
 	}
 
 	private CompletableFuture<Void> headObject(final O op) {
@@ -1856,6 +1880,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	protected void doClose()
 					throws IOException {
+		try {
+			if (lazyStandaloneDeleteResources != null) {
+				lazyStandaloneDeleteResources.close();
+				LOG.info("Standalone DELETE resources closed successfully");
+			}
+		} catch (final RuntimeException | Error e) {
+			LOG.warn("Failed to close standalone DELETE resources: {}", e.getMessage());
+		}
 		try {
 			if (s3AsyncClient != null) {
 				s3AsyncClient.close();

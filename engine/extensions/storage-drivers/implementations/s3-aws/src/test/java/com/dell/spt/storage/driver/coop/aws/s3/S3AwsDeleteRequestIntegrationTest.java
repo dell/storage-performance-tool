@@ -10,11 +10,17 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.Constants;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.BundledDefaultsProvider;
 import com.dell.spt.base.control.run.RunImpl;
+import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -31,6 +37,7 @@ import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.sun.net.httpserver.HttpExchange;
@@ -51,6 +58,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.script.ScriptEngine;
@@ -63,8 +71,11 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectResponse;
 
 /** Real-driver and real-SDK canary backed by a deterministic loopback S3 endpoint. */
 final class S3AwsDeleteRequestIntegrationTest {
@@ -108,6 +119,31 @@ final class S3AwsDeleteRequestIntegrationTest {
 	}
 
 	@Test
+	void realFactoryConstructionAndCloseDoNotCreateStandaloneDeleteResources() throws Exception {
+		final var standaloneResourceCreations = new AtomicInteger();
+		final var factory = new S3AwsStorageDriverFactory<IntegrityManifestDataItem, DeleteRequestOperation>(
+						ignored -> {
+							standaloneResourceCreations.incrementAndGet();
+							throw new AssertionError("standalone DELETE resources must remain unused");
+						});
+		for (final String workload : List.of("read", "write", "list", "mixed")) {
+			final Config storageConfig = scenarioConfig(101L).configVal("storage");
+			try (final var ignored = factory.create(
+							workload + "-resource-canary",
+							DataInput.instance(
+											null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+							storageConfig,
+							false,
+							16)) {
+				ignored.start();
+				assertEquals(0, standaloneResourceCreations.get());
+			}
+		}
+
+		assertEquals(0, standaloneResourceCreations.get());
+	}
+
+	@Test
 	void exactVersionDeleteRunsThroughRealAwsSdkDriver() throws Exception {
 		try (final var driver = newDriver()) {
 			final DeleteRequestOperation result = execute(
@@ -119,6 +155,103 @@ final class S3AwsDeleteRequestIntegrationTest {
 			assertEquals("/bucket/exact-key", request.rawPath());
 			assertEquals("versionId=v%2B1%2F%3D", request.rawQuery());
 		}
+	}
+
+	@Test
+	void realFactoryCreatesOneTimingResourceSetForCurrentAndExactDelete() throws Exception {
+		final var standaloneResourceCreations = new AtomicInteger();
+		final var factory = new S3AwsStorageDriverFactory<IntegrityManifestDataItem, DeleteRequestOperation>(
+						configuration -> {
+							standaloneResourceCreations.incrementAndGet();
+							return S3AwsStandaloneDeleteResources.create(configuration);
+						});
+		final Config storageConfig = scenarioConfig(102L).configVal("storage");
+
+		try (final var driver = factory.create(
+						"factory-delete-resource-canary",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						storageConfig,
+						false,
+						16)) {
+			assertEquals(0, standaloneResourceCreations.get());
+
+			final DeleteRequestOperation current = execute(
+							driver, operation(target("factory-current", null)));
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, current.deleteResult().outcome());
+			assertCompletedTransportTiming(current);
+			assertEquals(1, standaloneResourceCreations.get());
+			final CapturedRequest currentRequest = onlyRequest("DELETE");
+			assertEquals("/bucket/factory-current", currentRequest.rawPath());
+			assertNull(currentRequest.rawQuery());
+
+			final DeleteRequestOperation exact = execute(
+							driver, operation(target("factory-exact", "version+1/=")));
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, exact.deleteResult().outcome());
+			assertCompletedTransportTiming(exact);
+			assertEquals(1, standaloneResourceCreations.get());
+			final CapturedRequest exactRequest = requests.stream()
+							.filter(request -> "/bucket/factory-exact".equals(request.rawPath()))
+							.findFirst()
+							.orElseThrow();
+			assertEquals("versionId=version%2B1%2F%3D", exactRequest.rawQuery());
+		}
+	}
+
+	@Test
+	void concurrentFirstDeleteUseCreatesAndClosesOneResourceSet() throws Exception {
+		final S3AsyncClient standaloneClient = mock(S3AsyncClient.class);
+		final SdkAsyncHttpClient standaloneHttpClient = mock(SdkAsyncHttpClient.class);
+		when(standaloneClient.deleteObject(any(DeleteObjectRequest.class)))
+						.thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
+										DeleteObjectResponse.builder().build()));
+		final var standaloneResourceCreations = new AtomicInteger();
+		final var factory = new S3AwsStorageDriverFactory<IntegrityManifestDataItem, DeleteRequestOperation>(
+						ignored -> {
+							standaloneResourceCreations.incrementAndGet();
+							return new S3AwsStandaloneDeleteResources(
+											standaloneClient, standaloneHttpClient);
+						});
+		final Config storageConfig = scenarioConfig(103L).configVal("storage");
+		final var driver = factory.create(
+						"concurrent-delete-resource-canary",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 32, false),
+						storageConfig,
+						false,
+						32);
+		try {
+			final int requestCount = 32;
+			final var start = new java.util.concurrent.CountDownLatch(1);
+			final var results = new ArrayList<DeleteRequestOperation>();
+			try (final var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+				final var futures = new ArrayList<java.util.concurrent.Future<DeleteRequestOperation>>();
+				for (int i = 0; i < requestCount; i++) {
+					final DeleteRequestOperation request = operation(target("key-" + i, null));
+					futures.add(callers.submit(() -> {
+						assertTrue(start.await(3, TimeUnit.SECONDS));
+						driver.execute(request).get(3, TimeUnit.SECONDS);
+						return request;
+					}));
+				}
+				start.countDown();
+				for (final var future : futures) {
+					results.add(future.get(3, TimeUnit.SECONDS));
+				}
+			}
+
+			assertEquals(1, standaloneResourceCreations.get());
+			assertEquals(requestCount, results.size());
+			assertTrue(results.stream().allMatch(
+							result -> result.deleteResult().outcome() == DeleteRequestOutcome.FULL_SUCCESS));
+			verify(standaloneClient, times(requestCount))
+							.deleteObject(any(DeleteObjectRequest.class));
+		} finally {
+			driver.close();
+		}
+
+		verify(standaloneClient).close();
+		verify(standaloneHttpClient).close();
 	}
 
 	@Test
