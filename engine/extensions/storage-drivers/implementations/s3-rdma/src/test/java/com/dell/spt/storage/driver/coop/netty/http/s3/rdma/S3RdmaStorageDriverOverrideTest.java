@@ -24,6 +24,7 @@ import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.AttributeKey;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -33,7 +34,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -43,7 +43,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
 
 /**
  * Tests for the S3RdmaStorageDriver override methods:
@@ -55,11 +54,16 @@ public class S3RdmaStorageDriverOverrideTest {
 	private static final Credential TEST_CRED = Credential.getInstance("user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 	private static final long THRESHOLD = 1_048_576L;
 
+	@AfterEach
+	void closeDrivers() throws Exception {
+		S3RdmaStorageDriverTestSupport.closeCreatedDrivers();
+	}
+
 	// ---------- applyMetaDataHeaders ----------
 
 	@Test
 	void testApplyMetaDataHeaders_injectsTokenAndZeroContentLength() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var tokenField = S3RdmaStorageDriver.class.getDeclaredField("CURRENT_RDMA_TOKEN");
 		tokenField.setAccessible(true);
 		final var threadLocal = (ThreadLocal<String>) tokenField.get(null);
@@ -83,7 +87,7 @@ public class S3RdmaStorageDriverOverrideTest {
 
 	@Test
 	void testApplyMetaDataHeaders_noTokenNoChange() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 1048576);
@@ -102,7 +106,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void testCleanup_deregistersAndFreesNonPooledBuffer() throws Exception {
 		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
+		final var driver = newDriver(enabledConfig(), transport);
 		final var rdmaOps = getRdmaOps(driver);
 
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
@@ -122,7 +126,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void testCleanup_returnsFalseWhenNoContext() throws Exception {
 		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
+		final var driver = newDriver(enabledConfig(), transport);
 
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
 		final boolean found = invokeCleanupRdmaContext(driver, op);
@@ -134,7 +138,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void testRdmaOps_removeOnComplete() throws Exception {
 		// Verify that rdmaOps.remove(op) returns the correct context
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var rdmaOps = getRdmaOps(driver);
 
 		final var op = dataOp(OpType.READ, THRESHOLD);
@@ -167,7 +171,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final var transport = availableTransport();
 		// Use a very short timeout so the entry is already expired
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
-		final var driver = newMockDriver(config, transport);
+		final var driver = newDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
@@ -176,8 +180,9 @@ public class S3RdmaStorageDriverOverrideTest {
 
 		final var ctx = newRdmaContext("tokenExpired", buf, mrHandle, OpType.CREATE, (int) THRESHOLD);
 		rdmaOps.put(op, ctx);
-		final var results = Mockito.mock(Output.class);
-		setFieldInHierarchy(driver, "opResultOut", results);
+		final Output<Operation<Item>> results = Mockito.mock(Output.class);
+		Mockito.when(results.put(Mockito.<Operation<Item>> any())).thenReturn(true);
+		driver.operationResultOutput(results);
 		final var channel = new EmbeddedChannel();
 		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
 		invokeBindRequestChannel(driver, channel, op);
@@ -201,7 +206,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final var transport = availableTransport();
 		// Use a long timeout
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 60_000L);
-		final var driver = newMockDriver(config, transport);
+		final var driver = newDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
@@ -227,7 +232,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void testApplyMetaDataHeaders_doesNotOverrideZeroContentLength() throws Exception {
 		// For GET requests, Content-Length is already 0 — should not be touched
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var tokenField = S3RdmaStorageDriver.class.getDeclaredField("CURRENT_RDMA_TOKEN");
 		tokenField.setAccessible(true);
 		final var threadLocal = (ThreadLocal<String>) tokenField.get(null);
@@ -249,7 +254,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void testApplyMetaDataHeaders_overridesPositiveContentLength() throws Exception {
 		// For PUT requests, Content-Length > 0 — should be set to 0
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var tokenField = S3RdmaStorageDriver.class.getDeclaredField("CURRENT_RDMA_TOKEN");
 		tokenField.setAccessible(true);
 		final var threadLocal = (ThreadLocal<String>) tokenField.get(null);
@@ -324,7 +329,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	void testRdmaOpsLookup_gatesTokenAndWrapping() throws Exception {
 		// httpRequest() uses rdmaOps.get(op) to decide whether to set the token
 		// and whether to wrap. Verify the lookup semantics.
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var rdmaOps = getRdmaOps(driver);
 
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
@@ -376,9 +381,10 @@ public class S3RdmaStorageDriverOverrideTest {
 	void lateCompletionWhileTimeoutCleanupOwnsOperationDoesNotDoubleComplete() throws Exception {
 		final var transport = availableTransport();
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
-		final var driver = newMockDriver(config, transport);
-		final var results = Mockito.mock(Output.class);
-		setFieldInHierarchy(driver, "opResultOut", results);
+		final var driver = newDriver(config, transport);
+		final Output<Operation<Item>> results = Mockito.mock(Output.class);
+		Mockito.when(results.put(Mockito.<Operation<Item>> any())).thenReturn(true);
+		driver.operationResultOutput(results);
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
 		final ByteBuffer buffer = ByteBuffer.allocateDirect(64);
 		final long handle = 919L;
@@ -427,10 +433,11 @@ public class S3RdmaStorageDriverOverrideTest {
 	@Test
 	void lateTimedOutResponseCannotClaimNewerRetryAttempt() throws Exception {
 		final var transport = availableTransport();
-		final var driver = newMockDriver(
+		final var driver = newDriver(
 						new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L), transport);
-		final var results = Mockito.mock(Output.class);
-		setFieldInHierarchy(driver, "opResultOut", results);
+		final Output<Operation<Item>> results = Mockito.mock(Output.class);
+		Mockito.when(results.put(Mockito.<Operation<Item>> any())).thenReturn(true);
+		driver.operationResultOutput(results);
 		final var op = dataOp(OpType.CREATE, THRESHOLD);
 		final ByteBuffer firstBuffer = ByteBuffer.allocateDirect(64);
 		final ByteBuffer retryBuffer = ByteBuffer.allocateDirect(64);
@@ -443,6 +450,8 @@ public class S3RdmaStorageDriverOverrideTest {
 		invokeOnRequestDispatched(driver, firstChannel, op);
 		Thread.sleep(10);
 		invokeReapTimedOutOps(driver);
+		assertTrue(driver.operationLifecycle().driverQueued(op),
+						"a retry must begin a new operation lifecycle");
 
 		final var retryContext = newRdmaContext(
 						"retry-token", retryBuffer, 1002L, OpType.CREATE, (int) THRESHOLD);
@@ -476,7 +485,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		final var transport = availableTransport();
 		// 1ms timeout so reaper can claim entries
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
-		final var driver = newMockDriver(config, transport);
+		final var driver = newDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
 		final int opCount = 200;
@@ -541,7 +550,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		// Simulates the P0.1 scenario: doClose() drains while complete() is racing
 		final var transport = availableTransport();
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 60_000L);
-		final var driver = newMockDriver(config, transport);
+		final var driver = newDriver(config, transport);
 		final var rdmaOps = getRdmaOps(driver);
 
 		final int opCount = 100;
@@ -606,7 +615,7 @@ public class S3RdmaStorageDriverOverrideTest {
 	private static void assertRdmaIntegrityCompletion(
 					final String expectedDigest, final Operation.Status expectedStatus) throws Exception {
 		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
+		final var driver = newDriver(enabledConfig(), transport);
 		final var op = dataOp(OpType.READ, 3);
 		op.status(Operation.Status.SUCC);
 		final byte[] payload = "abc".getBytes(StandardCharsets.UTF_8);
@@ -645,20 +654,15 @@ public class S3RdmaStorageDriverOverrideTest {
 
 	private static RdmaTransport availableTransport() {
 		final var transport = Mockito.mock(RdmaTransport.class);
+		Mockito.when(transport.init(Mockito.anyString(), Mockito.anyString(), Mockito.anyString()))
+						.thenReturn(true);
 		Mockito.when(transport.isAvailable()).thenReturn(true);
 		return transport;
 	}
 
-	private static S3RdmaStorageDriver<Item, Operation<Item>> newMockDriver(
+	private static S3RdmaStorageDriver<Item, Operation<Item>> newDriver(
 					final RdmaConfig config, final RdmaTransport transport) throws Exception {
-		final var driver = (S3RdmaStorageDriver<Item, Operation<Item>>) Mockito.mock(
-						S3RdmaStorageDriver.class,
-						Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
-		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
-		setField(S3RdmaStorageDriver.class, driver, "rdmaTransport", transport);
-		// Mockito CALLS_REAL_METHODS skips field initializers — manually set rdmaOps
-		setField(S3RdmaStorageDriver.class, driver, "rdmaOps", new ConcurrentHashMap<>());
-		return driver;
+		return S3RdmaStorageDriverTestSupport.newDriver(config, transport);
 	}
 
 	private static Operation<Item> dataOp(final OpType opType, final long size) {
@@ -742,26 +746,4 @@ public class S3RdmaStorageDriverOverrideTest {
 		method.invoke(driver, channel, op, context);
 	}
 
-	private static void setFieldInHierarchy(final Object target, final String name, final Object value)
-					throws Exception {
-		Class<?> type = target.getClass();
-		while (type != null) {
-			try {
-				final Field field = type.getDeclaredField(name);
-				field.setAccessible(true);
-				field.set(target, value);
-				return;
-			} catch (final NoSuchFieldException ignored) {
-				type = type.getSuperclass();
-			}
-		}
-		throw new NoSuchFieldException(name);
-	}
-
-	private static void setField(final Class<?> clazz, final Object obj,
-					final String name, final Object value) throws Exception {
-		final Field f = clazz.getDeclaredField(name);
-		f.setAccessible(true);
-		f.set(obj, value);
-	}
 }

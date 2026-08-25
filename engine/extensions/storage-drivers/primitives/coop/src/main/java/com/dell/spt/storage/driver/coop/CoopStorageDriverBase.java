@@ -306,9 +306,24 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	protected abstract boolean submit(final O op) throws IllegalStateException;
 
+	/**
+	 * Submits a contiguous prefix of the operations in the half-open range
+	 * {@code [from, to)}. Implementations process the range in encounter order and stop before
+	 * the first operation they cannot accept.
+	 *
+	 * @return the number {@code n} of accepted operations, where
+	 *         {@code 0 <= n <= to - from}; the accepted operations must be exactly
+	 *         {@code [from, from + n)}, and the remaining suffix stays caller-owned
+	 */
 	protected abstract int submit(final List<O> ops, final int from, final int to)
 					throws IllegalStateException;
 
+	/**
+	 * Submits a contiguous prefix of {@code ops} under the same ordering and ownership contract
+	 * as {@link #submit(List, int, int)}.
+	 *
+	 * @return the number of operations accepted from the start of the list
+	 */
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
 

@@ -40,7 +40,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import org.apache.logging.log4j.Level;
@@ -48,6 +47,7 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -55,6 +55,38 @@ import org.junit.jupiter.api.Test;
  */
 @SuppressWarnings("unchecked")
 class CoopStorageDriverBaseTest {
+	private final List<RetryTestDriver> retryTestDrivers = new ArrayList<>();
+
+	private static final class RetryTestDriver
+					extends CoopStorageDriverMock<Item, Operation<Item>> {
+		private boolean rejectChildEnqueue;
+
+		private RetryTestDriver(
+						final DataInput dataInput, final Config storageConfig) throws Exception {
+			super("retry-test-step", dataInput, storageConfig, false, 1);
+		}
+
+		private void rejectChildEnqueue() {
+			rejectChildEnqueue = true;
+		}
+
+		@Override
+		protected void executeChildEnqueue(final Runnable task) {
+			if (rejectChildEnqueue) {
+				throw new RejectedExecutionException("test rejection");
+			}
+			super.executeChildEnqueue(task);
+		}
+	}
+
+	@AfterEach
+	void closeRetryTestDrivers() throws Exception {
+		for (final var driver : retryTestDrivers) {
+			driver.close();
+		}
+		retryTestDrivers.clear();
+	}
+
 	private static final class RefusingOnceMockDriver
 					extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
 		private final List<Operation<DataItem>> submitAttempts = new ArrayList<>();
@@ -1129,7 +1161,9 @@ class CoopStorageDriverBaseTest {
 		final Operation<Item> op = mock(Operation.class);
 		when(op.type()).thenReturn(OpType.CREATE);
 
-		assertTrue(driver.tryAcquireMpuObjectPermit(op), "non-MPU operations should not consume MPU object permits");
+		assertTrue(((CoopStorageDriverBase<Item, Operation<Item>>) driver)
+						.tryAcquireMpuObjectPermit(op),
+						"non-MPU operations should not consume MPU object permits");
 		assertEquals(0, mpuThrottle.availablePermits(), "non-MPU operation should leave MPU permits unchanged");
 	}
 
@@ -1228,14 +1262,7 @@ class CoopStorageDriverBaseTest {
 
 	@Test
 	void scheduledAndCompletedCountersAreIndependent() throws Exception {
-		final var scheduledField = CoopStorageDriverBase.class.getDeclaredField("scheduledOpCount");
-		scheduledField.setAccessible(true);
-		final var completedField = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
-		completedField.setAccessible(true);
-
-		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
-		scheduledField.set(driver, new LongAdder());
-		completedField.set(driver, new LongAdder());
+		final var driver = newRetryTestDriver();
 
 		assertEquals(0, driver.scheduledOpCount());
 		assertEquals(0, driver.completedOpCount());
@@ -1243,15 +1270,8 @@ class CoopStorageDriverBaseTest {
 
 	@Test
 	void activeOpCountReflectsSemaphoreState() throws Exception {
-		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		final var sem = new Semaphore(4, true);
-		semField.set(driver, sem);
-
-		final var limitField = CoopStorageDriverBase.class.getSuperclass().getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
+		final var driver = newRetryTestDriver();
+		final var sem = driver.concurrencyThrottle;
 
 		assertEquals(0, driver.activeOpCount(), "all permits free = 0 active");
 
@@ -1264,15 +1284,8 @@ class CoopStorageDriverBaseTest {
 
 	@Test
 	void isIdleWhenAllPermitsFree() throws Exception {
-		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
-		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
-		semField.setAccessible(true);
-		final var sem = new Semaphore(4, true);
-		semField.set(driver, sem);
-
-		final var limitField = CoopStorageDriverBase.class.getSuperclass().getDeclaredField("concurrencyLimit");
-		limitField.setAccessible(true);
-		limitField.set(driver, 4);
+		final var driver = newRetryTestDriver();
+		final var sem = driver.concurrencyThrottle;
 
 		assertTrue(driver.isIdle(), "should be idle when all permits free");
 
@@ -1395,41 +1408,22 @@ class CoopStorageDriverBaseTest {
 
 	// ---------- Part-level retry tests ----------
 
-	/** Set up a mock CoopStorageDriverBase with the fields needed by handleCompleted(). */
-	private CoopStorageDriverBase<Item, Operation<Item>> newRetryTestDriver() throws Exception {
+	/** Construct a real cooperative driver so lifecycle tests cross the production admission gate. */
+	private RetryTestDriver newRetryTestDriver() throws Exception {
 		return newRetryTestDriver(100);
 	}
 
-	/** Set up a mock CoopStorageDriverBase with the fields needed by handleCompleted(). */
-	private CoopStorageDriverBase<Item, Operation<Item>> newRetryTestDriver(final int childQueueCapacity) throws Exception {
-		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
-
-		// childOpQueue
-		final var childQueueField = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
-		childQueueField.setAccessible(true);
-		childQueueField.set(driver, new ArrayBlockingQueue<>(childQueueCapacity));
-
-		// completedOpCount
-		final var completedField = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
-		completedField.setAccessible(true);
-		completedField.set(driver, new LongAdder());
-
-		// dispatch lock and condition (needed by signalDispatch)
-		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
-		lockField.setAccessible(true);
-		final var lock = new ReentrantLock();
-		lockField.set(driver, lock);
-		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		condField.setAccessible(true);
-		condField.set(driver, lock.newCondition());
-
-		// opResultOut on StorageDriverBase (parent) — mock that accepts anything
+	/** Construct a real cooperative driver with a bounded child queue. */
+	private RetryTestDriver newRetryTestDriver(final int childQueueCapacity) throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 4);
+		when(storageConfig.intVal("driver-limit-queue-input")).thenReturn(childQueueCapacity);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new RetryTestDriver(dataInput, storageConfig);
 		final Output<Operation<Item>> mockOutput = mock(Output.class);
 		when(mockOutput.put(any(Operation.class))).thenReturn(true);
-		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
-		outField.setAccessible(true);
-		outField.set(driver, mockOutput);
-
+		driver.operationResultOutput(mockOutput);
+		retryTestDrivers.add(driver);
 		return driver;
 	}
 
@@ -1712,8 +1706,7 @@ class CoopStorageDriverBaseTest {
 		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
 		lifecycleField.setAccessible(true);
 		lifecycleField.set(driver, new OperationLifecycleTracker<Operation<Item>>());
-		doThrow(new RejectedExecutionException("test rejection"))
-						.when(driver).executeChildEnqueue(any(Runnable.class));
+		driver.rejectChildEnqueue();
 
 		final var parent = newCompositeParent("rejected-expansion", 3072, 1024);
 		parent.subOperations();
@@ -1868,34 +1861,20 @@ class CoopStorageDriverBaseTest {
 		// Multiple threads calling handleCompleted simultaneously. The dispatch
 		// task's Condition should receive at least one signal for every batch of
 		// completions. We verify by counting signals received.
-		final var driver = mock(CoopStorageDriverBase.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+		final var driver = newRetryTestDriver();
 
-		// childOpQueue
-		final var childQueueField = CoopStorageDriverBase.class.getDeclaredField("childOpQueue");
-		childQueueField.setAccessible(true);
-		childQueueField.set(driver, new ArrayBlockingQueue<>(100));
-
-		// completedOpCount
-		final var completedField = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
-		completedField.setAccessible(true);
-		completedField.set(driver, new LongAdder());
-
-		// Use a real lock/condition so we can observe signals
-		final var lock = new ReentrantLock();
-		final var condition = lock.newCondition();
+		// Observe the real lock and condition constructed for the dispatch task.
 		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
 		lockField.setAccessible(true);
-		lockField.set(driver, lock);
+		final var lock = (ReentrantLock) lockField.get(driver);
 		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
 		condField.setAccessible(true);
-		condField.set(driver, condition);
+		final var condition = (java.util.concurrent.locks.Condition) condField.get(driver);
 
 		// opResultOut accepts everything
 		final Output<Operation<Item>> output = mock(Output.class);
 		when(output.put(any(Operation.class))).thenReturn(true);
-		final var outField = StorageDriverBase.class.getDeclaredField("opResultOut");
-		outField.setAccessible(true);
-		outField.set(driver, output);
+		driver.operationResultOutput(output);
 
 		// Signal counter: a separate thread waits on the condition and counts signals
 		final AtomicInteger signalCount = new AtomicInteger(0);
@@ -1966,7 +1945,8 @@ class CoopStorageDriverBaseTest {
 		// When the driver is stopped, handleCompleted should return false
 		// (base class checks isStopped()).
 		final var driver = newRetryTestDriver();
-		when(driver.isStopped()).thenReturn(true);
+		driver.stop();
+		assertTrue(driver.isStopped());
 
 		final Operation<Item> op = mock(Operation.class);
 		when(op.status()).thenReturn(Operation.Status.SUCC);
@@ -2197,7 +2177,7 @@ class CoopStorageDriverBaseTest {
 
 		assertTrue(waiterReady.await(5, TimeUnit.SECONDS), "waiter should be parked on dispatch condition");
 
-		driver.releaseMpuObjectPermit();
+		((CoopStorageDriverBase<Item, Operation<Item>>) driver).releaseMpuObjectPermit();
 
 		assertTrue(waiterDone.await(5, TimeUnit.SECONDS), "waiter should complete after permit release signal");
 		assertTrue(awakened[0], "permit release should signal the dispatch condition");

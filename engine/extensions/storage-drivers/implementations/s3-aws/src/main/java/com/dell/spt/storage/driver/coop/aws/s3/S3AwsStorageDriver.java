@@ -114,7 +114,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private final S3AsyncClient s3AsyncClient;
 	private final Supplier<S3AsyncClient> exactVersionS3ClientSupplier;
-	private volatile S3AsyncClient exactVersionS3Client;
+	private S3AsyncClient exactVersionS3Client;
+	private boolean exactVersionS3ClientClosed;
 	private final S3AsyncClient standaloneDeleteS3Client;
 	private final SdkAsyncHttpClient standaloneDeleteHttpClient;
 	private final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources;
@@ -999,20 +1000,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return CompletableFuture.completedFuture(null);
 	}
 
-	private S3AsyncClient exactVersionS3Client() {
-		S3AsyncClient client = exactVersionS3Client;
-		if (client == null) {
-			synchronized (this) {
-				client = exactVersionS3Client;
-				if (client == null) {
-					client = Objects.requireNonNull(
-									exactVersionS3ClientSupplier.get(),
-									"Exact-version S3 client supplier returned null");
-					exactVersionS3Client = client;
-				}
-			}
+	private synchronized S3AsyncClient exactVersionS3Client() {
+		if (exactVersionS3ClientClosed) {
+			throw new IllegalStateException("Exact-version S3 client is already closed");
 		}
-		return client;
+		if (exactVersionS3Client == null) {
+			exactVersionS3Client = Objects.requireNonNull(
+							exactVersionS3ClientSupplier.get(),
+							"Exact-version S3 client supplier returned null");
+		}
+		return exactVersionS3Client;
 	}
 
 	/** Checks the requested current-key or exact-version identity with an SDK HEAD call. */
@@ -1903,8 +1900,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			LOG.warn("Failed to close S3AsyncClient: {}", e.getMessage());
 		}
 		try {
-			if (exactVersionS3Client != null && exactVersionS3Client != s3AsyncClient) {
-				exactVersionS3Client.close();
+			final S3AsyncClient exactVersionClient;
+			synchronized (this) {
+				exactVersionS3ClientClosed = true;
+				exactVersionClient = exactVersionS3Client;
+			}
+			if (exactVersionClient != null && exactVersionClient != s3AsyncClient) {
+				exactVersionClient.close();
 				LOG.info("Exact-version S3AsyncClient closed successfully");
 			}
 		} catch (Exception e) {

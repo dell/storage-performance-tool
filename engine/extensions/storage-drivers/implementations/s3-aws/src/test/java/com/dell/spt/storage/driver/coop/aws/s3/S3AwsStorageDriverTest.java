@@ -55,6 +55,7 @@ import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -3422,6 +3423,89 @@ public class S3AwsStorageDriverTest {
 
 			verify(primaryClient).close();
 			verifyNoInteractions(exactVersionClientSupplier);
+		}
+
+		@Test
+		void exactVersionClientCreatedWhileCloseRunsIsStillClosed() throws Exception {
+			final S3AsyncClient primaryClient = mock(S3AsyncClient.class);
+			final S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
+			final S3AsyncClient standaloneDeleteClient = mock(S3AsyncClient.class);
+			final SdkAsyncHttpClient standaloneDeleteHttpClient = mock(SdkAsyncHttpClient.class);
+			when(exactVersionClient.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											HeadObjectResponse.builder().build()));
+
+			final var supplierEntered = new CountDownLatch(1);
+			final var releaseSupplier = new CountDownLatch(1);
+			final var primaryClientClosed = new CountDownLatch(1);
+			final var closeAdvancedPastExactVersionClient = new CountDownLatch(1);
+			final var releaseStandaloneDeleteClose = new CountDownLatch(1);
+			final Supplier<S3AsyncClient> exactVersionClientSupplier = () -> {
+				supplierEntered.countDown();
+				try {
+					assertTrue(releaseSupplier.await(5, TimeUnit.SECONDS));
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+				return exactVersionClient;
+			};
+			doAnswer(ignored -> {
+				primaryClientClosed.countDown();
+				return null;
+			}).when(primaryClient).close();
+			doAnswer(ignored -> {
+				closeAdvancedPastExactVersionClient.countDown();
+				assertTrue(releaseStandaloneDeleteClose.await(5, TimeUnit.SECONDS));
+				return null;
+			}).when(standaloneDeleteClient).close();
+
+			final var driver = new S3AwsStorageDriver<Item, Operation<Item>>(
+							"exact-version-close-race", mock(DataInput.class), mockDriverConfig(),
+							false, 1, primaryClient, exactVersionClientSupplier,
+							standaloneDeleteClient, standaloneDeleteHttpClient,
+							100 * 1024L, 8 * 1024 * 1024L);
+			final var useFailure = new AtomicReference<Throwable>();
+			final var closeFailure = new AtomicReference<Throwable>();
+			final Thread clientUse = Thread.ofVirtual().start(() -> {
+				try {
+					driver.presence(new DeleteTarget(
+									new IntegrityManifestDataItem("bucket", "key", 1, "version-1")));
+				} catch (final Throwable thrown) {
+					useFailure.set(thrown);
+				}
+			});
+			assertTrue(supplierEntered.await(5, TimeUnit.SECONDS));
+			final Thread close = Thread.ofVirtual().start(() -> {
+				try {
+					driver.close();
+				} catch (final Throwable thrown) {
+					closeFailure.set(thrown);
+				}
+			});
+
+			try {
+				assertTrue(primaryClientClosed.await(5, TimeUnit.SECONDS));
+				// The vulnerable implementation advances to the next resource while construction
+				// is blocked; the hardened implementation waits for construction to finish.
+				final boolean closeAdvanced = closeAdvancedPastExactVersionClient.await(
+								250, TimeUnit.MILLISECONDS);
+				releaseSupplier.countDown();
+				if (!closeAdvanced) {
+					assertTrue(closeAdvancedPastExactVersionClient.await(5, TimeUnit.SECONDS));
+				}
+			} finally {
+				releaseSupplier.countDown();
+				releaseStandaloneDeleteClose.countDown();
+			}
+			clientUse.join(TimeUnit.SECONDS.toMillis(5));
+			close.join(TimeUnit.SECONDS.toMillis(5));
+
+			assertFalse(clientUse.isAlive());
+			assertFalse(close.isAlive());
+			assertNull(useFailure.get());
+			assertNull(closeFailure.get());
+			verify(exactVersionClient).close();
 		}
 
 		@Test

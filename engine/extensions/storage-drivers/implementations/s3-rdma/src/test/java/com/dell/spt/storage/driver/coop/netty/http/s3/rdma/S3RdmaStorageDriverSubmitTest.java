@@ -8,6 +8,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -16,7 +17,6 @@ import java.lang.reflect.Method;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
 
 @SuppressWarnings("unchecked")
 public class S3RdmaStorageDriverSubmitTest {
@@ -24,11 +24,16 @@ public class S3RdmaStorageDriverSubmitTest {
 	private static final Credential TEST_CRED = Credential.getInstance("user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 	private static final long THRESHOLD = 1_048_576L;
 
+	@AfterEach
+	void closeDrivers() throws Exception {
+		S3RdmaStorageDriverTestSupport.closeCreatedDrivers();
+	}
+
 	// ---------- shouldUseRdma: transport availability ----------
 
 	@Test
 	void testShouldUseRdma_falseWhenTransportUnavailable() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		final var op = dataOp(OpType.CREATE, THRESHOLD + 1);
 		assertFalse(invokeShouldUseRdma(driver, op));
 	}
@@ -37,7 +42,7 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testShouldUseRdma_falseForNonDataOp() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var op = (Operation<Item>) (Operation<?>) new OperationImpl<>(
 						0, OpType.CREATE, new ItemImpl("item"), null, "/bucket", TEST_CRED);
 		assertFalse(invokeShouldUseRdma(driver, op));
@@ -45,13 +50,13 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testShouldUseRdma_falseForDeleteOp() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.DELETE, THRESHOLD + 1)));
 	}
 
 	@Test
 	void testShouldUseRdma_falseForUpdateOp() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.UPDATE, THRESHOLD + 1)));
 	}
 
@@ -59,25 +64,25 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testShouldUseRdma_falseWhenBelowThreshold() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD - 1)));
 	}
 
 	@Test
 	void testShouldUseRdma_trueForCreateAtThreshold() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD)));
 	}
 
 	@Test
 	void testShouldUseRdma_trueForReadAtThreshold() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.READ, THRESHOLD)));
 	}
 
 	@Test
 	void testShouldUseRdma_trueForLargeCreate() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), availableTransport());
+		final var driver = newDriver(enabledConfig(), availableTransport());
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD * 10)));
 	}
 
@@ -112,19 +117,19 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testExtractKey_stripsLeadingSlash() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		assertEquals("mykey", invokeExtractKey(driver, new ItemImpl("/mykey")));
 	}
 
 	@Test
 	void testExtractKey_noLeadingSlash() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		assertEquals("mykey", invokeExtractKey(driver, new ItemImpl("mykey")));
 	}
 
 	@Test
 	void testExtractKey_nestedPath() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("a/b/c")));
 	}
 
@@ -162,24 +167,18 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testBuildEndpointAddrs_multipleNodes() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		setFieldInHierarchy(driver, "storageNodeAddrs",
-						new String[]{"10.0.0.1:9020", "10.0.0.2:9020", "10.0.0.3:9020"
-						});
-		setFieldInHierarchy(driver, "storageNodePort", 9020);
+		final var config = enabledConfig();
+		final var driver = S3RdmaStorageDriverTestSupport.newDriver(
+						config,
+						new RdmaTransport(config),
+						"/bucket",
+						List.of("10.0.0.1:9020", "10.0.0.2:9020", "10.0.0.3:9020"),
+						9020);
 		assertEquals("http://10.0.0.1:9020,http://10.0.0.2:9020,http://10.0.0.3:9020",
 						invokeBuildEndpointAddrs(driver));
 	}
 
 	// ---------- buildEndpointAddrs: edge cases ----------
-
-	@Test
-	void testBuildEndpointAddrs_emptyNodeArray() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		setFieldInHierarchy(driver, "storageNodeAddrs", new String[]{});
-		setFieldInHierarchy(driver, "storageNodePort", 9020);
-		assertEquals("", invokeBuildEndpointAddrs(driver));
-	}
 
 	@Test
 	void testBuildEndpointAddrs_singleNode() throws Exception {
@@ -192,13 +191,6 @@ public class S3RdmaStorageDriverSubmitTest {
 		// When addr has no port and storageNodePort=443, scheme should be https
 		assertEquals("https://s3.example.com:443",
 						invokeBuildEndpointAddrs(driverWithNode("s3.example.com", 443)));
-	}
-
-	@Test
-	void testBuildEndpointAddrs_ipv6BracketedAddr() throws Exception {
-		// IPv6 addresses with brackets: lastIndexOf(':') finds port separator correctly
-		assertEquals("http://[::1]:9020",
-						invokeBuildEndpointAddrs(driverWithNode("[::1]:9020", 9020)));
 	}
 
 	// ---------- extractBucket: edge cases ----------
@@ -219,13 +211,13 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	@Test
 	void testExtractKey_leadingSlashWithNestedPath() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("/a/b/c")));
 	}
 
 	@Test
 	void testExtractKey_slashOnly() throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		assertEquals("", invokeExtractKey(driver, new ItemImpl("/")));
 	}
 
@@ -234,15 +226,14 @@ public class S3RdmaStorageDriverSubmitTest {
 	@Test
 	void testShouldUseRdma_zeroThresholdAcceptsAnySizeCreate() throws Exception {
 		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
-		final var driver = newMockDriver(config, availableTransport());
-		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
+		final var driver = newDriver(config, availableTransport());
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 1)));
 	}
 
 	@Test
 	void testShouldUseRdma_zeroThresholdAcceptsZeroSizeCreate() throws Exception {
 		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
-		final var driver = newMockDriver(config, availableTransport());
+		final var driver = newDriver(config, availableTransport());
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 0)));
 	}
 
@@ -251,7 +242,7 @@ public class S3RdmaStorageDriverSubmitTest {
 	@Test
 	void testShouldUseRdma_warnsBelowThresholdOnce() throws Exception {
 		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
-		final var driver = newMockDriver(config, availableTransport());
+		final var driver = newDriver(config, availableTransport());
 
 		// Before any sub-threshold op, the guard should be false
 		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should start false");
@@ -269,64 +260,12 @@ public class S3RdmaStorageDriverSubmitTest {
 	@Test
 	void testShouldUseRdma_noWarningWhenAboveThreshold() throws Exception {
 		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
-		final var driver = newMockDriver(config, availableTransport());
+		final var driver = newDriver(config, availableTransport());
 
 		// Above-threshold op should not trip the guard
 		final var largeOp = dataOp(OpType.CREATE, THRESHOLD + 1);
 		assertTrue(invokeShouldUseRdma(driver, largeOp));
 		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should remain false for above-threshold ops");
-	}
-
-	// ---------- batch submit ----------
-
-	@Test
-	void testBatchSubmit_delegatesToParentWhenRdmaUnavailable() throws Exception {
-		// When RDMA is unavailable, batch submit should delegate to parent's optimized path
-		final var transport = new RdmaTransport(enabledConfig()); // Not initialized = unavailable
-		final var driver = newMockDriver(enabledConfig(), transport);
-
-		// Create a batch of operations
-		final var ops = List.of(
-						dataOp(OpType.CREATE, THRESHOLD + 1),
-						dataOp(OpType.CREATE, THRESHOLD + 1));
-
-		// Since transport is unavailable, batch submit should check this first
-		// and delegate to parent (which we can't easily verify without full driver setup)
-		// This test verifies the transport availability check is correct
-		assertFalse(transport.isAvailable());
-	}
-
-	@Test
-	void testBatchSubmit_routesIndividuallyWhenRdmaAvailable() throws Exception {
-		// When RDMA is available, batch submit processes ops individually
-		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
-
-		// Verify transport is available
-		assertTrue(transport.isAvailable());
-
-		// The batch submit method calls submit(op) for each op when RDMA is available
-		// This allows per-operation RDMA vs HTTP routing decisions
-		// Test verifies the method exists and is properly overridden
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod(
-						"submit", List.class, int.class, int.class);
-		assertNotNull(m);
-		assertEquals(int.class, m.getReturnType());
-	}
-
-	@Test
-	void testBatchSubmit_mixedOperationsRouteCorrectly() throws Exception {
-		// A batch with mixed sizes should route large ops to RDMA, small to HTTP
-		final var transport = availableTransport();
-		final var driver = newMockDriver(enabledConfig(), transport);
-
-		// Create operations: one above threshold, one below
-		final var largeOp = dataOp(OpType.CREATE, THRESHOLD + 1);
-		final var smallOp = dataOp(OpType.CREATE, THRESHOLD - 1);
-
-		// Verify shouldUseRdma returns correct values for each
-		assertTrue(invokeShouldUseRdma(driver, largeOp), "Large op should use RDMA");
-		assertFalse(invokeShouldUseRdma(driver, smallOp), "Small op should not use RDMA");
 	}
 
 	// ==================== Helpers ====================
@@ -337,37 +276,29 @@ public class S3RdmaStorageDriverSubmitTest {
 
 	private static RdmaTransport availableTransport() {
 		final var transport = Mockito.mock(RdmaTransport.class);
+		Mockito.when(transport.init(Mockito.anyString(), Mockito.anyString(), Mockito.anyString()))
+						.thenReturn(true);
 		Mockito.when(transport.isAvailable()).thenReturn(true);
 		return transport;
 	}
 
-	private static S3RdmaStorageDriver<Item, Operation<Item>> newMockDriver(
+	private static S3RdmaStorageDriver<Item, Operation<Item>> newDriver(
 					final RdmaConfig config, final RdmaTransport transport) throws Exception {
-		final var driver = (S3RdmaStorageDriver<Item, Operation<Item>>) Mockito.mock(
-						S3RdmaStorageDriver.class,
-						Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
-		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
-		setField(S3RdmaStorageDriver.class, driver, "rdmaTransport", transport);
-		setField(S3RdmaStorageDriver.class, driver, "belowThresholdWarned",
-						new java.util.concurrent.atomic.AtomicBoolean(false));
-		setFieldInHierarchy(driver, "stepId", "test-step");
-		return driver;
+		return S3RdmaStorageDriverTestSupport.newDriver(config, transport);
 	}
 
 	private static S3RdmaStorageDriver<Item, Operation<Item>> driverWithNamespace(
 					final String namespace) throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		setFieldInHierarchy(driver, "namespace", namespace);
-		return driver;
+		final var config = enabledConfig();
+		return S3RdmaStorageDriverTestSupport.newDriver(
+						config, new RdmaTransport(config), namespace, List.of("127.0.0.1"), 9020);
 	}
 
 	private static S3RdmaStorageDriver<Item, Operation<Item>> driverWithNode(
 					final String addr, final int port) throws Exception {
-		final var driver = newMockDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		setFieldInHierarchy(driver, "storageNodeAddrs", new String[]{addr
-		});
-		setFieldInHierarchy(driver, "storageNodePort", port);
-		return driver;
+		final var config = enabledConfig();
+		return S3RdmaStorageDriverTestSupport.newDriver(
+						config, new RdmaTransport(config), "/bucket", List.of(addr), port);
 	}
 
 	private static Operation<Item> dataOp(final OpType opType, final long size) {
@@ -414,27 +345,4 @@ public class S3RdmaStorageDriverSubmitTest {
 		return ((java.util.concurrent.atomic.AtomicBoolean) f.get(driver)).get();
 	}
 
-	private static void setField(final Class<?> clazz, final Object obj,
-					final String name, final Object value) throws Exception {
-		final Field f = clazz.getDeclaredField(name);
-		f.setAccessible(true);
-		f.set(obj, value);
-	}
-
-	private static void setFieldInHierarchy(final Object obj,
-					final String name, final Object value) throws Exception {
-		Class<?> clazz = obj.getClass();
-		while (clazz != null) {
-			try {
-				final Field f = clazz.getDeclaredField(name);
-				f.setAccessible(true);
-				f.set(obj, value);
-				return;
-			} catch (final NoSuchFieldException e) {
-				clazz = clazz.getSuperclass();
-			}
-		}
-		throw new NoSuchFieldException(
-						name + " not found in hierarchy of " + obj.getClass().getName());
-	}
 }

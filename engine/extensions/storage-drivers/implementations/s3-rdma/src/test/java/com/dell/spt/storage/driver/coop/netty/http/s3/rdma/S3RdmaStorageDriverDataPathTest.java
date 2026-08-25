@@ -12,6 +12,7 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import com.github.akurilov.commons.io.Output;
 import io.netty.channel.embedded.EmbeddedChannel;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -24,7 +25,6 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
 
 /**
  * Tests for the S3RdmaStorageDriver data path that do NOT require RDMA hardware.
@@ -44,6 +44,11 @@ public class S3RdmaStorageDriverDataPathTest {
 	private static final long THRESHOLD = 1_048_576L;
 	private static final long SEED = 0x12345678ABCDEF00L;
 	private static final int LAYER_SIZE = 4096;
+
+	@AfterEach
+	void closeDrivers() throws Exception {
+		S3RdmaStorageDriverTestSupport.closeCreatedDrivers();
+	}
 
 	// ---------- FakeRdmaTransport basic contract ----------
 
@@ -164,7 +169,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		expected.flip();
 
 		// Now invoke transferDataItemToBuffer via the driver
-		final var driver = newMockDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer actual = ByteBuffer.allocateDirect(size);
 
 		invokeTransferDataItemToBuffer(driver, item, actual, size);
@@ -186,7 +191,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final DataItemImpl item = new DataItemImpl("fillTest", 0, size, 0);
 		item.dataInput(dataInput);
 
-		final var driver = newMockDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer buf = ByteBuffer.allocateDirect(size);
 
 		invokeTransferDataItemToBuffer(driver, item, buf, size);
@@ -205,7 +210,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final DataItemImpl item = new DataItemImpl("tinyItem", 0, size, 0);
 		item.dataInput(dataInput);
 
-		final var driver = newMockDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer buf = ByteBuffer.allocateDirect(size);
 
 		invokeTransferDataItemToBuffer(driver, item, buf, size);
@@ -234,7 +239,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		expected.put(ring);
 		expected.flip();
 
-		final var driver = newMockDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
+		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer actual = ByteBuffer.allocateDirect(size);
 
 		invokeTransferDataItemToBuffer(driver, item, actual, size);
@@ -254,7 +259,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var fake = new FakeRdmaTransport(enabledConfig());
 		fake.init("http://10.0.0.1:9020", "key", "secret");
 
-		final var driver = newMockDriver(enabledConfig(), fake);
+		final var driver = newDriver(enabledConfig(), fake);
 		final var rdmaOps = getRdmaOps(driver);
 
 		// Simulate what submitRdma does: register, generate token, store context
@@ -282,14 +287,16 @@ public class S3RdmaStorageDriverDataPathTest {
 	@Test
 	void testReaper_deregistersAllTimedOutOpsOnFakeTransport() throws Exception {
 		// Use 1ms timeout so entries are immediately expired.
-		// Set opResultOut on the mock driver so completion can publish each timeout result,
+		// Set opResultOut so completion can publish each timeout result,
 		// allowing the reaper to iterate through all entries.
 		final var config = new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN", 1L);
 		final var fake = new FakeRdmaTransport(config);
 		fake.init("http://10.0.0.1:9020", "key", "secret");
 
-		final var driver = newMockDriver(config, fake);
-		setFieldInHierarchy(driver, "opResultOut", Mockito.mock(Output.class));
+		final var driver = newDriver(config, fake);
+		final Output<Operation<Item>> results = Mockito.mock(Output.class);
+		Mockito.when(results.put(Mockito.<Operation<Item>> any())).thenReturn(true);
+		driver.operationResultOutput(results);
 		final var rdmaOps = getRdmaOps(driver);
 		final List<EmbeddedChannel> channels = new ArrayList<>();
 
@@ -328,7 +335,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var fake = new FakeRdmaTransport(enabledConfig());
 		fake.init("http://10.0.0.1:9020", "key", "secret");
 
-		final var driver = newMockDriver(enabledConfig(), fake);
+		final var driver = newDriver(enabledConfig(), fake);
 		final var rdmaOps = getRdmaOps(driver);
 
 		// Simulate 10 operations registering and being cleaned up
@@ -353,7 +360,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		fake.init("http://10.0.0.1:9020", "key", "secret");
 		fake.setFailAfterNRegistrations(0); // all registrations fail
 
-		final var driver = newMockDriver(enabledConfig(), fake);
+		final var driver = newDriver(enabledConfig(), fake);
 
 		// Attempt registration — should fail
 		final ByteBuffer buf = ByteBuffer.allocateDirect(64);
@@ -485,15 +492,9 @@ public class S3RdmaStorageDriverDataPathTest {
 		return new RdmaConfig(true, THRESHOLD, true, "auto", "", "WARN");
 	}
 
-	private static S3RdmaStorageDriver<Item, Operation<Item>> newMockDriver(
+	private static S3RdmaStorageDriver<Item, Operation<Item>> newDriver(
 					final RdmaConfig config, final RdmaTransport transport) throws Exception {
-		final var driver = (S3RdmaStorageDriver<Item, Operation<Item>>) Mockito.mock(
-						S3RdmaStorageDriver.class,
-						Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
-		setField(S3RdmaStorageDriver.class, driver, "rdmaConfig", config);
-		setField(S3RdmaStorageDriver.class, driver, "rdmaTransport", transport);
-		setField(S3RdmaStorageDriver.class, driver, "rdmaOps", new ConcurrentHashMap<>());
-		return driver;
+		return S3RdmaStorageDriverTestSupport.newDriver(config, transport);
 	}
 
 	private static Operation<Item> dataOp(final OpType opType, final long size) {
@@ -571,27 +572,4 @@ public class S3RdmaStorageDriverDataPathTest {
 		return ctor.newInstance(buffer);
 	}
 
-	private static void setField(final Class<?> clazz, final Object obj,
-					final String name, final Object value) throws Exception {
-		final Field f = clazz.getDeclaredField(name);
-		f.setAccessible(true);
-		f.set(obj, value);
-	}
-
-	private static void setFieldInHierarchy(final Object obj,
-					final String name, final Object value) throws Exception {
-		Class<?> clazz = obj.getClass();
-		while (clazz != null) {
-			try {
-				final Field f = clazz.getDeclaredField(name);
-				f.setAccessible(true);
-				f.set(obj, value);
-				return;
-			} catch (final NoSuchFieldException e) {
-				clazz = clazz.getSuperclass();
-			}
-		}
-		throw new NoSuchFieldException(
-						name + " not found in hierarchy of " + obj.getClass().getName());
-	}
 }
