@@ -25,7 +25,12 @@ public final class DeleteRequestReconciler {
 		}
 		final var responses = transportResult.targetResults();
 		if (responses == null) {
-			return protocolFailure(request, "DELETE transport target reconciliation is missing");
+			final String message = transportResult.failureMessage();
+			return protocolFailure(
+							request,
+							message == null || message.isBlank()
+											? "DELETE transport target reconciliation is missing"
+											: message);
 		}
 		final var requestedIdentities = new HashSet<DeleteTargetIdentity>(request.targets().size());
 		for (final var target : request.targets()) {

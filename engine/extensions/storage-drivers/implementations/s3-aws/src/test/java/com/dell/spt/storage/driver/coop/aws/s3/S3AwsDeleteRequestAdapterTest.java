@@ -1,10 +1,12 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
 import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDeleteRequestTestFixture.driver;
+import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDeleteRequestTestFixture.fallthroughDriver;
 import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDeleteRequestTestFixture.operation;
 import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDeleteRequestTestFixture.target;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -22,10 +24,15 @@ import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.Output;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -39,6 +46,7 @@ import software.amazon.awssdk.services.s3.model.DeletedObject;
 import software.amazon.awssdk.services.s3.model.S3Error;
 
 final class S3AwsDeleteRequestAdapterTest {
+	private static final long RESULT_TIMEOUT_SECONDS = 5;
 
 	@Test
 	void oneCurrentTargetUsesOnePrimaryDeleteObjectRequest() throws Exception {
@@ -304,13 +312,106 @@ final class S3AwsDeleteRequestAdapterTest {
 
 	@Test
 	void legacySingleDeleteBuilderRejectsStandaloneRepresentativeItemFallThrough() throws Exception {
-		try (final var driver = driver(mock(S3AsyncClient.class), mock(S3AsyncClient.class))) {
+		final S3AsyncClient primary = mock(S3AsyncClient.class);
+		final S3AsyncClient exact = mock(S3AsyncClient.class);
+		try (final var driver = driver(primary, exact)) {
 			final DeleteRequestOperation operation = operation(target("one", null), target("two", null));
 
 			final CompletionException failure = assertThrows(
 							CompletionException.class, () -> driver.deleteObject(operation).join());
 
 			assertTrue(failure.getCause() instanceof IllegalArgumentException);
+			verifyNoInteractions(primary, exact);
+			assertEquals(DeleteRequestOutcome.FAILED, operation.deleteResult().outcome());
+			assertEquals(DeleteFailureClassification.PROTOCOL,
+							operation.deleteResult().failureClassification());
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, operation.status());
+			assertEquals(2, operation.deleteResult().targetResults().size());
+			assertTrue(operation.deleteResult().targetResults().stream()
+							.allMatch(result -> result.outcome() == DeleteTargetOutcome.FAILED
+											&& result.failureClassification() == DeleteFailureClassification.PROTOCOL));
+		}
+	}
+
+	@Test
+	void representativeItemFallthroughCompletesThroughRealNioLifecycleWithoutSdkEmission()
+					throws Exception {
+		final S3AsyncClient primary = mock(S3AsyncClient.class);
+		final S3AsyncClient exact = mock(S3AsyncClient.class);
+		try (final var driver = fallthroughDriver(primary, exact)) {
+			final ResultOutput output = new ResultOutput();
+			driver.operationResultOutput(output);
+			driver.start();
+			assertTrue(driver.put(operation(target("one", null), target("two", null))));
+
+			final DeleteRequestOperation result = output.await();
+			assertNotNull(result, "AWS fallthrough did not publish a terminal result");
+			awaitCompletionAccounting(driver);
+
+			verify(primary, never()).deleteObject(any(DeleteObjectRequest.class));
+			verify(primary, never()).deleteObjects(any(DeleteObjectsRequest.class));
+			verify(exact, never()).deleteObject(any(DeleteObjectRequest.class));
+			verify(exact, never()).deleteObjects(any(DeleteObjectsRequest.class));
+			assertEquals(DeleteRequestOutcome.FAILED, result.deleteResult().outcome());
+			assertEquals(DeleteFailureClassification.PROTOCOL,
+							result.deleteResult().failureClassification());
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(2, result.deleteResult().targetResults().size());
+			assertTrue(result.deleteResult().targetResults().stream()
+							.allMatch(targetResult -> targetResult.outcome() == DeleteTargetOutcome.FAILED
+											&& targetResult.failureClassification() == DeleteFailureClassification.PROTOCOL));
+			assertEquals(1, driver.completedOpCount());
+			assertEquals(0, driver.activeOpCount());
+		}
+	}
+
+	private static void awaitCompletionAccounting(
+					final S3AwsStorageDriver<?, ?> driver) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while ((driver.completedOpCount() != 1 || driver.activeOpCount() != 0)
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(1);
+		}
+	}
+
+	private static final class ResultOutput implements Output<DeleteRequestOperation> {
+		private final LinkedBlockingQueue<DeleteRequestOperation> results = new LinkedBlockingQueue<>();
+
+		@Override
+		public boolean put(final DeleteRequestOperation value) {
+			return results.offer(value);
+		}
+
+		@Override
+		public int put(
+						final List<DeleteRequestOperation> values, final int from, final int to) {
+			int count = 0;
+			for (int i = from; i < to; i++) {
+				if (!results.offer(values.get(i))) {
+					break;
+				}
+				count++;
+			}
+			return count;
+		}
+
+		@Override
+		public int put(final List<DeleteRequestOperation> values) {
+			return put(values, 0, values.size());
+		}
+
+		@Override
+		public Input<DeleteRequestOperation> getInput() {
+			return null;
+		}
+
+		@Override
+		public void close() {
+			results.clear();
+		}
+
+		private DeleteRequestOperation await() throws InterruptedException {
+			return results.poll(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 		}
 	}
 }

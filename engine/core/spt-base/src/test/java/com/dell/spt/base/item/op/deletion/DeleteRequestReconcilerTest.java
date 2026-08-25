@@ -59,6 +59,23 @@ class DeleteRequestReconcilerTest {
 	}
 
 	@Test
+	void explicitProtocolFailureRetainsItsCorrectionEvidenceForEveryTarget() {
+		final var result = DeleteRequestReconciler.reconcile(
+						request,
+						DeleteTransportResult.protocolFailure(
+										"standalone DELETE reached representative-item fallthrough"));
+
+		assertEquals(DeleteRequestOutcome.FAILED, result.outcome());
+		assertEquals(DeleteFailureClassification.PROTOCOL, result.failureClassification());
+		assertEquals(Status.RESP_FAIL_CORRUPT, result.operationStatus());
+		assertEquals("standalone DELETE reached representative-item fallthrough", result.errorMessage());
+		assertEquals(2, result.failedObjectCount());
+		assertEquals(
+						List.of(DeleteFailureClassification.PROTOCOL, DeleteFailureClassification.PROTOCOL),
+						result.targetResults().stream().map(DeleteTargetResult::failureClassification).toList());
+	}
+
+	@Test
 	void transportResultRejectsANonFailureRequestStatusRegardlessOfConstructionPath() {
 		assertThrows(
 						IllegalArgumentException.class,
