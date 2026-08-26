@@ -5,13 +5,13 @@ import static com.dell.spt.base.Constants.DIR_EXT;
 import static com.dell.spt.base.Constants.MIB;
 import static com.dell.spt.base.Constants.PATH_DEFAULTS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.dell.spt.base.config.CliArgUtil.ARG_PATH_SEP;
 import static com.dell.spt.base.config.CliArgUtil.allCliArgs;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
 import com.dell.spt.base.config.AliasingUtil;
-import com.dell.spt.base.config.BundledDefaultsProvider;
 import com.dell.spt.base.config.CliArgUtil;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalArgumentNameException;
@@ -19,6 +19,7 @@ import com.dell.spt.base.control.AddCorsHeadersRule;
 import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.control.NodeShutdownCoordinator;
 import com.dell.spt.base.control.StatusServlet;
+import com.dell.spt.base.control.VersionServlet;
 import com.dell.spt.base.control.ConfigServlet;
 import com.dell.spt.base.control.FleetMetricsHandler;
 import com.dell.spt.base.control.NodeMetricsHandler;
@@ -100,6 +101,7 @@ public final class Main {
 		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
 
 		LogUtil.init(resolveLogPath(), initialStepId);
+		Loggers.MSG.info(EngineBuildInfoRenderer.startupLine(EngineBuildInfoProvider.global().snapshot()));
 		try {
 			// install the core resources
 			coreResources.install(appHomePath);
@@ -135,6 +137,7 @@ public final class Main {
 				if (configWithArgs.boolVal("run-node")) {
 					runNode(configWithArgs, extClsLoader, extensions, metricsMgr, appHomePath);
 				} else {
+					EngineBuildInfoPublisher.global().publish(Path.of(resolveLogPath()), initialStepId);
 					runScenario(configWithArgs, extensions, extClsLoader, metricsMgr, appHomePath);
 				}
 			}
@@ -304,6 +307,8 @@ public final class Main {
 		// Status holder and endpoint
 		final var apiStatus = new ApiStatus();
 		apiStatus.setIdle();
+		context.addServlet(
+						new ServletHolder(new VersionServlet(EngineBuildInfoProvider.global().snapshot())), "/version");
 		context.addServlet(new ServletHolder(new StatusServlet(apiStatus)), "/status");
 		context.addServlet(new ServletHolder(new HealthServlet(metricsMgr, fullDefaultConfig)), "/health");
 		final var readinessGate = new ReadinessGate();
@@ -456,15 +461,13 @@ public final class Main {
 
 	private static void handleVersionRequest() {
 		try {
-			// Load the bundled defaults to get version
-			final var schema = SchemaProvider.resolveAndReduce(APP_NAME, Thread.currentThread().getContextClassLoader());
-			final var bundledDefaults = new BundledDefaultsProvider().config(ARG_PATH_SEP, schema);
-			final var appVersion = bundledDefaults.stringVal("run-version");
+			final var buildInfo = EngineBuildInfoProvider.global().snapshot();
 
 			// Print version header
-			final var msg = " " + APP_NAME + " v " + appVersion + " ";
+			final var msg = " " + APP_NAME + " v " + buildInfo.version() + " ";
 			final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
 			System.out.println(pad + msg + pad);
+			EngineBuildInfoRenderer.versionDetails(buildInfo).forEach(System.out::println);
 
 			// Load and print extensions from ext/ next to the JAR
 			final var extDir = Extension.resolveExtDir();

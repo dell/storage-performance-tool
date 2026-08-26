@@ -7,6 +7,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TimeUtil;
@@ -276,6 +277,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void doStart() throws IllegalStateException {
 
 		init();
+		EngineBuildInfoPublisher.global().publishForStep(loadStepId());
 
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 
