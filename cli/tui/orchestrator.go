@@ -339,6 +339,10 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if o.onOutput != nil {
 		o.onOutput("Spt API is ready")
 	}
+	if err := runPreSubmissionCheck(ctx, hooks, o.onOutput); err != nil {
+		logging.LogError("orchestrator", "pre-submission check failed, cleaning up container", err)
+		return errors.Join(err, cleanupSingleHostStartFailure(ctx, o.dockerManager))
+	}
 
 	// Start the test via API
 	logging.LogInfo("orchestrator", "starting test via API")

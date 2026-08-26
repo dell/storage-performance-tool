@@ -571,6 +571,44 @@ func (o *MultiHostOrchestrator) GetReadyHosts() []*HostConnection {
 	return readyHosts
 }
 
+// GetExecutionParticipantHosts returns the locked RMI execution topology in
+// entry/worker order. The boolean is false before a distributed topology has
+// been established; failed readiness must not remove a locked participant.
+func (o *MultiHostOrchestrator) GetExecutionParticipantHosts() ([]*HostConnection, bool, error) {
+	o.mu.Lock()
+	participantKeys := append([]string(nil), o.executionParticipantKeys...)
+	o.mu.Unlock()
+	if len(participantKeys) == 0 {
+		return nil, false, nil
+	}
+
+	hostsByKey := make(map[string]*HostConnection, len(o.hosts))
+	for _, host := range o.hosts {
+		if host == nil {
+			continue
+		}
+		hostKey := runtimeIdentityHostKey(host.Info)
+		if _, duplicate := hostsByKey[hostKey]; duplicate {
+			return nil, true, fmt.Errorf("execution topology contains duplicate host %q", hostKey)
+		}
+		hostsByKey[hostKey] = host
+	}
+	participants := make([]*HostConnection, 0, len(participantKeys))
+	seen := make(map[string]struct{}, len(participantKeys))
+	for _, hostKey := range participantKeys {
+		if _, duplicate := seen[hostKey]; duplicate {
+			return nil, true, fmt.Errorf("execution topology contains duplicate participant %q", hostKey)
+		}
+		seen[hostKey] = struct{}{}
+		host := hostsByKey[hostKey]
+		if host == nil {
+			return nil, true, fmt.Errorf("execution participant %q is unavailable", hostKey)
+		}
+		participants = append(participants, host)
+	}
+	return participants, true, nil
+}
+
 func (o *MultiHostOrchestrator) configureItemFileMounts(
 	ctx context.Context, hosts []*HostConnection, mounts []scenario.FileMount,
 ) error {
@@ -2391,6 +2429,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			if err := ctx.Err(); err != nil {
 				return failBeforeSubmission(err)
 			}
+			if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
+				return failBeforeSubmission(err)
+			}
 
 			// 5) Start test via entry node API
 			if primary.APIClient == nil {
@@ -2626,6 +2667,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	host.APIClient.LogReadySnapshot("pre-start")
+	if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
+	}
 
 	if m.onOutput != nil {
 		m.onOutput("Starting test via host API...")
@@ -2707,6 +2751,9 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
+	}
+	if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if m.onOutput != nil {

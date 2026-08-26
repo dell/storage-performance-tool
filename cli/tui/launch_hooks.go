@@ -5,6 +5,7 @@ Copyright © 2026 Dell Technologies
 package tui
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -38,8 +39,9 @@ const (
 // LaunchHooks carries orchestration lifecycle notifications that are not part
 // of scenario configuration. Hooks run synchronously at the named boundary.
 type LaunchHooks struct {
-	OnSubmitted func()
-	state       *LaunchState
+	OnSubmitted        func()
+	preSubmissionCheck func(context.Context) ([]string, error)
+	state              *LaunchState
 }
 
 // NewLaunchHooks creates hooks with a race-safe, exactly-once submission
@@ -47,6 +49,34 @@ type LaunchHooks struct {
 // need to inspect submission state.
 func NewLaunchHooks(onSubmitted func()) LaunchHooks {
 	return LaunchHooks{OnSubmitted: onSubmitted, state: &LaunchState{}}
+}
+
+// WithPreSubmissionCheck returns a copy that runs check synchronously after
+// engine readiness and before POST /run. The returned lines are already safe
+// for normal launch output and the error prevents submission.
+func (h LaunchHooks) WithPreSubmissionCheck(
+	check func(context.Context) ([]string, error),
+) LaunchHooks {
+	h.preSubmissionCheck = check
+	return h
+}
+
+// RunPreSubmissionCheck executes the optional readiness-to-submission gate.
+func (h LaunchHooks) RunPreSubmissionCheck(ctx context.Context) ([]string, error) {
+	if h.preSubmissionCheck == nil {
+		return nil, nil
+	}
+	return h.preSubmissionCheck(ctx)
+}
+
+func runPreSubmissionCheck(ctx context.Context, hooks LaunchHooks, output func(string)) error {
+	lines, err := hooks.RunPreSubmissionCheck(ctx)
+	if output != nil {
+		for _, line := range lines {
+			output(line)
+		}
+	}
+	return err
 }
 
 // NewSessionLaunchHooks binds launch notifications and resource registration
@@ -59,7 +89,9 @@ func NewSessionLaunchHooks(session *runcontrol.Session, onSubmitted func()) Laun
 
 func ensureLaunchState(hooks LaunchHooks) LaunchHooks {
 	if hooks.state == nil {
-		return NewLaunchHooks(hooks.OnSubmitted)
+		initialized := NewLaunchHooks(hooks.OnSubmitted)
+		initialized.preSubmissionCheck = hooks.preSubmissionCheck
+		return initialized
 	}
 	return hooks
 }
