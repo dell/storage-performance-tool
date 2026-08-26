@@ -84,11 +84,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1465,12 +1467,13 @@ public class LoadStepContextImplTest {
 		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
 		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
 		doNothing().when(driverMock).operationResultOutput(any());
-		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = new OperationLifecycleTracker<>();
+		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = spy(new OperationLifecycleTracker<>());
 		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
 		final Operation<DataItem> alreadyRecovered = baseDataOp("already-recovered", 1);
 		lifecycle.generatorBuffered(alreadyRecovered);
 		lifecycle.driverQueued(alreadyRecovered);
 		lifecycle.unattempted(alreadyRecovered);
+		clearInvocations(lifecycle);
 		when(driverMock.recoverQueuedOperations())
 						.thenReturn(List.of(alreadyRecovered))
 						.thenThrow(new IllegalStateException("recovery source invoked more than once"));
@@ -1485,6 +1488,7 @@ public class LoadStepContextImplTest {
 
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
+		verify(lifecycle, times(1)).unattempted(alreadyRecovered);
 	}
 
 	@Test
