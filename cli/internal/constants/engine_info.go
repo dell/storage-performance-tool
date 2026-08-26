@@ -6,6 +6,8 @@ import "time"
 const (
 	EngineVersionEndpoint           = "/version"
 	EngineBuildInfoSchemaVersion    = 1
+	EngineInfoManifestName          = "engine.info.json"
+	EngineInfoManifestSchemaVersion = 1
 	EngineBuildInfoProduct          = "spt-engine"
 	EngineBuildInfoUnknown          = "unknown"
 	EngineInfoCollectionParallelism = 8

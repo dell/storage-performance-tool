@@ -15,6 +15,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -65,6 +66,7 @@ type runMetadata struct {
 	preparedInputs          bool                                                    `json:"-"`
 	preparedScenarioJS      []byte                                                  `json:"-"`
 	preparedDefaultsYAML    []byte                                                  `json:"-"`
+	engineIdentity          *engineinfo.GateOutcome                                 `json:"-"`
 }
 
 type runLifecycleMetadata struct {

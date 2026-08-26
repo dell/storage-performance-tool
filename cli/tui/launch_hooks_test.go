@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,32 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
+
+func TestLaunchHooksRunPreSubmissionCheck(t *testing.T) {
+	type contextKey struct{}
+	wantErr := errors.New("identity mismatch")
+	hooks := NewLaunchHooks(nil).WithPreSubmissionCheck(func(ctx context.Context) ([]string, error) {
+		if ctx.Value(contextKey{}) != "active" {
+			t.Fatal("pre-submission check did not receive launch context")
+		}
+		return []string{"Engine identity: mismatch"}, wantErr
+	})
+
+	lines, err := hooks.RunPreSubmissionCheck(context.WithValue(context.Background(), contextKey{}, "active"))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RunPreSubmissionCheck() error = %v, want sentinel", err)
+	}
+	if len(lines) != 1 || lines[0] != "Engine identity: mismatch" {
+		t.Fatalf("RunPreSubmissionCheck() lines = %v", lines)
+	}
+}
+
+func TestZeroValueLaunchHooksPreSubmissionCheckIsCompatible(t *testing.T) {
+	lines, err := (LaunchHooks{}).RunPreSubmissionCheck(context.Background())
+	if err != nil || len(lines) != 0 {
+		t.Fatalf("zero hook result = %v, %v", lines, err)
+	}
+}
 
 func TestLaunchHooksSubmissionStateIsSharedAndExactlyOnce(t *testing.T) {
 	var calls atomic.Int32

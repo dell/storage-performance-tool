@@ -2651,7 +2651,16 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	defer cancel()
 	params := scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeList, Threads: 2, Bucket: "demo", Endpoint: "http://minio:9000"}
 	var launchSubmitted atomic.Bool
-	hooks := LaunchHooks{OnSubmitted: func() { launchSubmitted.Store(true) }}
+	var identityGateCalled atomic.Bool
+	hooks := NewLaunchHooks(func() { launchSubmitted.Store(true) }).WithPreSubmissionCheck(
+		func(context.Context) ([]string, error) {
+			if runStarted.Load() {
+				t.Fatal("LIST identity gate ran after /run submission")
+			}
+			identityGateCalled.Store(true)
+			return []string{"Engine identity: consistent"}, nil
+		},
+	)
 	if err := wrapper.StartTestWithLaunchHooks(ctx, "test-image", params, hooks); err != nil {
 		t.Fatalf("StartTest(list) returned error: %v", err)
 	}
@@ -2683,7 +2692,10 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 		t.Fatalf("expected run to be started via /run API on primary")
 	}
 	if !launchSubmitted.Load() {
-		t.Fatal("expected successful LIST POST to notify launch submission")
+		t.Fatal("expected LIST launch to notify submission")
+	}
+	if !identityGateCalled.Load() {
+		t.Fatal("expected LIST launch to run identity gate")
 	}
 
 	// Baseline should show both nodes present with worker inactive
@@ -3506,5 +3518,141 @@ func TestEntryAPIRunRejectsAPIFailedLockedWorkerBeforeScenarioPostForEveryTier(t
 				t.Fatalf("failed gate rewrote evidence to %d participants", got)
 			}
 		})
+	}
+}
+
+func TestDistributedEntryRunsPreSubmissionCheckAfterEveryAPIReadyAndBeforePost(t *testing.T) {
+	var readyHits, runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			readyHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	host, apiPort := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: host, Original: "entry"},
+		{Host: host, Original: "worker"},
+	}, 2)
+	orchestrator.SetAPIPort(apiPort)
+	for _, participant := range orchestrator.hosts {
+		participant.DockerManager = NewMockDockerManager()
+		participant.ContainerID = "container-identity"
+		participant.SetManaged(true)
+		participant.SetStatus(HostStatusRunning)
+	}
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	var output []string
+	wrapper.SetCallbacks(nil, nil, func(line string) { output = append(output, line) }, nil)
+	wantErr := errors.New("engine identity collection failed")
+	hooks := NewLaunchHooks(nil).WithPreSubmissionCheck(func(context.Context) ([]string, error) {
+		if readyHits.Load() < 2 {
+			t.Fatalf("pre-submission check saw %d readiness probes, want every execution participant", readyHits.Load())
+		}
+		return []string{"Engine identity: indeterminate"}, wantErr
+	})
+
+	err := wrapper.startEntryAPIRun(
+		context.Background(), "test-image",
+		scenario.ScenarioParams{WorkloadType: "write", RunID: 42},
+		[]byte(`Load.run({})`), nil, "Distributed test", hooks)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("startEntryAPIRun() error = %v, want pre-submission failure", err)
+	}
+	if runPosts.Load() != 0 || hooks.SubmissionState() != SubmissionNotSubmitted {
+		t.Fatalf("POST count/state = %d/%s, want 0/not-submitted", runPosts.Load(), hooks.SubmissionState())
+	}
+	if !containsStringSimple(strings.Join(output, "\n"), "Engine identity: indeterminate") {
+		t.Fatalf("pre-submission output = %v", output)
+	}
+	for _, participant := range orchestrator.hosts {
+		if participant.IsManaged() {
+			t.Fatalf("participant %s retained managed resources", participant.Info.Original)
+		}
+	}
+}
+
+func TestExecutionParticipantHostsRetainsLockedWorkerAfterReadinessFailure(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "entry.example", Original: "entry"},
+		{Host: "worker.example", Original: "worker"},
+	}, 2)
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[1].SetError(errors.New("API not ready"))
+	orchestrator.mu.Lock()
+	orchestrator.executionParticipantKeys = []string{"entry.example", "worker.example"}
+	orchestrator.mu.Unlock()
+
+	participants, locked, err := orchestrator.GetExecutionParticipantHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked || len(participants) != 2 || participants[0] != orchestrator.hosts[0] ||
+		participants[1] != orchestrator.hosts[1] {
+		t.Fatalf("locked participants = %+v, locked=%t; want entry and failed worker", participants, locked)
+	}
+	if ready := orchestrator.GetReadyHosts(); len(ready) != 1 || ready[0] != orchestrator.hosts[0] {
+		t.Fatalf("ready hosts = %+v, want only entry to demonstrate readiness filtering", ready)
+	}
+}
+
+func TestSingleRemoteRunsPreSubmissionCheckAfterReadinessAndBeforePost(t *testing.T) {
+	var readyHits, runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			readyHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	host, apiPort := splitServerHostPort(t, server.URL)
+
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{
+		Host: host, Original: "remote-entry",
+	}}, 1)
+	orchestrator.SetAPIPort(apiPort)
+	orchestrator.hosts[0].DockerManager = NewMockDockerManager()
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wantErr := errors.New("engine identity mismatch")
+	hooks := NewLaunchHooks(nil).WithPreSubmissionCheck(func(context.Context) ([]string, error) {
+		if readyHits.Load() == 0 {
+			t.Fatal("single-remote gate ran before readiness")
+		}
+		return []string{"Engine identity: mismatch"}, wantErr
+	})
+
+	err := wrapper.StartTestWithContentAndLaunchHooks(
+		context.Background(), "test-image",
+		scenario.ScenarioParams{WorkloadType: "write", RunID: 42},
+		[]byte(`Load.run({})`), nil, hooks)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("launch error = %v, want pre-submission rejection", err)
+	}
+	if runPosts.Load() != 0 || hooks.SubmissionState() != SubmissionNotSubmitted {
+		t.Fatalf("POST count/state = %d/%s, want 0/not-submitted", runPosts.Load(), hooks.SubmissionState())
+	}
+	if orchestrator.hosts[0].IsManaged() {
+		t.Fatal("single-remote rejected launch retained managed resources")
 	}
 }

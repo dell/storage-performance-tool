@@ -1581,6 +1581,56 @@ func TestOrchestratorCancelDuringPostReconcilesUnknownAndRollsBack(t *testing.T)
 	}
 }
 
+func TestOrchestratorRunsPreSubmissionCheckAfterReadinessAndBeforePost(t *testing.T) {
+	var readyHits, runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			readyHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	wantErr := errors.New("engine identity mismatch")
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	var output []string
+	orchestrator.SetCallbacks(nil, nil, func(line string) { output = append(output, line) }, nil)
+	hooks := NewLaunchHooks(nil).WithPreSubmissionCheck(func(context.Context) ([]string, error) {
+		if readyHits.Load() == 0 {
+			t.Fatal("pre-submission check ran before readiness")
+		}
+		return []string{"Engine identity: mismatch"}, wantErr
+	})
+
+	err := orchestrator.StartTestWithContentAndLaunchHooks(
+		context.Background(), "test-image",
+		scenario.ScenarioParams{WorkloadType: "write", RunID: 42},
+		[]byte(`Load.run({})`), nil, hooks)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("launch error = %v, want pre-submission rejection", err)
+	}
+	if runPosts.Load() != 0 || hooks.SubmissionState() != SubmissionNotSubmitted {
+		t.Fatalf("POST count/state = %d/%s, want 0/not-submitted", runPosts.Load(), hooks.SubmissionState())
+	}
+	if !containsString(output, "Engine identity: mismatch") {
+		t.Fatalf("pre-submission output = %v", output)
+	}
+	if mockDM.HasManagedResources() || mockDM.GetCleanupCallCount() != 1 {
+		t.Fatalf("rejected launch cleanup managed=%t calls=%d", mockDM.HasManagedResources(), mockDM.GetCleanupCallCount())
+	}
+}
+
 func TestAmbiguousSubmissionCleanupDefersToSessionOwner(t *testing.T) {
 	manager := NewMockDockerManager()
 	manager.SetContainerID("ambiguous-container")

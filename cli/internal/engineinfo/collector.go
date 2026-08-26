@@ -119,6 +119,7 @@ const (
 // ConsistencyAssessment explains the fleet-level result.
 type ConsistencyAssessment struct {
 	Status ConsistencyStatus
+	Forced bool
 	Reason string
 }
 
