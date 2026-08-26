@@ -461,7 +461,7 @@ func TestFleetOutputKeepsSuccessfulNodeAndRetryDetailsVerboseOnly(t *testing.T) 
 	for _, mode := range []string{"headless", "full TUI"} {
 		t.Run(mode, func(t *testing.T) {
 			normal := result.OutputLines(false)
-			if len(normal) != 1 || !strings.Contains(normal[0], "consistent") {
+			if len(normal) != 1 || !strings.Contains(normal[0], "consistency verified") {
 				t.Fatalf("normal output = %q, want one fleet-level result", normal)
 			}
 			assertExcludes(t, strings.Join(normal, "\n"), "entry.example", "worker.example", "attempts", "retries")

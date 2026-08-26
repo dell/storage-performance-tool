@@ -6,6 +6,10 @@ The SPT Engine is the high-performance Java core of the Dell Storage Performance
 
 This directory contains the engine source, extensions (storage drivers, load patterns), and Docker bundle configuration.
 
+Standalone and CLI-managed runs expose immutable engine provenance; see
+[Engine Build Information](../cli/docs/ENGINE_BUILD_INFO.md) for the version
+endpoint, local build records, combined manifests, and compatibility policy.
+
 ## Key Features
 
 - **High Performance**: Leverages Virtual Threads to sustain millions of concurrent operations

@@ -124,7 +124,7 @@ func TestReplayRoutesInstallCurrentParticipantIdentityGate(t *testing.T) {
 			if collectorCalls.Load() != 1 || submissions.Load() != 1 {
 				t.Fatalf("collector/submission calls = %d/%d, want 1/1", collectorCalls.Load(), submissions.Load())
 			}
-			if !strings.Contains(out.String(), "Engine identity: consistent") {
+			if !strings.Contains(out.String(), "consistency verified") {
 				t.Fatalf("output missing fleet result:\n%s", out.String())
 			}
 		})

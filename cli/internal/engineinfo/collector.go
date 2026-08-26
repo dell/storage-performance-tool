@@ -133,8 +133,7 @@ type FleetResult struct {
 // OutputLines returns one fleet-level line plus verbose participant detail.
 // Both headless and TUI adapters can consume the same already-sanitized lines.
 func (result FleetResult) OutputLines(verbose bool) []string {
-	lines := []string{fmt.Sprintf("Engine identity: %s (%d participants, %d build records)",
-		result.Consistency.Status, len(result.Participants), len(result.Builds))}
+	lines := []string{result.summaryLine()}
 	if !verbose {
 		return lines
 	}
@@ -158,6 +157,55 @@ func (result FleetResult) OutputLines(verbose bool) []string {
 		lines = append(lines, detail)
 	}
 	return lines
+}
+
+func (result FleetResult) summaryLine() string {
+	participantCount := len(result.Participants)
+	if result.Consistency.Status == ConsistencyConsistent && len(result.Builds) > 0 {
+		build := result.Builds[0].Information
+		return fmt.Sprintf("Engine identity: %s (%s), %d %s, consistency verified",
+			build.Version, AbbreviateRevision(build.Revision), participantCount,
+			pluralize(participantCount, "participant", "participants"))
+	}
+	return fmt.Sprintf("Engine identity: %s, %d %s, %d %s",
+		result.Consistency.Status, participantCount,
+		pluralize(participantCount, "participant", "participants"), len(result.Builds),
+		pluralize(len(result.Builds), "build record", "build records"))
+}
+
+// BuildGroupLines renders safe grouped build identity for mismatch diagnostics.
+// Participant identifiers and transport details remain in verbose output only.
+func (result FleetResult) BuildGroupLines() []string {
+	counts := make(map[string]int, len(result.Builds))
+	for _, participant := range result.Participants {
+		if participant.BuildID != "" {
+			counts[participant.BuildID]++
+		}
+	}
+	lines := make([]string, 0, len(result.Builds))
+	for _, grouped := range result.Builds {
+		count := counts[grouped.BuildID]
+		lines = append(lines, fmt.Sprintf("Engine build group: %s (%s), %d %s",
+			grouped.Information.Version, AbbreviateRevision(grouped.Information.Revision), count,
+			pluralize(count, "node", "nodes")))
+	}
+	return lines
+}
+
+// AbbreviateRevision returns a compact source revision without inventing data.
+func AbbreviateRevision(revision string) string {
+	revision = strings.TrimSpace(revision)
+	if len(revision) <= 12 {
+		return revision
+	}
+	return revision[:12]
+}
+
+func pluralize(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 // Collect queries the planned participants and returns their safe evidence.

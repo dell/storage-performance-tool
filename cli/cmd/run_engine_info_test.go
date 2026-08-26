@@ -58,6 +58,35 @@ func TestDistributedRunEngineParticipantsFreezesExecutionSetBeforeCollection(t *
 	}
 }
 
+func TestEngineIdentityGateLinesMakeForcedAndRejectedMismatchDiagnostic(t *testing.T) {
+	mismatch := runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected)
+	for _, test := range []struct {
+		name      string
+		force     bool
+		decision  engineinfo.GateDecision
+		wantAlert string
+	}{
+		{name: "forced", force: true, decision: engineinfo.GateProceed, wantAlert: "WARNING: ENGINE BUILD MISMATCH FORCED"},
+		{name: "rejected", decision: engineinfo.GateRejectedMismatch, wantAlert: "ERROR: Engine build mismatch rejected"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := engineinfo.GateOutcome{Fleet: mismatch, Decision: test.decision, Proceed: test.force}
+			outcome.Fleet.Consistency.Forced = test.force
+			lines := engineIdentityGateLines(outcome, false, errors.New("gate rejected"))
+			joined := strings.Join(lines, "\n")
+			alertAt := strings.Index(joined, test.wantAlert)
+			firstGroupAt := strings.Index(joined, "Engine build group: 5.14.2 (aaaaaaaaaaaa), 1 node")
+			secondGroupAt := strings.Index(joined, "Engine build group: 5.14.2 (bbbbbbbbbbbb), 1 node")
+			if alertAt < 0 || firstGroupAt <= alertAt || secondGroupAt <= firstGroupAt {
+				t.Fatalf("mismatch diagnostic order = %q", lines)
+			}
+			if strings.Contains(joined, "entry.example:9999") || strings.Contains(joined, "attempts=") {
+				t.Fatalf("normal mismatch output exposed verbose node detail: %q", lines)
+			}
+		})
+	}
+}
+
 func TestEngineExecutionHostsExcludesIdleListWorkers(t *testing.T) {
 	entry := &tui.HostConnection{Info: &hostparse.HostInfo{Host: "entry.example"}}
 	idleWorker := &tui.HostConnection{Info: &hostparse.HostInfo{Host: "idle.example"}}

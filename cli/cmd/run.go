@@ -2209,7 +2209,7 @@ func init() {
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")
-	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+	runCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 
 	// Mixed Workload Distribution Options (defaults: GET 45 / STAT 30 / PUT 15 / DELETE 10)
 	runCmd.Flags().Int("get-distrib", scenario.MixedDefaultGetDistrib, "Percentage of GET (read) operations for mixed workload (default: 45)")

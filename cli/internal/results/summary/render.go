@@ -9,6 +9,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
 
@@ -61,6 +62,11 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 
 	r.renderTitle(b, summary)
 	r.renderEnvironment(b, summary)
+	if summary.Rejected {
+		r.renderRejection(b, summary)
+		r.renderArtifactsAndWarnings(b, summary)
+		return strings.TrimRight(b.String(), "\n") + "\n"
+	}
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
 	r.renderDeleteDetails(b, summary)
@@ -190,6 +196,11 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
+	r.renderCompactIdentityEnvironment(sb, summary.Environment, wrapWidth)
+	if summary.Rejected {
+		r.renderCompactRejection(sb, summary, wrapWidth)
+		return strings.TrimRight(sb.String(), "\n") + "\n"
+	}
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
@@ -232,6 +243,17 @@ func (r *Renderer) renderTitle(b *strings.Builder, summary *RunSummary) {
 func (r *Renderer) renderEnvironment(b *strings.Builder, summary *RunSummary) {
 	env := summary.Environment
 	fmt.Fprintf(b, "Environment\n")
+	r.writeBullet(b, "CLI", formatCLIIdentity(env.CLIIdentity))
+	r.writeBullet(b, "Engine", formatEngineIdentity(env.EngineIdentity))
+	if env.EngineIdentity.Forced && env.EngineIdentity.Status == engineinfo.ConsistencyMismatch {
+		fmt.Fprintln(b, "  WARNING: PERFORMANCE RESULTS COMBINE DIFFERENT ENGINE BUILDS")
+		for _, build := range env.EngineIdentity.Builds {
+			r.writeBullet(b, "Engine group", formatEngineBuildGroup(build))
+		}
+	}
+	if env.EngineIdentity.Status == engineinfo.ConsistencyIndeterminate {
+		fmt.Fprintln(b, "  WARNING: Engine identity indeterminate: "+formatEngineParticipantIssues(env.EngineIdentity.Affected))
+	}
 	r.writeBullet(b, "Spt image", env.SptImage)
 	r.writeBullet(b, "API endpoint", env.BaseURL)
 	hostList := formatHostList(env.Hosts)
@@ -247,6 +269,127 @@ func (r *Renderer) renderEnvironment(b *strings.Builder, summary *RunSummary) {
 		r.writeBullet(b, "Scenario file", env.ScenarioStoredPath)
 	}
 	b.WriteString("\n")
+}
+
+func (r *Renderer) renderCompactIdentityEnvironment(
+	b *strings.Builder, env EnvironmentSummary, width int,
+) {
+	fmt.Fprintln(b, "Environment")
+	r.writeWrappedBullet(b, "CLI", formatCLIIdentity(env.CLIIdentity), width)
+	r.writeWrappedBullet(b, "Engine", formatEngineIdentity(env.EngineIdentity), width)
+	if env.EngineIdentity.Forced && env.EngineIdentity.Status == engineinfo.ConsistencyMismatch {
+		r.writeWrappedLine(b, "  WARNING: PERFORMANCE RESULTS COMBINE DIFFERENT ENGINE BUILDS", width)
+		for _, build := range env.EngineIdentity.Builds {
+			r.writeWrappedBullet(b, "Engine group", formatEngineBuildGroup(build), width)
+		}
+	}
+	if env.EngineIdentity.Status == engineinfo.ConsistencyIndeterminate {
+		r.writeWrappedLine(b, "  WARNING: Engine identity indeterminate: "+
+			formatEngineParticipantIssues(env.EngineIdentity.Affected), width)
+	}
+	b.WriteByte('\n')
+}
+
+func (r *Renderer) writeWrappedBullet(b *strings.Builder, label, value string, width int) {
+	if value == "" {
+		return
+	}
+	r.writeWrappedLine(b, fmt.Sprintf("  • %-18s %s", label, value), width)
+}
+
+func (r *Renderer) writeWrappedLine(b *strings.Builder, value string, width int) {
+	for _, line := range textutil.WrapWords(value, width) {
+		runes := []rune(line)
+		for len(runes) > width && width > 0 {
+			b.WriteString(string(runes[:width]))
+			b.WriteByte('\n')
+			runes = runes[width:]
+		}
+		b.WriteString(string(runes))
+		b.WriteByte('\n')
+	}
+}
+
+func (r *Renderer) renderRejection(b *strings.Builder, summary *RunSummary) {
+	fmt.Fprintln(b, "Run rejected")
+	reason := strings.TrimSpace(summary.RejectionReason)
+	if reason == "" {
+		reason = "engine build identity gate rejected the run before scenario submission"
+	}
+	r.writeBullet(b, "Reason", reason)
+	b.WriteString("\n")
+}
+
+func (r *Renderer) renderCompactRejection(b *strings.Builder, summary *RunSummary, width int) {
+	fmt.Fprintln(b, "Run rejected")
+	reason := strings.TrimSpace(summary.RejectionReason)
+	if reason == "" {
+		reason = "engine build identity gate rejected the run before scenario submission"
+	}
+	r.writeWrappedBullet(b, "Reason", reason, width)
+	b.WriteString("\n")
+}
+
+func formatCLIIdentity(identity CLIIdentitySummary) string {
+	if !identity.Available {
+		return "unavailable (legacy result)"
+	}
+	version := nonEmpty(identity.Version, "unknown")
+	revision := strings.TrimSpace(identity.Revision)
+	if revision == "" {
+		return version
+	}
+	return fmt.Sprintf("%s (%s)", version, engineinfo.AbbreviateRevision(revision))
+}
+
+func formatEngineIdentity(identity EngineIdentitySummary) string {
+	if !identity.Available {
+		return "unavailable (legacy result; engine identity was not recorded)"
+	}
+	participants := fmt.Sprintf("%d %s", identity.ParticipantCount,
+		pluralizeSummary(identity.ParticipantCount, "participant", "participants"))
+	if identity.Status == engineinfo.ConsistencyConsistent && len(identity.Builds) > 0 {
+		build := identity.Builds[0]
+		return fmt.Sprintf("%s (%s), %s, consistency verified",
+			build.Version, engineinfo.AbbreviateRevision(build.Revision), participants)
+	}
+	if identity.Status == engineinfo.ConsistencyIndeterminate && len(identity.Builds) > 0 {
+		build := identity.Builds[0]
+		return fmt.Sprintf("%s (%s), %s, consistency indeterminate",
+			build.Version, engineinfo.AbbreviateRevision(build.Revision), participants)
+	}
+	if identity.Status == engineinfo.ConsistencyIndeterminate {
+		return fmt.Sprintf("unavailable, %s, consistency indeterminate", participants)
+	}
+	return fmt.Sprintf("%s, %s", identity.Status, participants)
+}
+
+func formatEngineBuildGroup(build EngineBuildGroupSummary) string {
+	return fmt.Sprintf("%s (%s), %d %s", build.Version,
+		engineinfo.AbbreviateRevision(build.Revision), build.NodeCount,
+		pluralizeSummary(build.NodeCount, "node", "nodes"))
+}
+
+func formatEngineParticipantIssues(issues []EngineParticipantIssue) string {
+	if len(issues) == 0 {
+		return "one or more participants lack complete engine build information"
+	}
+	parts := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		part := issue.NodeID + "=" + string(issue.Status)
+		if strings.TrimSpace(issue.Reason) != "" {
+			part += " (" + strings.TrimSpace(issue.Reason) + ")"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func pluralizeSummary(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
