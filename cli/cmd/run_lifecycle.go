@@ -9,6 +9,7 @@ import (
 	"errors"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
 
@@ -32,6 +33,13 @@ func updateRunLifecycleMetadata(meta *runMetadata, outcome *autoResultsOutcome) 
 			lifecycle.Workload.FailureStepID = outcome.Tracker.FailureStepID
 			lifecycle.Workload.FailureCategory = outcome.Tracker.FailureCategory
 			lifecycle.Workload.FailureMessage = outcome.Tracker.FailureMessage
+		}
+	}
+	if meta.engineIdentity != nil && meta.engineIdentity.Decision != engineinfo.GateProceed {
+		lifecycle.Workload = lifecyclePhaseMetadata{
+			Completed: true,
+			State:     "rejected",
+			Error:     meta.engineIdentityError,
 		}
 	}
 	meta.Lifecycle = lifecycle

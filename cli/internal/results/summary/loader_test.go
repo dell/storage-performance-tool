@@ -11,8 +11,112 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
+
+func TestLoaderLoadsReferencedEngineIdentityAndCLIIdentity(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "identity-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, runDir, &results.Manifest{
+		OutputDir: runDir,
+		RunFiles: []results.FileStatus{{
+			Name: constants.EngineInfoManifestName, Status: "ok",
+		}},
+	})
+	writeParams(t, runDir, &RunParams{
+		ScenarioParams:    ScenarioParams{RunID: 17},
+		EngineInfoFile:    constants.EngineInfoManifestName,
+		EngineConsistency: engineinfo.ConsistencyIndeterminate,
+		CLI:               RunCLI{Version: "5.15.0-dev", Revision: strings.Repeat("c", 40), BuildTime: "2026-08-26T12:00:00Z"},
+	})
+	manifest := engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         17,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
+		},
+		Builds: []engineinfo.ManifestBuild{},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
+			Reason:           "engine version endpoint is unavailable",
+		}},
+	}
+	if err := engineinfo.WriteManifestAtomic(runDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EngineInfo == nil || loaded.EngineInfo.RunID != 17 ||
+		loaded.Params.CLI.Version != "5.15.0-dev" ||
+		loaded.EngineInfoPath != filepath.Join(runDir, constants.EngineInfoManifestName) {
+		t.Fatalf("loaded identity = %+v params = %+v path = %q", loaded.EngineInfo, loaded.Params, loaded.EngineInfoPath)
+	}
+}
+
+func TestLoaderRejectsEngineIdentityFromDifferentRun(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "identity-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, runDir, &results.Manifest{
+		OutputDir: runDir,
+		RunFiles: []results.FileStatus{{
+			Name: constants.EngineInfoManifestName, Status: "ok",
+		}},
+	})
+	writeParams(t, runDir, &RunParams{
+		ScenarioParams:    ScenarioParams{RunID: 18},
+		EngineInfoFile:    constants.EngineInfoManifestName,
+		EngineConsistency: engineinfo.ConsistencyIndeterminate,
+	})
+	manifest := engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         17,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
+		},
+		Builds: []engineinfo.ManifestBuild{},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
+			Reason:           "engine version endpoint is unavailable",
+		}},
+	}
+	if err := engineinfo.WriteManifestAtomic(runDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewLoader().Load(context.Background(), runDir)
+	if err == nil || !strings.Contains(err.Error(), "run_id 17 does not match current run_id 18") {
+		t.Fatalf("Load() error = %v, want run identity mismatch", err)
+	}
+}
+
+func TestLoaderKeepsPreIdentityBundlesBackwardCompatible(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "legacy-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, runDir, &results.Manifest{})
+	writeParams(t, runDir, &RunParams{WorkloadType: "read"})
+
+	loaded, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EngineInfo != nil || loaded.EngineInfoPath != "" || loaded.Params.EngineInfoFile != "" {
+		t.Fatalf("legacy bundle invented identity: %+v", loaded)
+	}
+}
 
 func TestLoaderLoadSuccess(t *testing.T) {
 	t.Parallel()

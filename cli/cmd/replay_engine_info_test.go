@@ -150,7 +150,7 @@ func TestReplayIdentityGatePolicyAndPartialEvidence(t *testing.T) {
 	}{
 		{name: "consistent", fleet: runGateFleet(engineinfo.ConsistencyConsistent, engineinfo.StatusCollected), wantSubmit: 1, wantOutput: "consistent"},
 		{name: "mismatch rejected", fleet: runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected), autoResults: true, wantErr: true, wantOutput: "mismatch rejected", wantArtifact: true, wantArtifactKind: engineinfo.GateRejectedMismatch},
-		{name: "mismatch forced", fleet: runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected), force: true, autoResults: true, wantSubmit: 1, wantOutput: "MISMATCH FORCED", wantForced: true},
+		{name: "mismatch forced", fleet: runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected), force: true, autoResults: true, wantSubmit: 1, wantOutput: "MISMATCH FORCED", wantArtifact: true, wantForced: true, wantArtifactKind: engineinfo.GateProceed},
 		{name: "legacy continues", fleet: runGateFleet(engineinfo.ConsistencyIndeterminate, engineinfo.StatusLegacyEndpointUnavailable), wantSubmit: 1, wantOutput: "legacy_endpoint_unavailable"},
 		{name: "future schema continues", fleet: replayFutureSchemaFleet(), wantSubmit: 1, wantOutput: "unsupported_schema"},
 		{name: "incomplete continues", fleet: runGateFleet(engineinfo.ConsistencyIndeterminate, engineinfo.StatusIncompleteBuildInfo), wantSubmit: 1, wantOutput: "incomplete_build_info"},
@@ -188,9 +188,12 @@ func TestReplayIdentityGatePolicyAndPartialEvidence(t *testing.T) {
 						_ func(context.Context), _ ...*integrity.FinalizeOptions,
 					) *autoResultsMonitor {
 						monitoredMetadata = metadata
-						done := make(chan autoResultsOutcome, 1)
-						done <- autoResultsOutcome{}
-						return &autoResultsMonitor{done: done, armed: make(chan struct{})}
+						monitor := &autoResultsMonitor{done: make(chan autoResultsOutcome, 1), armed: make(chan struct{})}
+						go func() {
+							<-monitor.armed
+							monitor.done <- autoResultsOutcome{ArtifactErr: writeRunMetadata(metadata, metadata.ResultsRoot)}
+						}()
+						return monitor
 					}
 				} else {
 					startReplayAutoResultsMonitor = immediateCancelableReplayMonitor
@@ -230,6 +233,8 @@ func TestReplayIdentityGatePolicyAndPartialEvidence(t *testing.T) {
 				wantReason := "engine identity collection failed before scenario submission"
 				if test.wantArtifactKind == engineinfo.GateRejectedMismatch {
 					wantReason = "engine build identity mismatch rejected before scenario submission"
+				} else if test.wantArtifactKind == engineinfo.GateProceed {
+					wantReason = "engine build identity mismatch overridden by --force"
 				}
 				if manifest.Consistency.Reason != wantReason {
 					t.Fatalf("manifest reason = %q, want %q", manifest.Consistency.Reason, wantReason)
@@ -458,13 +463,13 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func readReplayAbortManifest(t *testing.T, path string) engineInfoAbortManifest {
+func readReplayAbortManifest(t *testing.T, path string) engineinfo.Manifest {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read abort manifest: %v", err)
 	}
-	var manifest engineInfoAbortManifest
+	var manifest engineinfo.Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("parse abort manifest: %v", err)
 	}
