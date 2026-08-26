@@ -273,6 +273,9 @@ func TestClientRetriesTransportFailuresWithinConfiguredBounds(t *testing.T) {
 		if got := attempts.Load(); got != 3 {
 			t.Fatalf("requests = %d, want 3", got)
 		}
+		if result.Attempts != 3 {
+			t.Fatalf("reported attempts = %d, want 3 for verbose fleet detail", result.Attempts)
+		}
 	})
 
 	t.Run("retry exhaustion is fatal", func(t *testing.T) {
@@ -294,6 +297,9 @@ func TestClientRetriesTransportFailuresWithinConfiguredBounds(t *testing.T) {
 		}
 		if got := attempts.Load(); got != 3 {
 			t.Fatalf("requests = %d, want bounded 3", got)
+		}
+		if result.Attempts != 3 {
+			t.Fatalf("reported attempts = %d, want 3", result.Attempts)
 		}
 		assertExcludes(t, result.Reason, server.URL)
 		assertExcludes(t, err.Error(), server.URL)
