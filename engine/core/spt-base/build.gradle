@@ -1,17 +1,3 @@
-buildscript {
-	repositories {
-		mavenCentral()
-		maven {
-			url = "https://plugins.gradle.org/m2/"
-		}
-	}
-	dependencies {
-		classpath(
-			"org.yaml:snakeyaml:2.6",
-		)
-	}
-}
-
 plugins {
 	id "java-library"
 	id "scala"
@@ -42,18 +28,39 @@ repositories {
 
 description = "Spt is a high-load storage performance testing tool"
 group = "io.github.dell.spt"
-version = defineVersion()
+version = rootProject.ext.SPT_VERSION
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_21
 	targetCompatibility = JavaVersion.VERSION_21
 }
 
-import org.yaml.snakeyaml.Yaml
-
 ext {
 	rootPkg = "com.dell.spt.base"
 	mainClass = "${rootPkg}.Main"
+}
+
+def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
+def generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/engineBuildInfo")
+def generatedBuildInfoFile = generatedBuildInfoDir.map { it.file("META-INF/spt-build-info.properties") }
+
+tasks.register("generateEngineBuildInfo") {
+	group = "build"
+	description = "Generates immutable engine build information"
+	inputs.properties(engineBuildMetadata.resourceValues())
+	outputs.file(generatedBuildInfoFile)
+	doLast {
+		def outputFile = generatedBuildInfoFile.get().asFile
+		outputFile.parentFile.mkdirs()
+		outputFile.setText(
+				engineBuildMetadata.resourceValues().collect { key, value -> "${key}=${value}" }.join("\n") + "\n",
+				"UTF-8")
+	}
+}
+
+sourceSets.main.resources.srcDir(generatedBuildInfoDir)
+tasks.named("processResources") {
+	dependsOn tasks.named("generateEngineBuildInfo")
 }
 // No custom configurations needed
 
@@ -132,6 +139,13 @@ tasks.named("compileJava", JavaCompile) {
 // Common test configuration for all test tasks
 tasks.withType(Test) {
 	useJUnitPlatform()
+	systemProperty "spt.test.expected-build-version", project.version.toString()
+	systemProperty "spt.test.expected-build-revision", engineBuildMetadata.revision()
+	systemProperty "spt.test.expected-build-time", engineBuildMetadata.buildTime()
+	systemProperty "spt.test.expected-build-development", engineBuildMetadata.development().toString()
+	systemProperty "spt.test.expected-build-source-dirty", engineBuildMetadata.sourceDirty() == null
+			? "unknown"
+			: engineBuildMetadata.sourceDirty().toString()
 	jvmArgs "-XX:MaxDirectMemorySize=2g"
 	jvmArgs "-XX:+HeapDumpOnOutOfMemoryError"
 	maxHeapSize = "2g"
@@ -179,15 +193,6 @@ task integrationTest(type: Test) {
 	shouldRunAfter test
 }
 
-String defineVersion() {
-	def configFilePath = [ project.projectDir, "src", "main", "resources", "config", "defaults.yaml"]
-		.join(File.separator);
-	def inputFile = new File(configFilePath)
-	def parser = new Yaml()
-	def y = parser.load(inputFile.text)
-	y.run.version
-}
-
 task sptVersion {
 	group = "versioning"
 	description = "Prints Spt version."
@@ -197,6 +202,9 @@ task sptVersion {
 jar {
 	// Keep the regular JAR enabled for inter-project dependencies
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	manifest {
+		attributes(engineBuildMetadata.manifestAttributes())
+	}
 }
 
 // TODO: Shadow plugin's Log4j2PluginsCacheFileTransformer is not working correctly
@@ -302,6 +310,7 @@ shadowJar {
 			"Automatic-Module-Name": rootPkg,
 			"Main-Class": mainClass,
 		)
+		attributes(engineBuildMetadata.manifestAttributes())
 	}
 	
 	// Exclude unnecessary files to reduce size

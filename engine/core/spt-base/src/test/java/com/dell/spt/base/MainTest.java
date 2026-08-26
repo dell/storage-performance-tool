@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.akurilov.confuse.impl.BasicConfig;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.config.TestConfigBuilder;
 import java.lang.reflect.Method;
 import java.util.Map;
 import org.apache.logging.log4j.Level;
@@ -133,6 +135,16 @@ class MainTest {
 		final var config = runIdConfig(123456789L);
 		Main.initializeRunId(config);
 		assertEquals(123456789L, config.longVal("run-id"));
+	}
+
+	@Test
+	void commandLineRunVersionOverrideCannotRedefineEngineIdentity() {
+		final var config = TestConfigBuilder.config();
+
+		Main.applyArgsToConfig(new String[]{"--run-version=user-value"
+		}, config, "initial-step");
+
+		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), config.stringVal("run-version"));
 	}
 
 	private static BasicConfig runIdConfig(final long runId) {

@@ -9,6 +9,7 @@ import static com.dell.spt.base.config.CliArgUtil.ARG_PATH_SEP;
 import static com.dell.spt.base.config.CliArgUtil.allCliArgs;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.config.BundledDefaultsProvider;
 import com.dell.spt.base.config.CliArgUtil;
@@ -195,10 +196,13 @@ public final class Main {
 		return ConfigUtil.merge(mainDefaults.pathSep(), allDefaults);
 	}
 
-	private static Config applyArgsToConfig(
+	static Config applyArgsToConfig(
 					final String[] args, final Config config, final String initialStepId) {
+		boolean runVersionOverrideAttempted = false;
 		try {
-			argsWithAliases(args, config).forEach(config::val);
+			final var configArgs = argsWithAliases(args, config);
+			runVersionOverrideAttempted = configArgs.containsKey("run-version");
+			configArgs.forEach(config::val);
 		} catch (final IllegalArgumentNameException e) {
 			final var formattedAllCliArgs = allCliArgs(config.schema(), config.pathSep()).stream()
 							.collect(Collectors.joining("\n", "\t", ""));
@@ -215,6 +219,7 @@ public final class Main {
 							e.expectedType(),
 							e.actualType());
 		}
+		EngineBuildInfoProvider.global().projectVersion(config, runVersionOverrideAttempted);
 		checkAndSetStepId(config, initialStepId);
 		applyLogLevel(config);
 		Arrays.stream(args).forEach(Loggers.CLI::info);
