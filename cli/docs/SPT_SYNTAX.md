@@ -537,7 +537,7 @@ spt run write \
 | `--generate-only` | | `false` | Generate the scenario file without running it |
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
-| `--force` | | `false` | Automatically resolve port conflicts without prompting |
+| `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | | `9999` | SPT engine API port |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
@@ -737,7 +737,7 @@ environment variables.
 | `--headless` | `false` | Force headless (non-interactive) mode |
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
 | `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
-| `--force` | `false` | Automatically resolve port conflicts without prompting |
+| `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | `9999` | SPT engine API port |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |

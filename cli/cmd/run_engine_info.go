@@ -66,8 +66,10 @@ func engineIdentityGateLines(
 	case outcome.Fleet.Consistency.Forced:
 		lines = append(lines,
 			"WARNING: ENGINE BUILD MISMATCH FORCED; performance results combine different engine builds.")
+		lines = append(lines, outcome.Fleet.BuildGroupLines()...)
 	case outcome.Decision == engineinfo.GateRejectedMismatch:
 		lines = append(lines, "ERROR: Engine build mismatch rejected before scenario submission.")
+		lines = append(lines, outcome.Fleet.BuildGroupLines()...)
 	case outcome.Decision == engineinfo.GateCollectionFailure:
 		lines = append(lines, "ERROR: Engine identity collection failed; scenario submission blocked.")
 	case outcome.Fleet.Consistency.Status == engineinfo.ConsistencyIndeterminate:

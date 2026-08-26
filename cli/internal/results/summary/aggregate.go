@@ -11,6 +11,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
@@ -31,6 +32,8 @@ type RunSummary struct {
 	ActualStepIDs     []string
 	DiscoveredStepIDs []string
 	Warnings          []string
+	Rejected          bool
+	RejectionReason   string
 }
 
 // EnvironmentSummary captures host, image, and runtime metadata for the run.
@@ -48,6 +51,39 @@ type EnvironmentSummary struct {
 	ShutdownOnComplete bool
 	ShutdownLingerSec  int
 	DebugEnabled       bool
+	CLIIdentity        CLIIdentitySummary
+	EngineIdentity     EngineIdentitySummary
+}
+
+// CLIIdentitySummary is the CLI build identity stored separately from engine identity.
+type CLIIdentitySummary struct {
+	Available bool
+	Version   string
+	Revision  string
+}
+
+// EngineIdentitySummary is the compact human projection of engine.info.json.
+type EngineIdentitySummary struct {
+	Available        bool
+	Status           engineinfo.ConsistencyStatus
+	Forced           bool
+	ParticipantCount int
+	Builds           []EngineBuildGroupSummary
+	Affected         []EngineParticipantIssue
+}
+
+// EngineBuildGroupSummary reports one version/revision and its participant count.
+type EngineBuildGroupSummary struct {
+	Version   string
+	Revision  string
+	NodeCount int
+}
+
+// EngineParticipantIssue is concise compatibility or collection evidence.
+type EngineParticipantIssue struct {
+	NodeID string
+	Status engineinfo.CollectionStatus
+	Reason string
 }
 
 // HostSummary describes a single orchestrated host.
@@ -198,6 +234,10 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 	}
 
 	summary.Environment = buildEnvironmentSummary(data)
+	if data.Params.Lifecycle != nil && data.Params.Lifecycle.Workload.State == "rejected" {
+		summary.Rejected = true
+		summary.RejectionReason = data.Params.Lifecycle.Workload.Error
+	}
 	workload, workloadWarnings := buildWorkloadSummary(data)
 	summary.Workload = workload
 	summary.Warnings = append(summary.Warnings, workloadWarnings...)
@@ -232,13 +272,48 @@ func buildEnvironmentSummary(data *RunData) EnvironmentSummary {
 		ShutdownOnComplete: params.ResultsOptions.ShutdownOnComplete,
 		ShutdownLingerSec:  params.ResultsOptions.ShutdownLingerSeconds,
 		DebugEnabled:       params.ResultsOptions.Debug,
+		CLIIdentity: CLIIdentitySummary{
+			Available: strings.TrimSpace(params.CLI.Version) != "" || strings.TrimSpace(params.CLI.Revision) != "",
+			Version:   strings.TrimSpace(params.CLI.Version),
+			Revision:  strings.TrimSpace(params.CLI.Revision),
+		},
 	}
 	hosts := make([]HostSummary, 0, len(params.Hosts))
 	for _, h := range params.Hosts {
 		hosts = append(hosts, HostSummary(h))
 	}
 	env.Hosts = hosts
+	env.EngineIdentity = buildEngineIdentitySummary(data.EngineInfo)
 	return env
+}
+
+func buildEngineIdentitySummary(manifest *engineinfo.Manifest) EngineIdentitySummary {
+	if manifest == nil {
+		return EngineIdentitySummary{}
+	}
+	identity := EngineIdentitySummary{
+		Available:        true,
+		Status:           manifest.Consistency.Status,
+		Forced:           manifest.Consistency.Forced,
+		ParticipantCount: len(manifest.Participants),
+	}
+	participantCounts := make(map[string]int, len(manifest.Builds))
+	for _, participant := range manifest.Participants {
+		if participant.BuildID != "" {
+			participantCounts[participant.BuildID]++
+		}
+		if participant.CollectionStatus != engineinfo.StatusCollected {
+			identity.Affected = append(identity.Affected, EngineParticipantIssue{
+				NodeID: participant.NodeID, Status: participant.CollectionStatus, Reason: participant.Reason,
+			})
+		}
+	}
+	for _, build := range manifest.Builds {
+		identity.Builds = append(identity.Builds, EngineBuildGroupSummary{
+			Version: build.Version, Revision: build.Revision, NodeCount: participantCounts[build.BuildID],
+		})
+	}
+	return identity
 }
 
 const (

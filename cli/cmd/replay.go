@@ -546,7 +546,7 @@ func init() {
 	replayCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
-	replayCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 	replayCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
 	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")

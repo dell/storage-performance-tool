@@ -446,6 +446,18 @@ type RunParams struct {
 	MultiHost              RunMultiHost                      `json:"multiHost"`
 	EngineInfoFile         string                            `json:"engineInfoFile,omitempty"`
 	EngineConsistency      engineinfo.ConsistencyStatus      `json:"engineConsistency,omitempty"`
+	Lifecycle              *RunLifecycle                     `json:"lifecycle,omitempty"`
+}
+
+// RunLifecycle contains the stored phase state needed by human summaries.
+type RunLifecycle struct {
+	Workload LifecyclePhase `json:"workload"`
+}
+
+// LifecyclePhase contains the durable rejection diagnostic for pre-submission gates.
+type LifecyclePhase struct {
+	State string `json:"state,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // ScenarioParams captures key scenario tunables stored with the run.
