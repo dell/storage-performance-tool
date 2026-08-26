@@ -68,7 +68,6 @@ import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -2139,15 +2138,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	private RuntimeException markPendingUnattempted(final List<O> pending) {
 		RuntimeException recoveryFailure = null;
-		final Iterator<O> iterator = pending.iterator();
-		while (iterator.hasNext()) {
+		int retainedCount = 0;
+		// Compact failures into the prefix, then clear the processed tail once. Removing
+		// each successful ArrayList element while scanning would make large queue recovery quadratic.
+		for (int readIndex = 0; readIndex < pending.size(); readIndex++) {
+			final O operation = pending.get(readIndex);
 			try {
-				operationLifecycle.unattempted(iterator.next());
-				iterator.remove();
+				operationLifecycle.unattempted(operation);
 			} catch (final RuntimeException failure) {
+				pending.set(retainedCount++, operation);
 				recoveryFailure = appendRecoveryFailure(recoveryFailure, failure);
 			}
 		}
+		pending.subList(retainedCount, pending.size()).clear();
 		return recoveryFailure;
 	}
 

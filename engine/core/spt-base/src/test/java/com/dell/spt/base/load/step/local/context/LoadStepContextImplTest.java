@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -62,6 +63,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -97,6 +99,9 @@ import static org.mockito.Mockito.inOrder;
 
 /* Alot of the functionality from ItemInputFactoryTest is used here since need an ItemInputFactory */
 public class LoadStepContextImplTest {
+	private static final int LARGE_RECOVERY_BATCH_SIZE = 400_000;
+	private static final Duration LARGE_RECOVERY_TIME_BOUND = Duration.ofSeconds(2);
+
 	@TempDir
 	Path tempDir;
 
@@ -1374,6 +1379,113 @@ public class LoadStepContextImplTest {
 		verify(driverMock, times(1)).recoverQueuedOperations();
 		verify(lifecycle, times(2)).unattempted(generatorBuffered);
 		verify(lifecycle, times(1)).unattempted(driverQueued);
+	}
+
+	@Test
+	void queuedRecoveryRetriesFailedTransitionsInOriginalOrder() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = mock(OperationLifecycleTracker.class);
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		final Operation<DataItem> firstFailure = baseDataOp("first-failure", 1);
+		final Operation<DataItem> success = baseDataOp("success", 1);
+		final Operation<DataItem> secondFailure = baseDataOp("second-failure", 1);
+		when(driverMock.recoverQueuedOperations())
+						.thenReturn(List.of(firstFailure, success, secondFailure));
+		final var attempts = new ArrayList<String>();
+		final var firstAttempts = new AtomicInteger();
+		final var secondAttempts = new AtomicInteger();
+		doAnswer(invocation -> {
+			final Operation<DataItem> operation = invocation.getArgument(0);
+			if (operation == firstFailure) {
+				attempts.add("first-failure");
+				if (firstAttempts.getAndIncrement() == 0) {
+					throw new IllegalStateException("first transition failed");
+				}
+			} else if (operation == secondFailure) {
+				attempts.add("second-failure");
+				if (secondAttempts.getAndIncrement() == 0) {
+					throw new IllegalStateException("second transition failed");
+				}
+			} else {
+				attempts.add("success");
+			}
+			return true;
+		}).when(lifecycle).unattempted(any());
+		final MetricsContext metrics = buildMetricsCtx("orderedQueuedRecovery");
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-ordered-queued-recovery",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+
+		final var failure = assertThrows(
+						IllegalStateException.class, ctx::recoverQueuedOperationsForStepStop);
+		assertEquals("first transition failed", failure.getMessage());
+		assertEquals(1, failure.getSuppressed().length);
+		assertEquals("second transition failed", failure.getSuppressed()[0].getMessage());
+		assertEquals(List.of("first-failure", "success", "second-failure"), attempts);
+
+		attempts.clear();
+		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
+		assertEquals(List.of("first-failure", "second-failure"), attempts);
+	}
+
+	@Test
+	void largeQueuedRecoveryCompletesWithinBound() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		when(driverMock.operationLifecycle()).thenReturn(OperationLifecycleTracker.disabled());
+		final Operation<DataItem> queued = baseDataOp("large-recovery-batch", 1);
+		when(driverMock.recoverQueuedOperations())
+						.thenReturn(Collections.nCopies(LARGE_RECOVERY_BATCH_SIZE, queued));
+		final MetricsContext metrics = buildMetricsCtx("largeQueuedRecovery");
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-large-queued-recovery",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+
+		assertTimeout(LARGE_RECOVERY_TIME_BOUND, ctx::recoverQueuedOperationsForStepStop);
+	}
+
+	@Test
+	void queuedRecoveryTreatsANonThrowingFalseTransitionAsRecovered() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		when(generatorMock.isNothingPendingRetry()).thenReturn(true);
+		final StorageDriver<DataItem, Operation<DataItem>> driverMock = mock(StorageDriver.class);
+		doNothing().when(driverMock).operationResultOutput(any());
+		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = new OperationLifecycleTracker<>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		final Operation<DataItem> alreadyRecovered = baseDataOp("already-recovered", 1);
+		lifecycle.generatorBuffered(alreadyRecovered);
+		lifecycle.driverQueued(alreadyRecovered);
+		lifecycle.unattempted(alreadyRecovered);
+		when(driverMock.recoverQueuedOperations())
+						.thenReturn(List.of(alreadyRecovered))
+						.thenThrow(new IllegalStateException("recovery source invoked more than once"));
+		final MetricsContext metrics = buildMetricsCtx("falseTransitionRecovery");
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-false-transition-recovery",
+						generatorMock,
+						driverMock,
+						metrics,
+						testConfig.configVal("load"),
+						false);
+
+		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
+		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
 	}
 
 	@Test
