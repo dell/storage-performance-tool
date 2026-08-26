@@ -386,7 +386,7 @@ func (r *MultiHostHeadlessRunner) output(category, message string) {
 }
 
 func (r *MultiHostHeadlessRunner) outputMetricsUpdate(update *tui.MultiNodeMetricsUpdate) {
-	if update == nil {
+	if update == nil || !metricsOutputEnabled(r.verbose, r.jsonMode, r.metricsOnly) {
 		return
 	}
 	if update.Aggregated != nil {
@@ -410,6 +410,10 @@ func (r *MultiHostHeadlessRunner) outputMetricsUpdate(update *tui.MultiNodeMetri
 	for _, contributor := range contributors {
 		r.outputMetricView("node", contributor, update.PerNode[contributor])
 	}
+}
+
+func metricsOutputEnabled(verbose, jsonMode, metricsOnly bool) bool {
+	return verbose || jsonMode || metricsOnly
 }
 
 func (r *MultiHostHeadlessRunner) outputMetricView(
@@ -619,33 +623,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 			}
 		},
 		// Metrics updates from API
-		func(update *tui.MultiNodeMetricsUpdate) {
-			if update != nil && update.Aggregated != nil {
-				metric := update.Aggregated
-				if r.jsonMode {
-					r.outputMetricsJSON(*metric)
-				} else {
-					r.outputMetrics(*metric)
-				}
-
-				// Show per-op breakdown when multiple op types are present
-				if len(update.PerOpType) > 1 {
-					for _, opMetric := range update.PerOpType {
-						if r.jsonMode {
-							r.outputMetricsJSON(*opMetric)
-						} else {
-							r.outputMetrics(*opMetric)
-						}
-					}
-				}
-
-				// Log successful parsing
-				logging.LogMetricsParsing("received API metrics in headless mode",
-					"success", true,
-					"ops_per_sec", metric.OpsPerSec,
-					"source", "multi-node-api")
-			}
-		},
+		r.outputMetricsUpdate,
 		// Container output (display only; metrics are sourced from JSON endpoint)
 		func(line string) {
 			if !r.metricsOnly {
@@ -717,6 +695,35 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	}
 	r.output("COMPLETE", "Benchmark completed")
 	return nil
+}
+
+func (r *HeadlessRunner) outputMetricsUpdate(update *tui.MultiNodeMetricsUpdate) {
+	if update == nil || update.Aggregated == nil ||
+		!metricsOutputEnabled(r.verbose, r.jsonMode, r.metricsOnly) {
+		return
+	}
+	metric := update.Aggregated
+	if r.jsonMode {
+		r.outputMetricsJSON(*metric)
+	} else {
+		r.outputMetrics(*metric)
+	}
+
+	// Show per-op breakdown when multiple op types are present.
+	if len(update.PerOpType) > 1 {
+		for _, opMetric := range update.PerOpType {
+			if r.jsonMode {
+				r.outputMetricsJSON(*opMetric)
+			} else {
+				r.outputMetrics(*opMetric)
+			}
+		}
+	}
+
+	logging.LogMetricsParsing("received API metrics in headless mode",
+		"success", true,
+		"ops_per_sec", metric.OpsPerSec,
+		"source", "multi-node-api")
 }
 
 func stopLocalAfterLaunchError(orchestrator *tui.TestOrchestrator, hooks tui.LaunchHooks) error {

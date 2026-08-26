@@ -86,6 +86,66 @@ func installNonInteractiveTUIProgram(t *testing.T) {
 	t.Cleanup(func() { newTUIProgramWithTrace = original })
 }
 
+func TestTUIGatesTextMetricsByVerboseWithoutStoppingCharts(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		verbose bool
+		want    int
+	}{
+		{name: "default messages are quiet", verbose: false, want: 0},
+		{name: "verbose messages include metrics", verbose: true, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := InitialModel()
+			model.verbose = test.verbose
+
+			updated, _ := model.Update(containerOutputMsg(
+				"[2026-08-26 09:21:25.000] [METRICS] view=node ops/sec=42",
+			))
+			model = updated.(Model)
+			updated, _ = model.Update(sptMessageMsg("[METRICS] view=aggregate ops/sec=42"))
+			model = updated.(Model)
+			if got := len(model.processOutput); got != 2*test.want {
+				t.Fatalf("metrics message count = %d, want %d: %#v", got, 2*test.want, model.processOutput)
+			}
+
+			updated, _ = model.Update(multiNodeMetricsMsg(MultiNodeMetricsUpdate{
+				Aggregated: &PerformanceMetric{OpType: "CREATE", OpsPerSec: 42},
+			}))
+			model = updated.(Model)
+			if got := model.metricsCollector.GetLatestOpsPerSec(); got != 42 {
+				t.Fatalf("chart metric = %d, want 42", got)
+			}
+		})
+	}
+}
+
+func TestLocalTUIRunOptionsApplyVerboseToMessagesModel(t *testing.T) {
+	wantErr := errors.New("stop after model capture")
+	originalDockerFactory := newTUIDockerManager
+	originalProgramFactory := newTUIProgramWithTrace
+	newTUIDockerManager = func() (DockerInterface, error) { return NewMockDockerManager(), nil }
+	var captured Model
+	newTUIProgramWithTrace = func(model Model, _ string, _ bool) (*tea.Program, *os.File, error) {
+		captured = model
+		return nil, nil, wantErr
+	}
+	t.Cleanup(func() {
+		newTUIDockerManager = originalDockerFactory
+		newTUIProgramWithTrace = originalProgramFactory
+	})
+
+	err := StartTUIWithScenarioRunOptions(
+		"image", "scenario.js", scenario.ScenarioParams{}, RunOptions{Verbose: true},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StartTUIWithScenarioRunOptions() error = %v, want %v", err, wantErr)
+	}
+	if !captured.verbose {
+		t.Fatal("verbose run option did not reach the TUI messages model")
+	}
+}
+
 func TestLocalTUIPropagatesRealPostFailureAndCleansContainer(t *testing.T) {
 	installNonInteractiveTUIProgram(t)
 	mockDocker := NewMockDockerManager()
@@ -122,7 +182,7 @@ func TestLocalTUIPropagatesRealPostFailureAndCleansContainer(t *testing.T) {
 		context.Background(),
 		"image", "", scenario.Params{WorkloadType: scenario.WorkloadTypeRead}, apiPort,
 		"bridge", t.TempDir(), nil, "", false, []byte("scenario"), []byte("defaults"),
-		hooks,
+		hooks, false,
 	)
 	if err == nil || !strings.Contains(err.Error(), "status 500") {
 		t.Fatalf("local TUI startup error = %v, want POST status 500", err)
@@ -159,7 +219,7 @@ func TestRemoteTUIPropagatesReadinessFailureAndCleansContainer(t *testing.T) {
 	err := startTUIWithMultiHostOrchestratorWithTrace(
 		context.Background(),
 		orchestrator, "image", "", scenario.Params{WorkloadType: scenario.WorkloadTypeRead},
-		nil, "", false, []byte("scenario"), []byte("defaults"), hooks,
+		nil, "", false, []byte("scenario"), []byte("defaults"), hooks, false,
 	)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("remote TUI startup error = %v, want %v", err, wantErr)
@@ -187,7 +247,7 @@ func TestRemoteTUIPropagatesIdentityFailureBeforeContainerStart(t *testing.T) {
 	err := startTUIWithMultiHostOrchestratorWithTrace(
 		context.Background(), orchestrator, "repo/spt:test", "",
 		scenario.Params{WorkloadType: scenario.WorkloadTypeReadVerify},
-		nil, "", false, []byte("scenario"), []byte("defaults"), hooks,
+		nil, "", false, []byte("scenario"), []byte("defaults"), hooks, false,
 	)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("remote TUI identity error = %v, want %v", err, wantErr)

@@ -592,7 +592,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
 						"duration": "", "threads": "1", "headless": fmt.Sprint(headlessMode),
 						"auto-results": "true", "shutdown-on-complete": "false", "generate-only": "false",
-						"items-file": "",
+						"items-file": "", "verbose": "true",
 					} {
 						setGlobalRunFlagForTest(t, flag, value)
 					}
@@ -673,6 +673,9 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					}
 					startLocalTUIRunFunc = func(_ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.Verbose {
+							t.Fatal("--verbose did not reach local TUI options")
+						}
 						if !options.LaunchHooks.SessionManaged() {
 							t.Fatal("auto-results route is not session managed")
 						}
@@ -680,6 +683,9 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					}
 					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.Verbose {
+							t.Fatal("--verbose did not reach distributed TUI options")
+						}
 						if !options.LaunchHooks.SessionManaged() {
 							t.Fatal("auto-results route is not session managed")
 						}
