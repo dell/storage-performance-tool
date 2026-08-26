@@ -21,34 +21,39 @@ import (
 )
 
 var deleteRequestColumns = []string{
-	"schema_version", "request_id", "batch_id", "target_count", "outcome",
+	deleteColumnSchemaVersion, "request_id", "batch_id", "target_count", "outcome",
 	"node", "start_us", "duration_us", "latency_us",
 }
 
 var deleteObjectColumns = []string{
-	"schema_version", "request_id", "target_id", "target_index", "bucket", "key",
-	"size", "version_id", "outcome", "error_classification", "error",
+	deleteColumnSchemaVersion, "request_id", "target_id", "target_index", deleteColumnBucket, deleteColumnKey,
+	deleteColumnSize, deleteColumnVersionID, "outcome", "error_classification", "error",
 }
 
 var deleteVerificationColumns = []string{
-	"schema_version", "target_id", "target_index", "bucket", "key", "size", "version_id",
+	deleteColumnSchemaVersion, "target_id", "target_index", deleteColumnBucket, deleteColumnKey, deleteColumnSize, deleteColumnVersionID,
 	"operational_outcome", "pre_enabled", "pre_presence", "post_enabled", "post_presence",
 	"correctness_failure", "inconclusive", "residual",
 }
 
-var canonicalManifestColumns = []string{"bucket", "key", "size", "version_id"}
+var canonicalManifestColumns = []string{deleteColumnBucket, deleteColumnKey, deleteColumnSize, deleteColumnVersionID}
 
 const (
-	deleteOutcomeAccepted    = "accepted"
-	deleteOutcomeFailed      = "failed"
-	deleteOutcomeUnattempted = "unattempted"
-	deleteOutcomeUnresolved  = "unresolved"
-	deletePresenceDisabled   = "disabled"
-	deletePresenceAbsent     = "absent"
-	deletePresencePresent    = "present"
-	canonicalBooleanTrue     = "true"
-	deleteRequestFullSuccess = "full_success"
-	deleteRequestPartial     = "partial"
+	deleteColumnSchemaVersion = "schema_version"
+	deleteColumnBucket        = "bucket"
+	deleteColumnKey           = "key"
+	deleteColumnSize          = "size"
+	deleteColumnVersionID     = "version_id"
+	deleteOutcomeAccepted     = "accepted"
+	deleteOutcomeFailed       = "failed"
+	deleteOutcomeUnattempted  = "unattempted"
+	deleteOutcomeUnresolved   = "unresolved"
+	deletePresenceDisabled    = "disabled"
+	deletePresenceAbsent      = "absent"
+	deletePresencePresent     = "present"
+	canonicalBooleanTrue      = "true"
+	deleteRequestFullSuccess  = "full_success"
+	deleteRequestPartial      = "partial"
 )
 
 var deleteNodeSourcePattern = regexp.MustCompile(`^(delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification)\.node-[0-9]{3}\.csv$`)

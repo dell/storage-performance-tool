@@ -15,7 +15,7 @@ import (
 const deleteTotalsSchemaVersion = "1"
 
 var deleteTotalsColumns = []string{
-	"schema_version", "request_unit", "object_unit", "batch_unit", "mode",
+	deleteColumnSchemaVersion, "request_unit", "object_unit", "batch_unit", "mode",
 	"configured_batch_size", "selection_order", "requests_attempted",
 	"requests_full_success", "requests_partial", "requests_failed",
 	"requests_unresolved", "objects_selected", "objects_attempted",
@@ -50,7 +50,7 @@ func parseDeleteTotalsV1(path string) (*deletemetrics.Metrics, error) {
 		return nil, fmt.Errorf("DELETE totals v1 must contain exactly one aggregate row")
 	}
 	value := func(name string) string { return valueAt(record, indexes, name) }
-	if value("schema_version") != deleteTotalsSchemaVersion ||
+	if value(deleteColumnSchemaVersion) != deleteTotalsSchemaVersion ||
 		value("request_unit") != deletemetrics.RequestUnit ||
 		value("object_unit") != deletemetrics.ObjectUnit ||
 		value("batch_unit") != deletemetrics.RequestUnit {
