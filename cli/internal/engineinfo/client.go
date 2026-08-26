@@ -47,6 +47,7 @@ type CollectionResult struct {
 	Build                 *BuildInformation
 	Complete              bool
 	Reason                string
+	Attempts              int
 }
 
 // Client fetches Engine Build Information with bounded I/O and retries.
@@ -114,13 +115,18 @@ func (c *Client) Fetch(ctx context.Context, baseURL string) (CollectionResult, e
 	for attempt := 1; attempt <= c.requestAttempts; attempt++ {
 		result, retry, err := c.fetchOnce(ctx, endpoint)
 		if err == nil || !retry {
+			result.Attempts = attempt
 			return result, err
 		}
 		if ctx.Err() != nil {
-			return canceled(ctx.Err())
+			result, cancelErr := canceled(ctx.Err())
+			result.Attempts = attempt
+			return result, cancelErr
 		}
 		if attempt == c.requestAttempts {
-			return failed(fmt.Sprintf("engine version request failed after %d attempts", c.requestAttempts))
+			result, fetchErr := failed(fmt.Sprintf("engine version request failed after %d attempts", c.requestAttempts))
+			result.Attempts = attempt
+			return result, fetchErr
 		}
 		timer := time.NewTimer(c.retryDelay)
 		select {
@@ -131,11 +137,15 @@ func (c *Client) Fetch(ctx context.Context, baseURL string) (CollectionResult, e
 				default:
 				}
 			}
-			return canceled(ctx.Err())
+			result, cancelErr := canceled(ctx.Err())
+			result.Attempts = attempt
+			return result, cancelErr
 		case <-timer.C:
 		}
 	}
-	return failed("engine version request failed")
+	result, err := failed("engine version request failed")
+	result.Attempts = c.requestAttempts
+	return result, err
 }
 
 func (c *Client) fetchOnce(ctx context.Context, endpoint string) (CollectionResult, bool, error) {
