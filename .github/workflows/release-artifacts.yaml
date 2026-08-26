@@ -346,7 +346,13 @@ jobs:
 
       - name: Build bundle distribution
         working-directory: engine
-        run: ./gradlew :bundle:distZip --no-daemon --stacktrace
+        env:
+          SPT_BUILD_RELEASE: 'true'
+          SPT_BUILD_REVISION: ${{ github.sha }}
+          SPT_BUILD_SOURCE_DIRTY: 'false'
+        run: |
+          export SPT_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          ./gradlew :bundle:distZip --no-daemon --stacktrace
 
       - name: Stage bundle artifact
         run: |
@@ -438,7 +444,13 @@ jobs:
 
       - name: Build Engine distribution
         working-directory: engine
-        run: ./gradlew :bundle:assembleDist --no-daemon
+        env:
+          SPT_BUILD_RELEASE: 'true'
+          SPT_BUILD_REVISION: ${{ github.sha }}
+          SPT_BUILD_SOURCE_DIRTY: 'false'
+        run: |
+          export SPT_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          ./gradlew :bundle:assembleDist --no-daemon
 
       - name: Verify version alignment
         shell: bash

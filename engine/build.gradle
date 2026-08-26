@@ -4,12 +4,33 @@ plugins {
     alias(libs.plugins.versions)
 }
 
+import com.dell.spt.gradle.EngineBuildMetadata
+import com.dell.spt.gradle.GitCommandProbe
+import java.time.Clock
+
 def sptVersion = file('../VERSION').text.trim()
 def sptReleaseVersion = sptVersion.tokenize('-').first()
+def engineBuildPropertyNames = [
+    'sptBuildRevision',
+    'sptBuildTime',
+    'sptBuildRelease',
+    'sptBuildSourceDirty',
+]
+def engineBuildProperties = engineBuildPropertyNames.collectEntries { propertyName ->
+    def propertyValue = findProperty(propertyName)
+    propertyValue == null ? [:] : [(propertyName): propertyValue.toString()]
+}
+def engineBuildMetadata = EngineBuildMetadata.resolve(
+    sptVersion,
+    engineBuildProperties,
+    System.getenv(),
+    new GitCommandProbe(file('..')),
+    Clock.systemUTC())
 
 ext {
     SPT_VERSION = sptVersion
     SPT_RELEASE_VERSION = sptReleaseVersion
+    SPT_BUILD_METADATA = engineBuildMetadata
 }
 
 allprojects {

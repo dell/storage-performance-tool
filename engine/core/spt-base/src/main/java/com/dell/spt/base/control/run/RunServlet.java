@@ -8,6 +8,7 @@ import static org.eclipse.jetty.http.MimeTypes.Type.TEXT_JSON;
 
 import com.dell.spt.base.concurrent.SingleTaskExecutor;
 import com.dell.spt.base.concurrent.SingleTaskExecutorImpl;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
@@ -346,11 +347,13 @@ public class RunServlet extends HttpServlet {
 					throws IOException, NoSuchMethodException, InvalidValuePathException,
 					InvalidValueTypeException {
 		final Config configResult;
+		boolean runVersionOverrideAttempted = false;
 		if (defaultsPart == null) {
 			// NOTE: If custom config hasn't been specified in POST request, set the default one
 			configResult = new BasicConfig(aggregatedConfigWithArgs);
 		} else {
 			final var configIncoming = configFromPart(defaultsPart, resp, aggregatedConfigWithArgs.schema());
+			runVersionOverrideAttempted = configIncoming.val("run-version") != null;
 			// the load step id was set manually if it is set to some non-null/non-empty value in the incoming config
 			try {
 				final var loadStepIdIncoming = configIncoming.stringVal("load-step-id");
@@ -364,6 +367,7 @@ public class RunServlet extends HttpServlet {
 							aggregatedConfigWithArgs.pathSep(),
 							Arrays.asList(aggregatedConfigWithArgs, configIncoming));
 		}
+		EngineBuildInfoProvider.global().projectVersion(configResult, runVersionOverrideAttempted);
 		return configResult;
 	}
 

@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.concurrent.SingleTaskExecutor;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.config.TestConfigBuilder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
@@ -17,11 +19,14 @@ import org.mockito.MockitoAnnotations;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import javax.servlet.http.Part;
 
 /**
  * Test for RunServlet focusing on:
@@ -57,6 +62,26 @@ class RunServletTest {
 		verify(mockScenarioExecutor, times(1)).stop(mockRun);
 		verify(mockResponse, times(1)).setStatus(HttpServletResponse.SC_OK);
 		verify(mockResponse, never()).setStatus(HttpServletResponse.SC_NOT_FOUND);
+	}
+
+	@Test
+	void incomingRunVersionOverrideCannotRedefineEngineIdentity() throws Exception {
+		final Part defaultsPart = mock(Part.class);
+		when(defaultsPart.getInputStream()).thenReturn(new ByteArrayInputStream(
+						"run:\n  version: user-value\n".getBytes(StandardCharsets.UTF_8)));
+		when(defaultsPart.getContentType()).thenReturn("application/yaml");
+
+		final var merged = RunServlet.mergeIncomingWithLocalConfig(
+						defaultsPart, mockResponse, TestConfigBuilder.config());
+
+		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
+	}
+
+	@Test
+	void localDefaultsAreProjectedAfterTheFinalMerge() throws Exception {
+		final var merged = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, TestConfigBuilder.config());
+
+		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
 	}
 
 	@Test
