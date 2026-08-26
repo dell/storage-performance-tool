@@ -6,6 +6,7 @@ plugins {
 
 def sptVersion = rootProject.ext.SPT_VERSION
 def sptReleaseVersion = rootProject.ext.SPT_RELEASE_VERSION
+def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
 
 description = "Spt Bundle - Distribution assembly for all components"
 group = "io.github.dell.spt"
@@ -322,10 +323,115 @@ tasks.register('verifyDirectJarScenarioConfigs') {
 	}
 }
 
+tasks.register('verifyEngineBuildInfoCanary') {
+	group = 'verification'
+	description = 'Verifies packaged build information through --version and a direct mock workload'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	inputs.properties(engineBuildMetadata.resourceValues())
+	def canaryRootProvider = layout.buildDirectory.dir('engine-build-info-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def jarFile = file("${distDir}/${sptJar}")
+		def expectedResource = engineBuildMetadata.resourceValues()
+
+		def versionExecution = providers.exec {
+			workingDir distDir
+			commandLine javaExecutable, '-jar', jarFile.absolutePath, '--version'
+			ignoreExitValue = true
+		}
+		def versionResult = versionExecution.result.get()
+		def versionOutput = versionExecution.standardOutput.asText.get() + versionExecution.standardError.asText.get()
+		def expectedVersionLines = [
+			"Engine build schema: ${expectedResource.schema_version}",
+			"Engine product: ${expectedResource.product}",
+			"Engine version: ${expectedResource.version}",
+			"Engine revision: ${expectedResource.revision}",
+			"Engine build time: ${expectedResource.build_time}",
+			"Engine development: ${expectedResource.development}",
+			"Engine source dirty: ${expectedResource.source_dirty}",
+			'Java version: ',
+			'Available extensions:',
+		]
+		if (versionResult.exitValue != 0 || !expectedVersionLines.every { versionOutput.contains(it) }) {
+			throw new GradleException(
+				"Packaged --version build-information canary failed (exit ${versionResult.exitValue}):\n${versionOutput}")
+		}
+
+		def scenarioHome = new File(canaryRoot, 'home')
+		def scenarioLog = new File(canaryRoot, 'output')
+		def scenarioExecution = providers.exec {
+			workingDir distDir
+			commandLine(
+				javaExecutable,
+				'-jar',
+				jarFile.absolutePath,
+				'--storage-driver-type=netty-mock',
+				'--storage-driver-limit-concurrency=1',
+				'--item-data-size=1KiB',
+				'--load-op-limit-count=1',
+				'--load-step-id=engine-build-info-canary')
+			environment(
+				'SPT_HOME': scenarioHome.absolutePath,
+				'SPT_LOG_DIR': scenarioLog.absolutePath,
+			)
+			ignoreExitValue = true
+		}
+		def scenarioResult = scenarioExecution.result.get()
+		def scenarioOutput = scenarioExecution.standardOutput.asText.get() + scenarioExecution.standardError.asText.get()
+		def startupMarker = "Engine build: ${expectedResource.version} (${expectedResource.revision.take(12)}"
+		if (scenarioResult.exitValue != 0
+				|| scenarioOutput.count('Engine build:') != 1
+				|| !scenarioOutput.contains(startupMarker)) {
+			throw new GradleException(
+				"Packaged direct-scenario build-information canary failed (exit ${scenarioResult.exitValue}):\n${scenarioOutput}")
+		}
+
+		def logRoot = new File(scenarioLog, 'log')
+		def stepArtifact = new File(logRoot, 'engine-build-info-canary/engine.build.json')
+		def initializationArtifacts = fileTree(logRoot) {
+			include 'none-*/engine.build.json'
+		}.files
+		if (!stepArtifact.isFile() || initializationArtifacts.size() != 1) {
+			throw new GradleException(
+				"Direct scenario did not produce initialization and workload Engine Build Records under ${logRoot}")
+		}
+
+		def expectedJson = [
+			schema_version: expectedResource.schema_version as Integer,
+			product: expectedResource.product,
+			version: expectedResource.version,
+			revision: expectedResource.revision,
+			build_time: expectedResource.build_time,
+			development: expectedResource.development.toBoolean(),
+			source_dirty: expectedResource.source_dirty == 'unknown'
+				? null
+				: expectedResource.source_dirty.toBoolean(),
+		]
+		def parser = new groovy.json.JsonSlurper()
+		def records = [stepArtifact, initializationArtifacts.iterator().next()].collect {
+			parser.parseText(it.getText('UTF-8'))
+		}
+		if (!records.every { it == expectedJson } || records[0] != records[1]) {
+			throw new GradleException("Packaged direct-scenario Engine Build Records differ from generated metadata")
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
-	dependsOn tasks.named('verifyDirectJarScenarioConfigs')
+	dependsOn tasks.named('verifyDirectJarScenarioConfigs'), tasks.named('verifyEngineBuildInfoCanary')
 }
 
 check.dependsOn tasks.named('test')

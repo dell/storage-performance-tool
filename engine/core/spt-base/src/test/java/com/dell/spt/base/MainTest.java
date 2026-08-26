@@ -5,8 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.akurilov.confuse.impl.BasicConfig;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
 import com.dell.spt.base.config.TestConfigBuilder;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -145,6 +149,28 @@ class MainTest {
 		}, config, "initial-step");
 
 		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), config.stringVal("run-version"));
+	}
+
+	@Test
+	void versionCommandRendersEveryFieldFromTheSharedSnapshotAndKeepsRuntimeDetails() throws Exception {
+		final var originalOut = System.out;
+		final var captured = new ByteArrayOutputStream();
+		try {
+			System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
+			final Method method = Main.class.getDeclaredMethod("handleVersionRequest");
+			method.setAccessible(true);
+			method.invoke(null);
+		} finally {
+			System.setOut(originalOut);
+		}
+
+		final String output = captured.toString(StandardCharsets.UTF_8);
+		EngineBuildInfoRenderer.versionDetails(EngineBuildInfoProvider.global().snapshot())
+						.forEach(detail -> assertTrue(output.contains(detail), output));
+		assertTrue(output.contains("Java version: "), output);
+		assertTrue(output.contains("Java home: "), output);
+		assertTrue(output.contains("OS: "), output);
+		assertTrue(output.contains("extensions"), output);
 	}
 
 	private static BasicConfig runIdConfig(final long runId) {
