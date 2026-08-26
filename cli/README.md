@@ -603,7 +603,7 @@ Multi-endpoint options:
 - `--headless`: Force headless (non-interactive) mode even with TTY
 - `--trace-file`: Save all output to specified trace file
 - `--trace-append`: Append to existing trace file (default: overwrite)
-- `--verbose`: Show detailed Docker API calls and debug information
+- `--verbose`: Show detailed Docker API calls, debug information, and textual live metrics in headless output or the TUI messages window
 
 #### `spt replay`
 
@@ -833,11 +833,11 @@ When no TTY is available (CI/CD environments, Docker containers, etc.), spt auto
 
 - **Auto-Detection**: Automatically detects when TTY is not available
 - **Structured Output**: Timestamped, categorized console output
-- **Real-time Metrics**: Parsed performance data displayed in human-readable format
+- **Real-time Metrics**: Parsed performance data is always collected; textual updates are shown with `--verbose`
 - **Trace Files**: Complete output capture for post-analysis
 - **Signal Handling**: Graceful shutdown on interruption (Ctrl+C)
 
-**Output Format:**
+**Verbose Output Format:**
 
 ```
 [2025-08-06 14:23:45] [INIT] Starting spt in headless mode
@@ -883,7 +883,7 @@ When `--auto-results` is enabled and `--trace-file` is not set, spt now auto-cre
 
 **Headless Mode Debugging:**
 - **Trace Files**: Complete execution capture with `--trace-file`
-- **Verbose Mode**: Docker API details with `--verbose`
+- **Verbose Mode**: Docker API details and textual live metrics with `--verbose`
 - **Structured Output**: Categorized real-time output
 
 **Examples:**

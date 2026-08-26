@@ -841,6 +841,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "remote-headless" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach remote headless options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -852,6 +855,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "remote-tui" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach remote TUI options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -863,6 +869,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "local-headless" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach local headless options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -872,6 +881,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
 				if test.wantPath == "local-tui" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach local TUI options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -884,7 +896,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			cmd.SetErr(io.Discard)
 			args := []string{
 				"--from", server.URL, "--endpoints", "http://s3.example",
-				"--test-hosts", test.hosts, "--results-dir", t.TempDir(),
+				"--test-hosts", test.hosts, "--results-dir", t.TempDir(), "--verbose",
 			}
 			if test.headless {
 				args = append(args, "--headless")

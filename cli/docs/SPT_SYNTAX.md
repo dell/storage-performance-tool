@@ -655,13 +655,13 @@ Set any operation weight to `0` to exclude it. For example, `--get-distrib 60 --
 
 By default, `spt run` launches an interactive TUI. Use `--headless` for CI or unattended runs.
 
-Live metrics include throughput, latency, duration, and progress. Time to First Byte (TTFB) is reported for READ and LIST samples when the engine records first response body bytes; headless text/JSON output omits the TTFB field when it is unavailable.
+Live metrics include throughput, latency, duration, and progress. TUI charts continue to update in normal mode; textual live-metric messages in headless output and the TUI messages window require `--verbose`. Time to First Byte (TTFB) is reported for READ and LIST samples when the engine records first response body bytes; headless text/JSON output omits the TTFB field when it is unavailable.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--headless` | `false` | Force headless (non-interactive) mode |
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
-| `--verbose` | `false` | Show detailed Docker API calls and debug info (headless mode) |
+| `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to existing trace file instead of overwriting |
 
@@ -741,7 +741,7 @@ environment variables.
 | `--api-port` | `9999` | SPT engine API port |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
-| `--verbose` | `false` | Show detailed Docker API calls and debug information |
+| `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
 | `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 

@@ -840,7 +840,7 @@ func TestMultiHostHeadlessRunnerEmitsAggregateAndPerNodeDeleteMetrics(t *testing
 	traceFile := filepath.Join(tmpDir, "multi-delete-metrics.log")
 	runner, err := NewMultiHostHeadlessRunner(
 		tui.NewMultiHostOrchestrator(nil, 1),
-		HeadlessOptions{TraceFile: traceFile})
+		HeadlessOptions{TraceFile: traceFile, Verbose: true})
 	if err != nil {
 		t.Fatalf("new multi-host runner: %v", err)
 	}
@@ -877,6 +877,94 @@ func TestMultiHostHeadlessRunnerEmitsAggregateAndPerNodeDeleteMetrics(t *testing
 		!strings.Contains(trace, "type=DELETE success=0 failed=0") ||
 		strings.Contains(trace, "object_size=") {
 		t.Fatalf("multi-host DELETE views missing: %q", trace)
+	}
+}
+
+func TestHeadlessRunnersGateHumanMetricsByVerbose(t *testing.T) {
+	metric := &tui.PerformanceMetric{
+		MetricsSchema: 2,
+		OpType:        "CREATE",
+		OpsPerSec:     42,
+		SuccessCount:  100,
+	}
+
+	for _, test := range []struct {
+		name    string
+		verbose bool
+		want    bool
+	}{
+		{name: "default output is quiet", verbose: false, want: false},
+		{name: "verbose output includes metrics", verbose: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Run("single host", func(t *testing.T) {
+				traceFile := filepath.Join(t.TempDir(), "single.log")
+				runner, err := NewHeadlessRunner(
+					&tui.MockDockerManager{},
+					HeadlessOptions{TraceFile: traceFile, Verbose: test.verbose},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer runner.Close()
+
+				runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{Aggregated: metric})
+				content, err := os.ReadFile(traceFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := strings.Contains(string(content), "[METRICS]"); got != test.want {
+					t.Fatalf("metrics visible = %t, want %t; trace=%q", got, test.want, content)
+				}
+			})
+
+			t.Run("multi host", func(t *testing.T) {
+				traceFile := filepath.Join(t.TempDir(), "multi.log")
+				runner, err := NewMultiHostHeadlessRunner(
+					tui.NewMultiHostOrchestrator(nil, 1),
+					HeadlessOptions{TraceFile: traceFile, Verbose: test.verbose},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer runner.Close()
+
+				runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+					Aggregated: metric,
+					PerNode:    map[string]*tui.PerformanceMetric{"worker": metric},
+				})
+				content, err := os.ReadFile(traceFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := strings.Contains(string(content), "[METRICS]"); got != test.want {
+					t.Fatalf("metrics visible = %t, want %t; trace=%q", got, test.want, content)
+				}
+			})
+		})
+	}
+}
+
+func TestHeadlessMetricsOnlyModeKeepsMetricsWithoutVerbose(t *testing.T) {
+	traceFile := filepath.Join(t.TempDir(), "metrics-only.log")
+	runner, err := NewMultiHostHeadlessRunner(
+		tui.NewMultiHostOrchestrator(nil, 1),
+		HeadlessOptions{TraceFile: traceFile, MetricsOnly: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+
+	runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+		Aggregated: &tui.PerformanceMetric{OpType: "CREATE", OpsPerSec: 42},
+	})
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "[METRICS]") {
+		t.Fatalf("metrics-only output omitted metrics: %q", content)
 	}
 }
 

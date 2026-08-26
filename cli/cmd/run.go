@@ -2053,9 +2053,11 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
+			verbose, _ := cmd.Flags().GetBool("verbose")
 			err = startMultiHostTUIRunFunc(
 				orchestrator, sptImage, scenarioPath, params, tui.RunOptions{
 					Context:              runContext,
+					Verbose:              verbose,
 					AutoTerminateSeconds: autoTerminate,
 					SetSummarySink:       setSummarySink,
 					TracePath:            traceOpts.Path,
@@ -2104,9 +2106,11 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
+		verbose, _ := cmd.Flags().GetBool("verbose")
 		err = startLocalTUIRunFunc(
 			sptImage, scenarioPath, params, tui.RunOptions{
 				Context:              runContext,
+				Verbose:              verbose,
 				APIPort:              apiPort,
 				NetworkMode:          networkMode,
 				ResultsRoot:          plannedResultsRoot,
@@ -2277,7 +2281,7 @@ Omit to disable checksums. (env: SPT_CHECKSUM)`)
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	runCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	runCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")
-	runCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls and debug information")
+	runCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls, debug information, and textual live metrics")
 }
 
 // buildScenarioParams builds scenario parameters from command flags
