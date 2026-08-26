@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
@@ -57,6 +58,8 @@ type runMetadata struct {
 	MultiHost               *runMultiHostMetadata                                   `json:"multiHost,omitempty"`
 	RuntimeIdentity         *tui.DistributedRuntimeIdentityEvidence                 `json:"runtimeIdentity,omitempty"`
 	RuntimeIdentityError    string                                                  `json:"runtimeIdentityError,omitempty"`
+	EngineInfoFile          string                                                  `json:"engineInfoFile,omitempty"`
+	EngineConsistency       engineinfo.ConsistencyStatus                            `json:"engineConsistency,omitempty"`
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
 	Lifecycle               *runLifecycleMetadata                                   `json:"lifecycle,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
@@ -67,6 +70,8 @@ type runMetadata struct {
 	preparedScenarioJS      []byte                                                  `json:"-"`
 	preparedDefaultsYAML    []byte                                                  `json:"-"`
 	engineIdentity          *engineinfo.GateOutcome                                 `json:"-"`
+	engineIdentityError     string                                                  `json:"-"`
+	runID                   int64                                                   `json:"-"`
 }
 
 type runLifecycleMetadata struct {
@@ -109,7 +114,10 @@ type resultsOptionsSnapshot struct {
 }
 
 type runCLIInfo struct {
-	Command []string `json:"command"`
+	Version   string   `json:"version"`
+	Revision  string   `json:"revision"`
+	BuildTime string   `json:"buildTime"`
+	Command   []string `json:"command"`
 	// ChangedFlags holds only flags the user explicitly passed on the
 	// command line. EnvAppliedFlags holds flags applyEnvDefaultsToRunFlags
 	// injected from .env/OS env because the user did not — pflag's
@@ -169,6 +177,9 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	expected := append([]string(nil), in.ExpectedStepIDs...)
 
 	cliInfo := runCLIInfo{
+		Version:         buildinfo.Version,
+		Revision:        buildinfo.Commit,
+		BuildTime:       buildinfo.BuildDate,
 		Command:         sanitizeCommandArgs(os.Args),
 		ChangedFlags:    captureChangedFlags(in.Command),
 		EnvAppliedFlags: captureEnvAppliedFlags(in.Command),
@@ -189,6 +200,7 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 		ResultsOptions:       snapshotResultsOptions(in.ResultsOptions),
 		CLI:                  cliInfo,
 		AutoTerminateSeconds: in.AutoTerminateSeconds,
+		runID:                in.Params.RunID,
 	}
 	if in.WorkloadType == scenario.WorkloadTypeDelete {
 		meta.DeleteArtifactsVersion = constants.ResultsDeleteArtifactsVersion
@@ -463,7 +475,10 @@ func writeRunMetadata(meta *runMetadata, root string) error {
 	}
 	meta.GeneratedAt = time.Now().UTC()
 	meta.ResultsRoot = root
+	return persistRunMetadataAndIdentity(meta, root)
+}
 
+func writeRunMetadataFile(meta *runMetadata, root string) error {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal run metadata: %w", err)

@@ -79,7 +79,7 @@ func TestWriteEngineIdentityAbortManifestIsAtomicCompleteAndDeterministic(t *tes
 	outcome := engineinfo.GateOutcome{
 		Decision: engineinfo.GateCollectionFailure,
 		Fleet: engineinfo.FleetResult{
-			Consistency: engineinfo.ConsistencyAssessment{Status: engineinfo.ConsistencyMismatch},
+			Consistency: engineinfo.ConsistencyAssessment{Status: engineinfo.ConsistencyIndeterminate},
 			Builds: []engineinfo.GroupedBuild{{BuildID: "build-1", Information: engineinfo.BuildInformation{
 				SchemaVersion: 1, Product: "spt-engine", Version: "5.14.2",
 				Revision: strings.Repeat("a", 40), BuildTime: "2026-08-26T12:34:56Z",
@@ -97,19 +97,19 @@ func TestWriteEngineIdentityAbortManifestIsAtomicCompleteAndDeterministic(t *tes
 	}
 	t.Cleanup(func() { runEngineIdentityNow = previousNow })
 
-	if err := writeEngineIdentityAbortManifest(root, 1787750472685, outcome); err != nil {
+	if _, err := writeEngineIdentityManifest(root, 1787750472685, outcome, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, constants.EngineInfoManifestName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var manifest engineInfoAbortManifest
+	var manifest engineinfo.Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("decode manifest: %v\n%s", err, data)
 	}
 	if manifest.RunID != 1787750472685 || manifest.GeneratedAt != "2026-08-26T17:21:42Z" ||
-		manifest.Consistency.Status != engineinfo.ConsistencyMismatch || manifest.Consistency.Forced ||
+		manifest.Consistency.Status != engineinfo.ConsistencyIndeterminate || manifest.Consistency.Forced ||
 		!strings.Contains(manifest.Consistency.Reason, "collection failed") {
 		t.Fatalf("manifest identity/decision = %+v", manifest)
 	}
@@ -317,7 +317,7 @@ func TestRunCommandEngineIdentityGatePolicyAndAbortArtifacts(t *testing.T) {
 		wantOutputText string
 	}{
 		{name: "default mismatch rejects", fleet: mismatchFleet, autoResults: true, wantErr: true, wantArtifact: true, wantOutputText: "mismatch rejected"},
-		{name: "force permits only mismatch", fleet: mismatchFleet, force: true, wantSubmit: 1, wantOutputText: "MISMATCH FORCED"},
+		{name: "force permits only mismatch", fleet: mismatchFleet, force: true, autoResults: true, wantSubmit: 1, wantArtifact: true, wantOutputText: "MISMATCH FORCED"},
 		{name: "legacy absence continues", fleet: compatibilityFleet(engineinfo.StatusLegacyEndpointUnavailable), wantSubmit: 1, wantOutputText: "indeterminate"},
 		{name: "future schema continues", fleet: compatibilityFleet(engineinfo.StatusUnsupportedSchema), wantSubmit: 1, wantOutputText: "indeterminate"},
 		{name: "incomplete identity continues", fleet: compatibilityFleet(engineinfo.StatusIncompleteBuildInfo), wantSubmit: 1, wantOutputText: "indeterminate"},
@@ -402,7 +402,7 @@ func TestRunCommandEngineIdentityGatePolicyAndAbortArtifacts(t *testing.T) {
 				if readErr != nil {
 					t.Fatal(readErr)
 				}
-				var manifest engineInfoAbortManifest
+				var manifest engineinfo.Manifest
 				if unmarshalErr := json.Unmarshal(data, &manifest); unmarshalErr != nil {
 					t.Fatal(unmarshalErr)
 				}
@@ -464,19 +464,42 @@ func runGateFleet(
 	collectionStatus engineinfo.CollectionStatus,
 ) engineinfo.FleetResult {
 	dirty := false
+	baseBuild := engineinfo.BuildInformation{
+		SchemaVersion: 1, Product: "spt-engine", Version: "5.14.2",
+		Revision: strings.Repeat("a", 40), BuildTime: "2026-08-26T12:34:56Z",
+		SourceDirty: &dirty,
+	}
 	fleet := engineinfo.FleetResult{
 		Consistency: engineinfo.ConsistencyAssessment{Status: status, Reason: "test fleet assessment"},
 		Participants: []engineinfo.ParticipantResult{
 			{NodeID: "entry.example:9999", Role: engineinfo.RoleEntry, CollectionStatus: engineinfo.StatusCollected, ReportedSchemaVersion: 1, BuildID: "build-1"},
 			{NodeID: "worker.example:9999", Role: engineinfo.RoleWorker, CollectionStatus: collectionStatus},
 		},
-		Builds: []engineinfo.GroupedBuild{{BuildID: "build-1", Information: engineinfo.BuildInformation{
-			SchemaVersion: 1, Product: "spt-engine", Version: "5.14.2",
-			Revision: strings.Repeat("a", 40), BuildTime: "2026-08-26T12:34:56Z",
-			SourceDirty: &dirty,
-		}}},
+		Builds: []engineinfo.GroupedBuild{{BuildID: "build-1", Information: baseBuild}},
 	}
-	if collectionStatus == engineinfo.StatusCollectionFailed {
+	switch collectionStatus {
+	case engineinfo.StatusCollected:
+		fleet.Participants[1].ReportedSchemaVersion = 1
+		fleet.Participants[1].BuildID = "build-1"
+		if status == engineinfo.ConsistencyMismatch {
+			mismatchedBuild := baseBuild
+			mismatchedBuild.Revision = strings.Repeat("b", 40)
+			fleet.Builds = append(fleet.Builds, engineinfo.GroupedBuild{BuildID: "build-2", Information: mismatchedBuild})
+			fleet.Participants[1].BuildID = "build-2"
+		}
+	case engineinfo.StatusIncompleteBuildInfo:
+		incompleteBuild := baseBuild
+		incompleteBuild.Revision = constants.EngineBuildInfoUnknown
+		fleet.Builds = append(fleet.Builds, engineinfo.GroupedBuild{BuildID: "build-2", Information: incompleteBuild})
+		fleet.Participants[1].ReportedSchemaVersion = 1
+		fleet.Participants[1].BuildID = "build-2"
+		fleet.Participants[1].Reason = "engine build comparison fields are incomplete"
+	case engineinfo.StatusLegacyEndpointUnavailable:
+		fleet.Participants[1].Reason = "engine version endpoint is unavailable"
+	case engineinfo.StatusUnsupportedSchema:
+		fleet.Participants[1].ReportedSchemaVersion = 2
+		fleet.Participants[1].Reason = "engine version schema is newer than this CLI supports"
+	case engineinfo.StatusCollectionFailed:
 		fleet.Participants[1].Reason = "engine version collection failed"
 	}
 	return fleet
@@ -518,6 +541,9 @@ func immediateCleanupOnlyMonitor(
 	go func() {
 		<-monitor.armed
 		outcome := autoResultsOutcome{}
+		if metadata != nil {
+			outcome.ArtifactErr = writeRunMetadata(metadata, metadata.ResultsRoot)
+		}
 		outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
 		monitor.done <- outcome
 	}()

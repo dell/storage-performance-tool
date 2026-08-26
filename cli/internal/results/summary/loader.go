@@ -13,6 +13,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"gopkg.in/yaml.v3"
 )
@@ -43,6 +44,8 @@ type RunData struct {
 	MissingExpectedSteps []string
 	ManifestPath         string
 	MetadataPath         string
+	EngineInfo           *engineinfo.Manifest
+	EngineInfoPath       string
 }
 
 // StepData captures per-step artifact availability and metrics totals.
@@ -111,6 +114,33 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		Steps:        make(map[string]*StepData, len(manifest.Steps)),
 		ManifestPath: manifestPath,
 		MetadataPath: metadataPath,
+	}
+	if params.EngineInfoFile != "" {
+		if params.EngineInfoFile != constants.EngineInfoManifestName || filepath.Base(params.EngineInfoFile) != params.EngineInfoFile {
+			return data, fmt.Errorf("engine identity manifest reference %q is invalid", params.EngineInfoFile)
+		}
+		if !manifestListsRunFile(manifest, params.EngineInfoFile) {
+			return data, fmt.Errorf("engine identity manifest is not listed in index.json")
+		}
+		engineInfoPath := filepath.Join(runDir, params.EngineInfoFile)
+		engineIdentity, loadErr := engineinfo.LoadManifest(engineInfoPath)
+		if loadErr != nil {
+			return data, fmt.Errorf("load engine identity manifest: %w", loadErr)
+		}
+		if params.EngineConsistency != engineIdentity.Consistency.Status {
+			return data, fmt.Errorf(
+				"engine identity consistency index %q does not match manifest %q",
+				params.EngineConsistency, engineIdentity.Consistency.Status,
+			)
+		}
+		if params.ScenarioParams.RunID != engineIdentity.RunID {
+			return data, fmt.Errorf(
+				"engine identity manifest run_id %d does not match current run_id %d",
+				engineIdentity.RunID, params.ScenarioParams.RunID,
+			)
+		}
+		data.EngineInfo = engineIdentity
+		data.EngineInfoPath = engineInfoPath
 	}
 	if params.DeleteArtifactsVersion != 0 &&
 		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersionV1 &&
@@ -239,6 +269,15 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		return data, errors.Join(stepErrs...)
 	}
 	return data, nil
+}
+
+func manifestListsRunFile(manifest *results.Manifest, name string) bool {
+	for _, file := range manifest.RunFiles {
+		if file.Name == name && file.Status == fileStatusOK {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Loader) loadManifest(path string) (*results.Manifest, error) {
@@ -405,10 +444,13 @@ type RunParams struct {
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`
+	EngineInfoFile         string                            `json:"engineInfoFile,omitempty"`
+	EngineConsistency      engineinfo.ConsistencyStatus      `json:"engineConsistency,omitempty"`
 }
 
 // ScenarioParams captures key scenario tunables stored with the run.
 type ScenarioParams struct {
+	RunID          int64    `json:"RunID"`
 	WorkloadType   string   `json:"WorkloadType"`
 	Endpoint       string   `json:"Endpoint"`
 	Endpoints      []string `json:"Endpoints"`
@@ -440,6 +482,9 @@ type RunHost struct {
 
 // RunCLI captures the command vector and sanitized flag values.
 type RunCLI struct {
+	Version      string            `json:"version,omitempty"`
+	Revision     string            `json:"revision,omitempty"`
+	BuildTime    string            `json:"buildTime,omitempty"`
 	Command      []string          `json:"command"`
 	ChangedFlags map[string]string `json:"changedFlags"`
 }

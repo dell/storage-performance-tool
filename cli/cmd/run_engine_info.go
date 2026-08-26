@@ -2,16 +2,11 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -19,7 +14,6 @@ import (
 
 var (
 	evaluateRunEngineIdentityGate = engineinfo.EvaluateGate
-	writeRunEngineIdentityAbort   = writeEngineIdentityAbortManifest
 	runEngineIdentityNow          = time.Now
 	localRunEnginePlan            = localRunEngineParticipants
 	distributedRunEnginePlan      = distributedRunEngineParticipants
@@ -53,7 +47,7 @@ func newRunEngineIdentityPreSubmissionCheck(
 			return lines, nil
 		}
 		if options.autoResults {
-			persistErr := writeRunEngineIdentityAbort(options.resultsRoot, options.runID, outcome)
+			persistErr := persistRejectedEngineIdentity(options.metadata, options.resultsRoot, options.runID, outcome, gateErr)
 			if persistErr != nil {
 				gateErr = errors.Join(gateErr, fmt.Errorf("preserve engine identity rejection evidence: %w", persistErr))
 			}
@@ -166,100 +160,4 @@ func engineParticipantsFromReadyHosts(
 		descriptors = append(descriptors, descriptor)
 	}
 	return descriptors, nil
-}
-
-type engineInfoAbortManifest struct {
-	SchemaVersion int                             `json:"schema_version"`
-	RunID         int64                           `json:"run_id"`
-	GeneratedAt   string                          `json:"generated_at"`
-	Consistency   engineInfoManifestConsistency   `json:"consistency"`
-	Builds        []engineInfoManifestBuild       `json:"builds"`
-	Participants  []engineInfoManifestParticipant `json:"participants"`
-}
-
-type engineInfoManifestConsistency struct {
-	Status engineinfo.ConsistencyStatus `json:"status"`
-	Forced bool                         `json:"forced"`
-	Reason string                       `json:"reason"`
-}
-
-type engineInfoManifestBuild struct {
-	BuildID     string `json:"build_id"`
-	Product     string `json:"product"`
-	Version     string `json:"version"`
-	Revision    string `json:"revision"`
-	BuildTime   string `json:"build_time"`
-	Development bool   `json:"development"`
-	SourceDirty *bool  `json:"source_dirty"`
-}
-
-type engineInfoManifestParticipant struct {
-	NodeID                string                      `json:"node_id"`
-	Role                  engineinfo.ParticipantRole  `json:"role"`
-	CollectionStatus      engineinfo.CollectionStatus `json:"collection_status"`
-	ReportedSchemaVersion int                         `json:"reported_schema_version,omitempty"`
-	BuildID               string                      `json:"build_id,omitempty"`
-	Reason                string                      `json:"reason,omitempty"`
-}
-
-func writeEngineIdentityAbortManifest(
-	root string,
-	runID int64,
-	outcome engineinfo.GateOutcome,
-) error {
-	if strings.TrimSpace(root) == "" {
-		return fmt.Errorf("results root is required")
-	}
-	if err := os.MkdirAll(root, 0o750); err != nil {
-		return fmt.Errorf("create results root: %w", err)
-	}
-	reason := outcome.Fleet.Consistency.Reason
-	switch outcome.Decision {
-	case engineinfo.GateRejectedMismatch:
-		reason = "engine build identity mismatch rejected before scenario submission"
-	case engineinfo.GateCollectionFailure:
-		reason = "engine identity collection failed before scenario submission"
-	}
-	manifest := engineInfoAbortManifest{
-		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
-		RunID:         runID,
-		GeneratedAt:   runEngineIdentityNow().UTC().Format(time.RFC3339),
-		Consistency: engineInfoManifestConsistency{
-			Status: outcome.Fleet.Consistency.Status,
-			Forced: outcome.Fleet.Consistency.Forced,
-			Reason: reason,
-		},
-		Builds:       make([]engineInfoManifestBuild, 0, len(outcome.Fleet.Builds)),
-		Participants: make([]engineInfoManifestParticipant, 0, len(outcome.Fleet.Participants)),
-	}
-	for _, build := range outcome.Fleet.Builds {
-		manifest.Builds = append(manifest.Builds, engineInfoManifestBuild{
-			BuildID: build.BuildID, Product: build.Information.Product,
-			Version: build.Information.Version, Revision: build.Information.Revision,
-			BuildTime: build.Information.BuildTime, Development: build.Information.Development,
-			SourceDirty: build.Information.SourceDirty,
-		})
-	}
-	for _, participant := range outcome.Fleet.Participants {
-		manifest.Participants = append(manifest.Participants, engineInfoManifestParticipant{
-			NodeID: participant.NodeID, Role: participant.Role,
-			CollectionStatus:      participant.CollectionStatus,
-			ReportedSchemaVersion: participant.ReportedSchemaVersion,
-			BuildID:               participant.BuildID, Reason: participant.Reason,
-		})
-	}
-	// The collector already returns deterministic order; sorting here protects
-	// partial evidence supplied by a future alternative collector.
-	sort.SliceStable(manifest.Participants, func(i, j int) bool {
-		if manifest.Participants[i].Role != manifest.Participants[j].Role {
-			return manifest.Participants[i].Role == engineinfo.RoleEntry
-		}
-		return manifest.Participants[i].NodeID < manifest.Participants[j].NodeID
-	})
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode engine identity manifest: %w", err)
-	}
-	data = append(data, '\n')
-	return writeAtomic(filepath.Join(root, constants.EngineInfoManifestName), data, 0o644)
 }
