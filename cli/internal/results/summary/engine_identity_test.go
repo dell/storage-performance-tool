@@ -126,6 +126,32 @@ func TestStoredSummaryToleratesLegacyResultsWithoutBuildInformation(t *testing.T
 			t.Errorf("legacy report missing %q:\n%s", want, report)
 		}
 	}
+	if strings.Contains(report, "Engine Build Information unavailable") {
+		t.Fatalf("pre-identity result gained a new warning:\n%s", report)
+	}
+}
+
+func TestStoredSummaryWarnsWhenEngineBuildInformationIsUnusable(t *testing.T) {
+	data := identityRunData(nil)
+	data.EngineInfoUnavailableReason = "manifest file is missing"
+	summary := mustAggregate(t, data)
+	for name, report := range map[string]string{
+		"full": NewRenderer(RenderOptions{MaxWidth: 72}).FullReport(summary),
+		"tui":  NewRenderer(RenderOptions{MaxWidth: 72}).CompactSnippet(summary),
+	} {
+		normalized := strings.Join(strings.Fields(report), " ")
+		for _, want := range []string{
+			"unavailable (engine build information could not be verified)",
+			"WARNING: Engine Build Information unavailable: manifest file is missing",
+		} {
+			if !strings.Contains(normalized, want) {
+				t.Errorf("%s report missing %q:\n%s", name, want, report)
+			}
+		}
+		if strings.Contains(report, "legacy result; engine identity was not recorded") {
+			t.Errorf("%s report mislabeled unusable identity as legacy:\n%s", name, report)
+		}
+	}
 }
 
 func TestCompactStoredSummaryKeepsEnvironmentIdentityOnlyAndWidthBounded(t *testing.T) {

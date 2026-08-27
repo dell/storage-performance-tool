@@ -245,6 +245,9 @@ func (r *Renderer) renderEnvironment(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Environment\n")
 	r.writeBullet(b, "CLI", formatCLIIdentity(env.CLIIdentity))
 	r.writeBullet(b, "Engine", formatEngineIdentity(env.EngineIdentity))
+	if warning := formatEngineIdentityUnavailableWarning(env.EngineIdentity); warning != "" {
+		fmt.Fprintln(b, "  "+warning)
+	}
 	if env.EngineIdentity.Forced && env.EngineIdentity.Status == engineinfo.ConsistencyMismatch {
 		fmt.Fprintln(b, "  WARNING: PERFORMANCE RESULTS COMBINE DIFFERENT ENGINE BUILDS")
 		for _, build := range env.EngineIdentity.Builds {
@@ -277,6 +280,9 @@ func (r *Renderer) renderCompactIdentityEnvironment(
 	fmt.Fprintln(b, "Environment")
 	r.writeWrappedBullet(b, "CLI", formatCLIIdentity(env.CLIIdentity), width)
 	r.writeWrappedBullet(b, "Engine", formatEngineIdentity(env.EngineIdentity), width)
+	if warning := formatEngineIdentityUnavailableWarning(env.EngineIdentity); warning != "" {
+		r.writeWrappedLine(b, "  "+warning, width)
+	}
 	if env.EngineIdentity.Forced && env.EngineIdentity.Status == engineinfo.ConsistencyMismatch {
 		r.writeWrappedLine(b, "  WARNING: PERFORMANCE RESULTS COMBINE DIFFERENT ENGINE BUILDS", width)
 		for _, build := range env.EngineIdentity.Builds {
@@ -344,6 +350,9 @@ func formatCLIIdentity(identity CLIIdentitySummary) string {
 
 func formatEngineIdentity(identity EngineIdentitySummary) string {
 	if !identity.Available {
+		if identity.UnavailableReason != "" {
+			return "unavailable (engine build information could not be verified)"
+		}
 		return "unavailable (legacy result; engine identity was not recorded)"
 	}
 	participants := fmt.Sprintf("%d %s", identity.ParticipantCount,
@@ -362,6 +371,13 @@ func formatEngineIdentity(identity EngineIdentitySummary) string {
 		return fmt.Sprintf("unavailable, %s, consistency indeterminate", participants)
 	}
 	return fmt.Sprintf("%s, %s", identity.Status, participants)
+}
+
+func formatEngineIdentityUnavailableWarning(identity EngineIdentitySummary) string {
+	if identity.Available || strings.TrimSpace(identity.UnavailableReason) == "" {
+		return ""
+	}
+	return "WARNING: Engine Build Information unavailable: " + strings.TrimSpace(identity.UnavailableReason)
 }
 
 func formatEngineBuildGroup(build EngineBuildGroupSummary) string {

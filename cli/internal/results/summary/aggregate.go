@@ -64,12 +64,13 @@ type CLIIdentitySummary struct {
 
 // EngineIdentitySummary is the compact human projection of engine.info.json.
 type EngineIdentitySummary struct {
-	Available        bool
-	Status           engineinfo.ConsistencyStatus
-	Forced           bool
-	ParticipantCount int
-	Builds           []EngineBuildGroupSummary
-	Affected         []EngineParticipantIssue
+	Available         bool
+	UnavailableReason string
+	Status            engineinfo.ConsistencyStatus
+	Forced            bool
+	ParticipantCount  int
+	Builds            []EngineBuildGroupSummary
+	Affected          []EngineParticipantIssue
 }
 
 // EngineBuildGroupSummary reports one version/revision and its participant count.
@@ -283,13 +284,13 @@ func buildEnvironmentSummary(data *RunData) EnvironmentSummary {
 		hosts = append(hosts, HostSummary(h))
 	}
 	env.Hosts = hosts
-	env.EngineIdentity = buildEngineIdentitySummary(data.EngineInfo)
+	env.EngineIdentity = buildEngineIdentitySummary(data.EngineInfo, data.EngineInfoUnavailableReason)
 	return env
 }
 
-func buildEngineIdentitySummary(manifest *engineinfo.Manifest) EngineIdentitySummary {
+func buildEngineIdentitySummary(manifest *engineinfo.Manifest, unavailableReason string) EngineIdentitySummary {
 	if manifest == nil {
-		return EngineIdentitySummary{}
+		return EngineIdentitySummary{UnavailableReason: strings.TrimSpace(unavailableReason)}
 	}
 	identity := EngineIdentitySummary{
 		Available:        true,

@@ -187,6 +187,9 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 		haveAnyTotals = haveAnyTotals || hasSuccessfulGenericTotals(sm)
 	}
 
+	if err := f.preserveIndependentManifestFields(man); err != nil {
+		return nil, err
+	}
 	// Write manifest to disk
 	if err := f.writeManifest(man); err != nil {
 		return nil, err
@@ -196,6 +199,30 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 		return man, fmt.Errorf("failed to retrieve required metrics.total.csv for all steps")
 	}
 	return man, nil
+}
+
+func (f *Fetcher) preserveIndependentManifestFields(man *Manifest) error {
+	// Step collection owns only BaseURL, OutputDir, GeneratedAt, and Steps. Start
+	// from the existing manifest so every independently owned field survives the
+	// step-owned rewrite, including fields added to Manifest in the future.
+	path := filepath.Join(f.OutputDir, constants.ResultsManifestFileName)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is under the selected results directory
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read existing manifest: %w", err)
+	}
+	var existing Manifest
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return fmt.Errorf("decode existing manifest: %w", err)
+	}
+	existing.BaseURL = man.BaseURL
+	existing.OutputDir = man.OutputDir
+	existing.GeneratedAt = man.GeneratedAt
+	existing.Steps = man.Steps
+	*man = existing
+	return nil
 }
 
 func hasSuccessfulGenericTotals(sm StepManifest) bool {
