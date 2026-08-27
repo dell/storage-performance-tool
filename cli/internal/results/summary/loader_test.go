@@ -61,25 +61,131 @@ func TestLoaderLoadsReferencedEngineIdentityAndCLIIdentity(t *testing.T) {
 	}
 }
 
-func TestLoaderRejectsEngineIdentityFromDifferentRun(t *testing.T) {
-	runDir := filepath.Join(t.TempDir(), "identity-run")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
-		t.Fatal(err)
+func TestLoaderQuarantinesUnusableEngineBuildInformation(t *testing.T) {
+	const invalidSchema = `{"schema_version":2,"run_id":17,"generated_at":"2026-08-26T13:21:42Z",` +
+		`"consistency":{"status":"indeterminate","forced":false,"reason":"legacy engine"},"builds":[],` +
+		`"participants":[{"node_id":"127.0.0.1:9999","role":"standalone",` +
+		`"collection_status":"legacy_endpoint_unavailable","reason":"endpoint unavailable"}]}`
+	tests := []struct {
+		name       string
+		wantReason string
+		setup      func(t *testing.T, parent, runDir string, index *results.Manifest, params *RunParams)
+	}{
+		{
+			name: "missing reference", wantReason: "manifest reference is missing",
+			setup: func(_ *testing.T, _, _ string, _ *results.Manifest, params *RunParams) {
+				params.EngineInfoFile = ""
+				params.EngineConsistency = ""
+			},
+		},
+		{
+			name: "unsafe reference", wantReason: "manifest reference is invalid",
+			setup: func(t *testing.T, parent, _ string, index *results.Manifest, params *RunParams) {
+				params.EngineInfoFile = "../" + constants.EngineInfoManifestName
+				index.RunFiles[0].Name = params.EngineInfoFile
+				if err := engineinfo.WriteManifestAtomic(parent, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unlisted manifest", wantReason: "manifest is not listed in index.json",
+			setup: func(_ *testing.T, _, _ string, index *results.Manifest, _ *RunParams) {
+				index.RunFiles = nil
+			},
+		},
+		{name: "missing manifest", wantReason: "manifest file is missing"},
+		{
+			name: "symlink escape", wantReason: "manifest file is not contained in result bundle",
+			setup: func(t *testing.T, parent, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := engineinfo.WriteManifestAtomic(parent, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(
+					filepath.Join(parent, constants.EngineInfoManifestName),
+					filepath.Join(runDir, constants.EngineInfoManifestName),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed manifest", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(`{"schema_version":`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsupported manifest schema", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(invalidSchema), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "consistency mismatch", wantReason: "indexed consistency does not match manifest",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				if err := engineinfo.WriteManifestAtomic(runDir, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "run ID mismatch", wantReason: "manifest run ID does not match current run",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := engineinfo.WriteManifestAtomic(runDir, legacyEngineIdentityManifest(18)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 	}
-	writeManifest(t, runDir, &results.Manifest{
-		OutputDir: runDir,
-		RunFiles: []results.FileStatus{{
-			Name: constants.EngineInfoManifestName, Status: "ok",
-		}},
-	})
-	writeParams(t, runDir, &RunParams{
-		ScenarioParams:    ScenarioParams{RunID: 18},
-		EngineInfoFile:    constants.EngineInfoManifestName,
-		EngineConsistency: engineinfo.ConsistencyIndeterminate,
-	})
-	manifest := engineinfo.Manifest{
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			runDir := filepath.Join(parent, "identity-run")
+			if err := os.Mkdir(runDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			index := makeManifest(t, runDir, []stepFixture{{
+				ID: "step-read",
+				MetricsContent: sampleMetricsCSV([]string{
+					`"2025-09-26T17:27:00Z",READ,8,1,8,8,100,0,104857600,1,8,100,100,100,100,1000,500,750,900,950,2000,800,400,650,800,900,1800`,
+				}),
+			}})
+			index.RunFiles = []results.FileStatus{{Name: constants.EngineInfoManifestName, Status: "ok"}}
+			params := &RunParams{
+				ScenarioParams: ScenarioParams{RunID: 17}, EngineInfoFile: constants.EngineInfoManifestName,
+				EngineConsistency: engineinfo.ConsistencyIndeterminate,
+			}
+			if test.setup != nil {
+				test.setup(t, parent, runDir, index, params)
+			}
+			writeManifest(t, runDir, index)
+			writeParams(t, runDir, params)
+
+			loaded, err := NewLoader().Load(context.Background(), runDir)
+			if err != nil {
+				t.Fatalf("Load() error = %v, want performance evidence to remain loadable", err)
+			}
+			if loaded.EngineInfo != nil || loaded.EngineInfoPath != "" ||
+				loaded.EngineInfoUnavailableReason != test.wantReason {
+				t.Fatalf("engine identity was not quarantined: %+v", loaded)
+			}
+			if loaded.Steps["step-read"] == nil || loaded.Steps["step-read"].Metrics == nil {
+				t.Fatalf("performance evidence was not loaded: %+v", loaded.Steps)
+			}
+		})
+	}
+}
+
+func legacyEngineIdentityManifest(runID int64) engineinfo.Manifest {
+	return engineinfo.Manifest{
 		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
-		RunID:         17,
+		RunID:         runID,
 		GeneratedAt:   "2026-08-26T13:21:42Z",
 		Consistency: engineinfo.ManifestConsistency{
 			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
@@ -90,14 +196,6 @@ func TestLoaderRejectsEngineIdentityFromDifferentRun(t *testing.T) {
 			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
 			Reason:           "engine version endpoint is unavailable",
 		}},
-	}
-	if err := engineinfo.WriteManifestAtomic(runDir, manifest); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := NewLoader().Load(context.Background(), runDir)
-	if err == nil || !strings.Contains(err.Error(), "run_id 17 does not match current run_id 18") {
-		t.Fatalf("Load() error = %v, want run identity mismatch", err)
 	}
 }
 

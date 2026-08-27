@@ -35,17 +35,18 @@ func NewLoader() *Loader {
 
 // RunData captures the raw ingestion outputs required for summary generation.
 type RunData struct {
-	RunDir               string
-	RunID                string
-	Manifest             *results.Manifest
-	Params               *RunParams
-	Steps                map[string]*StepData
-	StepOrder            []string
-	MissingExpectedSteps []string
-	ManifestPath         string
-	MetadataPath         string
-	EngineInfo           *engineinfo.Manifest
-	EngineInfoPath       string
+	RunDir                      string
+	RunID                       string
+	Manifest                    *results.Manifest
+	Params                      *RunParams
+	Steps                       map[string]*StepData
+	StepOrder                   []string
+	MissingExpectedSteps        []string
+	ManifestPath                string
+	MetadataPath                string
+	EngineInfo                  *engineinfo.Manifest
+	EngineInfoPath              string
+	EngineInfoUnavailableReason string
 }
 
 // StepData captures per-step artifact availability and metrics totals.
@@ -83,6 +84,8 @@ const (
 	fileStatusMissing = "missing"
 )
 
+var errEngineInfoNotContained = errors.New("engine identity manifest is not a regular file in the result bundle")
+
 // Load ingests results artifacts located under runDir. The returned RunData is populated
 // even when recoverable issues occur; such issues are joined into the returned error.
 func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
@@ -115,32 +118,34 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		ManifestPath: manifestPath,
 		MetadataPath: metadataPath,
 	}
-	if params.EngineInfoFile != "" {
+	if params.EngineInfoFile == "" &&
+		(params.EngineConsistency != "" || manifestListsRunFileName(manifest, constants.EngineInfoManifestName)) {
+		data.EngineInfoUnavailableReason = "manifest reference is missing"
+	} else if params.EngineInfoFile != "" {
 		if params.EngineInfoFile != constants.EngineInfoManifestName || filepath.Base(params.EngineInfoFile) != params.EngineInfoFile {
-			return data, fmt.Errorf("engine identity manifest reference %q is invalid", params.EngineInfoFile)
+			data.EngineInfoUnavailableReason = "manifest reference is invalid"
+		} else if !manifestListsRunFile(manifest, params.EngineInfoFile) {
+			data.EngineInfoUnavailableReason = "manifest is not listed in index.json"
+		} else {
+			engineInfoPath := filepath.Join(runDir, params.EngineInfoFile)
+			engineIdentity, loadErr := loadEngineInfoManifest(runDir, params.EngineInfoFile)
+			if loadErr != nil {
+				if errors.Is(loadErr, os.ErrNotExist) {
+					data.EngineInfoUnavailableReason = "manifest file is missing"
+				} else if errors.Is(loadErr, errEngineInfoNotContained) {
+					data.EngineInfoUnavailableReason = "manifest file is not contained in result bundle"
+				} else {
+					data.EngineInfoUnavailableReason = "manifest is malformed or invalid"
+				}
+			} else if params.EngineConsistency != engineIdentity.Consistency.Status {
+				data.EngineInfoUnavailableReason = "indexed consistency does not match manifest"
+			} else if params.ScenarioParams.RunID != engineIdentity.RunID {
+				data.EngineInfoUnavailableReason = "manifest run ID does not match current run"
+			} else {
+				data.EngineInfo = engineIdentity
+				data.EngineInfoPath = engineInfoPath
+			}
 		}
-		if !manifestListsRunFile(manifest, params.EngineInfoFile) {
-			return data, fmt.Errorf("engine identity manifest is not listed in index.json")
-		}
-		engineInfoPath := filepath.Join(runDir, params.EngineInfoFile)
-		engineIdentity, loadErr := engineinfo.LoadManifest(engineInfoPath)
-		if loadErr != nil {
-			return data, fmt.Errorf("load engine identity manifest: %w", loadErr)
-		}
-		if params.EngineConsistency != engineIdentity.Consistency.Status {
-			return data, fmt.Errorf(
-				"engine identity consistency index %q does not match manifest %q",
-				params.EngineConsistency, engineIdentity.Consistency.Status,
-			)
-		}
-		if params.ScenarioParams.RunID != engineIdentity.RunID {
-			return data, fmt.Errorf(
-				"engine identity manifest run_id %d does not match current run_id %d",
-				engineIdentity.RunID, params.ScenarioParams.RunID,
-			)
-		}
-		data.EngineInfo = engineIdentity
-		data.EngineInfoPath = engineInfoPath
 	}
 	if params.DeleteArtifactsVersion != 0 &&
 		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersionV1 &&
@@ -278,6 +283,43 @@ func manifestListsRunFile(manifest *results.Manifest, name string) bool {
 		}
 	}
 	return false
+}
+
+func manifestListsRunFileName(manifest *results.Manifest, name string) bool {
+	for _, file := range manifest.RunFiles {
+		if file.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func loadEngineInfoManifest(runDir, name string) (*engineinfo.Manifest, error) {
+	root, err := os.OpenRoot(runDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errEngineInfoNotContained
+	}
+	content, err := root.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	manifest := &engineinfo.Manifest{}
+	if err := json.Unmarshal(content, manifest); err != nil {
+		return nil, fmt.Errorf("decode engine identity manifest: %w", err)
+	}
+	if err := manifest.Validate(); err != nil {
+		return nil, err
+	}
+	return manifest, nil
 }
 
 func (l *Loader) loadManifest(path string) (*results.Manifest, error) {

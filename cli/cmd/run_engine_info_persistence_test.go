@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	resultsummary "github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -111,6 +115,89 @@ func TestWriteRunMetadataPersistsIdentityCLIReferenceIndexAndLegacyHint(t *testi
 	}
 	if count != 1 || len(index.Steps) != 1 {
 		t.Fatalf("index run files/steps = %+v / %+v", index.RunFiles, index.Steps)
+	}
+}
+
+func TestPublishedIdentitySurvivesRealArtifactFetchAndImmediateSummaryLoad(t *testing.T) {
+	const stepID = "ticket-10-001-read"
+	metrics := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc," +
+		"CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s]," +
+		"BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us]," +
+		"DurationQ_0.75[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us]," +
+		"LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyMax[us]\n" +
+		`"2026-08-27T12:00:00Z",READ,8,1,8,8,100,0,104857600,1,8,100,100,100,100,` +
+		"1000,500,750,900,950,2000,800,400,650,800,900,1800\n"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/logs/"+stepID+"/index.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"logger": "metrics.FileTotal", "size": len(metrics)},
+		}})
+	})
+	mux.HandleFunc("/logs/"+stepID+"/metrics.FileTotal", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(metrics))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	root := filepath.Join(t.TempDir(), "managed-run")
+	dirty := false
+	metadata := buildRunMetadata(runMetadataInput{
+		WorkloadType:    scenario.WorkloadTypeRead,
+		Params:          scenario.Params{RunID: 1787750472685, WorkloadType: scenario.WorkloadTypeRead},
+		BaseURL:         server.URL,
+		ExpectedStepIDs: []string{stepID},
+	})
+	metadata.engineIdentity = &engineinfo.GateOutcome{
+		Decision: engineinfo.GateProceed,
+		Proceed:  true,
+		Fleet: engineinfo.FleetResult{
+			Consistency: engineinfo.ConsistencyAssessment{
+				Status: engineinfo.ConsistencyConsistent, Reason: "all participants reported the same engine build identity",
+			},
+			Builds: []engineinfo.GroupedBuild{{
+				BuildID: "build-1",
+				Information: engineinfo.BuildInformation{
+					SchemaVersion: 1, Product: "spt-engine", Version: "5.14.2",
+					Revision: strings.Repeat("a", 40), BuildTime: "2026-08-27T12:00:00Z",
+					SourceDirty: &dirty,
+				},
+			}},
+			Participants: []engineinfo.ParticipantResult{{
+				NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+				CollectionStatus: engineinfo.StatusCollected, ReportedSchemaVersion: 1, BuildID: "build-1",
+			}},
+		},
+	}
+	if err := writeRunMetadata(metadata, root); err != nil {
+		t.Fatal(err)
+	}
+
+	fetcher := results.NewFetcher(server.URL, root)
+	fetcher.Artifacts = []results.ArtifactSpec{{
+		Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true,
+	}}
+	if _, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{stepID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh loader represents a process that stopped immediately after artifact fetching;
+	// no later writeRunMetadata pass repairs or republishes the on-disk bundle.
+	loaded, err := resultsummary.NewLoader().Load(context.Background(), root)
+	if err != nil {
+		t.Fatalf("load immediately after artifact fetch: %v", err)
+	}
+	if loaded.EngineInfo == nil || loaded.EngineInfo.RunID != metadata.runID || loaded.EngineInfoUnavailableReason != "" {
+		t.Fatalf("loaded engine identity = %+v, unavailable reason = %q", loaded.EngineInfo, loaded.EngineInfoUnavailableReason)
+	}
+	if loaded.Steps[stepID] == nil || loaded.Steps[stepID].Metrics == nil {
+		t.Fatalf("loaded performance evidence = %+v", loaded.Steps)
+	}
+	foundEngineInfo := false
+	for _, file := range loaded.Manifest.RunFiles {
+		foundEngineInfo = foundEngineInfo || file.Name == constants.EngineInfoManifestName && file.Status == "ok"
+	}
+	if !foundEngineInfo {
+		t.Fatalf("engine information was erased from index after fetch: %+v", loaded.Manifest.RunFiles)
 	}
 }
 
