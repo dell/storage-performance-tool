@@ -1,9 +1,11 @@
 package engineinfo
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -503,6 +505,37 @@ func LoadManifest(path string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	return DecodeManifest(data)
+}
+
+// DecodeManifest decodes and validates a stored run-level manifest.
+func DecodeManifest(data []byte) (*Manifest, error) {
+	if err := rejectDuplicateJSONFields(data); err != nil {
+		return nil, fmt.Errorf("decode engine identity manifest: %w", err)
+	}
+	var presence struct {
+		Consistency struct {
+			Forced *bool `json:"forced"`
+		} `json:"consistency"`
+		Builds []struct {
+			Development *bool           `json:"development"`
+			SourceDirty json.RawMessage `json:"source_dirty"`
+		} `json:"builds"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return nil, fmt.Errorf("decode engine identity manifest: %w", err)
+	}
+	if presence.Consistency.Forced == nil {
+		return nil, fmt.Errorf("engine identity manifest consistency forced must be a Boolean")
+	}
+	for index, build := range presence.Builds {
+		if build.Development == nil {
+			return nil, fmt.Errorf("engine identity manifest build %d development must be a Boolean", index+1)
+		}
+		if build.SourceDirty == nil {
+			return nil, fmt.Errorf("engine identity manifest build %d is missing source_dirty", index+1)
+		}
+	}
 	manifest := &Manifest{}
 	if err := json.Unmarshal(data, manifest); err != nil {
 		return nil, fmt.Errorf("decode engine identity manifest: %w", err)
@@ -511,4 +544,59 @@ func LoadManifest(path string) (*Manifest, error) {
 		return nil, err
 	}
 	return manifest, nil
+}
+
+func rejectDuplicateJSONFields(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := consumeUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return fmt.Errorf("JSON value has trailing content")
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		fields := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object field name is invalid")
+			}
+			if _, exists := fields[name]; exists {
+				return fmt.Errorf("JSON object contains a duplicate field")
+			}
+			fields[name] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("JSON value contains an unexpected delimiter")
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	return nil
 }

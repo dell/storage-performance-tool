@@ -312,14 +312,7 @@ func loadEngineInfoManifest(runDir, name string) (*engineinfo.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	manifest := &engineinfo.Manifest{}
-	if err := json.Unmarshal(content, manifest); err != nil {
-		return nil, fmt.Errorf("decode engine identity manifest: %w", err)
-	}
-	if err := manifest.Validate(); err != nil {
-		return nil, err
-	}
-	return manifest, nil
+	return engineinfo.DecodeManifest(content)
 }
 
 func (l *Loader) loadManifest(path string) (*results.Manifest, error) {
