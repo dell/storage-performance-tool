@@ -184,11 +184,14 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			// submit all buffered ops (including retries from prior iterations)
 			final int buffSize = buff.size();
 			if (buffSize > 0) {
-				final var dispatchTokens = captureQueuedDispatchTokens(buffSize);
-				submittingOperations = submittingOperationsSnapshot(buffSize, dispatchTokens);
+				final int dispatchAttemptCount = storageDriver.dispatchAttemptLimit(buffSize);
+				final var dispatchTokens = captureQueuedDispatchTokens(dispatchAttemptCount);
+				submittingOperations = submittingOperationsSnapshot(dispatchAttemptCount, dispatchTokens);
 				boolean submitted;
 				try {
-					if (buffSize == 1) { // non-batch mode
+					if (dispatchAttemptCount == 0) {
+						submitted = removeResolvedPrefix() > 0;
+					} else if (buffSize == 1) { // non-batch mode
 						submitted = storageDriver.submit(buff.get(0));
 						if (submitted) {
 							markLegacyDispatchFallback(1, dispatchTokens);
@@ -197,7 +200,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 							submitted = removeResolvedPrefix() > 0;
 						}
 					} else { // batch mode
-						final int m = storageDriver.submit(buff, 0, buffSize);
+						final int m = storageDriver.submit(buff, 0, dispatchAttemptCount);
 						submitted = m > 0;
 						if (submitted) {
 							markLegacyDispatchFallback(m, dispatchTokens);

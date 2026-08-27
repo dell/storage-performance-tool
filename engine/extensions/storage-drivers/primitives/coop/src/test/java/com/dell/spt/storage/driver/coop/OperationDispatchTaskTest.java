@@ -65,6 +65,7 @@ class OperationDispatchTaskTest {
 		childOpQueue = new ArrayBlockingQueue<>(16);
 		dispatchLock = new ReentrantLock();
 		dispatchReady = dispatchLock.newCondition();
+		when(driverMock.dispatchAttemptLimit(anyInt())).thenAnswer(invocation -> invocation.getArgument(0));
 		task = new OperationDispatchTask<>(
 						executor, driverMock, inOpQueue, childOpQueue, STEP_ID, BATCH_SIZE,
 						dispatchLock, dispatchReady, 16);
@@ -112,6 +113,37 @@ class OperationDispatchTaskTest {
 		task.doWork();
 
 		verify(driverMock).submit(op);
+	}
+
+	@Test
+	void batchSubmissionSnapshotIsBoundedByAvailableDispatchCapacity() throws Exception {
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		when(driverMock.dispatchAttemptLimit(4)).thenReturn(1);
+		final var ops = List.<Operation<Item>> of(
+						new OperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("bounded-1", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("bounded-2", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("bounded-3", 0, 1), null, "/bucket", null),
+						new OperationImpl<>(
+										0, OpType.DELETE, new DataItemImpl("bounded-4", 0, 1), null, "/bucket", null));
+		for (final var op : ops) {
+			assertTrue(lifecycle.driverQueued(op));
+		}
+		when(driverMock.submit(anyList(), eq(0), eq(1))).thenAnswer(invocation -> {
+			final var submitting = task.submittingOperations();
+			assertEquals(1, submitting.size(),
+							"shutdown recovery should snapshot only operations which this call may submit");
+			assertSame(ops.get(0), submitting.get(0).operation());
+			return 1;
+		});
+
+		inOpQueue.addAll(ops);
+		task.doWork();
+
+		verify(driverMock).submit(anyList(), eq(0), eq(1));
 	}
 
 	@Test

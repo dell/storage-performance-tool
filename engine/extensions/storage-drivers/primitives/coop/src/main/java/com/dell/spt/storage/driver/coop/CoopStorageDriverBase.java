@@ -250,6 +250,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return concurrencyThrottle.availablePermits() > 0;
 	}
 
+	/**
+	 * Bounds one submission call to the operations which may acquire transport capacity now.
+	 * The dispatch task uses the same bound for its shutdown-recovery snapshot, avoiding work
+	 * proportional to a much larger queued batch on every small permit release.
+	 */
+	int dispatchAttemptLimit(final int bufferedOperationCount) {
+		return Math.max(
+						0,
+						Math.min(bufferedOperationCount, concurrencyThrottle.availablePermits()));
+	}
+
 	/** Returns whether new transport dispatch may begin. */
 	protected final boolean isAdmissionOpen() {
 		// Constructor-bypassing test doubles predate the gate and have no admission lock.
