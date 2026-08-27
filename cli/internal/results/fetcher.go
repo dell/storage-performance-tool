@@ -94,12 +94,13 @@ type StepManifest struct {
 
 // Manifest is the top-level results summary.
 type Manifest struct {
-	BaseURL     string            `json:"baseUrl"`
-	OutputDir   string            `json:"outputDir"`
-	GeneratedAt time.Time         `json:"generatedAt"`
-	Steps       []StepManifest    `json:"steps"`
-	RunFiles    []FileStatus      `json:"runFiles,omitempty"`
-	Integrity   *IntegritySummary `json:"integrity,omitempty"`
+	BaseURL           string            `json:"baseUrl"`
+	OutputDir         string            `json:"outputDir"`
+	GeneratedAt       time.Time         `json:"generatedAt"`
+	Steps             []StepManifest    `json:"steps"`
+	RunFiles          []FileStatus      `json:"runFiles,omitempty"`
+	Integrity         *IntegritySummary `json:"integrity,omitempty"`
+	independentFields map[string]json.RawMessage
 }
 
 // IntegritySummary is the stable machine-readable verification outcome embedded in index.json.
@@ -217,6 +218,9 @@ func (f *Fetcher) preserveIndependentManifestFields(man *Manifest) error {
 	if err := json.Unmarshal(data, &existing); err != nil {
 		return fmt.Errorf("decode existing manifest: %w", err)
 	}
+	if err := json.Unmarshal(data, &existing.independentFields); err != nil {
+		return fmt.Errorf("decode existing manifest fields: %w", err)
+	}
 	existing.BaseURL = man.BaseURL
 	existing.OutputDir = man.OutputDir
 	existing.GeneratedAt = man.GeneratedAt
@@ -236,7 +240,7 @@ func hasSuccessfulGenericTotals(sm StepManifest) bool {
 }
 
 func (f *Fetcher) writeManifest(m *Manifest) error {
-	data, err := json.MarshalIndent(m, "", "  ")
+	data, err := marshalManifestWithIndependentFields(m)
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
@@ -260,6 +264,26 @@ func (f *Fetcher) writeManifest(m *Manifest) error {
 		return fmt.Errorf("rename manifest: %w", err)
 	}
 	return nil
+}
+
+func marshalManifestWithIndependentFields(manifest *Manifest) ([]byte, error) {
+	typedData, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, err
+	}
+	if len(manifest.independentFields) == 0 {
+		return json.MarshalIndent(manifest, "", "  ")
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(typedData, &merged); err != nil {
+		return nil, err
+	}
+	for name, value := range manifest.independentFields {
+		if _, owned := merged[name]; !owned {
+			merged[name] = value
+		}
+	}
+	return json.MarshalIndent(merged, "", "  ")
 }
 
 func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {

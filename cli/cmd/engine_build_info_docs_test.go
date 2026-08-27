@@ -36,6 +36,8 @@ func TestEngineBuildInformationDocumentationCoversPublicContract(t *testing.T) {
 		"consistent", "mismatch", "indeterminate", "--force", "spt replay",
 		"legacy_endpoint_unavailable", "unsupported_schema", "incomplete_build_info",
 		"collection_failed", "enabled by default", "credentials", "environment variables",
+		"explicitly reports `unknown`", "`version` or `revision`", "`null` for `source_dirty`",
+		"omits a required field",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("documentation missing %q", want)

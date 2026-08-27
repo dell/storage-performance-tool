@@ -92,8 +92,10 @@ Compatibility states are explicit in participant records:
 
 - `legacy_endpoint_unavailable`: an older engine returned HTTP 404 or 405;
 - `unsupported_schema`: a readable future schema is newer than the CLI;
-- `incomplete_build_info`: supported JSON omitted a comparison value; and
-- `collection_failed`: a required request or supported contract failed.
+- `incomplete_build_info`: supported schema-1 JSON explicitly reports `unknown`
+  for `version` or `revision`, or `null` for `source_dirty`; and
+- `collection_failed`: a required request failed, or supported schema-1 JSON is
+  malformed, omits a required field, or otherwise violates the contract.
 
 The first three states make consistency indeterminate unless other records
 already prove a mismatch. `collection_failed` stops submission. Older result

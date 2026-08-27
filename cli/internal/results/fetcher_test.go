@@ -970,6 +970,15 @@ func TestFetcherReplacesStepEvidenceWithoutErasingIndependentIndexFields(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	var priorMembers map[string]json.RawMessage
+	if err := json.Unmarshal(priorData, &priorMembers); err != nil {
+		t.Fatal(err)
+	}
+	priorMembers["futureEvidence"] = json.RawMessage(`{"owner":"independent","generation":2}`)
+	priorData, err = json.Marshal(priorMembers)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(out, constants.ResultsManifestFileName), priorData, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1004,5 +1013,19 @@ func TestFetcherReplacesStepEvidenceWithoutErasingIndependentIndexFields(t *test
 	}
 	if len(persisted.RunFiles) != 2 || persisted.Integrity == nil || persisted.Integrity.VerifiedCount != 41 {
 		t.Fatalf("persisted independent fields = runFiles %+v, integrity %+v", persisted.RunFiles, persisted.Integrity)
+	}
+	var persistedMembers map[string]json.RawMessage
+	if err := json.Unmarshal(persistedData, &persistedMembers); err != nil {
+		t.Fatal(err)
+	}
+	var futureEvidence struct {
+		Owner      string `json:"owner"`
+		Generation int    `json:"generation"`
+	}
+	if err := json.Unmarshal(persistedMembers["futureEvidence"], &futureEvidence); err != nil {
+		t.Fatalf("additive independently owned field was not preserved: %v", err)
+	}
+	if futureEvidence.Owner != "independent" || futureEvidence.Generation != 2 {
+		t.Fatalf("additive independently owned field changed: %+v", futureEvidence)
 	}
 }
