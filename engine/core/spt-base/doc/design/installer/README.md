@@ -21,9 +21,10 @@ required/supplementary files are already installed and their content is the same
 
 ### Stages
 
-0. Installer loads the default configuration from the resources to determine the version (used for the startup
-banner). The Spt home path is resolved independently: if the `SPT_HOME` environment variable is set it is used;
-otherwise a temporary directory is created and automatically removed on JVM shutdown.
+0. The engine loads its process-wide immutable Engine Build Information and renders the startup banner from that snapshot.
+The installer does not read mutable defaults to determine the version. The Spt home path is resolved independently:
+if the `SPT_HOME` environment variable is set it is used; otherwise a temporary directory is created and automatically
+removed on JVM shutdown.
 
 1. Installer copies the required and supplementary files into the Spt home. These files are default configuration,
 custom content files, scenarios and extensions.

@@ -102,7 +102,7 @@ reference.
 | run-port                                       | Integer > 0 | 9999               | Port for REST API
 | server-metrics-expose_fleet                    | Boolean | true                   | Controls whether the entry node exposes the `/metrics/cluster/json` endpoint (and the legacy `/metrics/fleet/json` alias).
 | run-scenario                                   | Path | null                      | The default file scenario to run, null means invoking the default.js scenario bundled into the distribution
-| run-version                                    | String | (current)               | The Spt version (set automatically from defaults.yaml)
+| run-version                                    | String | (current)               | Compatibility value projected from immutable Engine Build Information after configuration merging. User values, including CLI and Control API overrides, are ignored with a warning.
 | run-id                                         | long | 0                         | The run identifier (see Runs API). If not specified, it takes the value of timestam
 | storage-auth-file                              | Path | null                      | The path to a credentials list file, containing the lines of comma-separated item path, user id and secret key
 | storage-auth-uid                               | String | null                    | The authentication identifier

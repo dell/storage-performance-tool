@@ -258,6 +258,45 @@ def directJarScenarioSpecs = [
 	],
 ]
 
+def engineBuildInfoDocumentation = [
+	[
+		file: file("${rootDir}/README.md"),
+		required: 'same immutable Engine Build Information snapshot used by startup reporting',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/input/cli/README.md"),
+		required: '`--run-version` is retained only as a compatibility option',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/input/configuration/README.md"),
+		required: 'projected from immutable Engine Build Information after configuration merging',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/design/installer/README.md"),
+		required: 'renders the startup banner from that snapshot',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/api/remote/README.md"),
+		required: '`run.version` is projected from immutable Engine Build Information',
+	],
+]
+
+tasks.register('verifyEngineBuildInfoDocumentation') {
+	group = 'verification'
+	description = 'Verifies engine version documentation keeps immutable build information authoritative'
+	inputs.files(engineBuildInfoDocumentation.collect { it.file })
+
+	doLast {
+		engineBuildInfoDocumentation.each { contract ->
+			def content = contract.file.getText('UTF-8')
+			if (!content.contains(contract.required)) {
+				throw new GradleException(
+					"${contract.file} does not document the Engine Build Information authority contract")
+			}
+		}
+	}
+}
+
 tasks.register('verifyDirectJarScenarioConfigs') {
 	group = 'verification'
 	description = 'Validates direct-JAR integrity scenarios through the packaged Nashorn and Confuse path'
@@ -325,7 +364,7 @@ tasks.register('verifyDirectJarScenarioConfigs') {
 
 tasks.register('verifyEngineBuildInfoCanary') {
 	group = 'verification'
-	description = 'Verifies packaged build information through --version and a direct mock workload'
+	description = 'Verifies all packaged engine version surfaces use generated build information'
 	dependsOn assembleDist
 
 	inputs.file(file("${distDir}/${sptJar}"))
@@ -352,7 +391,11 @@ tasks.register('verifyEngineBuildInfoCanary') {
 		}
 		def versionResult = versionExecution.result.get()
 		def versionOutput = versionExecution.standardOutput.asText.get() + versionExecution.standardError.asText.get()
+		def bannerMessage = " spt v ${expectedResource.version} "
+		def bannerPadding = '#' * (120 - bannerMessage.length()).intdiv(2)
+		def expectedBanner = bannerPadding + bannerMessage + bannerPadding
 		def expectedVersionLines = [
+			expectedBanner,
 			"Engine build schema: ${expectedResource.schema_version}",
 			"Engine product: ${expectedResource.product}",
 			"Engine version: ${expectedResource.version}",
@@ -370,12 +413,18 @@ tasks.register('verifyEngineBuildInfoCanary') {
 
 		def scenarioHome = new File(canaryRoot, 'home')
 		def scenarioLog = new File(canaryRoot, 'output')
+		def scenarioFile = new File(canaryRoot, 'engine-build-info-canary.js')
+		def effectiveVersionMarker = "ENGINE_EFFECTIVE_VERSION=${expectedResource.version}"
+		scenarioFile.setText(
+			"print('ENGINE_EFFECTIVE_VERSION=' + config.stringVal('run-version'));\nLoad.run();\n",
+			'UTF-8')
 		def scenarioExecution = providers.exec {
 			workingDir distDir
 			commandLine(
 				javaExecutable,
 				'-jar',
 				jarFile.absolutePath,
+				"--run-scenario=${scenarioFile.absolutePath}",
 				'--storage-driver-type=netty-mock',
 				'--storage-driver-limit-concurrency=1',
 				'--item-data-size=1KiB',
@@ -391,8 +440,10 @@ tasks.register('verifyEngineBuildInfoCanary') {
 		def scenarioOutput = scenarioExecution.standardOutput.asText.get() + scenarioExecution.standardError.asText.get()
 		def startupMarker = "Engine build: ${expectedResource.version} (${expectedResource.revision.take(12)}"
 		if (scenarioResult.exitValue != 0
+				|| scenarioOutput.count(expectedBanner) != 1
 				|| scenarioOutput.count('Engine build:') != 1
-				|| !scenarioOutput.contains(startupMarker)) {
+				|| !scenarioOutput.contains(startupMarker)
+				|| scenarioOutput.count(effectiveVersionMarker) != 1) {
 			throw new GradleException(
 				"Packaged direct-scenario build-information canary failed (exit ${scenarioResult.exitValue}):\n${scenarioOutput}")
 		}
@@ -425,13 +476,99 @@ tasks.register('verifyEngineBuildInfoCanary') {
 		if (!records.every { it == expectedJson } || records[0] != records[1]) {
 			throw new GradleException("Packaged direct-scenario Engine Build Records differ from generated metadata")
 		}
+
+		def reservePort = {
+			def socket = new java.net.ServerSocket(0)
+			try {
+				return socket.localPort
+			} finally {
+				socket.close()
+			}
+		}
+		def nodePort = reservePort()
+		def nodeServicePort = reservePort()
+		while (nodeServicePort == nodePort) {
+			nodeServicePort = reservePort()
+		}
+		def nodeHome = new File(canaryRoot, 'node-home')
+		def nodeLog = new File(canaryRoot, 'node-output')
+		def nodeStdout = new File(canaryRoot, 'node.stdout.log')
+		def nodeStderr = new File(canaryRoot, 'node.stderr.log')
+		nodeHome.mkdirs()
+		nodeLog.mkdirs()
+		def nodeBuilder = new ProcessBuilder(
+			javaExecutable,
+			'-jar',
+			jarFile.absolutePath,
+			'--run-node',
+			"--run-port=${nodePort}",
+			"--load-step-node-port=${nodeServicePort}",
+			'--api-linger-sec=0',
+			'--storage-driver-type=netty-mock')
+		nodeBuilder.directory(file(distDir))
+		nodeBuilder.environment().put('SPT_HOME', nodeHome.absolutePath)
+		nodeBuilder.environment().put('SPT_LOG_DIR', nodeLog.absolutePath)
+		nodeBuilder.redirectOutput(nodeStdout)
+		nodeBuilder.redirectError(nodeStderr)
+		def nodeProcess = nodeBuilder.start()
+		try {
+			def versionBody = null
+			def deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos()
+			while (versionBody == null && nodeProcess.isAlive() && System.nanoTime() < deadline) {
+				try {
+					def connection = (java.net.HttpURLConnection) new URL("http://127.0.0.1:${nodePort}/version").openConnection()
+					connection.connectTimeout = 500
+					connection.readTimeout = 1000
+					if (connection.responseCode == 200) {
+						versionBody = connection.inputStream.getText('UTF-8')
+					}
+					connection.disconnect()
+				} catch (IOException ignored) {
+					Thread.sleep(100)
+				}
+			}
+			if (versionBody == null || parser.parseText(versionBody) != expectedJson) {
+				throw new GradleException(
+					"Packaged node /version differs from generated metadata:\n"
+						+ nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8'))
+			}
+
+			def shutdownConnection = (java.net.HttpURLConnection) new URL(
+				"http://127.0.0.1:${nodePort}/shutdown").openConnection()
+			shutdownConnection.requestMethod = 'POST'
+			shutdownConnection.connectTimeout = 1000
+			shutdownConnection.readTimeout = 1000
+			if (shutdownConnection.responseCode != 202) {
+				throw new GradleException("Packaged node shutdown was not accepted")
+			}
+			shutdownConnection.disconnect()
+			if (!nodeProcess.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) {
+				throw new GradleException("Packaged node did not stop after the canary")
+			}
+			def nodeOutput = nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8')
+			if (nodeProcess.exitValue() != 0
+					|| nodeOutput.count(expectedBanner) != 1
+					|| nodeOutput.count('Engine build:') != 1
+					|| !nodeOutput.contains(startupMarker)) {
+				throw new GradleException("Packaged node banner/startup build information differs from generated metadata:\n${nodeOutput}")
+			}
+		} finally {
+			if (nodeProcess.isAlive()) {
+				nodeProcess.destroy()
+				if (!nodeProcess.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+					nodeProcess.destroyForcibly()
+				}
+			}
+		}
 	}
 }
 
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
-	dependsOn tasks.named('verifyDirectJarScenarioConfigs'), tasks.named('verifyEngineBuildInfoCanary')
+	dependsOn tasks.named('verifyDirectJarScenarioConfigs'),
+		tasks.named('verifyEngineBuildInfoCanary'),
+		tasks.named('verifyEngineBuildInfoDocumentation')
 }
 
 check.dependsOn tasks.named('test')

@@ -66,13 +66,23 @@ class RunServletTest {
 
 	@Test
 	void incomingRunVersionOverrideCannotRedefineEngineIdentity() throws Exception {
-		final Part defaultsPart = mock(Part.class);
-		when(defaultsPart.getInputStream()).thenReturn(new ByteArrayInputStream(
-						"run:\n  version: user-value\n".getBytes(StandardCharsets.UTF_8)));
-		when(defaultsPart.getContentType()).thenReturn("application/yaml");
+		final Part defaultsPart = defaultsPart("run:\n  version: user-value\n");
 
 		final var merged = RunServlet.mergeIncomingWithLocalConfig(
 						defaultsPart, mockResponse, TestConfigBuilder.config());
+
+		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"{}\n",
+			"output:\n  color: false\n",
+			"run:\n  id: 123456789\n"
+	})
+	void partialIncomingConfigurationsReceiveTheImmutableVersion(final String incomingConfig) throws Exception {
+		final var merged = RunServlet.mergeIncomingWithLocalConfig(
+						defaultsPart(incomingConfig), mockResponse, TestConfigBuilder.config());
 
 		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
 	}
@@ -82,6 +92,13 @@ class RunServletTest {
 		final var merged = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, TestConfigBuilder.config());
 
 		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
+	}
+
+	private static Part defaultsPart(final String content) throws IOException {
+		final Part defaultsPart = mock(Part.class);
+		when(defaultsPart.getInputStream()).thenReturn(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
+		when(defaultsPart.getContentType()).thenReturn("application/yaml");
+		return defaultsPart;
 	}
 
 	@Test

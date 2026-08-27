@@ -101,6 +101,10 @@ curl -v -X POST \
 ```
 > **Note**: use this example above as the most simple way to start via the remote API.
 
+Partial configurations may omit `run` or provide only `run.id`. `run.version` is projected from immutable Engine Build Information
+after the submitted configuration is merged with local defaults. A submitted `run.version` is ignored with a warning and cannot
+redefine the executing engine build.
+
 If successful, the response will contain the ETag header with the hexadecimal timestamp (Unix epoch time):
 ```bash
 ...

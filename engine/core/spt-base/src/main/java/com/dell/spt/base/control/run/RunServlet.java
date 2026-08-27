@@ -353,7 +353,7 @@ public class RunServlet extends HttpServlet {
 			configResult = new BasicConfig(aggregatedConfigWithArgs);
 		} else {
 			final var configIncoming = configFromPart(defaultsPart, resp, aggregatedConfigWithArgs.schema());
-			runVersionOverrideAttempted = configIncoming.val("run-version") != null;
+			runVersionOverrideAttempted = containsRunVersion(configIncoming);
 			// the load step id was set manually if it is set to some non-null/non-empty value in the incoming config
 			try {
 				final var loadStepIdIncoming = configIncoming.stringVal("load-step-id");
@@ -369,6 +369,14 @@ public class RunServlet extends HttpServlet {
 		}
 		EngineBuildInfoProvider.global().projectVersion(configResult, runVersionOverrideAttempted);
 		return configResult;
+	}
+
+	private static boolean containsRunVersion(final Config config) {
+		final Map<String, Object> root = config.mapVal("");
+		if (!root.containsKey("run")) {
+			return false;
+		}
+		return config.configVal("run").mapVal("").containsKey("version");
 	}
 
 	static Config configFromPart(
