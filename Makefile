@@ -8,7 +8,7 @@ MAKEFLAGS += --warn-undefined-variables
 CLI_DIR := cli
 ENGINE_DIR := engine
 
-.PHONY: help setup build test lint build-cli test-cli lint-cli build-engine test-engine lint-engine clean distclean test-coverage test-coverage-cli test-coverage-engine
+.PHONY: help setup build test lint build-cli test-cli lint-cli build-engine test-engine lint-engine test-engine-build-info clean distclean test-coverage test-coverage-cli test-coverage-engine
 
 help:
 	@echo "Storage Performance Tool (SPT) — available targets"
@@ -25,6 +25,7 @@ help:
 	@echo "  make test-coverage-cli     Run only the CLI coverage workflow"
 	@echo "  make build-engine  Build only the engine bundle"
 	@echo "  make test-engine   Run only the engine test suite"
+	@echo "  make test-engine-build-info  Qualify packaged engine identity with the real Go collector"
 	@echo "  make lint-engine   Run only the engine formatting/lint checks"
 	@echo "  make test-coverage-engine  Run only the engine coverage workflow"
 
@@ -62,6 +63,9 @@ test-cli:
 
 test-engine:
 	$(MAKE) -C $(ENGINE_DIR) test
+
+test-engine-build-info:
+	$(MAKE) -C $(ENGINE_DIR) test-build-info
 
 lint: lint-cli lint-engine
 

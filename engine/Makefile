@@ -30,7 +30,7 @@ BUILD_OPTS := --no-daemon
 
 # Phony targets (not files)
 .PHONY: all build clean distclean test test-coverage bundle help check lint spotless docker docker-local docker-run docker-push
-.PHONY: test-integration test-performance test-all test-coverage-all errorprone
+.PHONY: test-integration test-performance test-all test-coverage-all test-build-info errorprone
 
 # Help target - displays available targets
 help:
@@ -44,6 +44,7 @@ help:
 	@echo "  make test-all   - Run unit + integration + performance tests"
 	@echo "  make test-coverage - Run unit tests with coverage report"
 	@echo "  make test-coverage-all - Run all tests with combined coverage report"
+	@echo "  make test-build-info - Run packaged engine plus real Go collector qualification"
 	@echo "  make check      - Run spotless checks"
 	@echo "  make lint       - Apply spotless formatting + run Error Prone analysis"
 	@echo "  make spotless   - Apply spotless formatting only"
@@ -125,6 +126,9 @@ test-performance:
 test-all:
 	@echo "Running unit + integration + performance tests..."
 	$(GRADLE) testAll
+
+test-build-info:
+	@tools/testbuildinfo.sh
 
 # Run tests with coverage reporting
 test-coverage:

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
@@ -216,10 +217,14 @@ func (f *Fetcher) preserveIndependentManifestFields(man *Manifest) error {
 	}
 	var existing Manifest
 	if err := json.Unmarshal(data, &existing); err != nil {
-		return fmt.Errorf("decode existing manifest: %w", err)
+		logging.LogWarn("results", "replacing corrupt results index",
+			"file", constants.ResultsManifestFileName, "error", err)
+		return nil
 	}
 	if err := json.Unmarshal(data, &existing.independentFields); err != nil {
-		return fmt.Errorf("decode existing manifest fields: %w", err)
+		logging.LogWarn("results", "replacing corrupt results index",
+			"file", constants.ResultsManifestFileName, "error", err)
+		return nil
 	}
 	existing.BaseURL = man.BaseURL
 	existing.OutputDir = man.OutputDir
