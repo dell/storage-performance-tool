@@ -15,6 +15,9 @@ func TestPackagedEngineSemanticVersionCanary(t *testing.T) {
 	baseURL := os.Getenv("SPT_TEST_PACKAGED_ENGINE_URL")
 	expectedVersion := os.Getenv("SPT_TEST_PACKAGED_ENGINE_VERSION")
 	if baseURL == "" || expectedVersion == "" {
+		if os.Getenv("SPT_REQUIRE_PACKAGED_ENGINE_CANARY") == "true" {
+			t.Fatal("packaged engine canary is required; set SPT_TEST_PACKAGED_ENGINE_URL and SPT_TEST_PACKAGED_ENGINE_VERSION")
+		}
 		t.Skip("set SPT_TEST_PACKAGED_ENGINE_URL and SPT_TEST_PACKAGED_ENGINE_VERSION for the packaged canary")
 	}
 
