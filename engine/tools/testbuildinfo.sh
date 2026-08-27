@@ -129,10 +129,10 @@ printf 'Verifying packaged Go collector against engine version %s\n' "$EXPECTED_
 set +e
 CANARY_OUTPUT="$(
 	cd "$CLI_ROOT"
-	SPT_REQUIRE_PACKAGED_ENGINE_CANARY=true \
 	SPT_TEST_PACKAGED_ENGINE_URL="$BASE_URL" \
 	SPT_TEST_PACKAGED_ENGINE_VERSION="$EXPECTED_VERSION" \
-		go test -json -count=1 -run '^TestPackagedEngineSemanticVersionCanary$' ./internal/engineinfo
+		go test -json -tags packaged_engine_canary -count=1 \
+		-run '^TestPackagedEngineSemanticVersionCanary$' ./internal/engineinfo
 )"
 CANARY_STATUS=$?
 set -e
