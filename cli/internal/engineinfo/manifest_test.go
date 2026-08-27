@@ -348,6 +348,35 @@ func TestManifestValidateRejectsSemanticallyInvalidEvidence(t *testing.T) {
 			},
 			want: "exactly one entry",
 		},
+		{
+			name: "unsupported participant role",
+			mutate: func(manifest *engineinfo.Manifest) {
+				manifest.Participants[0].Role = engineinfo.ParticipantRole("container")
+			},
+			want: "role is invalid",
+		},
+		{
+			name: "multiple entries",
+			mutate: func(manifest *engineinfo.Manifest) {
+				entry := manifest.Participants[0]
+				entry.NodeID = "entry-a.example:9999"
+				entry.Role = engineinfo.RoleEntry
+				second := entry
+				second.NodeID = "entry-b.example:9999"
+				manifest.Participants = []engineinfo.ManifestParticipant{entry, second}
+			},
+			want: "exactly one entry",
+		},
+		{
+			name: "standalone mixed with worker",
+			mutate: func(manifest *engineinfo.Manifest) {
+				worker := manifest.Participants[0]
+				worker.NodeID = "worker.example:9999"
+				worker.Role = engineinfo.RoleWorker
+				manifest.Participants = append(manifest.Participants, worker)
+			},
+			want: "standalone engine identity manifest participant must be the only participant",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

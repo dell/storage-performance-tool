@@ -69,7 +69,7 @@ func (h LaunchHooks) RunPreSubmissionCheck(ctx context.Context) ([]string, error
 	return h.preSubmissionCheck(ctx)
 }
 
-func runPreSubmissionCheck(ctx context.Context, hooks LaunchHooks, output func(string)) error {
+func runAndEmitPreSubmissionCheck(ctx context.Context, hooks LaunchHooks, output func(string)) error {
 	lines, err := hooks.RunPreSubmissionCheck(ctx)
 	if output != nil {
 		for _, line := range lines {

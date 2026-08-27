@@ -109,10 +109,10 @@ func NewManifest(
 		})
 	}
 	sort.Slice(participants, func(i, j int) bool {
-		leftRank, _, _ := participantRolePolicy(participants[i].Role)
-		rightRank, _, _ := participantRolePolicy(participants[j].Role)
-		if leftRank != rightRank {
-			return leftRank < rightRank
+		leftPolicy, _ := policyForParticipantRole(participants[i].Role)
+		rightPolicy, _ := policyForParticipantRole(participants[j].Role)
+		if leftPolicy.canonicalOrderRank != rightPolicy.canonicalOrderRank {
+			return leftPolicy.canonicalOrderRank < rightPolicy.canonicalOrderRank
 		}
 		return participants[i].NodeID < participants[j].NodeID
 	})
@@ -253,9 +253,9 @@ func validateManifestBuilds(builds []ManifestBuild) (map[string]BuildInformation
 }
 
 type manifestParticipantEvidence struct {
-	collections     []CollectionResult
-	entryCount      int
-	standaloneCount int
+	collections              []CollectionResult
+	entryCount               int
+	onlyParticipantRoleCount int
 }
 
 type manifestParticipantOrder struct {
@@ -275,15 +275,15 @@ func validateManifestParticipants(
 	evidence := manifestParticipantEvidence{collections: make([]CollectionResult, 0, len(participants))}
 	order := manifestParticipantOrder{nodeIDs: make(map[string]struct{}, len(participants)), priorRoleRank: -1}
 	for _, participant := range participants {
-		topology, err := validateManifestParticipantIdentity(participant, &order)
+		policy, err := validateManifestParticipantIdentity(participant, &order)
 		if err != nil {
 			return manifestParticipantEvidence{}, err
 		}
-		switch topology {
-		case topologyEntry:
+		if policy.countsAsEntry {
 			evidence.entryCount++
-		case topologyStandalone:
-			evidence.standaloneCount++
+		}
+		if policy.mustBeOnlyParticipant {
+			evidence.onlyParticipantRoleCount++
 		}
 		build, err := manifestParticipantBuild(participant, buildsByID, buildReferences)
 		if err != nil {
@@ -301,32 +301,33 @@ func validateManifestParticipants(
 func validateManifestParticipantIdentity(
 	participant ManifestParticipant,
 	order *manifestParticipantOrder,
-) (participantTopology, error) {
+) (participantRolePolicy, error) {
 	if strings.TrimSpace(participant.NodeID) == "" {
-		return 0, fmt.Errorf("engine identity manifest participant node_id is required")
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest participant node_id is required")
 	}
-	roleRank, topology, ok := participantRolePolicy(participant.Role)
+	policy, ok := policyForParticipantRole(participant.Role)
 	if !ok {
-		return 0, fmt.Errorf("engine identity manifest participant role is invalid")
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest participant role is invalid")
 	}
 	host, port, err := net.SplitHostPort(participant.NodeID)
 	if err != nil {
-		return 0, fmt.Errorf("engine identity manifest participant node_id is invalid")
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest participant node_id is invalid")
 	}
 	descriptor, err := NewParticipantDescriptor(&hostparse.HostInfo{Host: host}, port, participant.Role)
 	if err != nil || descriptor.nodeID != participant.NodeID {
-		return 0, fmt.Errorf("engine identity manifest participant node_id is not canonical")
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest participant node_id is not canonical")
 	}
 	if _, exists := order.nodeIDs[participant.NodeID]; exists {
-		return 0, fmt.Errorf("engine identity manifest contains duplicate participant %q", participant.NodeID)
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest contains duplicate participant %q", participant.NodeID)
 	}
 	order.nodeIDs[participant.NodeID] = struct{}{}
-	if roleRank < order.priorRoleRank || (roleRank == order.priorRoleRank && participant.NodeID <= order.priorNodeID) {
-		return 0, fmt.Errorf("engine identity manifest participants are not in canonical order")
+	if policy.canonicalOrderRank < order.priorRoleRank ||
+		(policy.canonicalOrderRank == order.priorRoleRank && participant.NodeID <= order.priorNodeID) {
+		return participantRolePolicy{}, fmt.Errorf("engine identity manifest participants are not in canonical order")
 	}
-	order.priorRoleRank = roleRank
+	order.priorRoleRank = policy.canonicalOrderRank
 	order.priorNodeID = participant.NodeID
-	return topology, nil
+	return policy, nil
 }
 
 func manifestParticipantBuild(
@@ -402,8 +403,8 @@ func validateManifestParticipantEvidence(
 }
 
 func validateManifestTopology(evidence manifestParticipantEvidence, participantCount int) error {
-	if evidence.standaloneCount > 0 {
-		if evidence.standaloneCount != 1 || participantCount != 1 {
+	if evidence.onlyParticipantRoleCount > 0 {
+		if evidence.onlyParticipantRoleCount != 1 || participantCount != 1 {
 			return fmt.Errorf("standalone engine identity manifest participant must be the only participant")
 		}
 	} else if evidence.entryCount != 1 {

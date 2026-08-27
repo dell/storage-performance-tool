@@ -13,13 +13,13 @@ import (
 )
 
 var (
-	evaluateRunEngineIdentityGate = engineinfo.EvaluateGate
-	runEngineIdentityNow          = time.Now
-	localRunEnginePlan            = localRunEngineParticipants
-	distributedRunEnginePlan      = distributedRunEngineParticipants
+	evaluateEngineIdentityGate = engineinfo.EvaluateGate
+	runEngineIdentityNow       = time.Now
+	localRunEnginePlan         = localRunEngineParticipants
+	distributedRunEnginePlan   = distributedRunEngineParticipants
 )
 
-type runEngineIdentityGateOptions struct {
+type engineIdentityGateOptions struct {
 	force       bool
 	verbose     bool
 	autoResults bool
@@ -29,16 +29,26 @@ type runEngineIdentityGateOptions struct {
 	descriptors func() ([]engineinfo.ParticipantDescriptor, error)
 }
 
-func newRunEngineIdentityPreSubmissionCheck(
+// attachEngineIdentityGate adds the shared managed-run identity policy while
+// leaving route selection and scenario submission to the launch adapter.
+func attachEngineIdentityGate(
+	hooks tui.LaunchHooks,
 	collector engineinfo.FleetCollector,
-	options runEngineIdentityGateOptions,
+	options engineIdentityGateOptions,
+) tui.LaunchHooks {
+	return hooks.WithPreSubmissionCheck(newEngineIdentityPreSubmissionCheck(collector, options))
+}
+
+func newEngineIdentityPreSubmissionCheck(
+	collector engineinfo.FleetCollector,
+	options engineIdentityGateOptions,
 ) func(context.Context) ([]string, error) {
 	return func(ctx context.Context) ([]string, error) {
 		descriptors, err := options.descriptors()
 		if err != nil {
 			return nil, fmt.Errorf("freeze engine participant plan: %w", err)
 		}
-		outcome, gateErr := evaluateRunEngineIdentityGate(ctx, collector, descriptors, options.force)
+		outcome, gateErr := evaluateEngineIdentityGate(ctx, collector, descriptors, options.force)
 		if options.metadata != nil {
 			options.metadata.engineIdentity = &outcome
 		}

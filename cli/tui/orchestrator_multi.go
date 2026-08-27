@@ -2429,7 +2429,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			if err := ctx.Err(); err != nil {
 				return failBeforeSubmission(err)
 			}
-			if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
+			if err := runAndEmitPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
 				return failBeforeSubmission(err)
 			}
 
@@ -2667,7 +2667,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	host.APIClient.LogReadySnapshot("pre-start")
-	if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
+	if err := runAndEmitPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 
@@ -2753,7 +2753,7 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if err := runPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
+	if err := runAndEmitPreSubmissionCheck(ctx, hooks, m.onOutput); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if m.onOutput != nil {
