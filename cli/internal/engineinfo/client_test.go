@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -172,7 +173,9 @@ func TestClientVersionMatchesTheSharedSemanticVersionContract(t *testing.T) {
 func TestClientClassifiesLegacyVersionEndpoints(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
+			var attempts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
 				w.WriteHeader(status)
 				_, _ = fmt.Fprint(w, `credential=LEGACY_SECRET path=/private/location`)
 			}))
@@ -184,6 +187,9 @@ func TestClientClassifiesLegacyVersionEndpoints(t *testing.T) {
 			}
 			if result.Status != engineinfo.StatusLegacyEndpointUnavailable || result.Build != nil || result.ReportedSchemaVersion != 0 {
 				t.Fatalf("Fetch() result = %+v, want safe legacy classification", result)
+			}
+			if attempts.Load() != 1 || result.Attempts != 1 {
+				t.Fatalf("requests/reported attempts = %d/%d, want immediate 1/1", attempts.Load(), result.Attempts)
 			}
 			assertExcludes(t, result.Reason, "LEGACY_SECRET", "/private/location")
 		})
@@ -260,7 +266,9 @@ func TestClientRejectsMalformedAndContractInvalidSchemaOneResponses(t *testing.T
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			var attempts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
 				w.Header().Set("Content-Type", test.contentType)
 				_, _ = fmt.Fprint(w, test.body)
 			}))
@@ -273,8 +281,147 @@ func TestClientRejectsMalformedAndContractInvalidSchemaOneResponses(t *testing.T
 			if result.Status != engineinfo.StatusCollectionFailed || result.Build != nil || result.Reason == "" {
 				t.Fatalf("Fetch() result = %+v, want safe failed classification", result)
 			}
+			if attempts.Load() != 1 || result.Attempts != 1 {
+				t.Fatalf("requests/reported attempts = %d/%d, want terminal 1/1", attempts.Load(), result.Attempts)
+			}
 			assertExcludes(t, result.Reason, "RAW_SECRET_91ba", "/private/revision", "/private/build/time", test.body, server.URL)
 			assertExcludes(t, err.Error(), "RAW_SECRET_91ba", "/private/revision", "/private/build/time", test.body, server.URL)
+		})
+	}
+}
+
+func TestClientRetriesEveryTransientHTTPStatusWithinConfiguredBounds(t *testing.T) {
+	statuses := []int{http.StatusTooManyRequests}
+	for status := http.StatusInternalServerError; status <= 599; status++ {
+		statuses = append(statuses, status)
+	}
+
+	for _, status := range statuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if attempts.Add(1) == 1 {
+					w.WriteHeader(status)
+					_, _ = fmt.Fprint(w, `token=TRANSIENT_SECRET path=/private/transient`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, validDevelopmentBuildJSON)
+			}))
+			defer server.Close()
+
+			result, err := engineinfo.NewClientWithOptions(engineinfo.ClientOptions{
+				RequestAttempts: 2,
+				RequestTimeout:  time.Second,
+				RetryDelay:      time.Nanosecond,
+			}).Fetch(context.Background(), server.URL)
+			if err != nil || result.Status != engineinfo.StatusCollected {
+				t.Fatalf("Fetch() = (%+v, %v), want collected after HTTP %d retry", result, err, status)
+			}
+			if attempts.Load() != 2 || result.Attempts != 2 {
+				t.Fatalf("requests/reported attempts = %d/%d, want 2/2", attempts.Load(), result.Attempts)
+			}
+		})
+	}
+}
+
+func TestClientTransientHTTPStatusExhaustionIsSafeAndBounded(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(status)
+				_, _ = fmt.Fprint(w, `token=EXHAUSTION_SECRET path=/private/exhaustion`)
+			}))
+			defer server.Close()
+
+			result, err := engineinfo.NewClientWithOptions(engineinfo.ClientOptions{
+				RequestAttempts: 3,
+				RequestTimeout:  time.Second,
+				RetryDelay:      time.Nanosecond,
+			}).Fetch(context.Background(), server.URL)
+			if err == nil || result.Status != engineinfo.StatusCollectionFailed {
+				t.Fatalf("Fetch() = (%+v, %v), want fatal HTTP %d exhaustion", result, err, status)
+			}
+			if attempts.Load() != 3 || result.Attempts != 3 {
+				t.Fatalf("requests/reported attempts = %d/%d, want bounded 3/3", attempts.Load(), result.Attempts)
+			}
+			assertExcludes(t, result.Reason, "EXHAUSTION_SECRET", "/private/exhaustion", server.URL)
+			assertExcludes(t, err.Error(), "EXHAUSTION_SECRET", "/private/exhaustion", server.URL)
+		})
+	}
+}
+
+func TestClientCancellationStopsTransientHTTPBackoffWithoutAnotherRequest(t *testing.T) {
+	var attempts atomic.Int32
+	firstResponse := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			close(firstResponse)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := engineinfo.NewClientWithOptions(engineinfo.ClientOptions{
+		RequestAttempts: 3,
+		RequestTimeout:  time.Second,
+		RetryDelay:      time.Minute,
+	})
+	type fetchOutcome struct {
+		result engineinfo.CollectionResult
+		err    error
+	}
+	done := make(chan fetchOutcome, 1)
+	go func() {
+		result, err := client.Fetch(ctx, server.URL)
+		done <- fetchOutcome{result: result, err: err}
+	}()
+	<-firstResponse
+	cancel()
+
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.err, context.Canceled) {
+			t.Fatalf("Fetch() error = %v, want context cancellation", outcome.err)
+		}
+		if attempts.Load() != 1 || outcome.result.Attempts != 1 {
+			t.Fatalf("requests/reported attempts = %d/%d, want canceled 1/1", attempts.Load(), outcome.result.Attempts)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Fetch() did not stop promptly during transient HTTP backoff")
+	}
+}
+
+func TestClientDoesNotRetryPermanentHTTPStatuses(t *testing.T) {
+	for status := http.StatusBadRequest; status <= 499; status++ {
+		if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusTooManyRequests {
+			continue
+		}
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(status)
+				_, _ = fmt.Fprint(w, `token=PERMANENT_SECRET path=/private/permanent`)
+			}))
+			defer server.Close()
+
+			result, err := engineinfo.NewClientWithOptions(engineinfo.ClientOptions{
+				RequestAttempts: 3,
+				RequestTimeout:  time.Second,
+				RetryDelay:      time.Nanosecond,
+			}).Fetch(context.Background(), server.URL)
+			if err == nil || result.Status != engineinfo.StatusCollectionFailed {
+				t.Fatalf("Fetch() = (%+v, %v), want terminal HTTP %d failure", result, err, status)
+			}
+			if attempts.Load() != 1 || result.Attempts != 1 {
+				t.Fatalf("requests/reported attempts = %d/%d, want terminal 1/1", attempts.Load(), result.Attempts)
+			}
+			assertExcludes(t, result.Reason, "PERMANENT_SECRET", "/private/permanent", server.URL)
+			assertExcludes(t, err.Error(), "PERMANENT_SECRET", "/private/permanent", server.URL)
 		})
 	}
 }
@@ -556,6 +703,7 @@ func TestClientReturnsSafeDiagnosticsForRequestAndHTTPFailures(t *testing.T) {
 	})
 
 	t.Run("redirect is not followed", func(t *testing.T) {
+		var originRequests atomic.Int32
 		var redirectedRequests atomic.Int32
 		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			redirectedRequests.Add(1)
@@ -564,6 +712,7 @@ func TestClientReturnsSafeDiagnosticsForRequestAndHTTPFailures(t *testing.T) {
 		}))
 		defer target.Close()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			originRequests.Add(1)
 			w.Header().Set("Location", target.URL+"/private/redirect?token=REDIRECT_SECRET_f6a1")
 			w.WriteHeader(http.StatusFound)
 		}))
@@ -573,18 +722,19 @@ func TestClientReturnsSafeDiagnosticsForRequestAndHTTPFailures(t *testing.T) {
 		if err == nil || result.Status != engineinfo.StatusCollectionFailed {
 			t.Fatalf("Fetch() = (%+v, %v), want redirect contract failure", result, err)
 		}
-		if got := redirectedRequests.Load(); got != 0 {
-			t.Fatalf("redirect target requests = %d, want 0", got)
+		if originRequests.Load() != 1 || result.Attempts != 1 || redirectedRequests.Load() != 0 {
+			t.Fatalf("origin/reported/redirect target requests = %d/%d/%d, want 1/1/0",
+				originRequests.Load(), result.Attempts, redirectedRequests.Load())
 		}
 		assertExcludes(t, result.Reason, "REDIRECT_SECRET_f6a1", "/private/redirect", target.URL)
 		assertExcludes(t, err.Error(), "REDIRECT_SECRET_f6a1", "/private/redirect", target.URL)
 	})
 
-	t.Run("unexpected HTTP status", func(t *testing.T) {
+	t.Run("permanent HTTP status", func(t *testing.T) {
 		var attempts atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			attempts.Add(1)
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusTeapot)
 			_, _ = fmt.Fprint(w, `token=HTTP_SECRET_d2f8 path=/private/http/path`)
 		}))
 		defer server.Close()

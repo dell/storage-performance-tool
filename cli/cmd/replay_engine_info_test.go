@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
@@ -288,6 +290,97 @@ func TestReplayIdentityGateCancellationStopsBeforeSubmission(t *testing.T) {
 	}
 	if submissions.Load() != 0 {
 		t.Fatalf("submission calls = %d, want 0", submissions.Load())
+	}
+}
+
+func TestReplayCommandRetriesTransientVersionResponsesWithinSubmissionGate(t *testing.T) {
+	archive := newReplayArchiveServer(t)
+	defer archive.Close()
+
+	for _, test := range []struct {
+		name       string
+		status     int
+		succeed    bool
+		wantSubmit int32
+	}{
+		{name: "429 then success", status: http.StatusTooManyRequests, succeed: true, wantSubmit: 1},
+		{name: "503 exhaustion remains non-forceable", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restore := installReplayEngineInfoSeams(t)
+			defer restore()
+
+			var requests atomic.Int32
+			versionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempt := requests.Add(1)
+				if !test.succeed || attempt == 1 {
+					w.WriteHeader(test.status)
+					_, _ = fmt.Fprint(w, `token=REPLAY_RETRY_SECRET path=/private/replay`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{
+					"schema_version":1,
+					"product":"spt-engine",
+					"version":"5.14.2",
+					"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"build_time":"2026-08-26T12:34:56Z",
+					"development":false,
+					"source_dirty":false
+				}`)
+			}))
+			defer versionServer.Close()
+			_, apiPort, err := net.SplitHostPort(versionServer.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			standalone := replayDescriptor(t, "127.0.0.1", apiPort, engineinfo.RoleStandalone)
+			replayLocalEnginePlan = func(string) ([]engineinfo.ParticipantDescriptor, error) {
+				return []engineinfo.ParticipantDescriptor{standalone}, nil
+			}
+			newReplayEngineIdentityCollector = func() engineinfo.FleetCollector {
+				return engineinfo.NewCollector(engineinfo.NewClientWithOptions(engineinfo.ClientOptions{
+					RequestAttempts: 3,
+					RequestTimeout:  time.Second,
+					RetryDelay:      time.Millisecond,
+				}))
+			}
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
+
+			var submissions atomic.Int32
+			var out bytes.Buffer
+			startReplayLocalHeadless = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte) error {
+				return executeReplayHookForTest(options.Context, options.LaunchHooks, &out, &submissions)
+			}
+
+			cmd := newReplayCommandForTest(t)
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs(replayIdentityArgs(archive.URL, "127.0.0.1", t.TempDir(), false, true, true))
+			err = cmd.Execute()
+			if test.succeed && err != nil {
+				t.Fatalf("Execute() error = %v, want retry success", err)
+			}
+			if !test.succeed && err == nil {
+				t.Fatal("Execute() error = nil, want non-forceable retry exhaustion")
+			}
+			wantRequests := int32(3)
+			if test.succeed {
+				wantRequests = 2
+			}
+			if requests.Load() != wantRequests || submissions.Load() != test.wantSubmit {
+				t.Fatalf("version requests/submissions = %d/%d, want %d/%d", requests.Load(), submissions.Load(), wantRequests, test.wantSubmit)
+			}
+			if strings.Contains(out.String(), "attempts=") {
+				t.Fatalf("normal replay output exposed retry detail:\n%s", out.String())
+			}
+			if strings.Contains(out.String(), "REPLAY_RETRY_SECRET") || strings.Contains(out.String(), "/private/replay") {
+				t.Fatalf("replay output exposed response body:\n%s", out.String())
+			}
+		})
 	}
 }
 
