@@ -239,6 +239,46 @@ func TestPersistRejectedEngineIdentityRecordsLifecycleAndMinimalIndex(t *testing
 	}
 }
 
+func TestEngineIdentityIndexIgnoresTemporaryManifestCandidates(t *testing.T) {
+	root := t.TempDir()
+	manifest := engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         73,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
+		},
+		Builds: []engineinfo.ManifestBuild{},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
+			Reason:           "engine version endpoint is unavailable",
+		}},
+	}
+	if err := engineinfo.WriteManifestAtomic(root, manifest); err != nil {
+		t.Fatal(err)
+	}
+	temporaryCandidate := "." + constants.EngineInfoManifestName + ".tmp-leftover"
+	if err := os.WriteFile(filepath.Join(root, temporaryCandidate), []byte("incomplete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := indexEngineIdentityManifest(root); err != nil {
+		t.Fatal(err)
+	}
+
+	var index results.Manifest
+	data, err := os.ReadFile(filepath.Join(root, constants.ResultsManifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	if len(index.RunFiles) != 1 || index.RunFiles[0].Name != constants.EngineInfoManifestName {
+		t.Fatalf("indexed run files = %+v, want only the completed public manifest", index.RunFiles)
+	}
+}
+
 func TestDefaultArtifactFetcherNeverCopiesEngineLocalBuildRecords(t *testing.T) {
 	for _, artifact := range results.DefaultArtifacts {
 		if artifact.Suffix == "engine.build.json" {

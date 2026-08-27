@@ -372,7 +372,7 @@ func groupBuilds(collections []CollectionResult) ([]GroupedBuild, map[string]str
 	builds := make([]GroupedBuild, 0, len(keys))
 	ids := make(map[string]string, len(keys))
 	for index, key := range keys {
-		buildID := fmt.Sprintf("build-%d", index+1)
+		buildID := canonicalBuildReference(index)
 		ids[key] = buildID
 		builds = append(builds, GroupedBuild{BuildID: buildID, Information: byKey[key]})
 	}

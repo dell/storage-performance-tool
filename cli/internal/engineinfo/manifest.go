@@ -71,7 +71,7 @@ func NewManifest(
 	manifestBuilds := make([]ManifestBuild, 0, len(builds))
 	buildIDByPriorID := make(map[string]string, len(builds))
 	for index, grouped := range builds {
-		buildID := fmt.Sprintf("build-%d", index+1)
+		buildID := canonicalBuildReference(index)
 		buildIDByPriorID[grouped.BuildID] = buildID
 		manifestBuilds = append(manifestBuilds, ManifestBuild{
 			BuildID:     buildID,
@@ -225,7 +225,7 @@ func validateManifestBuilds(builds []ManifestBuild) (map[string]BuildInformation
 	buildReferences := make(map[string]int, len(builds))
 	priorBuildKey := ""
 	for index, build := range builds {
-		expectedID := fmt.Sprintf("build-%d", index+1)
+		expectedID := canonicalBuildReference(index)
 		if build.BuildID != expectedID {
 			return nil, nil, fmt.Errorf("engine identity manifest build %d has noncanonical id %q", index+1, build.BuildID)
 		}
@@ -453,7 +453,7 @@ func WriteManifestAtomic(root string, manifest Manifest) error {
 		return fmt.Errorf("encode engine identity manifest: %w", err)
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(root, ".engine.info.json.tmp-*")
+	tmp, err := os.CreateTemp(root, "."+constants.EngineInfoManifestName+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temporary engine identity manifest: %w", err)
 	}
