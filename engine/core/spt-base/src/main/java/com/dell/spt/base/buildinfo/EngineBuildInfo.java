@@ -9,4 +9,10 @@ public record EngineBuildInfo(
 				String buildTime,
 				boolean development,
 				Boolean sourceDirty) {
+
+	public EngineBuildInfo {
+		if (!EngineBuildInfoProvider.UNKNOWN.equals(version) && !SemanticVersion.isValid(version)) {
+			throw new IllegalArgumentException("Engine build version is not a valid semantic version");
+		}
+	}
 }

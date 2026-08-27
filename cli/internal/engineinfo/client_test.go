@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -133,6 +136,34 @@ func TestClientClassifiesSupportedBuildInformationCompleteness(t *testing.T) {
 			}
 			if result.Build == nil {
 				t.Fatal("Fetch() discarded supported build information")
+			}
+		})
+	}
+}
+
+func TestClientVersionMatchesTheSharedSemanticVersionContract(t *testing.T) {
+	for _, fixture := range semanticVersionFixtures(t) {
+		t.Run(fixture.name, func(t *testing.T) {
+			body := strings.Replace(validDevelopmentBuildJSON, `"version": "5.14.2"`,
+				fmt.Sprintf(`"version": %q`, fixture.version), 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+
+			result, err := engineinfo.NewClient().Fetch(context.Background(), server.URL)
+			if fixture.valid {
+				if err != nil || result.Status != engineinfo.StatusCollected || result.Build == nil {
+					t.Fatalf("Fetch() = (%+v, %v), want collected", result, err)
+				}
+				if result.Build.Version != fixture.version {
+					t.Fatalf("version = %q, want exact %q", result.Build.Version, fixture.version)
+				}
+				return
+			}
+			if err == nil || result.Status != engineinfo.StatusCollectionFailed || result.Build != nil {
+				t.Fatalf("Fetch() = (%+v, %v), want non-forceable contract failure", result, err)
 			}
 		})
 	}
@@ -582,6 +613,40 @@ const validDevelopmentBuildJSON = `{
 	"development": true,
 	"source_dirty": false
 }`
+
+type semanticVersionFixture struct {
+	valid   bool
+	name    string
+	version string
+}
+
+func semanticVersionFixtures(t *testing.T) []semanticVersionFixture {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate semantic-version fixture from test source")
+	}
+	path := filepath.Join(filepath.Dir(testFile), "..", "..", "..", "test-fixtures", "engine-build-info", "semantic-versions.txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read semantic-version fixture: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	fixtures := make([]semanticVersionFixture, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 || (parts[0] != "valid" && parts[0] != "invalid") {
+			t.Fatalf("invalid semantic-version fixture line %q", line)
+		}
+		fixtures = append(fixtures, semanticVersionFixture{
+			valid: parts[0] == "valid", name: parts[1], version: parts[2],
+		})
+	}
+	return fixtures
+}
 
 func dropConnection(t *testing.T, w http.ResponseWriter) {
 	t.Helper()

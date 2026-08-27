@@ -16,4 +16,6 @@ dependencies {
 
 test {
 	useJUnitPlatform()
+	systemProperty "spt.test.semver-fixtures",
+		file("../../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
 }

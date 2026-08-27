@@ -6,10 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import com.github.akurilov.confuse.impl.BasicConfig;
@@ -106,6 +110,53 @@ class EngineBuildInfoProviderTest {
 		assertTrue(warnings.getFirst().contains("run.version"));
 	}
 
+	@Test
+	void generatedResourceVersionMatchesTheSharedSemanticVersionContract() throws Exception {
+		final var mapper = new ObjectMapper();
+		for (final var fixture : semanticVersionFixtures()) {
+			final var warnings = new ArrayList<String>();
+			final var resource = COMPLETE_RESOURCE.replace("version=5.14.2", "version=" + fixture.version());
+			final var provider = new EngineBuildInfoProvider(
+							source(resource, fixture.version(), new AtomicInteger()), warnings::add);
+			final var publishedVersion = mapper.readTree(EngineBuildInfoJson.serialize(provider.snapshot()))
+							.get("version")
+							.asText();
+
+			if (fixture.valid()) {
+				assertEquals(fixture.version(), provider.snapshot().version(), fixture.name());
+				assertEquals(fixture.version(), publishedVersion, fixture.name());
+				assertTrue(warnings.isEmpty(), fixture.name());
+			} else {
+				assertEquals(EngineBuildInfoProvider.UNKNOWN, provider.snapshot().version(), fixture.name());
+				assertEquals(EngineBuildInfoProvider.UNKNOWN, publishedVersion, fixture.name());
+				assertEquals(1, warnings.size(), fixture.name());
+			}
+		}
+	}
+
+	@Test
+	void developmentFallbackVersionMatchesTheSharedSemanticVersionContract() throws Exception {
+		for (final var fixture : semanticVersionFixtures()) {
+			final var provider = new EngineBuildInfoProvider(
+							source(null, fixture.version(), new AtomicInteger()), warning -> {});
+			assertEquals(
+							fixture.valid() ? fixture.version() : EngineBuildInfoProvider.UNKNOWN,
+							provider.snapshot().version(),
+							fixture.name());
+			assertTrue(provider.snapshot().development(), fixture.name());
+			assertNull(provider.snapshot().sourceDirty(), fixture.name());
+		}
+	}
+
+	private static List<SemanticVersionFixture> semanticVersionFixtures() throws Exception {
+		final var path = Path.of(System.getProperty("spt.test.semver-fixtures"));
+		return Files.readAllLines(path).stream()
+						.filter(line -> !line.startsWith("#"))
+						.map(line -> line.split("\\|", -1))
+						.map(parts -> new SemanticVersionFixture(parts[0].equals("valid"), parts[1], parts[2]))
+						.toList();
+	}
+
 	private static EngineBuildInfoSource source(
 					final String resource, final String implementationVersion, final AtomicInteger opens) {
 		return new EngineBuildInfoSource() {
@@ -123,4 +174,6 @@ class EngineBuildInfoProviderTest {
 			}
 		};
 	}
+
+	private record SemanticVersionFixture(boolean valid, String name, String version) {}
 }

@@ -32,7 +32,7 @@ class CoreResourcesToInstallTest {
 		final var buildInfo = new EngineBuildInfo(
 						1,
 						"spt-engine",
-						"immutable-version",
+						"5.14.2-test+immutable",
 						"0123456789abcdef0123456789abcdef01234567",
 						"2026-08-26T12:34:56Z",
 						true,
