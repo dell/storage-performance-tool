@@ -252,9 +252,11 @@ func TestRunCommandInvokesEngineIdentityGateAcrossTopologyPresentationAndLimitMo
 }
 
 func TestRunCommandLockedParticipantVersionFailureBlocksSubmission(t *testing.T) {
+	var failedRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Host, "localhost:") {
-			http.Error(w, "worker unavailable", http.StatusServiceUnavailable)
+			failedRequests.Add(1)
+			http.Error(w, "token=RUN_EXHAUSTION_SECRET path=/private/run-exhaustion", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -275,7 +277,7 @@ func TestRunCommandLockedParticipantVersionFailureBlocksSubmission(t *testing.T)
 	}
 
 	t.Chdir(t.TempDir())
-	setRunEngineInfoFlags(t, "entry.example,worker.example", "2", "", false, false)
+	setRunEngineInfoFlags(t, "entry.example,worker.example", "2", "", true, false)
 	setGlobalRunFlagForTest(t, "api-port", apiPort)
 	restore := installRunEngineInfoCommandSeams(t)
 	defer restore()
@@ -318,8 +320,84 @@ func TestRunCommandLockedParticipantVersionFailureBlocksSubmission(t *testing.T)
 	if submitted.Load() != 0 {
 		t.Fatalf("scenario submissions = %d, want zero", submitted.Load())
 	}
+	if failedRequests.Load() != constants.EngineVersionRequestAttempts {
+		t.Fatalf("failed worker version requests = %d, want bounded %d", failedRequests.Load(), constants.EngineVersionRequestAttempts)
+	}
 	if !strings.Contains(strings.Join(output, "\n"), "collection failed") {
 		t.Fatalf("gate output = %v, want collection failure", output)
+	}
+	if strings.Contains(err.Error(), "RUN_EXHAUSTION_SECRET") || strings.Contains(err.Error(), "/private/run-exhaustion") ||
+		strings.Contains(strings.Join(output, "\n"), "RUN_EXHAUSTION_SECRET") || strings.Contains(strings.Join(output, "\n"), "/private/run-exhaustion") {
+		t.Fatalf("run exhaustion diagnostics exposed response body: error=%v output=%v", err, output)
+	}
+}
+
+func TestRunCommandRetriesTransientVersionResponseBeforeSubmission(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "token=RUN_RETRY_SECRET path=/private/run", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"schema_version":1,
+			"product":"spt-engine",
+			"version":"5.14.2",
+			"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"build_time":"2026-08-26T12:34:56Z",
+			"development":false,
+			"source_dirty":false
+		}`)
+	}))
+	defer server.Close()
+	_, apiPort, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(t.TempDir())
+	setRunEngineInfoFlags(t, "127.0.0.1", "1", "", false, false)
+	setGlobalRunFlagForTest(t, "api-port", apiPort)
+	setGlobalRunFlagForTest(t, "verbose", "true")
+	restore := installRunEngineInfoCommandSeams(t)
+	defer restore()
+	shouldRunHeadlessForRun = func(*cobra.Command) bool { return true }
+	evaluateRunEngineIdentityGate = engineinfo.EvaluateGate
+	standalone, err := engineinfo.NewParticipantDescriptor(
+		&hostparse.HostInfo{Host: "127.0.0.1"}, apiPort, engineinfo.RoleStandalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localRunEnginePlan = func(string) ([]engineinfo.ParticipantDescriptor, error) {
+		return []engineinfo.ParticipantDescriptor{standalone}, nil
+	}
+
+	var submitted atomic.Int64
+	var output []string
+	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+		lines, gateErr := options.LaunchHooks.RunPreSubmissionCheck(options.Context)
+		output = append(output, lines...)
+		if gateErr != nil {
+			return gateErr
+		}
+		options.LaunchHooks.NotifySubmitted()
+		submitted.Add(1)
+		return nil
+	}
+
+	if err := runCmd.RunE(runCmd, []string{WorkloadTypeMock}); err != nil {
+		t.Fatalf("RunE() error = %v, want success after transient retry", err)
+	}
+	if requests.Load() != 2 || submitted.Load() != 1 {
+		t.Fatalf("version requests/submissions = %d/%d, want 2/1", requests.Load(), submitted.Load())
+	}
+	joined := strings.Join(output, "\n")
+	if !strings.Contains(joined, "attempts=2 retries=1") {
+		t.Fatalf("verbose gate output = %v, want actual retry detail", output)
+	}
+	if strings.Contains(joined, "RUN_RETRY_SECRET") || strings.Contains(joined, "/private/run") {
+		t.Fatalf("verbose gate output exposed response body: %v", output)
 	}
 }
 

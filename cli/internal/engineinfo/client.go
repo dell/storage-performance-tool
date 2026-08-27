@@ -176,6 +176,11 @@ func (c *Client) fetchOnce(ctx context.Context, endpoint string) (CollectionResu
 			Reason: "engine version endpoint is unavailable on this engine",
 		}, false, nil
 	}
+	if response.StatusCode == http.StatusTooManyRequests ||
+		(response.StatusCode >= http.StatusInternalServerError && response.StatusCode <= 599) {
+		result, fetchErr := failed("engine version endpoint returned a transient HTTP status")
+		return result, true, fetchErr
+	}
 	if response.StatusCode != http.StatusOK {
 		result, fetchErr := failed("engine version endpoint returned an unexpected HTTP status")
 		return result, false, fetchErr
