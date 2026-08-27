@@ -165,6 +165,34 @@ func cloneBool(value *bool) *bool {
 
 // Validate checks schema-one referential and lifecycle invariants.
 func (manifest Manifest) Validate() error {
+	if err := validateManifestEnvelope(manifest); err != nil {
+		return err
+	}
+	buildsByID, buildReferences, err := validateManifestBuilds(manifest.Builds)
+	if err != nil {
+		return err
+	}
+	participantEvidence, err := validateManifestParticipants(manifest.Participants, buildsByID, buildReferences)
+	if err != nil {
+		return err
+	}
+	if err := validateManifestTopology(participantEvidence, len(manifest.Participants)); err != nil {
+		return err
+	}
+	if err := validateManifestBuildReferences(buildReferences); err != nil {
+		return err
+	}
+	assessed := assessConsistency(participantEvidence.collections)
+	if assessed.Status != manifest.Consistency.Status {
+		return fmt.Errorf(
+			"engine identity manifest consistency %q does not match participant evidence %q",
+			manifest.Consistency.Status, assessed.Status,
+		)
+	}
+	return nil
+}
+
+func validateManifestEnvelope(manifest Manifest) error {
 	if manifest.SchemaVersion != constants.EngineInfoManifestSchemaVersion {
 		return fmt.Errorf("unsupported engine identity manifest schema %d", manifest.SchemaVersion)
 	}
@@ -189,14 +217,17 @@ func (manifest Manifest) Validate() error {
 	if manifest.Builds == nil || manifest.Participants == nil {
 		return fmt.Errorf("engine identity manifest builds and participants must be arrays")
 	}
-	buildIDs := make(map[string]struct{}, len(manifest.Builds))
-	buildsByID := make(map[string]BuildInformation, len(manifest.Builds))
-	buildReferences := make(map[string]int, len(manifest.Builds))
+	return nil
+}
+
+func validateManifestBuilds(builds []ManifestBuild) (map[string]BuildInformation, map[string]int, error) {
+	buildsByID := make(map[string]BuildInformation, len(builds))
+	buildReferences := make(map[string]int, len(builds))
 	priorBuildKey := ""
-	for index, build := range manifest.Builds {
+	for index, build := range builds {
 		expectedID := fmt.Sprintf("build-%d", index+1)
 		if build.BuildID != expectedID {
-			return fmt.Errorf("engine identity manifest build %d has noncanonical id %q", index+1, build.BuildID)
+			return nil, nil, fmt.Errorf("engine identity manifest build %d has noncanonical id %q", index+1, build.BuildID)
 		}
 		information := BuildInformation{
 			SchemaVersion: constants.EngineBuildInfoSchemaVersion,
@@ -208,133 +239,184 @@ func (manifest Manifest) Validate() error {
 			SourceDirty:   build.SourceDirty,
 		}
 		if reason := validateSchemaOne(schemaOneFromBuild(information), information.SourceDirty); reason != "" {
-			return fmt.Errorf("engine identity manifest build %s is invalid: %s", build.BuildID, reason)
+			return nil, nil, fmt.Errorf("engine identity manifest build %s is invalid: %s", build.BuildID, reason)
 		}
 		key := buildKey(information)
 		if index > 0 && key <= priorBuildKey {
-			return fmt.Errorf("engine identity manifest builds are not in canonical unique order")
+			return nil, nil, fmt.Errorf("engine identity manifest builds are not in canonical unique order")
 		}
 		priorBuildKey = key
-		buildIDs[build.BuildID] = struct{}{}
 		buildsByID[build.BuildID] = information
+		buildReferences[build.BuildID] = 0
 	}
-	if len(manifest.Participants) == 0 {
-		return fmt.Errorf("engine identity manifest must contain every planned participant")
+	return buildsByID, buildReferences, nil
+}
+
+type manifestParticipantEvidence struct {
+	collections     []CollectionResult
+	entryCount      int
+	standaloneCount int
+}
+
+type manifestParticipantOrder struct {
+	nodeIDs       map[string]struct{}
+	priorRoleRank int
+	priorNodeID   string
+}
+
+func validateManifestParticipants(
+	participants []ManifestParticipant,
+	buildsByID map[string]BuildInformation,
+	buildReferences map[string]int,
+) (manifestParticipantEvidence, error) {
+	if len(participants) == 0 {
+		return manifestParticipantEvidence{}, fmt.Errorf("engine identity manifest must contain every planned participant")
 	}
-	collections := make([]CollectionResult, 0, len(manifest.Participants))
-	nodeIDs := make(map[string]struct{}, len(manifest.Participants))
-	entryCount := 0
-	standaloneCount := 0
-	priorRoleRank := -1
-	priorNodeID := ""
-	for _, participant := range manifest.Participants {
-		if strings.TrimSpace(participant.NodeID) == "" {
-			return fmt.Errorf("engine identity manifest participant node_id is required")
-		}
-		if _, _, ok := participantRolePolicy(participant.Role); !ok {
-			return fmt.Errorf("engine identity manifest participant role is invalid")
-		}
-		host, port, err := net.SplitHostPort(participant.NodeID)
+	evidence := manifestParticipantEvidence{collections: make([]CollectionResult, 0, len(participants))}
+	order := manifestParticipantOrder{nodeIDs: make(map[string]struct{}, len(participants)), priorRoleRank: -1}
+	for _, participant := range participants {
+		topology, err := validateManifestParticipantIdentity(participant, &order)
 		if err != nil {
-			return fmt.Errorf("engine identity manifest participant node_id is invalid")
+			return manifestParticipantEvidence{}, err
 		}
-		descriptor, err := NewParticipantDescriptor(&hostparse.HostInfo{Host: host}, port, participant.Role)
-		if err != nil || descriptor.nodeID != participant.NodeID {
-			return fmt.Errorf("engine identity manifest participant node_id is not canonical")
-		}
-		if _, exists := nodeIDs[participant.NodeID]; exists {
-			return fmt.Errorf("engine identity manifest contains duplicate participant %q", participant.NodeID)
-		}
-		nodeIDs[participant.NodeID] = struct{}{}
-		roleRank, topology, _ := participantRolePolicy(participant.Role)
-		if roleRank < priorRoleRank || (roleRank == priorRoleRank && participant.NodeID <= priorNodeID) {
-			return fmt.Errorf("engine identity manifest participants are not in canonical order")
-		}
-		priorRoleRank = roleRank
-		priorNodeID = participant.NodeID
 		switch topology {
 		case topologyEntry:
-			entryCount++
+			evidence.entryCount++
 		case topologyStandalone:
-			standaloneCount++
+			evidence.standaloneCount++
 		}
-		switch participant.CollectionStatus {
-		case StatusCollected, StatusLegacyEndpointUnavailable, StatusUnsupportedSchema,
-			StatusIncompleteBuildInfo, StatusCollectionFailed:
-		default:
-			return fmt.Errorf("engine identity manifest participant collection status is invalid")
+		build, err := manifestParticipantBuild(participant, buildsByID, buildReferences)
+		if err != nil {
+			return manifestParticipantEvidence{}, err
 		}
-		var build *BuildInformation
-		if participant.BuildID != "" {
-			information, ok := buildsByID[participant.BuildID]
-			if !ok {
-				return fmt.Errorf("engine identity manifest participant references unknown build %q", participant.BuildID)
-			}
-			cloned := cloneBuild(information)
-			build = &cloned
-			buildReferences[participant.BuildID]++
+		collection, err := validateManifestParticipantEvidence(participant, build)
+		if err != nil {
+			return manifestParticipantEvidence{}, err
 		}
-		if participant.ConfiguredVersionHint != safeConfiguredVersionHint(participant.ConfiguredVersionHint) ||
-			(participant.CollectionStatus != StatusLegacyEndpointUnavailable && participant.ConfiguredVersionHint != "") {
-			return fmt.Errorf("engine identity manifest participant configured version hint is invalid")
-		}
-		complete := false
-		switch participant.CollectionStatus {
-		case StatusCollected:
-			if participant.ReportedSchemaVersion != constants.EngineBuildInfoSchemaVersion || build == nil || participant.Reason != "" {
-				return fmt.Errorf("collected engine identity manifest participant is incomplete")
-			}
-			if !completeBuildIdentity(*build) {
-				return fmt.Errorf("collected engine identity manifest participant has incomplete comparison fields")
-			}
-			complete = true
-		case StatusIncompleteBuildInfo:
-			if participant.ReportedSchemaVersion != constants.EngineBuildInfoSchemaVersion || build == nil {
-				return fmt.Errorf("incomplete engine identity manifest participant lacks its schema-one build")
-			}
-			if completeBuildIdentity(*build) {
-				return fmt.Errorf("incomplete engine identity manifest participant has complete comparison fields")
-			}
-		case StatusLegacyEndpointUnavailable:
-			if participant.ReportedSchemaVersion != 0 || build != nil {
-				return fmt.Errorf("legacy engine identity manifest participant contains build evidence")
-			}
-		case StatusUnsupportedSchema:
-			if participant.ReportedSchemaVersion <= constants.EngineBuildInfoSchemaVersion || build != nil {
-				return fmt.Errorf("unsupported engine identity manifest participant schema evidence is invalid")
-			}
-		case StatusCollectionFailed:
-			if build != nil || participant.ReportedSchemaVersion < 0 ||
-				participant.ReportedSchemaVersion > constants.EngineBuildInfoSchemaVersion {
-				return fmt.Errorf("failed engine identity manifest participant contains build evidence")
-			}
-		}
-		if participant.CollectionStatus != StatusCollected && strings.TrimSpace(participant.Reason) == "" {
-			return fmt.Errorf("engine identity manifest participant collection reason is required")
-		}
-		collections = append(collections, CollectionResult{
-			Status: participant.CollectionStatus, Build: build, Complete: complete,
-			ReportedSchemaVersion: participant.ReportedSchemaVersion, Reason: participant.Reason,
-		})
+		evidence.collections = append(evidence.collections, collection)
 	}
-	if standaloneCount > 0 {
-		if standaloneCount != 1 || len(manifest.Participants) != 1 {
+	return evidence, nil
+}
+
+func validateManifestParticipantIdentity(
+	participant ManifestParticipant,
+	order *manifestParticipantOrder,
+) (participantTopology, error) {
+	if strings.TrimSpace(participant.NodeID) == "" {
+		return 0, fmt.Errorf("engine identity manifest participant node_id is required")
+	}
+	roleRank, topology, ok := participantRolePolicy(participant.Role)
+	if !ok {
+		return 0, fmt.Errorf("engine identity manifest participant role is invalid")
+	}
+	host, port, err := net.SplitHostPort(participant.NodeID)
+	if err != nil {
+		return 0, fmt.Errorf("engine identity manifest participant node_id is invalid")
+	}
+	descriptor, err := NewParticipantDescriptor(&hostparse.HostInfo{Host: host}, port, participant.Role)
+	if err != nil || descriptor.nodeID != participant.NodeID {
+		return 0, fmt.Errorf("engine identity manifest participant node_id is not canonical")
+	}
+	if _, exists := order.nodeIDs[participant.NodeID]; exists {
+		return 0, fmt.Errorf("engine identity manifest contains duplicate participant %q", participant.NodeID)
+	}
+	order.nodeIDs[participant.NodeID] = struct{}{}
+	if roleRank < order.priorRoleRank || (roleRank == order.priorRoleRank && participant.NodeID <= order.priorNodeID) {
+		return 0, fmt.Errorf("engine identity manifest participants are not in canonical order")
+	}
+	order.priorRoleRank = roleRank
+	order.priorNodeID = participant.NodeID
+	return topology, nil
+}
+
+func manifestParticipantBuild(
+	participant ManifestParticipant,
+	buildsByID map[string]BuildInformation,
+	buildReferences map[string]int,
+) (*BuildInformation, error) {
+	var build *BuildInformation
+	if participant.BuildID != "" {
+		information, ok := buildsByID[participant.BuildID]
+		if !ok {
+			return nil, fmt.Errorf("engine identity manifest participant references unknown build %q", participant.BuildID)
+		}
+		cloned := cloneBuild(information)
+		build = &cloned
+		buildReferences[participant.BuildID]++
+	}
+	return build, nil
+}
+
+func validateManifestParticipantEvidence(
+	participant ManifestParticipant,
+	build *BuildInformation,
+) (CollectionResult, error) {
+	switch participant.CollectionStatus {
+	case StatusCollected, StatusLegacyEndpointUnavailable, StatusUnsupportedSchema,
+		StatusIncompleteBuildInfo, StatusCollectionFailed:
+	default:
+		return CollectionResult{}, fmt.Errorf("engine identity manifest participant collection status is invalid")
+	}
+	if participant.ConfiguredVersionHint != safeConfiguredVersionHint(participant.ConfiguredVersionHint) ||
+		(participant.CollectionStatus != StatusLegacyEndpointUnavailable && participant.ConfiguredVersionHint != "") {
+		return CollectionResult{}, fmt.Errorf("engine identity manifest participant configured version hint is invalid")
+	}
+	complete := false
+	switch participant.CollectionStatus {
+	case StatusCollected:
+		if participant.ReportedSchemaVersion != constants.EngineBuildInfoSchemaVersion || build == nil || participant.Reason != "" {
+			return CollectionResult{}, fmt.Errorf("collected engine identity manifest participant is incomplete")
+		}
+		if !completeBuildIdentity(*build) {
+			return CollectionResult{}, fmt.Errorf("collected engine identity manifest participant has incomplete comparison fields")
+		}
+		complete = true
+	case StatusIncompleteBuildInfo:
+		if participant.ReportedSchemaVersion != constants.EngineBuildInfoSchemaVersion || build == nil {
+			return CollectionResult{}, fmt.Errorf("incomplete engine identity manifest participant lacks its schema-one build")
+		}
+		if completeBuildIdentity(*build) {
+			return CollectionResult{}, fmt.Errorf("incomplete engine identity manifest participant has complete comparison fields")
+		}
+	case StatusLegacyEndpointUnavailable:
+		if participant.ReportedSchemaVersion != 0 || build != nil {
+			return CollectionResult{}, fmt.Errorf("legacy engine identity manifest participant contains build evidence")
+		}
+	case StatusUnsupportedSchema:
+		if participant.ReportedSchemaVersion <= constants.EngineBuildInfoSchemaVersion || build != nil {
+			return CollectionResult{}, fmt.Errorf("unsupported engine identity manifest participant schema evidence is invalid")
+		}
+	case StatusCollectionFailed:
+		if build != nil || participant.ReportedSchemaVersion < 0 ||
+			participant.ReportedSchemaVersion > constants.EngineBuildInfoSchemaVersion {
+			return CollectionResult{}, fmt.Errorf("failed engine identity manifest participant contains build evidence")
+		}
+	}
+	if participant.CollectionStatus != StatusCollected && strings.TrimSpace(participant.Reason) == "" {
+		return CollectionResult{}, fmt.Errorf("engine identity manifest participant collection reason is required")
+	}
+	return CollectionResult{
+		Status: participant.CollectionStatus, Build: build, Complete: complete,
+		ReportedSchemaVersion: participant.ReportedSchemaVersion, Reason: participant.Reason,
+	}, nil
+}
+
+func validateManifestTopology(evidence manifestParticipantEvidence, participantCount int) error {
+	if evidence.standaloneCount > 0 {
+		if evidence.standaloneCount != 1 || participantCount != 1 {
 			return fmt.Errorf("standalone engine identity manifest participant must be the only participant")
 		}
-	} else if entryCount != 1 {
+	} else if evidence.entryCount != 1 {
 		return fmt.Errorf("distributed engine identity manifest requires exactly one entry participant")
 	}
-	for buildID := range buildIDs {
-		if buildReferences[buildID] == 0 {
+	return nil
+}
+
+func validateManifestBuildReferences(buildReferences map[string]int) error {
+	for buildID, count := range buildReferences {
+		if count == 0 {
 			return fmt.Errorf("engine identity manifest build %s is unreferenced", buildID)
 		}
-	}
-	assessed := assessConsistency(collections)
-	if assessed.Status != manifest.Consistency.Status {
-		return fmt.Errorf(
-			"engine identity manifest consistency %q does not match participant evidence %q",
-			manifest.Consistency.Status, assessed.Status,
-		)
 	}
 	return nil
 }
