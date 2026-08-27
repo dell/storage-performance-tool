@@ -1,7 +1,10 @@
 package com.dell.spt.base.buildinfo;
 
+import static com.dell.spt.base.Constants.APP_NAME;
+
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.commons.lang3.StringUtils;
 
 /** Human-oriented rendering of the immutable Engine Build Identity snapshot. */
 public final class EngineBuildInfoRenderer {
@@ -9,6 +12,12 @@ public final class EngineBuildInfoRenderer {
 	private static final int ABBREVIATED_REVISION_LENGTH = 12;
 
 	private EngineBuildInfoRenderer() {}
+
+	public static String banner(final EngineBuildInfo buildInfo) {
+		final var message = " " + APP_NAME + " v " + buildInfo.version() + " ";
+		final var padding = StringUtils.repeat("#", (120 - message.length()) / 2);
+		return padding + message + padding;
+	}
 
 	public static String startupLine(final EngineBuildInfo buildInfo) {
 		final List<String> details = new ArrayList<>();

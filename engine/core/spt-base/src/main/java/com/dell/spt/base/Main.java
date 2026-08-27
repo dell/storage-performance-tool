@@ -464,9 +464,7 @@ public final class Main {
 			final var buildInfo = EngineBuildInfoProvider.global().snapshot();
 
 			// Print version header
-			final var msg = " " + APP_NAME + " v " + buildInfo.version() + " ";
-			final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
-			System.out.println(pad + msg + pad);
+			System.out.println(EngineBuildInfoRenderer.banner(buildInfo));
 			EngineBuildInfoRenderer.versionDetails(buildInfo).forEach(System.out::println);
 
 			// Load and print extensions from ext/ next to the JAR

@@ -5,9 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.buildinfo.EngineBuildInfo;
+import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.LineNumberReader;
+import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,8 +21,35 @@ import java.util.Objects;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 class CoreResourcesToInstallTest {
+
+	@Test
+	@ResourceLock(Resources.SYSTEM_OUT)
+	void startupBannerUsesTheSuppliedImmutableSnapshot() {
+		final var buildInfo = new EngineBuildInfo(
+						1,
+						"spt-engine",
+						"immutable-version",
+						"0123456789abcdef0123456789abcdef01234567",
+						"2026-08-26T12:34:56Z",
+						true,
+						false);
+		final var originalOut = System.out;
+		final var captured = new ByteArrayOutputStream();
+		try {
+			System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
+			new CoreResourcesToInstall(buildInfo);
+		} finally {
+			System.setOut(originalOut);
+		}
+
+		assertEquals(
+						EngineBuildInfoRenderer.banner(buildInfo) + System.lineSeparator(),
+						captured.toString(StandardCharsets.UTF_8));
+	}
 
 	@Test
 	void resourceFilesToInstallMatchesManifest() throws IOException {

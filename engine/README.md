@@ -140,6 +140,10 @@ Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 ./run.sh --run-scenario=mytest.js
 ```
 
+`--version` reports the same immutable Engine Build Information snapshot used by startup reporting,
+the `/version` endpoint, effective `run.version`, and local `engine.build.json` records. It does not
+derive the engine version from mutable defaults or command-line configuration.
+
 ### Distribution Structure
 
 After building, the distribution contains:

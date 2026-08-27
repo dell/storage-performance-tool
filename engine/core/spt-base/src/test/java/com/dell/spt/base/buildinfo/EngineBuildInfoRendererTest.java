@@ -20,6 +20,13 @@ class EngineBuildInfoRendererTest {
 	}
 
 	@Test
+	void bannerKeepsItsFamiliarShapeAndUsesTheSnapshotVersion() {
+		final var banner = EngineBuildInfoRenderer.banner(buildInfo(true, true));
+
+		assertEquals("##################################################### spt v 5.14.2 #####################################################", banner);
+	}
+
+	@Test
 	void cleanReleaseStartupLineDoesNotClaimDevelopmentOrDirtyState() {
 		final var line = EngineBuildInfoRenderer.startupLine(buildInfo(false, false));
 

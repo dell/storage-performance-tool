@@ -17,6 +17,10 @@ The command-line options are directly mapped to the **configuration** items. For
 
 [More about configuration](../configuration)
 
+`--run-version` is retained only as a compatibility option. Engine startup ignores a supplied value
+with a warning and projects `run.version` from immutable Engine Build Information after all
+configuration sources have been merged.
+
 
 ### Limitations
 
