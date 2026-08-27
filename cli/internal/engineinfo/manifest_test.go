@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,17 @@ func TestManifestFromGateOutcomeMatchesSchemaOneGolden(t *testing.T) {
 	}
 	if string(append(got, '\n')) != string(want) {
 		t.Fatalf("manifest mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	root := t.TempDir()
+	if err := engineinfo.WriteManifestAtomic(root, manifest); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filepath.Join(root, constants.EngineInfoManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != string(want) {
+		t.Fatalf("stored manifest bytes changed\n--- got ---\n%s\n--- want ---\n%s", stored, want)
 	}
 	if err := manifest.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -386,5 +398,74 @@ func TestWriteManifestAtomicValidationFailurePreservesPriorFile(t *testing.T) {
 	}
 	if string(data) != "prior" {
 		t.Fatalf("prior manifest changed after rejected write: %q", data)
+	}
+}
+
+func TestWriteManifestAtomicPublishFailureCleansTemporaryFile(t *testing.T) {
+	root := t.TempDir()
+	publicPath := filepath.Join(root, constants.EngineInfoManifestName)
+	if err := os.Mkdir(publicPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engineinfo.WriteManifestAtomic(root, validCollectedManifest()); err == nil {
+		t.Fatal("WriteManifestAtomic() error = nil, want final rename failure")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != constants.EngineInfoManifestName || !entries[0].IsDir() {
+		t.Fatalf("results root entries after failed publish = %+v, want only the preexisting destination directory", entries)
+	}
+	if _, err := engineinfo.LoadManifest(publicPath); err == nil {
+		t.Fatal("LoadManifest() accepted an unpublished destination directory")
+	}
+}
+
+func TestCanonicalIdentityIdentifiersHaveSingleProductionOwners(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() could not locate the engine information package")
+	}
+	packageDir := filepath.Dir(testFile)
+	goSources, err := filepath.Glob(filepath.Join(packageDir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildReferenceOwners := 0
+	manifestTemporaryPrefixLiterals := 0
+	for _, sourcePath := range goSources {
+		if strings.HasSuffix(sourcePath, "_test.go") {
+			continue
+		}
+		source, readErr := os.ReadFile(sourcePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		buildReferenceOwners += strings.Count(string(source), `"build-`)
+		manifestTemporaryPrefixLiterals += strings.Count(string(source), `.engine.info.json.tmp-*`)
+	}
+	if buildReferenceOwners != 1 {
+		t.Fatalf("production build-reference wire-format owners = %d, want exactly 1", buildReferenceOwners)
+	}
+	if manifestTemporaryPrefixLiterals != 0 {
+		t.Fatalf("production manifest temporary-prefix literals = %d, want 0 derived from the artifact name", manifestTemporaryPrefixLiterals)
+	}
+
+	publisherPath := filepath.Join(
+		packageDir,
+		"..", "..", "..", "engine", "core", "spt-base", "src", "main", "java", "com", "dell", "spt", "base",
+		"buildinfo", "EngineBuildInfoPublisher.java",
+	)
+	publisherSource, err := os.ReadFile(publisherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owners := strings.Count(string(publisherSource), `"engine.build.json"`); owners != 1 {
+		t.Fatalf("production engine build-record filename owners = %d, want exactly 1", owners)
+	}
+	if prefixes := strings.Count(string(publisherSource), `.engine.build.`); prefixes != 0 {
+		t.Fatalf("production engine build-record temporary-prefix literals = %d, want 0 derived from the artifact name", prefixes)
 	}
 }

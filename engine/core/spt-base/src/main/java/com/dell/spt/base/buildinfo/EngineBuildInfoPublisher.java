@@ -17,6 +17,7 @@ import org.apache.logging.log4j.ThreadContext;
 public final class EngineBuildInfoPublisher {
 
 	public static final String FILE_NAME = "engine.build.json";
+	private static final String TEMPORARY_FILE_PREFIX = "." + FILE_NAME + ".";
 
 	private final String json;
 	private final Consumer<String> warningSink;
@@ -32,7 +33,7 @@ public final class EngineBuildInfoPublisher {
 		try {
 			final Path stepDirectory = Objects.requireNonNull(logHome).resolve("log").resolve(stepId);
 			Files.createDirectories(stepDirectory);
-			temporaryFile = Files.createTempFile(stepDirectory, ".engine.build.", ".tmp");
+			temporaryFile = Files.createTempFile(stepDirectory, TEMPORARY_FILE_PREFIX, ".tmp");
 			Files.writeString(temporaryFile, json, StandardCharsets.UTF_8);
 			Files.move(
 							temporaryFile,

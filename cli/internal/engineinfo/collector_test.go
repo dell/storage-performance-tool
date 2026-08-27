@@ -221,6 +221,33 @@ func TestCollectorGroupsFullBuildRecordsAndAssessesTimestampOnlyDifferenceAsCons
 	if !reflect.DeepEqual(result.Participants, wantParticipants) {
 		t.Fatalf("participants = %+v, want %+v", result.Participants, wantParticipants)
 	}
+	manifest, err := engineinfo.NewManifest(
+		17,
+		time.Unix(0, 0).UTC(),
+		engineinfo.GateOutcome{Decision: engineinfo.GateProceed, Proceed: true, Fleet: result},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range result.Builds {
+		if result.Builds[index].BuildID != manifest.Builds[index].BuildID {
+			t.Fatalf(
+				"build reference changed between collection and manifest construction: fleet=%q manifest=%q",
+				result.Builds[index].BuildID,
+				manifest.Builds[index].BuildID,
+			)
+		}
+	}
+	for index := range result.Participants {
+		if result.Participants[index].BuildID != manifest.Participants[index].BuildID {
+			t.Fatalf(
+				"participant build reference changed between collection and manifest construction: fleet=%q manifest=%q",
+				result.Participants[index].BuildID,
+				manifest.Participants[index].BuildID,
+			)
+		}
+	}
 }
 
 func TestCollectorAppliesExactConsistencyComparisonAndPrecedence(t *testing.T) {

@@ -91,6 +91,24 @@ class EngineBuildInfoPublicationTest {
 	}
 
 	@Test
+	void publisherCleansTemporaryFileWhenFinalMoveFails() throws Exception {
+		final var warnings = new ArrayList<String>();
+		final var publisher = new EngineBuildInfoPublisher(BUILD_INFO, warnings::add);
+		final var stepDir = tempDir.resolve("log/workload-step");
+		Files.createDirectories(stepDir.resolve(EngineBuildInfoPublisher.FILE_NAME));
+
+		assertDoesNotThrow(() -> publisher.publish(tempDir, "workload-step"));
+
+		assertEquals(1, warnings.size());
+		try (final var entries = Files.list(stepDir)) {
+			assertEquals(
+							Set.of(EngineBuildInfoPublisher.FILE_NAME),
+							entries.map(path -> path.getFileName().toString()).collect(Collectors.toSet()));
+		}
+		assertTrue(Files.isDirectory(stepDir.resolve(EngineBuildInfoPublisher.FILE_NAME)));
+	}
+
+	@Test
 	void missingProcessLogHomeIsAlsoNonfatal() {
 		final var warnings = new ArrayList<String>();
 		final var publisher = new EngineBuildInfoPublisher(BUILD_INFO, warnings::add);
