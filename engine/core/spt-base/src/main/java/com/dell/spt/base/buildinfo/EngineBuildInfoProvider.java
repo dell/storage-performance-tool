@@ -80,6 +80,9 @@ public final class EngineBuildInfoProvider {
 			throw new IllegalArgumentException("Invalid engine product");
 		}
 		final var version = required(properties, "version");
+		if (!SemanticVersion.isValid(version)) {
+			throw new IllegalArgumentException("Invalid engine build semantic version");
+		}
 		final var revision = required(properties, "revision");
 		if (!UNKNOWN.equals(revision) && !revision.matches("(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")) {
 			throw new IllegalArgumentException("Invalid engine build revision");
@@ -122,9 +125,7 @@ public final class EngineBuildInfoProvider {
 	}
 
 	private static EngineBuildInfo fallback(final String implementationVersion) {
-		final var version = implementationVersion == null || implementationVersion.isBlank()
-						? UNKNOWN
-						: implementationVersion;
+		final var version = SemanticVersion.isValid(implementationVersion) ? implementationVersion : UNKNOWN;
 		return new EngineBuildInfo(SCHEMA_VERSION, PRODUCT, version, UNKNOWN, UNKNOWN, true, null);
 	}
 

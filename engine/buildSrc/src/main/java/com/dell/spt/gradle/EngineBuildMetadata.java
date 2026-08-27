@@ -66,8 +66,8 @@ public record EngineBuildMetadata(
 	}
 
 	private void validate() {
-		if (version == null || version.isBlank()) {
-			throw new IllegalArgumentException("Engine build version is unavailable");
+		if (!SemanticVersion.isValid(version)) {
+			throw new IllegalArgumentException("Engine build version is not a valid semantic version");
 		}
 		if (!UNKNOWN.equals(revision) && !revision.matches("(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")) {
 			throw new IllegalArgumentException("Engine build revision is not a full source object ID");

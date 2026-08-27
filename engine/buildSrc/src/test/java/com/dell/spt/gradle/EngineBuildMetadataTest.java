@@ -6,9 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -174,6 +177,65 @@ class EngineBuildMetadataTest {
 		assertEquals(metadata.resourceValues().get("source_dirty"), metadata.manifestAttributes().get("Spt-Source-Dirty"));
 	}
 
+	@Test
+	void developmentBuildVersionMatchesTheSharedSemanticVersionContract() throws Exception {
+		for (final var fixture : semanticVersionFixtures()) {
+			if (fixture.valid()) {
+				final var metadata = EngineBuildMetadata.resolve(
+							fixture.version(), Map.of(), Map.of(), new FixedGit(null, null), CLOCK);
+				assertEquals(fixture.version(), metadata.version(), fixture.name());
+				assertEquals(fixture.version(), metadata.resourceValues().get("version"), fixture.name());
+				assertEquals(
+							fixture.version(), metadata.manifestAttributes().get("Implementation-Version"), fixture.name());
+			} else {
+				final var error = assertThrows(
+							IllegalArgumentException.class,
+							() -> EngineBuildMetadata.resolve(
+										fixture.version(), Map.of(), Map.of(), new FixedGit(null, null), CLOCK),
+							fixture.name());
+				assertTrue(error.getMessage().contains("semantic version"), fixture.name());
+			}
+		}
+	}
+
+	@Test
+	void releaseBuildVersionMatchesTheSharedSemanticVersionContract() throws Exception {
+		final var releaseInputs = Map.of(
+					"sptBuildRelease", "true",
+					"sptBuildRevision", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"sptBuildTime", "2026-08-26T12:34:56Z",
+					"sptBuildSourceDirty", "false");
+		for (final var fixture : semanticVersionFixtures()) {
+			if (fixture.valid()) {
+				assertEquals(
+							fixture.version(),
+							EngineBuildMetadata.resolve(
+										fixture.version(), releaseInputs, Map.of(), new FixedGit(null, null), CLOCK)
+									.version(),
+							fixture.name());
+			} else {
+				final var error = assertThrows(
+							IllegalArgumentException.class,
+							() -> EngineBuildMetadata.resolve(
+										fixture.version(), releaseInputs, Map.of(), new FixedGit(null, null), CLOCK),
+							fixture.name());
+				assertTrue(error.getMessage().contains("semantic version"), fixture.name());
+			}
+		}
+	}
+
+	private static List<SemanticVersionFixture> semanticVersionFixtures() throws Exception {
+		final var path = Path.of(System.getProperty("spt.test.semver-fixtures"));
+		return Files.readAllLines(path).stream()
+					.filter(line -> !line.startsWith("#"))
+					.map(line -> line.split("\\|", -1))
+					.map(parts -> new SemanticVersionFixture(parts[0].equals("valid"), parts[1], parts[2]))
+					.toList();
+	}
+
 	private record FixedGit(String revision, Boolean dirty) implements EngineBuildMetadata.GitProbe {
+	}
+
+	private record SemanticVersionFixture(boolean valid, String name, String version) {
 	}
 }

@@ -139,6 +139,8 @@ tasks.named("compileJava", JavaCompile) {
 // Common test configuration for all test tasks
 tasks.withType(Test) {
 	useJUnitPlatform()
+	systemProperty "spt.test.semver-fixtures",
+		rootProject.file("../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
 	systemProperty "spt.test.expected-build-version", project.version.toString()
 	systemProperty "spt.test.expected-build-revision", engineBuildMetadata.revision()
 	systemProperty "spt.test.expected-build-time", engineBuildMetadata.buildTime()
