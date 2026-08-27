@@ -283,14 +283,15 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 		return replayLocalEnginePlan(apiPort)
 	}
-	launchHooks = launchHooks.WithPreSubmissionCheck(newRunEngineIdentityPreSubmissionCheck(
+	launchHooks = attachEngineIdentityGate(
+		launchHooks,
 		newReplayEngineIdentityCollector(),
-		runEngineIdentityGateOptions{
+		engineIdentityGateOptions{
 			force: forceMode, verbose: verbose,
 			autoResults: resultsOpts.AutoResults, resultsRoot: plannedResultsRoot,
 			runID: params.RunID, metadata: metadata, descriptors: participantPlan,
 		},
-	))
+	)
 	finalizeReplaySession := func(ctx context.Context) {
 		if runSession == nil {
 			return

@@ -102,6 +102,62 @@ func TestEngineExecutionHostsExcludesIdleListWorkers(t *testing.T) {
 	}
 }
 
+func TestAttachEngineIdentityGatePreservesLaunchHooksAndGateInputs(t *testing.T) {
+	previousEvaluate := evaluateEngineIdentityGate
+	t.Cleanup(func() { evaluateEngineIdentityGate = previousEvaluate })
+
+	descriptor, err := engineinfo.NewParticipantDescriptor(
+		&hostparse.HostInfo{Host: "127.0.0.1"}, "9999", engineinfo.RoleStandalone,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDescriptors := []engineinfo.ParticipantDescriptor{descriptor}
+	wantCollector := fixedFleetCollector{}
+	var evaluated atomic.Int32
+	evaluateEngineIdentityGate = func(
+		ctx context.Context,
+		collector engineinfo.FleetCollector,
+		descriptors []engineinfo.ParticipantDescriptor,
+		force bool,
+	) (engineinfo.GateOutcome, error) {
+		if ctx.Err() != nil {
+			t.Fatalf("gate context error = %v", ctx.Err())
+		}
+		if _, ok := collector.(fixedFleetCollector); !ok {
+			t.Fatalf("collector type = %T, want fixedFleetCollector", collector)
+		}
+		if len(descriptors) != 1 || descriptors[0] != wantDescriptors[0] || !force {
+			t.Fatalf("gate descriptors/force = %#v/%t", descriptors, force)
+		}
+		evaluated.Add(1)
+		return consistentRunGateOutcome(), nil
+	}
+
+	var submitted atomic.Int32
+	hooks := attachEngineIdentityGate(
+		tui.NewLaunchHooks(func() { submitted.Add(1) }),
+		wantCollector,
+		engineIdentityGateOptions{
+			force: true, descriptors: func() ([]engineinfo.ParticipantDescriptor, error) {
+				return append([]engineinfo.ParticipantDescriptor(nil), wantDescriptors...), nil
+			},
+		},
+	)
+	lines, err := hooks.RunPreSubmissionCheck(context.Background())
+	if err != nil {
+		t.Fatalf("RunPreSubmissionCheck() error = %v", err)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "consistent") {
+		t.Fatalf("gate output = %v", lines)
+	}
+	hooks.NotifySubmitted()
+	if evaluated.Load() != 1 || submitted.Load() != 1 || !hooks.Submitted() {
+		t.Fatalf("evaluated/submitted/state = %d/%d/%t, want 1/1/true",
+			evaluated.Load(), submitted.Load(), hooks.Submitted())
+	}
+}
+
 func TestWriteEngineIdentityAbortManifestIsAtomicCompleteAndDeterministic(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "abort-results")
 	dirty := false
@@ -176,7 +232,8 @@ func TestRunCommandInvokesEngineIdentityGateAcrossTopologyPresentationAndLimitMo
 		{name: "single remote tui timed", hosts: "entry.example", minHosts: "1", headless: false, duration: "1s"},
 		{name: "multi worker headless timed", hosts: "entry.example,worker.example", minHosts: "2", headless: true, duration: "1s"},
 		{name: "multi worker tui untimed", hosts: "entry.example,worker.example", minHosts: "2", headless: false},
-		{name: "LIST excludes idle workers", workload: scenario.WorkloadTypeList, hosts: "entry.example,worker.example", minHosts: "2", headless: true, entryOnly: true},
+		{name: "LIST headless excludes idle workers", workload: scenario.WorkloadTypeList, hosts: "entry.example,worker.example", minHosts: "2", headless: true, entryOnly: true},
+		{name: "LIST tui excludes idle workers", workload: scenario.WorkloadTypeList, hosts: "entry.example,worker.example", minHosts: "2", entryOnly: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -191,8 +248,8 @@ func TestRunCommandInvokesEngineIdentityGateAcrossTopologyPresentationAndLimitMo
 				return nil, nil
 			}
 
-			var gateCalls, localCalls, remoteCalls atomic.Int64
-			evaluateRunEngineIdentityGate = func(
+			var gateCalls, submissionCalls, localCalls, remoteCalls atomic.Int64
+			evaluateEngineIdentityGate = func(
 				context.Context, engineinfo.FleetCollector, []engineinfo.ParticipantDescriptor, bool,
 			) (engineinfo.GateOutcome, error) {
 				gateCalls.Add(1)
@@ -206,6 +263,7 @@ func TestRunCommandInvokesEngineIdentityGateAcrossTopologyPresentationAndLimitMo
 				if len(lines) != 1 || !strings.Contains(lines[0], "consistent") {
 					t.Fatalf("gate output = %v", lines)
 				}
+				submissionCalls.Add(1)
 				hooks.NotifySubmitted()
 				return nil
 			}
@@ -237,6 +295,9 @@ func TestRunCommandInvokesEngineIdentityGateAcrossTopologyPresentationAndLimitMo
 			}
 			if gateCalls.Load() != 1 {
 				t.Fatalf("gate calls = %d, want one", gateCalls.Load())
+			}
+			if submissionCalls.Load() != 1 {
+				t.Fatalf("submission calls = %d, want one", submissionCalls.Load())
 			}
 			if test.wantLocal && (localCalls.Load() != 1 || remoteCalls.Load() != 0) {
 				t.Fatalf("local/remote calls = %d/%d", localCalls.Load(), remoteCalls.Load())
@@ -282,7 +343,7 @@ func TestRunCommandLockedParticipantVersionFailureBlocksSubmission(t *testing.T)
 	restore := installRunEngineInfoCommandSeams(t)
 	defer restore()
 	shouldRunHeadlessForRun = func(*cobra.Command) bool { return true }
-	evaluateRunEngineIdentityGate = engineinfo.EvaluateGate
+	evaluateEngineIdentityGate = engineinfo.EvaluateGate
 
 	entry, err := engineinfo.NewParticipantDescriptor(
 		&hostparse.HostInfo{Host: "127.0.0.1"}, apiPort, engineinfo.RoleEntry)
@@ -363,7 +424,7 @@ func TestRunCommandRetriesTransientVersionResponseBeforeSubmission(t *testing.T)
 	restore := installRunEngineInfoCommandSeams(t)
 	defer restore()
 	shouldRunHeadlessForRun = func(*cobra.Command) bool { return true }
-	evaluateRunEngineIdentityGate = engineinfo.EvaluateGate
+	evaluateEngineIdentityGate = engineinfo.EvaluateGate
 	standalone, err := engineinfo.NewParticipantDescriptor(
 		&hostparse.HostInfo{Host: "127.0.0.1"}, apiPort, engineinfo.RoleStandalone)
 	if err != nil {
@@ -451,7 +512,7 @@ func TestRunCommandEngineIdentityGatePolicyAndAbortArtifacts(t *testing.T) {
 				startAutoResultsFunc = immediateCleanupOnlyMonitor
 			}
 
-			evaluateRunEngineIdentityGate = func(
+			evaluateEngineIdentityGate = func(
 				ctx context.Context,
 				_ engineinfo.FleetCollector,
 				descriptors []engineinfo.ParticipantDescriptor,
@@ -687,7 +748,7 @@ func installRunEngineInfoCommandSeams(t *testing.T) func() {
 	previousLocalTUI := startLocalTUIRunFunc
 	previousRemoteHeadless := startMultiHostHeadlessRunFunc
 	previousRemoteTUI := startMultiHostTUIRunFunc
-	previousEvaluate := evaluateRunEngineIdentityGate
+	previousEvaluate := evaluateEngineIdentityGate
 	previousLocalPlan := localRunEnginePlan
 	previousDistributedPlan := distributedRunEnginePlan
 	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
@@ -706,7 +767,7 @@ func installRunEngineInfoCommandSeams(t *testing.T) func() {
 		startLocalTUIRunFunc = previousLocalTUI
 		startMultiHostHeadlessRunFunc = previousRemoteHeadless
 		startMultiHostTUIRunFunc = previousRemoteTUI
-		evaluateRunEngineIdentityGate = previousEvaluate
+		evaluateEngineIdentityGate = previousEvaluate
 		localRunEnginePlan = previousLocalPlan
 		distributedRunEnginePlan = previousDistributedPlan
 	}

@@ -41,6 +41,24 @@ func TestZeroValueLaunchHooksPreSubmissionCheckIsCompatible(t *testing.T) {
 	}
 }
 
+func TestRunAndEmitPreSubmissionCheckEmitsLinesAndReturnsGateError(t *testing.T) {
+	wantErr := errors.New("engine identity mismatch")
+	hooks := NewLaunchHooks(nil).WithPreSubmissionCheck(func(context.Context) ([]string, error) {
+		return []string{"first gate line", "second gate line"}, wantErr
+	})
+	var output []string
+
+	err := runAndEmitPreSubmissionCheck(context.Background(), hooks, func(line string) {
+		output = append(output, line)
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runAndEmitPreSubmissionCheck() error = %v, want sentinel", err)
+	}
+	if len(output) != 2 || output[0] != "first gate line" || output[1] != "second gate line" {
+		t.Fatalf("emitted output = %v", output)
+	}
+}
+
 func TestLaunchHooksSubmissionStateIsSharedAndExactlyOnce(t *testing.T) {
 	var calls atomic.Int32
 	hooks := NewLaunchHooks(func() { calls.Add(1) })

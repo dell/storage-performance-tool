@@ -1955,14 +1955,15 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 			return localRunEnginePlan(apiPort)
 		}
-		launchHooks = launchHooks.WithPreSubmissionCheck(newRunEngineIdentityPreSubmissionCheck(
+		launchHooks = attachEngineIdentityGate(
+			launchHooks,
 			engineinfo.NewCollector(engineinfo.NewClient()),
-			runEngineIdentityGateOptions{
+			engineIdentityGateOptions{
 				force: forceMode, verbose: verbose,
 				autoResults: resultsOpts.AutoResults, resultsRoot: plannedResultsRoot,
 				runID: params.RunID, metadata: metadata, descriptors: participantPlan,
 			},
-		))
+		)
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)

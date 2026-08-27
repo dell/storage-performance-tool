@@ -48,7 +48,7 @@ func NewParticipantDescriptor(host *hostparse.HostInfo, controlPort string, role
 	if err != nil || port < 1 || port > 65535 {
 		return ParticipantDescriptor{}, fmt.Errorf("engine participant control port is invalid")
 	}
-	if _, _, supported := participantRolePolicy(role); !supported {
+	if _, supported := policyForParticipantRole(role); !supported {
 		return ParticipantDescriptor{}, fmt.Errorf("engine participant role is unsupported")
 	}
 	nodeID := net.JoinHostPort(normalizedHost, strconv.Itoa(port))
@@ -219,9 +219,9 @@ func (c *Collector) Collect(ctx context.Context, descriptors []ParticipantDescri
 	ordered := append([]ParticipantDescriptor(nil), descriptors...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].role != ordered[j].role {
-			leftRank, _, _ := participantRolePolicy(ordered[i].role)
-			rightRank, _, _ := participantRolePolicy(ordered[j].role)
-			return leftRank < rightRank
+			leftPolicy, _ := policyForParticipantRole(ordered[i].role)
+			rightPolicy, _ := policyForParticipantRole(ordered[j].role)
+			return leftPolicy.canonicalOrderRank < rightPolicy.canonicalOrderRank
 		}
 		return ordered[i].nodeID < ordered[j].nodeID
 	})
@@ -312,15 +312,14 @@ func validateTopology(descriptors []ParticipantDescriptor) error {
 			return fmt.Errorf("engine participant plan contains duplicate node %s", descriptor.nodeID)
 		}
 		nodes[descriptor.nodeID] = struct{}{}
-		_, topology, supported := participantRolePolicy(descriptor.role)
+		policy, supported := policyForParticipantRole(descriptor.role)
 		if !supported {
 			return fmt.Errorf("engine participant plan contains unsupported role")
 		}
-		switch topology {
-		case topologyEntry:
+		if policy.countsAsEntry {
 			entries++
-		case topologyWorker:
-		case topologyStandalone:
+		}
+		if policy.mustBeOnlyParticipant {
 			standalones++
 		}
 	}
@@ -334,27 +333,6 @@ func validateTopology(descriptors []ParticipantDescriptor) error {
 		return fmt.Errorf("distributed engine participant plan requires exactly one entry")
 	}
 	return nil
-}
-
-type participantTopology uint8
-
-const (
-	topologyEntry participantTopology = iota
-	topologyWorker
-	topologyStandalone
-)
-
-func participantRolePolicy(role ParticipantRole) (int, participantTopology, bool) {
-	switch role {
-	case RoleEntry:
-		return 0, topologyEntry, true
-	case RoleWorker:
-		return 1, topologyWorker, true
-	case RoleStandalone:
-		return 0, topologyStandalone, true
-	default:
-		return 0, 0, false
-	}
 }
 
 func groupBuilds(collections []CollectionResult) ([]GroupedBuild, map[string]string) {
