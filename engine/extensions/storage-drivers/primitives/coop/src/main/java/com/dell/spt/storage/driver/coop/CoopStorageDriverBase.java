@@ -54,7 +54,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
 	private final ReentrantLock dispatchLock = new ReentrantLock();
-	private final ReentrantLock admissionLock = new ReentrantLock();
+	// Admission and dispatch intentionally share one lock to preserve their shutdown boundary.
+	private final ReentrantLock admissionLock = dispatchLock;
 	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask<I, O> opDispatchTask;
 	private final Object mpuSchedulingLock = new Object();
