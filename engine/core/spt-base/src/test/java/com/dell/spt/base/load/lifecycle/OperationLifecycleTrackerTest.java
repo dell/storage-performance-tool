@@ -11,10 +11,14 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
@@ -123,6 +127,71 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void drainClaimsDispatchedAndCompletingOperationsExactlyOnce() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var queued = operation("queued");
+		final var dispatched = operation("dispatched");
+		final var completing = operation("completing");
+
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.driverQueued(dispatched));
+		assertTrue(tracker.dispatched(dispatched));
+		assertTrue(tracker.driverQueued(completing));
+		assertTrue(tracker.dispatched(completing));
+		assertTrue(tracker.completionStarted(completing));
+
+		assertEquals(2, tracker.resolveOutstandingAsUnresolved());
+		assertEquals(0, tracker.resolveOutstandingAsUnresolved());
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(queued));
+		assertEquals(OperationLifecycleState.UNRESOLVED, tracker.stateOf(dispatched));
+		assertEquals(OperationLifecycleState.UNRESOLVED, tracker.stateOf(completing));
+		assertEquals(0, tracker.inFlightCount());
+		assertEquals(1, tracker.driverQueuedOperations().size());
+		assertSame(queued, tracker.driverQueuedOperations().get(0));
+		assertEquals(2, tracker.snapshot().unresolved());
+		assertTrue(tracker.snapshot().unresolvedOperations().containsAll(List.of(dispatched, completing)));
+	}
+
+	@Test
+	void terminalAndDeadlineRaceStillProducesOneDefinitiveOutcome() throws Exception {
+		for (var i = 0; i < 128; i++) {
+			final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+			final var op = operation("terminal-deadline-race-" + i);
+			assertTrue(tracker.driverQueued(op));
+			assertTrue(tracker.dispatched(op));
+			assertTrue(tracker.completionStarted(op));
+			final var ready = new CountDownLatch(2);
+			final var start = new CountDownLatch(1);
+			final var terminalTask = new FutureTask<>(() -> {
+				ready.countDown();
+				await(start);
+				return tracker.terminal(op);
+			});
+			final var deadlineTask = new FutureTask<>(() -> {
+				ready.countDown();
+				await(start);
+				return tracker.expireTerminalDeadline();
+			});
+			Thread.ofVirtual().start(terminalTask);
+			Thread.ofVirtual().start(deadlineTask);
+
+			assertTrue(ready.await(5, TimeUnit.SECONDS));
+			start.countDown();
+			final boolean terminalAccepted = terminalTask.get(5, TimeUnit.SECONDS);
+			deadlineTask.get(5, TimeUnit.SECONDS);
+
+			final var snapshot = tracker.snapshot();
+			assertEquals(1, snapshot.terminal() + snapshot.unresolved());
+			assertEquals(terminalAccepted ? 1 : 0, snapshot.terminal());
+			assertEquals(terminalAccepted ? 0 : 1, snapshot.unresolved());
+			assertEquals(0, snapshot.inFlight());
+			assertEquals(0, tracker.outstandingOperationCount());
+			assertEquals(0, tracker.inFlightOperationCount());
+			assertFalse(tracker.terminal(op), "late completion must not create a second outcome");
+		}
+	}
+
+	@Test
 	void terminalDeadlineRejectsACompletionBeforeTheLaterDrainPhaseBegins() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final var op = operation("post-deadline-completion");
@@ -188,6 +257,23 @@ final class OperationLifecycleTrackerTest {
 		assertEquals(1, tracker.expireTerminalDeadline());
 		assertFalse(tracker.completionStarted(op));
 		assertEquals(1, tracker.snapshot().unresolved());
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void hungCompatibilitySubmissionBecomesUnresolvedExactlyOnce() {
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		final Operation<Item> legacy = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		assertTrue(tracker.driverQueued(legacy));
+		final var submission = tracker.queuedDispatchToken(legacy);
+
+		assertTrue(tracker.unresolvedSubmission(submission));
+		assertFalse(tracker.unresolvedSubmission(submission));
+		assertEquals(OperationLifecycleState.UNRESOLVED, tracker.stateOf(legacy));
+		assertEquals(1, tracker.snapshot().unresolved());
+		assertEquals(List.of(legacy), tracker.snapshot().unresolvedOperations());
+		assertEquals(0, tracker.snapshot().inFlight());
+		assertEquals(0, tracker.outstandingOperationCount());
 	}
 
 	@Test
@@ -324,6 +410,30 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void sameInstanceRetryStartsAFreshCirculation() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("same-instance-retry");
+		assertTrue(tracker.generatorBuffered(op));
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+		assertTrue(tracker.completionStarted(op));
+		final var firstCirculation = op.lifecycle();
+		assertTrue(tracker.terminal(op));
+
+		assertTrue(tracker.generatorBuffered(op));
+		assertTrue(tracker.driverQueued(op));
+		assertTrue(tracker.dispatched(op));
+		assertTrue(tracker.unresolved(op));
+
+		assertEquals(OperationLifecycleState.TERMINAL, firstCirculation.state());
+		assertEquals(OperationLifecycleState.UNRESOLVED, op.lifecycle().state());
+		assertEquals(2, tracker.snapshot().dispatched());
+		assertEquals(1, tracker.snapshot().terminal());
+		assertEquals(1, tracker.snapshot().unresolved());
+		assertEquals(0, tracker.snapshot().inFlight());
+	}
+
+	@Test
 	@SuppressWarnings("unchecked")
 	void compatibilityOperationUsesExactlyOnceSidecarState() {
 		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
@@ -448,9 +558,69 @@ final class OperationLifecycleTrackerTest {
 		assertEquals(0, tracker.inFlightCount());
 	}
 
+	@Test
+	void resetStartsAFreshRunWithoutRetainingTerminalWork() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var priorRun = operation("prior-run");
+		assertTrue(tracker.driverQueued(priorRun));
+		assertTrue(tracker.dispatched(priorRun));
+		assertTrue(tracker.completionStarted(priorRun));
+		assertTrue(tracker.terminal(priorRun));
+
+		tracker.reset();
+		assertFalse(tracker.completionStarted(priorRun));
+		assertFalse(tracker.terminal(priorRun));
+		assertEquals(0, tracker.outstandingOperationCount());
+		assertEquals(0, tracker.inFlightOperationCount());
+		assertEquals(0, tracker.snapshot().terminal());
+
+		final var restartedRun = operation("restarted-run");
+		assertTrue(tracker.driverQueued(restartedRun));
+		assertTrue(tracker.dispatched(restartedRun));
+		assertTrue(tracker.completionStarted(restartedRun));
+		assertTrue(tracker.terminal(restartedRun));
+		assertEquals(1, tracker.snapshot().dispatched());
+		assertEquals(1, tracker.snapshot().terminal());
+		assertEquals(0, tracker.outstandingOperationCount());
+		assertEquals(0, tracker.inFlightOperationCount());
+	}
+
+	@Test
+	void disabledTrackerAndDummyDriverRemainLifecycleUnaware() throws Exception {
+		final var disabled = OperationLifecycleTracker.<DataOperationImpl<DataItemImpl>> disabled();
+		final var op = operation("disabled");
+
+		assertFalse(disabled.isEnabled());
+		assertTrue(disabled.generatorBuffered(op));
+		assertTrue(disabled.driverQueued(op));
+		assertTrue(disabled.dispatched(op));
+		assertTrue(disabled.completionStarted(op));
+		assertTrue(disabled.terminal(op));
+		assertEquals(OperationLifecycleState.NEW, op.lifecycle().state());
+		assertEquals(0, disabled.snapshot().dispatched());
+		assertEquals(0, disabled.inFlightCount());
+
+		final var dummy = DummyStorageDriverMock.<DataItemImpl, DataOperationImpl<DataItemImpl>> create();
+		try {
+			assertSame(OperationLifecycleTracker.disabled(), dummy.operationLifecycle());
+			assertFalse(dummy.operationLifecycle().isEnabled());
+		} finally {
+			dummy.close();
+		}
+	}
+
 	private static DataOperationImpl<DataItemImpl> operation(final String name) {
 		return new DataOperationImpl<>(
 						0, OpType.DELETE, new DataItemImpl(name, 0, 1), null, "/bucket", null, null, 0);
+	}
+
+	private static void await(final CountDownLatch latch) {
+		try {
+			latch.await();
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new AssertionError(e);
+		}
 	}
 
 	private static final class ValueEqualLegacyOperation implements InvocationHandler {

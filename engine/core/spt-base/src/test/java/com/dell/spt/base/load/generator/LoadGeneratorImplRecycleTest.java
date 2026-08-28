@@ -13,6 +13,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationAssembler;
 import com.dell.spt.base.item.op.OperationAssemblyResult;
+import com.dell.spt.base.item.op.OperationAssemblyStopReason;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.OperationsBuilderImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
@@ -31,6 +32,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -439,6 +441,168 @@ class LoadGeneratorImplRecycleTest {
 	}
 
 	@Test
+	void registrationPrecedesSchedulingVisibilityAndHandoffTransfersCustody() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var observedAtOutput = new AtomicReference<OperationLifecycleState>();
+		final var handoffAccepted = new AtomicReference<Boolean>();
+		final var handoffOutput = new CollectingOutput<DataOperation<DataItem>>() {
+			@Override
+			public boolean put(final DataOperation<DataItem> op) {
+				observedAtOutput.set(tracker.stateOf(op));
+				handoffAccepted.set(tracker.driverQueued(op));
+				return super.put(op);
+			}
+		};
+		final var handoffGenerator = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(), handoffOutput, BATCH_SIZE, 0, 1000, true, false);
+		final var op = newOp("registered-before-visible");
+		handoffGenerator.operationLifecycle(tracker);
+		try {
+			handoffGenerator.doWork();
+			handoffGenerator.recycle(op);
+			handoffGenerator.doWork();
+
+			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, observedAtOutput.get());
+			assertEquals(Boolean.TRUE, handoffAccepted.get());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(op));
+			handoffGenerator.closeAdmission();
+			assertTrue(handoffGenerator.recoverBufferedOperations().isEmpty());
+			assertEquals(1, tracker.snapshot().driverQueued());
+			assertEquals(0, tracker.snapshot().generatorBuffered());
+		} finally {
+			handoffGenerator.close();
+		}
+	}
+
+	@Test
+	void rejectedHandoffRemainsRecoverableExactlyOnce() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final Output<DataOperation<DataItem>> rejectingOutput = new CollectingOutput<>() {
+			@Override
+			public boolean put(final DataOperation<DataItem> op) {
+				return false;
+			}
+		};
+		final var rejectingGenerator = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(), rejectingOutput, BATCH_SIZE, 0, 1000, true, false);
+		final var op = newOp("rejected-handoff");
+		rejectingGenerator.operationLifecycle(tracker);
+		try {
+			rejectingGenerator.doWork();
+			rejectingGenerator.recycle(op);
+			rejectingGenerator.doWork();
+			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, tracker.stateOf(op));
+
+			rejectingGenerator.closeAdmission();
+			assertEquals(List.of(op), rejectingGenerator.recoverBufferedOperations());
+			assertTrue(rejectingGenerator.recoverBufferedOperations().isEmpty());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, tracker.stateOf(op));
+			assertEquals(1, tracker.snapshot().unattempted());
+		} finally {
+			rejectingGenerator.close();
+		}
+	}
+
+	@Test
+	void recoveryCombinesAssemblerTailRetryRecycleAndLocalBufferWithoutDuplicates() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var inputItem = new DataItemImpl("assembled-input", 0, 1024);
+		final var localBuffered = newOp("local-buffer");
+		final var assemblerTail = newOp("assembler-tail");
+		final var retried = newOp("retry-queue");
+		final var recycled = newOp("recycle-queue");
+		final var finishReason = new AtomicReference<OperationAssemblyStopReason>();
+		final var assembler = new OperationAssembler<DataItem, DataOperation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.READ;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items,
+							final List<DataOperation<DataItem>> operations) {
+				operations.add(localBuffered);
+				return new OperationAssemblyResult(items.size(), 1);
+			}
+
+			@Override
+			public OperationAssemblyResult finish(
+							final OperationAssemblyStopReason reason,
+							final List<DataOperation<DataItem>> operations) {
+				finishReason.set(reason);
+				operations.add(assemblerTail);
+				return new OperationAssemblyResult(0, 1);
+			}
+
+			@Override
+			public void close() {}
+		};
+		final Output<DataOperation<DataItem>> rejectingOutput = new CollectingOutput<>() {
+			@Override
+			public boolean put(final DataOperation<DataItem> op) {
+				return false;
+			}
+		};
+		final var recoveryGenerator = new LoadGeneratorImpl<>(
+						fixedBatchInput("RecoveryInput", List.of(inputItem)),
+						assembler,
+						List.of(),
+						rejectingOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						true,
+						false);
+		recoveryGenerator.operationLifecycle(tracker);
+		try {
+			recoveryGenerator.doWork();
+			recoveryGenerator.retry(retried);
+			recoveryGenerator.recycle(recycled);
+			recoveryGenerator.closeAdmission();
+
+			final var recovered = recoveryGenerator.recoverBufferedOperations();
+			assertEquals(OperationAssemblyStopReason.ADMISSION_CLOSED, finishReason.get());
+			assertEquals(4, recovered.size());
+			for (final var expected : List.of(localBuffered, assemblerTail, retried, recycled)) {
+				assertTrue(recovered.stream().anyMatch(actual -> actual == expected));
+				assertEquals(OperationLifecycleState.UNATTEMPTED, expected.lifecycle().state());
+			}
+			assertEquals(4, tracker.snapshot().unattempted());
+			assertTrue(recoveryGenerator.isNothingPendingRetry());
+			assertTrue(recoveryGenerator.isNothingToRecycle());
+			assertTrue(recoveryGenerator.recoverBufferedOperations().isEmpty());
+		} finally {
+			recoveryGenerator.close();
+		}
+	}
+
+	@Test
+	void directDisabledLifecycleConstructionRetainsLocalRecovery() {
+		final var recycled = newOp("disabled-recycle");
+		final var retried = newOp("disabled-retry");
+		generator.recycle(recycled);
+		generator.retry(retried);
+
+		generator.closeAdmission();
+		final var recovered = generator.recoverBufferedOperations();
+
+		assertEquals(2, recovered.size());
+		assertTrue(recovered.stream().anyMatch(actual -> actual == recycled));
+		assertTrue(recovered.stream().anyMatch(actual -> actual == retried));
+		assertEquals(OperationLifecycleState.NEW, recycled.lifecycle().state());
+		assertEquals(OperationLifecycleState.NEW, retried.lifecycle().state());
+		assertTrue(generator.recoverBufferedOperations().isEmpty());
+		assertTrue(generator.isNothingPendingRetry());
+		assertTrue(generator.isNothingToRecycle());
+	}
+
+	@Test
 	void closingAdmissionRecoversGeneratorBufferedWorkAsUnattempted() throws Exception {
 		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
 		generator.operationLifecycle(tracker);
@@ -485,7 +649,7 @@ class LoadGeneratorImplRecycleTest {
 	}
 
 	@Test
-	void admissionClosureReconcilesCirculationOnBothSidesOfTheBoundary() throws Exception {
+	void admissionClosureReconcilesRetryAndRecycleOnBothSidesOfTheBoundary() throws Exception {
 		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
 		generator.operationLifecycle(tracker);
 		final var operations = new ArrayList<DataOperation<DataItem>>();
@@ -496,7 +660,11 @@ class LoadGeneratorImplRecycleTest {
 		final var continueAfterClosure = new CountDownLatch(1);
 		final var producer = Thread.ofVirtual().start(() -> {
 			for (var i = 0; i < operations.size(); i++) {
-				generator.recycle(operations.get(i));
+				if (i % 2 == 0) {
+					generator.recycle(operations.get(i));
+				} else {
+					generator.retry(operations.get(i));
+				}
 				if (i == 31) {
 					admitted.countDown();
 					try {
@@ -520,6 +688,8 @@ class LoadGeneratorImplRecycleTest {
 		assertEquals(128, tracker.snapshot().unattempted());
 		assertTrue(operations.stream()
 						.allMatch(op -> op.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
+		assertTrue(generator.isNothingPendingRetry());
+		assertTrue(generator.isNothingToRecycle());
 	}
 
 	@Test
