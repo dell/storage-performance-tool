@@ -106,7 +106,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
-	private final Set<IdentityKey<O>> inFlightOperations = ConcurrentHashMap.newKeySet();
 	private final ReferenceQueue<O> compatibilityReferences = new ReferenceQueue<>();
 	private final Map<WeakIdentityKey<O>, CompatibilityState> compatibilityStates = new HashMap<>();
 	private final LongAdder dispatched = new LongAdder();
@@ -176,7 +175,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 			return;
 		}
 		outstanding.clear();
-		inFlightOperations.clear();
 		// Keep weak compatibility states across restarts. Otherwise a late callback for an
 		// untracked prior-run operation becomes NEW and contaminates the next run's counters.
 		dispatched.reset();
@@ -390,7 +388,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private void recordDispatched(final O op) {
 		outstanding.add(identityKey(op));
-		inFlightOperations.add(identityKey(op));
 		dispatched.increment();
 		inFlight.incrementAndGet();
 	}
@@ -512,7 +509,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 			return false;
 		}
 		outstanding.remove(identityKey(op));
-		inFlightOperations.remove(identityKey(op));
 		inFlight.decrementAndGet();
 		terminal.increment();
 		return true;
@@ -597,7 +593,6 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private void recordUnresolved(final O op) {
 		outstanding.remove(identityKey(op));
-		inFlightOperations.remove(identityKey(op));
 		inFlight.decrementAndGet();
 		unresolved.increment();
 		synchronized (unresolvedOperations) {
@@ -671,7 +666,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 			return 0;
 		}
 		var count = 0;
-		for (final var operationKey : Set.copyOf(inFlightOperations)) {
+		for (final var operationKey : Set.copyOf(outstanding)) {
 			final O op = operationKey.value;
 			final var state = stateOf(op);
 			if ((state == OperationLifecycleState.DISPATCHED
@@ -741,7 +736,15 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	}
 
 	int inFlightOperationCount() {
-		return enabled ? inFlightOperations.size() : 0;
+		return enabled
+						? (int) outstanding.stream()
+										.filter(operationKey -> {
+											final var state = stateOf(operationKey.value);
+											return state == OperationLifecycleState.DISPATCHED
+															|| state == OperationLifecycleState.COMPLETING;
+										})
+										.count()
+						: 0;
 	}
 
 	private boolean transition(

@@ -15,7 +15,9 @@ import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -24,6 +26,45 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
 
 final class OperationLifecycleTrackerTest {
+
+	@Test
+	void generatorRecoveryAndDrainShareOneAuthoritativeRegistry() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var generatorBuffered = operation("generator-buffered");
+		final var dispatched = operation("dispatched");
+		final var completing = operation("completing");
+
+		assertTrue(tracker.generatorBuffered(generatorBuffered));
+		assertTrue(tracker.generatorBuffered(dispatched));
+		assertTrue(tracker.driverQueued(dispatched));
+		assertEquals(0, tracker.inFlightOperationCount());
+		assertTrue(tracker.dispatched(dispatched));
+		assertEquals(1, tracker.inFlightOperationCount());
+		assertTrue(tracker.generatorBuffered(completing));
+		assertTrue(tracker.driverQueued(completing));
+		assertTrue(tracker.dispatched(completing));
+		assertTrue(tracker.completionStarted(completing));
+		assertEquals(2, tracker.inFlightOperationCount());
+
+		assertEquals(List.of(generatorBuffered), tracker.recoverGeneratorBufferedAsUnattempted());
+		assertEquals(2, tracker.inFlightOperationCount());
+		assertEquals(2, tracker.resolveOutstandingAsUnresolved());
+		assertEquals(0, tracker.resolveOutstandingAsUnresolved());
+		assertFalse(tracker.unresolved(generatorBuffered));
+		assertFalse(tracker.unattempted(dispatched));
+
+		final var snapshot = tracker.snapshot();
+		assertEquals(1, snapshot.unattempted());
+		assertEquals(2, snapshot.unresolved());
+		assertEquals(0, snapshot.inFlight());
+		assertEquals(0, tracker.outstandingOperationCount());
+		assertEquals(0, tracker.inFlightOperationCount());
+		assertFalse(Arrays.stream(OperationLifecycleTracker.class.getDeclaredFields())
+						.anyMatch(field -> field.getName().equals("inFlightOperations")));
+		assertEquals(1, Arrays.stream(OperationLifecycleTracker.class.getDeclaredFields())
+						.filter(field -> Set.class.isAssignableFrom(field.getType()))
+						.count());
+	}
 
 	@Test
 	void attemptBeginsAtActualDispatchAndTerminalCompletionIsRecordedOnce() {
