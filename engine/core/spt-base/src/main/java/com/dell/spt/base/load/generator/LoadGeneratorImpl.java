@@ -36,7 +36,6 @@ import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.Random;
@@ -126,8 +125,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Lock assemblyLock = new ReentrantLock();
 	private final Lock admissionLock = new ReentrantLock();
 	private final long standaloneDeleteInputIdentityCount;
-	private final Set<IdentityKey<O>> bufferedOperations = ConcurrentHashMap.newKeySet();
+	private final Set<IdentityKey<O>> compatibilityBufferedOperations = ConcurrentHashMap.newKeySet();
 	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
+	private boolean custodyModeSelected;
 	private final Lock tempBufferLock = new ReentrantLock();
 	private List<I> items;
 
@@ -403,7 +403,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								if (opOutput.put(op)) {
 									outputOpCounter.increment();
 									onFinalOperationHandoff();
-									bufferedOperations.remove(identityKey(op));
+									releaseCompatibilityCustody(op);
 									if (pendingOpCount == 1) {
 										opBuff.clear();
 									} else {
@@ -431,7 +431,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								outputOpCounter.add(writtenCount);
 								onFinalOperationHandoff();
 								for (var i = 0; i < writtenCount; i++) {
-									bufferedOperations.remove(identityKey(opBuff.get(i)));
+									releaseCompatibilityCustody(opBuff.get(i));
 								}
 								if (writtenCount > 0) {
 									outputProgress = true;
@@ -722,20 +722,73 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		admissionLock.lock();
 		try {
 			if (admissionAllowedLocked()) {
+				registerAssemblyCustody(assemblyBuffer);
 				opBuff.addAll(assemblyBuffer);
-				for (final O op : assemblyBuffer) {
-					operationLifecycle.generatorBuffered(op);
-					bufferedOperations.add(identityKey(op));
-				}
 				return assemblyBuffer.size();
 			}
 			for (final O op : assemblyBuffer) {
-				operationLifecycle.generatorBuffered(op);
+				registerGeneratorCustody(op);
 				operationLifecycle.unattempted(op);
+				releaseCompatibilityCustody(op);
 			}
 			return 0;
 		} finally {
 			admissionLock.unlock();
+		}
+	}
+
+	private void registerAssemblyCustody(final List<O> operations) {
+		var registeredCount = 0;
+		try {
+			for (final O op : operations) {
+				registerGeneratorCustody(op);
+				registeredCount++;
+			}
+		} catch (final IntegrityTerminalException failure) {
+			for (var i = 0; i < registeredCount; i++) {
+				releaseRegisteredGeneratorCustody(operations.get(i));
+			}
+			throw failure;
+		}
+	}
+
+	private void registerGeneratorCustody(final O op) {
+		custodyModeSelected = true;
+		if (!operationLifecycle.isEnabled()) {
+			compatibilityBufferedOperations.add(identityKey(op));
+			return;
+		}
+		final boolean registered;
+		try {
+			registered = operationLifecycle.generatorBuffered(op);
+		} catch (final RuntimeException failure) {
+			throw registrationFailure(failure);
+		}
+		if (!registered) {
+			throw registrationFailure(null);
+		}
+	}
+
+	private IntegrityTerminalException registrationFailure(final RuntimeException cause) {
+		final var failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Operation lifecycle rejected generator custody registration",
+						cause);
+		terminalFailure.compareAndSet(null, failure);
+		return terminalFailure.get();
+	}
+
+	private void releaseRegisteredGeneratorCustody(final O op) {
+		if (operationLifecycle.isEnabled()) {
+			operationLifecycle.unattempted(op);
+		} else {
+			compatibilityBufferedOperations.remove(identityKey(op));
+		}
+	}
+
+	private void releaseCompatibilityCustody(final O op) {
+		if (!operationLifecycle.isEnabled()) {
+			compatibilityBufferedOperations.remove(identityKey(op));
 		}
 	}
 
@@ -751,8 +804,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			try {
 				finishAssembler(OperationAssemblyStopReason.ABORTED, assemblyBuffer);
 				for (final var operation : assemblyBuffer) {
-					operationLifecycle.generatorBuffered(operation);
+					registerGeneratorCustody(operation);
 					operationLifecycle.unattempted(operation);
+					releaseCompatibilityCustody(operation);
 				}
 			} catch (final IOException abortFailure) {
 				assemblyFailure.addSuppressed(abortFailure);
@@ -805,17 +859,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
-	private void finishAssemblerForRecovery(final Map<IdentityKey<O>, O> recovered) {
+	private void finishAssemblerForRecovery() {
 		if (!assemblerFinished.compareAndSet(false, true)) {
 			return;
 		}
 		final var assemblyBuffer = new ArrayList<O>(1);
 		try {
 			finishAssembler(OperationAssemblyStopReason.ADMISSION_CLOSED, assemblyBuffer);
-			for (final O op : assemblyBuffer) {
-				operationLifecycle.generatorBuffered(op);
-				recovered.put(identityKey(op), op);
-			}
+			registerAssemblyCustody(assemblyBuffer);
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to recover retained operation-assembler work", e);
 		}
@@ -874,8 +925,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				operationLifecycle.unattempted(op);
 				return;
 			}
-			operationLifecycle.generatorBuffered(op);
-			bufferedOperations.add(identityKey(op));
+			registerGeneratorCustody(op);
 			recycleQueue.add(op);
 			final var size = recycleQueueSize.incrementAndGet();
 			if (!recycleQueueFullState && size > recycleQueueCapacity) {
@@ -895,8 +945,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				operationLifecycle.unattempted(op);
 				return;
 			}
-			operationLifecycle.generatorBuffered(op);
-			bufferedOperations.add(identityKey(op));
+			registerGeneratorCustody(op);
 			retryQueue.add(op);
 		} finally {
 			admissionLock.unlock();
@@ -905,7 +954,45 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
-		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
+		final var selectedLifecycle = lifecycle == null
+						? OperationLifecycleTracker.<O> disabled()
+						: lifecycle;
+		if (operationLifecycle == selectedLifecycle) {
+			return;
+		}
+		assemblyLock.lock();
+		try {
+			admissionLock.lock();
+			try {
+				if (isStarted()
+								|| !isGeneratorCustodyEmpty()
+								|| hasOutstandingCustody(selectedLifecycle)
+								|| (custodyModeSelected && admissionOpen.get())) {
+					throw new IllegalStateException(
+									"Operation custody may only change while the generator is stopped and empty");
+				}
+				operationLifecycle = selectedLifecycle;
+				custodyModeSelected = true;
+			} finally {
+				admissionLock.unlock();
+			}
+		} finally {
+			assemblyLock.unlock();
+		}
+	}
+
+	private boolean isGeneratorCustodyEmpty() {
+		return compatibilityBufferedOperations.isEmpty()
+						&& retryQueue.isEmpty()
+						&& recycleQueue.isEmpty()
+						&& !hasOutstandingCustody(operationLifecycle);
+	}
+
+	private boolean hasOutstandingCustody(final OperationLifecycleTracker<O> lifecycle) {
+		final var snapshot = lifecycle.snapshot();
+		return snapshot.generatorBuffered() != 0
+						|| snapshot.driverQueued() != 0
+						|| snapshot.inFlight() != 0;
 	}
 
 	@Override
@@ -973,28 +1060,31 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		try {
 			admissionLock.lock();
 			try {
-				final var recovered = new LinkedHashMap<IdentityKey<O>, O>();
 				recoverUnconsumedStandaloneDeleteItems();
-				finishAssemblerForRecovery(recovered);
-				for (final var operationKey : bufferedOperations) {
-					recovered.put(operationKey, operationKey.value);
+				IntegrityTerminalException tailFailure = null;
+				try {
+					finishAssemblerForRecovery();
+				} catch (final IntegrityTerminalException failure) {
+					tailFailure = failure;
 				}
-				bufferedOperations.clear();
-				O op;
-				while ((op = retryQueue.poll()) != null) {
-					recovered.put(identityKey(op), op);
-				}
-				while ((op = recycleQueue.poll()) != null) {
-					recovered.put(identityKey(op), op);
-				}
-				recycleQueueSize.set(0);
-				final var unattempted = new ArrayList<O>(recovered.size());
-				for (final O buffered : recovered.values()) {
-					if (operationLifecycle.unattempted(buffered)) {
-						unattempted.add(buffered);
+				final List<O> recovered;
+				if (operationLifecycle.isEnabled()) {
+					recovered = operationLifecycle.recoverGeneratorBufferedAsUnattempted();
+				} else {
+					final var recoveredByIdentity = new LinkedHashMap<IdentityKey<O>, O>();
+					for (final var operationKey : compatibilityBufferedOperations) {
+						recoveredByIdentity.put(operationKey, operationKey.value);
 					}
+					compatibilityBufferedOperations.clear();
+					recovered = List.copyOf(recoveredByIdentity.values());
 				}
-				return List.copyOf(unattempted);
+				retryQueue.clear();
+				recycleQueue.clear();
+				recycleQueueSize.set(0);
+				if (tailFailure != null) {
+					throw tailFailure;
+				}
+				return recovered;
 			} finally {
 				admissionLock.unlock();
 			}
@@ -1075,7 +1165,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					requeueRetry(retryOp);
 					break;
 				}
-				bufferedOperations.remove(identityKey(retryOp));
+				releaseCompatibilityCustody(retryOp);
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				final var terminal = IntegrityTerminalException.find(e);
@@ -1108,7 +1198,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				retryQueue.add(retryOp);
 			} else {
 				operationLifecycle.unattempted(retryOp);
-				bufferedOperations.remove(identityKey(retryOp));
+				releaseCompatibilityCustody(retryOp);
 			}
 		} finally {
 			admissionLock.unlock();

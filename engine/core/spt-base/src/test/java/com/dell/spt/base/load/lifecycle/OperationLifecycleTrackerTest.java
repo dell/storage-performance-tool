@@ -127,6 +127,67 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void generatorRecoveryClaimsOnlyBufferedCustodyExactlyOnce() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var firstBuffered = operation("first-generator-buffered");
+		final var secondBuffered = operation("second-generator-buffered");
+		final var handedOff = operation("driver-queued");
+
+		assertTrue(tracker.generatorBuffered(firstBuffered));
+		assertTrue(tracker.generatorBuffered(secondBuffered));
+		assertTrue(tracker.generatorBuffered(handedOff));
+		assertTrue(tracker.driverQueued(handedOff));
+
+		final var recovered = tracker.recoverGeneratorBufferedAsUnattempted();
+
+		assertEquals(2, recovered.size());
+		assertTrue(recovered.stream().anyMatch(operation -> operation == firstBuffered));
+		assertTrue(recovered.stream().anyMatch(operation -> operation == secondBuffered));
+		assertEquals(OperationLifecycleState.UNATTEMPTED, firstBuffered.lifecycle().state());
+		assertEquals(OperationLifecycleState.UNATTEMPTED, secondBuffered.lifecycle().state());
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, handedOff.lifecycle().state());
+		assertTrue(tracker.recoverGeneratorBufferedAsUnattempted().isEmpty());
+		assertEquals(2, tracker.snapshot().unattempted());
+		assertEquals(1, tracker.snapshot().driverQueued());
+	}
+
+	@Test
+	void generatorRecoveryAndDriverHandoffCannotClaimTheSameCirculation() throws Exception {
+		for (var i = 0; i < 128; i++) {
+			final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+			final var op = operation("generator-recovery-handoff-race-" + i);
+			assertTrue(tracker.generatorBuffered(op));
+			final var ready = new CountDownLatch(2);
+			final var start = new CountDownLatch(1);
+			final var handoff = new FutureTask<>(() -> {
+				ready.countDown();
+				await(start);
+				return tracker.driverQueued(op);
+			});
+			final var recovery = new FutureTask<>(() -> {
+				ready.countDown();
+				await(start);
+				return tracker.recoverGeneratorBufferedAsUnattempted();
+			});
+			Thread.ofVirtual().start(handoff);
+			Thread.ofVirtual().start(recovery);
+
+			assertTrue(ready.await(5, TimeUnit.SECONDS));
+			start.countDown();
+			final boolean handedOff = handoff.get(5, TimeUnit.SECONDS);
+			final var recovered = recovery.get(5, TimeUnit.SECONDS);
+
+			assertEquals(1, (handedOff ? 1 : 0) + recovered.size());
+			assertEquals(
+							handedOff
+											? OperationLifecycleState.DRIVER_QUEUED
+											: OperationLifecycleState.UNATTEMPTED,
+							tracker.stateOf(op));
+			assertTrue(tracker.recoverGeneratorBufferedAsUnattempted().isEmpty());
+		}
+	}
+
+	@Test
 	void drainClaimsDispatchedAndCompletingOperationsExactlyOnce() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final var queued = operation("queued");

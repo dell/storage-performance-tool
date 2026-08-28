@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.OperationsBuilderImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.storage.Credential;
@@ -603,6 +604,219 @@ class LoadGeneratorImplRecycleTest {
 	}
 
 	@Test
+	void custodyModeCannotChangeWhileTheGeneratorRetainsBufferedWork() {
+		final var buffered = newOp("buffered-before-custody-switch");
+		generator.recycle(buffered);
+
+		assertThrows(
+						IllegalStateException.class,
+						() -> generator.operationLifecycle(new OperationLifecycleTracker<>()));
+
+		generator.closeAdmission();
+		assertEquals(List.of(buffered), generator.recoverBufferedOperations());
+	}
+
+	@Test
+	void custodyModeMayChangeOnlyAfterAdmissionClosesBetweenEmptyRuns() {
+		final var firstRun = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var nextRun = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		generator.operationLifecycle(firstRun);
+
+		assertThrows(IllegalStateException.class, () -> generator.operationLifecycle(nextRun));
+
+		generator.closeAdmission();
+		assertTrue(generator.recoverBufferedOperations().isEmpty());
+		assertDoesNotThrow(() -> generator.operationLifecycle(nextRun));
+	}
+
+	@Test
+	void custodyModeCannotSelectATrackerThatAlreadyOwnsWork() {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var buffered = newOp("buffered-by-selected-tracker");
+		assertTrue(tracker.generatorBuffered(buffered));
+
+		assertThrows(IllegalStateException.class, () -> generator.operationLifecycle(tracker));
+
+		assertEquals(List.of(buffered), tracker.recoverGeneratorBufferedAsUnattempted());
+	}
+
+	@Test
+	void custodyModeCannotChangeWhileTheGeneratorIsRunning() throws Exception {
+		generator.operationLifecycle(new OperationLifecycleTracker<>());
+		generator.start();
+		assertEventually(generator::isItemInputFinished, 2000);
+
+		assertThrows(
+						IllegalStateException.class,
+						() -> generator.operationLifecycle(new OperationLifecycleTracker<>()));
+	}
+
+	@Test
+	void rejectedTrackedRegistrationFailsIntegrityWithoutSchedulingVisibility() {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var rejected = newOp("rejected-registration");
+		generator.operationLifecycle(tracker);
+		assertTrue(tracker.driverQueued(rejected));
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class, () -> generator.recycle(rejected));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertSame(failure, generator.terminalFailure());
+		assertTrue(generator.isNothingToRecycle());
+		generator.closeAdmission();
+		assertTrue(generator.recoverBufferedOperations().isEmpty());
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, rejected.lifecycle().state());
+	}
+
+	@Test
+	void exceptionalTrackedRegistrationFailsIntegrityWithoutSchedulingVisibility() {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var registrationFailure = new IllegalStateException("lifecycle registration failed");
+		final DataOperation<DataItem> rejected = new DataOperationImpl<>(
+						0,
+						OpType.READ,
+						new DataItemImpl("exceptional-registration", 0, 1024),
+						"/bucket",
+						null,
+						null,
+						List.of(),
+						0) {
+			@Override
+			public synchronized OperationLifecycle startNextLifecycle() {
+				throw registrationFailure;
+			}
+		};
+		generator.operationLifecycle(tracker);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class, () -> generator.retry(rejected));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertSame(registrationFailure, failure.getCause());
+		assertSame(failure, generator.terminalFailure());
+		assertTrue(generator.isNothingPendingRetry());
+		generator.closeAdmission();
+		assertTrue(generator.recoverBufferedOperations().isEmpty());
+	}
+
+	@Test
+	void batchRegistrationFailureResolvesEarlierMembersBeforeAborting() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var first = newOp("registered-before-batch-failure");
+		final var rejected = newOp("rejected-batch-member");
+		final var batchBuilder = (OperationsBuilder<DataItem, DataOperation<DataItem>>) mock(
+						OperationsBuilder.class);
+		when(batchBuilder.opType()).thenReturn(OpType.READ);
+		when(batchBuilder.originIndex()).thenReturn(0);
+		doAnswer(invocation -> {
+			final var operations = invocation.<List<DataOperation<DataItem>>> getArgument(1);
+			operations.add(first);
+			operations.add(rejected);
+			return null;
+		}).when(batchBuilder).buildOps(anyList(), anyList());
+		final var batchOutput = new CollectingOutput<DataOperation<DataItem>>();
+		final var batchGenerator = new LoadGeneratorImpl<>(
+						fixedBatchInput(
+										"BatchRegistrationInput",
+										List.of(
+														new DataItemImpl("first", 0, 1024),
+														new DataItemImpl("second", 0, 1024))),
+						batchBuilder,
+						List.of(),
+						batchOutput,
+						BATCH_SIZE,
+						0,
+						1000,
+						false,
+						false);
+		batchGenerator.operationLifecycle(tracker);
+		assertTrue(tracker.driverQueued(rejected));
+
+		try {
+			assertThrows(IntegrityTerminalException.class, batchGenerator::doWork);
+			assertEquals(OperationLifecycleState.UNATTEMPTED, first.lifecycle().state());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, rejected.lifecycle().state());
+			assertEquals(1, tracker.snapshot().unattempted());
+			assertTrue(batchOutput.received.isEmpty());
+			batchGenerator.closeAdmission();
+			assertTrue(batchGenerator.recoverBufferedOperations().isEmpty());
+		} finally {
+			batchGenerator.close();
+		}
+	}
+
+	@Test
+	void recoveryTailRegistrationFailureStillResolvesAllGeneratorCustody() {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var firstTail = newOp("registered-tail-before-failure");
+		final var rejectedTail = newOp("rejected-tail-member");
+		final var retried = newOp("retry-before-tail-failure");
+		final var recycled = newOp("recycle-before-tail-failure");
+		final var tailAssembler = new OperationAssembler<DataItem, DataOperation<DataItem>>() {
+			@Override
+			public int originIndex() {
+				return 0;
+			}
+
+			@Override
+			public OpType opType() {
+				return OpType.READ;
+			}
+
+			@Override
+			public OperationAssemblyResult assemble(
+							final List<DataItem> items,
+							final List<DataOperation<DataItem>> operations) {
+				return new OperationAssemblyResult(items.size(), 0);
+			}
+
+			@Override
+			public OperationAssemblyResult finish(
+							final OperationAssemblyStopReason reason,
+							final List<DataOperation<DataItem>> operations) {
+				operations.add(firstTail);
+				operations.add(rejectedTail);
+				return new OperationAssemblyResult(0, operations.size());
+			}
+
+			@Override
+			public void close() {}
+		};
+		final var tailGenerator = new LoadGeneratorImpl<>(
+						itemInput,
+						tailAssembler,
+						List.of(),
+						output,
+						BATCH_SIZE,
+						0,
+						1000,
+						true,
+						false);
+		tailGenerator.operationLifecycle(tracker);
+		assertTrue(tracker.driverQueued(rejectedTail));
+		tailGenerator.retry(retried);
+		tailGenerator.recycle(recycled);
+
+		try {
+			tailGenerator.closeAdmission();
+			final var failure = assertThrows(
+							IntegrityTerminalException.class, tailGenerator::recoverBufferedOperations);
+
+			assertSame(failure, tailGenerator.terminalFailure());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, firstTail.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, retried.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, recycled.lifecycle().state());
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, rejectedTail.lifecycle().state());
+			assertEquals(3, tracker.snapshot().unattempted());
+			assertTrue(tailGenerator.isNothingPendingRetry());
+			assertTrue(tailGenerator.isNothingToRecycle());
+		} finally {
+			tailGenerator.close();
+		}
+	}
+
+	@Test
 	void closingAdmissionRecoversGeneratorBufferedWorkAsUnattempted() throws Exception {
 		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
 		generator.operationLifecycle(tracker);
@@ -627,6 +841,21 @@ class LoadGeneratorImplRecycleTest {
 		assertEquals(OperationLifecycleState.UNATTEMPTED, lateRecycle.lifecycle().state());
 		assertEquals(OperationLifecycleState.UNATTEMPTED, lateRetry.lifecycle().state());
 		assertEquals(3, tracker.snapshot().unattempted());
+	}
+
+	@Test
+	void trackedRecoveryLeavesGeneratorEmptyForTheNextCustodyMode() {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var buffered = newOp("tracked-recovery-before-mode-change");
+		generator.operationLifecycle(tracker);
+		generator.recycle(buffered);
+
+		generator.closeAdmission();
+		assertEquals(List.of(buffered), generator.recoverBufferedOperations());
+
+		assertDoesNotThrow(() -> generator.operationLifecycle(null));
+		assertTrue(generator.isNothingPendingRetry());
+		assertTrue(generator.isNothingToRecycle());
 	}
 
 	@Test
