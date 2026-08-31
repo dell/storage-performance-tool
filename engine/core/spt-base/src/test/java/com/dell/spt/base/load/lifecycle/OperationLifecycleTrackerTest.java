@@ -28,37 +28,9 @@ import org.mockito.Answers;
 final class OperationLifecycleTrackerTest {
 
 	@Test
-	void generatorRecoveryAndDrainShareOneAuthoritativeRegistry() {
-		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
-		final var generatorBuffered = operation("generator-buffered");
-		final var dispatched = operation("dispatched");
-		final var completing = operation("completing");
-
-		assertTrue(tracker.generatorBuffered(generatorBuffered));
-		assertTrue(tracker.generatorBuffered(dispatched));
-		assertTrue(tracker.driverQueued(dispatched));
-		assertEquals(0, tracker.inFlightOperationCount());
-		assertTrue(tracker.dispatched(dispatched));
-		assertEquals(1, tracker.inFlightOperationCount());
-		assertTrue(tracker.generatorBuffered(completing));
-		assertTrue(tracker.driverQueued(completing));
-		assertTrue(tracker.dispatched(completing));
-		assertTrue(tracker.completionStarted(completing));
-		assertEquals(2, tracker.inFlightOperationCount());
-
-		assertEquals(List.of(generatorBuffered), tracker.recoverGeneratorBufferedAsUnattempted());
-		assertEquals(2, tracker.inFlightOperationCount());
-		assertEquals(2, tracker.resolveOutstandingAsUnresolved());
-		assertEquals(0, tracker.resolveOutstandingAsUnresolved());
-		assertFalse(tracker.unresolved(generatorBuffered));
-		assertFalse(tracker.unattempted(dispatched));
-
-		final var snapshot = tracker.snapshot();
-		assertEquals(1, snapshot.unattempted());
-		assertEquals(2, snapshot.unresolved());
-		assertEquals(0, snapshot.inFlight());
-		assertEquals(0, tracker.outstandingOperationCount());
-		assertEquals(0, tracker.inFlightOperationCount());
+	void outstandingIsTheOnlyStrongIdentityRegistry() throws NoSuchFieldException {
+		assertEquals(Set.class,
+						OperationLifecycleTracker.class.getDeclaredField("outstanding").getType());
 		assertFalse(Arrays.stream(OperationLifecycleTracker.class.getDeclaredFields())
 						.anyMatch(field -> field.getName().equals("inFlightOperations")));
 		assertEquals(1, Arrays.stream(OperationLifecycleTracker.class.getDeclaredFields())
@@ -165,67 +137,6 @@ final class OperationLifecycleTrackerTest {
 		assertEquals(1, snapshot.unresolved());
 		assertEquals(List.of(generatorBuffered, driverQueued), snapshot.unattemptedOperations());
 		assertEquals(List.of(dispatched), snapshot.unresolvedOperations());
-	}
-
-	@Test
-	void generatorRecoveryClaimsOnlyBufferedCustodyExactlyOnce() {
-		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
-		final var firstBuffered = operation("first-generator-buffered");
-		final var secondBuffered = operation("second-generator-buffered");
-		final var handedOff = operation("driver-queued");
-
-		assertTrue(tracker.generatorBuffered(firstBuffered));
-		assertTrue(tracker.generatorBuffered(secondBuffered));
-		assertTrue(tracker.generatorBuffered(handedOff));
-		assertTrue(tracker.driverQueued(handedOff));
-
-		final var recovered = tracker.recoverGeneratorBufferedAsUnattempted();
-
-		assertEquals(2, recovered.size());
-		assertTrue(recovered.stream().anyMatch(operation -> operation == firstBuffered));
-		assertTrue(recovered.stream().anyMatch(operation -> operation == secondBuffered));
-		assertEquals(OperationLifecycleState.UNATTEMPTED, firstBuffered.lifecycle().state());
-		assertEquals(OperationLifecycleState.UNATTEMPTED, secondBuffered.lifecycle().state());
-		assertEquals(OperationLifecycleState.DRIVER_QUEUED, handedOff.lifecycle().state());
-		assertTrue(tracker.recoverGeneratorBufferedAsUnattempted().isEmpty());
-		assertEquals(2, tracker.snapshot().unattempted());
-		assertEquals(1, tracker.snapshot().driverQueued());
-	}
-
-	@Test
-	void generatorRecoveryAndDriverHandoffCannotClaimTheSameCirculation() throws Exception {
-		for (var i = 0; i < 128; i++) {
-			final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
-			final var op = operation("generator-recovery-handoff-race-" + i);
-			assertTrue(tracker.generatorBuffered(op));
-			final var ready = new CountDownLatch(2);
-			final var start = new CountDownLatch(1);
-			final var handoff = new FutureTask<>(() -> {
-				ready.countDown();
-				await(start);
-				return tracker.driverQueued(op);
-			});
-			final var recovery = new FutureTask<>(() -> {
-				ready.countDown();
-				await(start);
-				return tracker.recoverGeneratorBufferedAsUnattempted();
-			});
-			Thread.ofVirtual().start(handoff);
-			Thread.ofVirtual().start(recovery);
-
-			assertTrue(ready.await(5, TimeUnit.SECONDS));
-			start.countDown();
-			final boolean handedOff = handoff.get(5, TimeUnit.SECONDS);
-			final var recovered = recovery.get(5, TimeUnit.SECONDS);
-
-			assertEquals(1, (handedOff ? 1 : 0) + recovered.size());
-			assertEquals(
-							handedOff
-											? OperationLifecycleState.DRIVER_QUEUED
-											: OperationLifecycleState.UNATTEMPTED,
-							tracker.stateOf(op));
-			assertTrue(tracker.recoverGeneratorBufferedAsUnattempted().isEmpty());
-		}
 	}
 
 	@Test
@@ -462,14 +373,19 @@ final class OperationLifecycleTrackerTest {
 		assertTrue(tracker.driverQueued(queued));
 		assertTrue(tracker.driverQueued(completing));
 		assertEquals(0, tracker.inFlightCount());
+		assertEquals(0, tracker.inFlightOperationCount());
 		assertTrue(tracker.dispatched(completing));
 		assertEquals(1, tracker.inFlightCount());
+		assertEquals(1, tracker.inFlightOperationCount());
 		assertTrue(tracker.completionStarted(completing));
 		assertEquals(1, tracker.inFlightCount());
+		assertEquals(1, tracker.inFlightOperationCount());
 		assertTrue(tracker.terminal(completing));
 		assertEquals(0, tracker.inFlightCount());
+		assertEquals(0, tracker.inFlightOperationCount());
 		assertTrue(tracker.unattempted(queued));
 		assertEquals(0, tracker.inFlightCount());
+		assertEquals(0, tracker.inFlightOperationCount());
 	}
 
 	@Test

@@ -214,23 +214,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (dispatchDeadlineReached()) {
 			return false;
 		}
-		final var currentLifecycle = lifecycle(op);
-		if (currentLifecycle.isTracked()) {
-			synchronized (currentLifecycle) {
-				if (currentLifecycle.state() == OperationLifecycleState.UNATTEMPTED) {
-					return false;
-				}
-				final var nextLifecycle = op.startNextLifecycle();
-				if (nextLifecycle == currentLifecycle) {
-					if (dispatchDeadlineReached() || !currentLifecycle.driverQueued()) {
-						return false;
-					}
-				} else if (!transition(op, nextLifecycle, OperationLifecycleState.DRIVER_QUEUED)) {
-					return false;
-				}
-			}
-		} else if (!transition(
-						op, op.startNextLifecycle(), OperationLifecycleState.DRIVER_QUEUED)) {
+		if (!transition(op, op.startNextLifecycle(), OperationLifecycleState.DRIVER_QUEUED)) {
 			return false;
 		}
 		outstanding.add(identityKey(op));
@@ -529,49 +513,12 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!transition(op, lifecycle(op), OperationLifecycleState.UNATTEMPTED)) {
 			return false;
 		}
-		recordUnattempted(op);
-		return true;
-	}
-
-	private void recordUnattempted(final O op) {
 		outstanding.remove(identityKey(op));
 		unattempted.increment();
 		synchronized (unattemptedOperations) {
 			unattemptedOperations.add(op);
 		}
-	}
-
-	/** Atomically claims every circulation still owned by the generator as unattempted. */
-	public List<O> recoverGeneratorBufferedAsUnattempted() {
-		if (!enabled) {
-			return List.of();
-		}
-		final var recovered = new ArrayList<O>();
-		for (final var operationKey : Set.copyOf(outstanding)) {
-			final O op = operationKey.value;
-			final var lifecycle = lifecycle(op);
-			final boolean claimed;
-			if (lifecycle.isTracked()) {
-				synchronized (lifecycle) {
-					claimed = lifecycle.state() == OperationLifecycleState.GENERATOR_BUFFERED
-									&& lifecycle.unattempted();
-				}
-			} else {
-				synchronized (compatibilityStates) {
-					final var compatibilityState = compatibilityState(op);
-					claimed = compatibilityState != null
-									&& compatibilityState.state == OperationLifecycleState.GENERATOR_BUFFERED;
-					if (claimed) {
-						compatibilityState.state = OperationLifecycleState.UNATTEMPTED;
-					}
-				}
-			}
-			if (claimed) {
-				recordUnattempted(op);
-				recovered.add(op);
-			}
-		}
-		return List.copyOf(recovered);
+		return true;
 	}
 
 	/** Records a dispatched or completing operation which outlived the bounded drain. */
