@@ -64,6 +64,10 @@ task cmakeConfigure(type: Exec) {
 	def cmakeArgs = ['cmake', '-B', 'build', '.']
 	commandLine cmakeArgs
 
+	// FindJNI relies on JAVA_HOME for JDKs installed outside standard system paths.
+	// Use the same JDK that is running Gradle so native and Java compilation agree.
+	environment 'JAVA_HOME', System.getProperty('java.home')
+
 	// Only run if all prerequisites are met
 	onlyIf { canBuildNative() }
 
