@@ -38,6 +38,7 @@ _tmp/
 
 # Test summary files
 test-results.json
+test-results.meta.json
 test-failures.txt
 
 # Local environment (secrets/config)

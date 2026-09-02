@@ -53,6 +53,7 @@ cli/*.test
 cli/coverage.*
 cli/cmd_coverage.html
 cli/test-results.json
+cli/test-results.meta.json
 cli/test-failures.txt
 cli/coverage.out
 cli/coverage.html
