@@ -25,7 +25,7 @@ help:
 	@echo "  make test-coverage-cli     Run only the CLI coverage workflow"
 	@echo "  make build-engine  Build only the engine bundle"
 	@echo "  make test-engine   Run only the engine test suite"
-	@echo "  make lint-engine   Run only the engine formatting/lint checks"
+	@echo "  make lint-engine   Run engine formatting and Error Prone checks"
 	@echo "  make test-coverage-engine  Run only the engine coverage workflow"
 
 setup:
@@ -69,7 +69,7 @@ lint-cli:
 	$(MAKE) -C $(CLI_DIR) lint
 
 lint-engine:
-	$(MAKE) -C $(ENGINE_DIR) check
+	$(MAKE) -C $(ENGINE_DIR) check errorprone
 
 test-coverage: test-coverage-cli test-coverage-engine
 

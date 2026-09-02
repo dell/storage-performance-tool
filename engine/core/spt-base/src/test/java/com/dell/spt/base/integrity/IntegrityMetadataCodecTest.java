@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +19,8 @@ class IntegrityMetadataCodecTest {
 		final var entries = List.<Map.Entry<String, ?>> of(
 						new AbstractMap.SimpleImmutableEntry<>("X-Amz-Meta-SPT-Integrity-Version", " 1 "),
 						new AbstractMap.SimpleImmutableEntry<>("spt-integrity-algorithm", " SHA256 "),
-						new AbstractMap.SimpleImmutableEntry<>("SPT-INTEGRITY-DIGEST", EMPTY_SHA256.toUpperCase()),
+						new AbstractMap.SimpleImmutableEntry<>(
+										"SPT-INTEGRITY-DIGEST", EMPTY_SHA256.toUpperCase(Locale.ROOT)),
 						new AbstractMap.SimpleImmutableEntry<>("x-amz-meta-spt-integrity-size", " 0 "));
 
 		assertEquals(new IntegrityMetadata("1", "sha256", EMPTY_SHA256, 0),
@@ -31,7 +33,7 @@ class IntegrityMetadataCodecTest {
 		entries.add(new AbstractMap.SimpleImmutableEntry<>(
 						"x-amz-meta-spt-integrity-size", List.of("0", "0")));
 		entries.add(new AbstractMap.SimpleImmutableEntry<>(
-						"x-amz-meta-spt-integrity-digest", EMPTY_SHA256.toUpperCase()));
+						"x-amz-meta-spt-integrity-digest", EMPTY_SHA256.toUpperCase(Locale.ROOT)));
 		assertEquals(0, IntegrityMetadataCodec.decode(entries).size());
 
 		entries.add(new AbstractMap.SimpleImmutableEntry<>("SPT-INTEGRITY-SIZE", "1"));

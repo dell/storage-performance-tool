@@ -50,6 +50,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1735,7 +1736,7 @@ public class LoadStepContextImplTest {
 		// stable across a retry's original attempt vs. its later copies. The item object
 		// reference itself, however, is shared (copy-constructed, not cloned) all the way
 		// through every result() copy in the chain, so identity is the stable key.
-		private final Map<DataItem, Integer> attemptsByItem = new java.util.IdentityHashMap<>();
+		private final IdentityHashMap<DataItem, Integer> attemptsByItem = new IdentityHashMap<>();
 		private final Object attemptsByItemLock = new Object();
 		private final AtomicInteger totalPutCalls = new AtomicInteger();
 		private final AtomicInteger successCount = new AtomicInteger();
@@ -1865,7 +1866,7 @@ public class LoadStepContextImplTest {
 		private final int failuresBeforeSuccess;
 		private final Operation.Status failureStatus;
 		private final long completionDelayMillis;
-		private final Map<DataItem, Integer> attemptsByItem = new java.util.IdentityHashMap<>();
+		private final IdentityHashMap<DataItem, Integer> attemptsByItem = new IdentityHashMap<>();
 		private final Object attemptsByItemLock = new Object();
 		private final AtomicInteger totalPutCalls = new AtomicInteger();
 		private final AtomicInteger successCount = new AtomicInteger();
@@ -2033,7 +2034,9 @@ public class LoadStepContextImplTest {
 				final DataOperation<DataItem> dataOp = (DataOperation<DataItem>) op;
 				try {
 					dataOp.countBytesDone(dataOp.item().size());
-				} catch (final IOException ignored) {}
+				} catch (final IOException e) {
+					throw new AssertionError("test item size should be readable", e);
+				}
 			}
 			op.status(Operation.Status.SUCC);
 			op.finishResponse();

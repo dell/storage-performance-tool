@@ -139,12 +139,12 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	}
 
 	@Override
-	public final void incrementOpRetryCount() {
+	public final synchronized void incrementOpRetryCount() {
 		opRetryCount++;
 	}
 
 	@Override
-	public final void resetOpRetryCount() {
+	public final synchronized void resetOpRetryCount() {
 		opRetryCount = 0;
 	}
 

@@ -3,9 +3,40 @@ package com.dell.spt.base.item.op;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.dell.spt.base.item.ItemImpl;
+import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class OperationImplTest {
+
+	@Test
+	void retryCountPreservesConcurrentIncrements() throws Exception {
+		final int workerCount = 8;
+		final int incrementsPerWorker = 100_000;
+		final var op = new OperationImpl<>(0, OpType.CREATE, new ItemImpl("item"), null, null, null);
+		final var start = new CountDownLatch(1);
+		final var futures = new ArrayList<java.util.concurrent.Future<?>>();
+
+		try (final var executor = Executors.newFixedThreadPool(workerCount)) {
+			for (int worker = 0; worker < workerCount; worker++) {
+				futures.add(executor.submit(() -> {
+					start.await();
+					for (int increment = 0; increment < incrementsPerWorker; increment++) {
+						op.incrementOpRetryCount();
+					}
+					return null;
+				}));
+			}
+			start.countDown();
+			for (final var future : futures) {
+				future.get(10, TimeUnit.SECONDS);
+			}
+		}
+
+		assertEquals(workerCount * incrementsPerWorker, op.opRetryCount());
+	}
 
 	@Test
 	void create_doesNotDeriveSrcPathFromKey() {
