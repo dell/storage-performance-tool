@@ -19,9 +19,9 @@ allprojects { prj ->
                 errorprone 'com.google.errorprone:error_prone_core:2.36.0'
             }
             prj.tasks.withType(JavaCompile).configureEach { JavaCompile t ->
-                // Treat everything as warnings for triage
-                options.errorprone.allErrorsAsWarnings.set(true)
-                options.errorprone.disableWarningsInGeneratedCode.set(true)
+				// Keep the lint gate fail-closed: Error Prone warnings and errors fail compilation.
+				options.compilerArgs.add('-Werror')
+				options.errorprone.disableWarningsInGeneratedCode.set(true)
             }
         }
     }

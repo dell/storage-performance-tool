@@ -128,7 +128,7 @@ class MetricsManagerImplCsvTotalTest {
 	}
 
 	private static void configureSortOrder(final List<DistributedMetricsContext> contexts) {
-		final Map<DistributedMetricsContext, Integer> orderByContext = new IdentityHashMap<>();
+		final IdentityHashMap<DistributedMetricsContext, Integer> orderByContext = new IdentityHashMap<>();
 		for (int i = 0; i < contexts.size(); i++) {
 			orderByContext.put(contexts.get(i), i);
 		}

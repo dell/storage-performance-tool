@@ -28,6 +28,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.logging.log4j.Level;
@@ -251,7 +252,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		if (!integrityModeEnabled || !emitsOperationArtifacts()) {
 			return;
 		}
-		final OpType opType = OpType.valueOf(config.stringVal("load-op-type").toUpperCase());
+		final OpType opType = OpType.valueOf(config.stringVal("load-op-type").toUpperCase(Locale.ROOT));
 		for (final var artifact : IntegrityCsvArtifacts.applicableHeaders(
 						opType, true, multipartEnabled())) {
 			switch (artifact.kind()) {
