@@ -19,22 +19,15 @@ else
 fi
 
 # Box drawing characters
-BOX_H="════"
 BOX_V="║"
 BOX_TL="╔"
 BOX_TR="╗"
 BOX_BL="╚"
 BOX_BR="╝"
 
-TEMP_FILE=$(mktemp)
 RESULTS_FILE="test-results.json"
+METADATA_FILE="test-results.meta.json"
 FAILURES_FILE="test-failures.txt"
-
-# Cleanup function
-cleanup() {
-    rm -f "$TEMP_FILE"
-}
-trap cleanup EXIT
 
 # Check for jq
 check_jq() {
@@ -73,17 +66,29 @@ parse_results() {
         exit 1
     fi
     
-    # Count results by action type - use jq -s to read the entire file as an array
-    local total_tests=$(jq -s '[.[] | select(.Action == "pass" or .Action == "fail" or .Action == "skip")] | length' "$json_file")
-    local passed_tests=$(jq -s '[.[] | select(.Action == "pass")] | length' "$json_file")
-    local failed_tests=$(jq -s '[.[] | select(.Action == "fail")] | length' "$json_file")
-    local skipped_tests=$(jq -s '[.[] | select(.Action == "skip")] | length' "$json_file")
+    # A final event is an individual test result only when Go supplies a test name.
+    # Named parents and named subtests each have their own final event and are counted.
+    local total_tests
+    local passed_tests
+    local failed_tests
+    local skipped_tests
+    local package_failures
+    local package_skips
+    total_tests=$(jq -s '[.[] | select(.Test != null and (.Action == "pass" or .Action == "fail" or .Action == "skip"))] | length' "$json_file")
+    passed_tests=$(jq -s '[.[] | select(.Test != null and .Action == "pass")] | length' "$json_file")
+    failed_tests=$(jq -s '[.[] | select(.Test != null and .Action == "fail")] | length' "$json_file")
+    skipped_tests=$(jq -s '[.[] | select(.Test != null and .Action == "skip")] | length' "$json_file")
+    package_failures=$(jq -s '[.[] | select(.Test == null and .Action == "fail")] | length' "$json_file")
+    package_skips=$(jq -s '[.[] | select(.Test == null and .Action == "skip")] | length' "$json_file")
     
     # Count packages
-    local total_packages=$(jq -s '[.[] | .Package] | unique | length' "$json_file")
-    
-    # Calculate duration (sum of all elapsed times from final test events)
-    local total_duration=$(jq -s '[.[] | select(.Action == "pass" or .Action == "fail") | .Elapsed // 0] | add // 0' "$json_file")
+    local total_packages
+    total_packages=$(jq -s '[.[] | .Package | select(. != null)] | unique | length' "$json_file")
+
+    local wall_clock_duration=""
+    if [ -f "$METADATA_FILE" ]; then
+        wall_clock_duration=$(jq -er '.wallClockSeconds | numbers' "$METADATA_FILE" 2>/dev/null || true)
+    fi
     
     # Calculate percentages (use awk for more portable math)
     local pass_pct="0.0"
@@ -111,59 +116,106 @@ parse_results() {
     else
         printf "${GRAY}⊘ Skipped: %s (%.1f%%)${NC}\n" "$skipped_tests" "$skip_pct"
     fi
-    printf "⏱  Duration: %.2fs\n" "$total_duration"
+    if [ "$package_failures" -gt 0 ]; then
+        printf "${RED}✗ Package/build failures: %s${NC}\n" "$package_failures"
+    fi
+    if [ -n "$wall_clock_duration" ]; then
+        printf "⏱  Wall-clock duration: %.2fs\n" "$wall_clock_duration"
+    else
+        printf "⏱  Wall-clock duration: unavailable (results predate metadata)\n"
+    fi
     echo
-    
-    # Show failures if any
+
+    # The report always describes the results currently being parsed, never a prior run.
+    rm -f "$FAILURES_FILE"
+
+    # Show named test failures if any.
     if [ "$failed_tests" -gt 0 ]; then
-        draw_box "FAILURES"
+        draw_box "TEST FAILURES"
         echo
-        
-        # Get failed tests with package info
-        jq -s -r '.[] | select(.Action == "fail") | "✗ \(.Test)\n  Package: \(.Package)\n"' "$json_file" > "$FAILURES_FILE"
-        cat "$FAILURES_FILE" | while IFS= read -r line; do
+
+        jq -s -r '.[] | select(.Action == "fail" and .Test != null) | "✗ \(.Test)\n  Package: \(.Package)\n"' "$json_file" > "$FAILURES_FILE"
+        while IFS= read -r line; do
             if [[ $line == ✗* ]]; then
                 echo -e "${RED}$line${NC}"
             else
                 echo -e "${GRAY}$line${NC}"
             fi
-        done
+        done < "$FAILURES_FILE"
         echo
     fi
-    
-    # Show skipped tests if any
-    if [ "$skipped_tests" -gt 0 ]; then
+
+    # Report null-test failure events separately and retain useful compiler/setup output.
+    if [ "$package_failures" -gt 0 ]; then
+        draw_box "PACKAGE / BUILD FAILURES"
+        echo
+
+        local package_failure_report
+        package_failure_report=$(jq -s -r '
+            . as $events
+            | [.[] | select(.Action == "fail" and .Test == null)]
+            | unique_by(.Package)
+            | .[]
+            | .Package as $package
+            | ([$events[]
+                | select(
+                    (.Package == $package and .Action == "output")
+                    or (.ImportPath == $package and .Action == "build-output"))
+                | .Output]
+                | join("")
+                | split("\n")
+                | map(select(length > 0))
+                | .[-20:]) as $output
+            | "✗ \($package)\n  Package/build failure"
+                + (if ($output | length) > 0
+                   then "\n" + ($output | map("  " + .) | join("\n"))
+                   else "\n  No package output was captured; inspect test-results.json."
+                   end)
+                + "\n"' "$json_file")
+        printf '%s\n' "$package_failure_report" >> "$FAILURES_FILE"
+        while IFS= read -r line; do
+            if [[ $line == ✗* ]]; then
+                echo -e "${RED}$line${NC}"
+            else
+                echo -e "${GRAY}$line${NC}"
+            fi
+        done <<< "$package_failure_report"
+        echo
+    fi
+
+    # Show skipped tests and package-level skips without counting package events as tests.
+    if [ "$skipped_tests" -gt 0 ] || [ "$package_skips" -gt 0 ]; then
         draw_box "SKIPPED TESTS"
         echo
-        
+
         # Get individual test skips (with Test field)
-        local individual_skips=$(jq -s -r '.[] | select(.Action == "skip" and .Test) | "⊘ \(.Test)\n  Package: \(.Package)\n  Reason: Conditional skip (likely missing dependencies)"' "$json_file")
-        
-        # Get package-level skips (no Test field) 
-        local package_skips=$(jq -s -r '.[] | select(.Action == "skip" and .Test == null) | .Package' "$json_file")
-        
+        local individual_skip_report
+        local package_skip_report
+        individual_skip_report=$(jq -s -r '.[] | select(.Action == "skip" and .Test != null) | "⊘ \(.Test)\n  Package: \(.Package)\n  Reason: Conditional skip (likely missing dependencies)"' "$json_file")
+        package_skip_report=$(jq -s -r '.[] | select(.Action == "skip" and .Test == null) | .Package' "$json_file")
+
         # Show individual test skips
-        if [ -n "$individual_skips" ]; then
+        if [ -n "$individual_skip_report" ]; then
             echo -e "${YELLOW}Individual Test Skips:${NC}"
-            echo "$individual_skips" | while IFS= read -r line; do
+            while IFS= read -r line; do
                 if [[ $line == ⊘* ]]; then
                     echo -e "${YELLOW}$line${NC}"
                 else
                     echo -e "${GRAY}$line${NC}"
                 fi
-            done
+            done <<< "$individual_skip_report"
             echo
         fi
-        
+
         # Show package-level skips
-        if [ -n "$package_skips" ]; then
+        if [ -n "$package_skip_report" ]; then
             echo -e "${GRAY}Package-Level Skips (No Test Files):${NC}"
-            echo "$package_skips" | while IFS= read -r pkg; do
+            while IFS= read -r pkg; do
                 echo -e "${GRAY}  • $pkg${NC}"
-            done
+            done <<< "$package_skip_report"
             echo
         fi
-        
+
         echo -e "${GRAY}💡 Skipped tests are normal and indicate:${NC}"
         echo -e "${GRAY}   • Directories without test files (package-level skips)${NC}"
         echo -e "${GRAY}   • Tests that require specific dependencies or environments${NC}"
@@ -176,19 +228,23 @@ parse_results() {
     echo
     
     # Generate package statistics
-    jq -s -r '[.[] | select(.Action == "pass" or .Action == "fail") | 
+    jq -s -r '[.[] | select(.Test != null and (.Action == "pass" or .Action == "fail" or .Action == "skip")) |
            {package: .Package, test: .Test, result: .Action}] |
            group_by(.package) | 
            map({
                package: .[0].package,
                total: length,
                passed: [.[] | select(.result == "pass")] | length,
-               failed: [.[] | select(.result == "fail")] | length
+               failed: [.[] | select(.result == "fail")] | length,
+               skipped: [.[] | select(.result == "skip")] | length
            }) | 
            sort_by(.package) |
            .[] | 
            if .failed > 0 then
-               "FAIL \(.package) \(.passed)/\(.total) (\((.passed * 100 / .total * 10 + 0.5) / 10)%) ← \(.failed) failures"
+               "FAIL \(.package) \(.passed)/\(.total) (\((((.passed * 1000 / .total) + 0.5) | floor) / 10)%) ← \(.failed) failures"
+               + (if .skipped > 0 then ", \(.skipped) skipped" else "" end)
+           elif .skipped > 0 then
+               "PASS \(.package) \(.passed)/\(.total) (\((((.passed * 1000 / .total) + 0.5) | floor) / 10)%) ← \(.skipped) skipped"
            else
                "PASS \(.package) \(.passed)/\(.total) (100%)"
            end' "$json_file" | \
@@ -207,32 +263,75 @@ parse_results() {
     echo
     echo -e "${GRAY}💡 Run 'make test-verbose' for detailed output${NC}"
     echo -e "${GRAY}📄 Full results saved to: $RESULTS_FILE${NC}"
-    if [ "$failed_tests" -gt 0 ]; then
+    if [ "$failed_tests" -gt 0 ] || [ "$package_failures" -gt 0 ]; then
         echo -e "${GRAY}❌ Failure details saved to: $FAILURES_FILE${NC}"
     fi
     echo
 }
 
+wall_clock_now() {
+    local bash_time="${EPOCHREALTIME:-}"
+    if [ -n "$bash_time" ]; then
+        printf '%s\n' "$bash_time"
+    else
+        date +%s
+    fi
+}
+
 # Run tests and generate summary
 run_tests() {
     echo "Running tests with JSON output..."
-    
+
+    # Clear reports before invoking Go so interrupted or successful runs cannot retain
+    # failure details or timing metadata from an earlier execution.
+    rm -f "$FAILURES_FILE" "$METADATA_FILE"
+
     # Run tests with JSON output, save both to file and display progress
-    gowork_setting=$(go env GOWORK 2>/dev/null || echo "")
-    go_cmd=(go test -json ./...)
+    local gowork_setting
+    local -a go_cmd=(go test -json ./...)
+    gowork_setting=$(go env GOWORK 2>/dev/null || true)
     # Only pass -mod=mod when not using a workspace.
     if [[ -z "${gowork_setting}" || "${gowork_setting}" == "off" ]]; then
         go_cmd=(go test -mod=mod -json ./...)
     fi
+    local wall_clock_start
+    local wall_clock_end
+    local wall_clock_duration
+    local -a pipeline_status
+    wall_clock_start=$(wall_clock_now)
+
+    # Do not enable pipefail here: an empty progress stream is valid. Capture every
+    # stage immediately and preserve the go test status explicitly below.
+    set +e
     "${go_cmd[@]}" | tee "$RESULTS_FILE" | \
-    grep -E '"Action":"(run|pass|fail|skip)"' | \
     jq -r 'select(.Action == "run") | "Running: \(.Test // .Package)"' | \
     while IFS= read -r line; do
         echo -e "${GRAY}$line${NC}"
     done
-    
+    pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+
+    wall_clock_end=$(wall_clock_now)
+    wall_clock_duration=$(awk -v start="$wall_clock_start" -v end="$wall_clock_end" 'BEGIN {printf "%.6f", end - start}')
+    jq -n --argjson wall_clock_seconds "$wall_clock_duration" \
+        '{wallClockSeconds: $wall_clock_seconds}' > "$METADATA_FILE"
+
     echo "Tests completed. Generating summary..."
     parse_results "$RESULTS_FILE"
+
+    local go_test_status=${pipeline_status[0]}
+    if [ "$go_test_status" -ne 0 ]; then
+        return "$go_test_status"
+    fi
+
+    # A progress-display failure must not replace a nonzero Go status, but it should
+    # still fail an otherwise successful run because the results may be incomplete.
+    local pipeline_stage_status
+    for pipeline_stage_status in "${pipeline_status[@]:1}"; do
+        if [ "$pipeline_stage_status" -ne 0 ]; then
+            return "$pipeline_stage_status"
+        fi
+    done
 }
 
 # Main execution
