@@ -20,9 +20,11 @@ import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -347,12 +349,7 @@ class OperationDispatchTaskTest {
 			try {
 				platformTask.start();
 				inOpQueue.add(op);
-				dispatchLock.lock();
-				try {
-					dispatchReady.signal();
-				} finally {
-					dispatchLock.unlock();
-				}
+				platformTask.unpark();
 				verify(driverMock, timeout(5_000)).submit(op);
 			} finally {
 				platformTask.stop();
@@ -433,12 +430,7 @@ class OperationDispatchTaskTest {
 		assertTrue(inOpQueue.isEmpty(), "op should have been drained from the queue");
 
 		// Signal to release the backpressure await so doWork() returns
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 		worker.join(5000);
 
 		task.doWork(); // retry succeeds — buffer clears
@@ -529,12 +521,7 @@ class OperationDispatchTaskTest {
 
 		// Add op and signal — dispatch should wake instantly
 		inOpQueue.add(op);
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 
 		verify(driverMock, timeout(1000)).submit(any(Operation.class));
 
@@ -554,23 +541,13 @@ class OperationDispatchTaskTest {
 
 		// Add op and signal
 		inOpQueue.add(op);
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 
 		// Wait until the first attempt has entered backpressure before signaling the completion.
 		// Otherwise a busy suite may deliver this signal before the dispatcher starts awaiting it.
 		verify(driverMock, timeout(1000)).submit(any(Operation.class));
 		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(true);
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 
 		// Should eventually succeed on retry
 		verify(driverMock, timeout(500).atLeast(2)).submit(any(Operation.class));
@@ -592,17 +569,106 @@ class OperationDispatchTaskTest {
 
 		// Signal should wake the untimed await instantly
 		inOpQueue.add(op);
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 
 		verify(driverMock, timeout(1000)).submit(any(Operation.class));
 
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
+
+	@Test
+	void unparkWakesDispatcherWhileDispatchLockIsHeldElsewhere() throws Exception {
+		// Completion paths signal without touching dispatchLock, so a wake-up must be
+		// delivered even while another thread holds that lock.
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class))).thenReturn(true);
+
+		task.start();
+		final var thread = awaitParkedDispatchThread(task);
+
+		// With a Condition-based signal the wake-up could not be delivered while the lock is
+		// held; here the thread must leave its park (it then queues on the drain lock) at once.
+		dispatchLock.lock();
+		try {
+			inOpQueue.add(op);
+			task.unpark();
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+			while (LockSupport.getBlocker(thread) == task && System.nanoTime() < deadline) {
+				Thread.sleep(1);
+			}
+			assertNotSame(task, LockSupport.getBlocker(thread), "unpark must wake the dispatcher without the lock");
+		} finally {
+			dispatchLock.unlock();
+		}
+		verify(driverMock, timeout(1000)).submit(any(Operation.class));
+
+		task.stop();
+		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+	}
+
+	@Test
+	void unparkBeforeParkIsNotLost() throws Exception {
+		// A producer may signal between the dispatcher's empty-queue check and its park.
+		// The permit is sticky, so the subsequent park returns immediately instead of
+		// blocking until the next signal.
+		// The gate must not park, or it would consume the permit under test.
+		final var gate = new AtomicBoolean(false);
+		final var worker = Thread.ofPlatform().start(() -> {
+			try {
+				while (!gate.get()) {
+					Thread.onSpinWait();
+				}
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		// Record the started worker as the dispatch thread and signal it before it ever
+		// checks the queues, then let it run.
+		final var threadField = OperationDispatchTask.class.getDeclaredField("dispatchThread");
+		threadField.setAccessible(true);
+		threadField.set(task, worker);
+		task.unpark();
+		gate.set(true);
+
+		worker.join(2000);
+		assertFalse(worker.isAlive(), "a pre-delivered wake-up must not be lost by the park");
+	}
+
+	/** Waits until the task's thread is parked in its own wait (blocker == task) and returns it. */
+	private static Thread awaitParkedDispatchThread(final OperationDispatchTask<?, ?> task) throws Exception {
+		final var threadField = OperationDispatchTask.class.getDeclaredField("dispatchThread");
+		threadField.setAccessible(true);
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (System.nanoTime() < deadline) {
+			final var thread = (Thread) threadField.get(task);
+			if (thread != null && LockSupport.getBlocker(thread) == task) {
+				return thread;
+			}
+			Thread.sleep(1);
+		}
+		throw new AssertionError("dispatch thread did not park");
+	}
+
+	@Test
+	void interruptTerminatesParkedDispatcher() throws Exception {
+		final Throwable[] failure = new Throwable[1];
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Throwable t) {
+				failure[0] = t;
+			}
+		});
+		Thread.sleep(50); // let it park on empty queues
+		assertTrue(worker.isAlive(), "dispatcher should be parked with no work");
+
+		worker.interrupt();
+		worker.join(2000);
+		assertFalse(worker.isAlive(), "interrupt must wake the parked dispatcher");
+		assertTrue(failure[0] instanceof InterruptedException,
+						"parked dispatcher should surface the interrupt like Condition.await() did");
 	}
 
 	@Test
@@ -650,12 +716,7 @@ class OperationDispatchTaskTest {
 		Thread.sleep(50);
 		assertTrue(worker.isAlive(), "dispatcher should await when only deferred MPU ops exist and no permits are available");
 
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 		worker.join(5000);
 		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
 	}
@@ -688,12 +749,7 @@ class OperationDispatchTaskTest {
 		assertTrue(worker.isAlive(), "dispatcher should await when deferred queue is full and MPU permits are unavailable");
 		assertEquals(1, inOpQueue.size(), "input queue should not be drained while deferred queue is full");
 
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 		worker.join(5000);
 		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
 	}
@@ -770,12 +826,7 @@ class OperationDispatchTaskTest {
 		assertTrue(worker.isAlive(), "dispatcher should await when deferred MPU queue is full and permits are unavailable");
 		assertEquals(1, inOpQueue.size(), "input queue should remain paused while awaiting permits");
 
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
-		}
+		task.unpark();
 		worker.join(5000);
 		assertFalse(worker.isAlive(), "dispatcher should wake and finish iteration after signal");
 		assertEquals(1, inOpQueue.size(), "signal without permits should not drain paused input");

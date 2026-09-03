@@ -34,7 +34,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
 
@@ -56,7 +55,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final ReentrantLock dispatchLock = new ReentrantLock();
 	// Admission and dispatch intentionally share one lock to preserve their shutdown boundary.
 	private final ReentrantLock admissionLock = dispatchLock;
-	private final Condition dispatchReady = dispatchLock.newCondition();
 	private final OperationDispatchTask<I, O> opDispatchTask;
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
@@ -105,7 +103,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.TASK_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
-						dispatchLock, dispatchReady, inQueueLimit);
+						dispatchLock, dispatchLock.newCondition(), inQueueLimit);
 	}
 
 	@Override
@@ -813,20 +811,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * Wake the dispatch task. Called when new ops are available (put) or when
-	 * a completion frees capacity (handleCompleted). Uses lock() instead of
-	 * tryLock() to guarantee delivery — the dispatch task only holds the lock
-	 * for nanoseconds (double-check before await), so contention is negligible.
+	 * a completion frees capacity (handleCompleted). Lock-free so transport
+	 * event loops never contend on {@code dispatchLock}: the task re-checks its
+	 * wait condition before parking and an unpark permit is sticky, so delivery
+	 * is guaranteed without holding a lock across the signal.
 	 */
 	private void signalDispatch() {
 		final var task = this.opDispatchTask;
 		if (task != null) {
 			task.unpark();
-		}
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
 		}
 	}
 

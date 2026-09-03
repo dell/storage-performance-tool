@@ -1859,59 +1859,46 @@ class CoopStorageDriverBaseTest {
 	@Test
 	void signalDispatch_concurrentCompletionsDoNotLoseSignals() throws Exception {
 		// Multiple threads calling handleCompleted simultaneously. The dispatch
-		// task's Condition should receive at least one signal for every batch of
-		// completions. We verify by counting signals received.
+		// thread should be unparked at least once for every batch of completions,
+		// and no completion thread may need dispatchLock to deliver its wake-up.
 		final var driver = newRetryTestDriver();
 
-		// Observe the real lock and condition constructed for the dispatch task.
 		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
 		lockField.setAccessible(true);
 		final var lock = (ReentrantLock) lockField.get(driver);
-		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		condField.setAccessible(true);
-		final var condition = (java.util.concurrent.locks.Condition) condField.get(driver);
 
 		// opResultOut accepts everything
 		final Output<Operation<Item>> output = mock(Output.class);
 		when(output.put(any(Operation.class))).thenReturn(true);
 		driver.operationResultOutput(output);
 
-		// Signal counter: a separate thread waits on the condition and counts signals
+		// Wake-up counter: a separate thread stands in for the parked dispatch thread
 		final AtomicInteger signalCount = new AtomicInteger(0);
 		final int completionCount = 32;
 		final var allCompleted = new CountDownLatch(completionCount);
 		final var listenerReady = new CountDownLatch(1);
 		final var listenerDone = new CountDownLatch(1);
 
-		// Listener thread: simulates the dispatch task waiting for signals
-		Thread.ofVirtual().start(() -> {
+		// A timed park that expires takes the full timeout; an early return is an unpark.
+		final long parkTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(200);
+		final var listener = Thread.ofPlatform().start(() -> {
 			listenerReady.countDown();
-			try {
-				// Keep listening until all completions are done
-				while (!allCompleted.await(0, TimeUnit.MILLISECONDS)) {
-					lock.lock();
-					try {
-						if (condition.await(50, TimeUnit.MILLISECONDS)) {
-							signalCount.incrementAndGet();
-						}
-					} finally {
-						lock.unlock();
-					}
+			// Keep listening until all completions are done
+			while (allCompleted.getCount() > 0) {
+				final long parkedAt = System.nanoTime();
+				java.util.concurrent.locks.LockSupport.parkNanos(parkTimeoutNanos);
+				if (System.nanoTime() - parkedAt < parkTimeoutNanos / 2) {
+					signalCount.incrementAndGet();
 				}
-				// Drain any remaining signals
-				lock.lock();
-				try {
-					while (condition.await(10, TimeUnit.MILLISECONDS)) {
-						signalCount.incrementAndGet();
-					}
-				} finally {
-					lock.unlock();
-				}
-			} catch (final InterruptedException ignored) {}
+			}
 			listenerDone.countDown();
 		});
+		installDispatchWaiter(driver, listener);
 
 		assertTrue(listenerReady.await(5, TimeUnit.SECONDS), "listener should be ready");
+
+		// Hold dispatchLock for the whole burst: completions must still wake the listener.
+		lock.lock();
 
 		// Fire completions from multiple threads simultaneously
 		final var startLatch = new CountDownLatch(1);
@@ -1930,14 +1917,30 @@ class CoopStorageDriverBaseTest {
 		}
 
 		startLatch.countDown(); // release all completion threads
-		assertTrue(allCompleted.await(10, TimeUnit.SECONDS), "all completions should finish");
+		try {
+			assertTrue(allCompleted.await(10, TimeUnit.SECONDS),
+							"all completions should finish without needing dispatchLock");
+		} finally {
+			lock.unlock();
+		}
 		assertTrue(listenerDone.await(5, TimeUnit.SECONDS), "listener should finish");
 
-		// We expect at least 1 signal (signals can coalesce), and all ops completed
+		// We expect at least 1 wake-up (unparks coalesce), and all ops completed
 		assertTrue(signalCount.get() >= 1,
-						"at least one signal must be received by the dispatch listener");
+						"at least one wake-up must reach the dispatch thread");
 		assertEquals(completionCount, driver.completedOpCount(),
 						"all ops should be counted as completed");
+	}
+
+	/** Points the driver's dispatch task at {@code waiter} so signalDispatch() unparks it. */
+	private static void installDispatchWaiter(final CoopStorageDriverBase<?, ?> driver, final Thread waiter)
+					throws Exception {
+		final var taskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		taskField.setAccessible(true);
+		final var task = taskField.get(driver);
+		final var threadField = OperationDispatchTask.class.getDeclaredField("dispatchThread");
+		threadField.setAccessible(true);
+		threadField.set(task, waiter);
 	}
 
 	@Test
@@ -2151,36 +2154,28 @@ class CoopStorageDriverBaseTest {
 		mpuField.setAccessible(true);
 		mpuField.set(driver, mpuThrottle);
 
-		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
-		lockField.setAccessible(true);
-		final ReentrantLock lock = (ReentrantLock) lockField.get(driver);
-
-		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		condField.setAccessible(true);
-		final var condition = (java.util.concurrent.locks.Condition) condField.get(driver);
-
 		final var waiterReady = new CountDownLatch(1);
 		final var waiterDone = new CountDownLatch(1);
 		final boolean[] awakened = {false
 		};
 
-		Thread.ofVirtual().start(() -> {
-			lock.lock();
-			try {
-				waiterReady.countDown();
-				awakened[0] = condition.await(2, TimeUnit.SECONDS);
-			} catch (final InterruptedException ignored) {} finally {
-				lock.unlock();
-				waiterDone.countDown();
-			}
+		// A timed park that expires takes the full timeout; an early return is an unpark.
+		final long parkTimeoutNanos = TimeUnit.SECONDS.toNanos(2);
+		final var waiter = Thread.ofPlatform().start(() -> {
+			waiterReady.countDown();
+			final long parkedAt = System.nanoTime();
+			java.util.concurrent.locks.LockSupport.parkNanos(parkTimeoutNanos);
+			awakened[0] = System.nanoTime() - parkedAt < parkTimeoutNanos / 2;
+			waiterDone.countDown();
 		});
+		installDispatchWaiter(driver, waiter);
 
-		assertTrue(waiterReady.await(5, TimeUnit.SECONDS), "waiter should be parked on dispatch condition");
+		assertTrue(waiterReady.await(5, TimeUnit.SECONDS), "waiter should be parked as the dispatch thread");
 
 		((CoopStorageDriverBase<Item, Operation<Item>>) driver).releaseMpuObjectPermit();
 
 		assertTrue(waiterDone.await(5, TimeUnit.SECONDS), "waiter should complete after permit release signal");
-		assertTrue(awakened[0], "permit release should signal the dispatch condition");
+		assertTrue(awakened[0], "permit release should unpark the dispatch thread");
 		assertEquals(1, mpuThrottle.availablePermits(), "permit release should return one permit");
 	}
 

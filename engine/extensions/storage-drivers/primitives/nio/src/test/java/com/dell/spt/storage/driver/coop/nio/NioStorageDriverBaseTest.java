@@ -823,26 +823,24 @@ public class NioStorageDriverBaseTest {
 	}
 
 	private static void awaitDispatchCapacityWaiter(final CoopStorageDriverBase<?, ?> driver) throws Exception {
-		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
-		lockField.setAccessible(true);
-		final var dispatchLock = (java.util.concurrent.locks.ReentrantLock) lockField.get(driver);
-		final var conditionField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		conditionField.setAccessible(true);
-		final var dispatchReady = (java.util.concurrent.locks.Condition) conditionField.get(driver);
+		// The dispatch task parks its own thread (blocker = the task) while it waits for capacity.
+		final var taskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		taskField.setAccessible(true);
+		final var task = taskField.get(driver);
+		final var threadField = task.getClass().getDeclaredField("dispatchThread");
+		threadField.setAccessible(true);
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-		var waiterCount = 0;
+		var parked = false;
 		do {
-			dispatchLock.lock();
-			try {
-				waiterCount = dispatchLock.getWaitQueueLength(dispatchReady);
-			} finally {
-				dispatchLock.unlock();
-			}
-			if (waiterCount == 0) {
+			final var thread = (Thread) threadField.get(task);
+			parked = thread != null
+							&& thread.getState() == Thread.State.WAITING
+							&& java.util.concurrent.locks.LockSupport.getBlocker(thread) == task;
+			if (!parked) {
 				Thread.sleep(1);
 			}
-		} while (waiterCount == 0 && System.nanoTime() < deadline);
-		assertEquals(1, waiterCount, "dispatch task should be waiting for the failed batch to return capacity");
+		} while (!parked && System.nanoTime() < deadline);
+		assertTrue(parked, "dispatch task should be waiting for the failed batch to return capacity");
 	}
 
 	private void assertUnexpectedWorkerFailureRecovery(

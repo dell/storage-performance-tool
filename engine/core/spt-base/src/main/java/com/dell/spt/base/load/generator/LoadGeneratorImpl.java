@@ -59,6 +59,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				implements LoadGenerator<I, O> {
 
 	private static final String CLS_NAME = LoadGeneratorImpl.class.getSimpleName();
+	private static final long NO_PROGRESS_BACKOFF_NANOS = 50_000L;
 
 	private static final class IdentityKey<T> {
 		private final T value;
@@ -307,8 +308,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							pendingOpCount += n;
 							recycledOpCounter.add(n);
 						} else {
-							// Yield so in-flight operations can complete and return through
-							// recycleQueue without imposing a timed parking syscall.
+							// Back off briefly so in-flight operations can complete and return
+							// through recycleQueue instead of spinning against an empty queue.
 							yieldThread();
 						}
 					}
@@ -633,8 +634,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return true;
 	}
 
+	/**
+	 * No-progress back-off. A timed park (rather than {@code Thread.yield()}) frees the core
+	 * while the driver's input queue is full; the queue is drained in batches, so a sub-millisecond
+	 * wake-up is ample to keep it fed.
+	 */
 	private static void yieldThread() {
-		LockSupport.parkNanos(50_000);
+		LockSupport.parkNanos(NO_PROGRESS_BACKOFF_NANOS);
 	}
 
 	private void assertOutputRange(

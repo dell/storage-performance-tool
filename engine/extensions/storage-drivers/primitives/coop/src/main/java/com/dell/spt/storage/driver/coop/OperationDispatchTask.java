@@ -61,13 +61,17 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final CircularBuffer<O> buff;
 	private final List<O> tempInOps;
 	private final Lock dispatchLock;
-	private final Condition dispatchReady;
 	private final int deferredQueueCapacity;
 
 	private final Queue<O> deferredMpuQueue;
 	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
 	private volatile Thread dispatchThread;
 
+	/**
+	 * The {@code dispatchReady} condition is retained in the descriptor for existing extensions
+	 * but is no longer the wake-up mechanism: the task parks its own thread and producers
+	 * {@link #unpark()} it without acquiring {@code dispatchLock}.
+	 */
 	public OperationDispatchTask(
 					final ThreadTaskExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
@@ -81,7 +85,6 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		this.stepId = stepId;
 		this.batchSize = batchSize;
 		this.dispatchLock = dispatchLock;
-		this.dispatchReady = dispatchReady;
 		this.deferredQueueCapacity = deferredQueueCapacity;
 		this.deferredMpuQueue = new java.util.ArrayDeque<>(deferredQueueCapacity);
 	}
@@ -97,11 +100,16 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doInit() {
-		dispatchThread = Thread.currentThread();
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 	}
 
+	/**
+	 * Wakes the dispatch thread if it is parked in {@link #awaitDispatchSignal()}. Lock-free:
+	 * an unpark permit is sticky, so a producer that changes state and then calls this after
+	 * the task checked that state (but before it parked) still wakes the task. Safe to call
+	 * from any thread, including transport event loops.
+	 */
 	void unpark() {
 		final var thread = this.dispatchThread;
 		if (thread != null) {
@@ -109,8 +117,24 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	/**
+	 * Parks the dispatch thread until a producer calls {@link #unpark()}. Callers re-check
+	 * their wait condition immediately before calling this; a stale permit only causes one
+	 * spurious iteration. Mirrors {@code Condition.await()} by throwing when interrupted so
+	 * {@link #stop()} still terminates the work loop promptly.
+	 */
+	private void awaitDispatchSignal() throws InterruptedException {
+		LockSupport.park(this);
+		if (Thread.currentThread().isInterrupted()) {
+			throw new InterruptedException();
+		}
+	}
+
 	@Override
 	protected final void doWork() throws Exception {
+		// Recorded per iteration rather than in doInit() so a caller invoking doWork() directly
+		// on its own thread is also the thread that unpark() targets.
+		dispatchThread = Thread.currentThread();
 		try {
 			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
 							&& storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
@@ -126,13 +150,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			if (buff.size() == 0) {
 				drainIncomingOperations(Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
 				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
-					dispatchLock.lock();
-					try {
-						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
-							dispatchReady.await();
-						}
-					} finally {
-						dispatchLock.unlock();
+					if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
+						awaitDispatchSignal();
 					}
 					// Drain again after waking
 					while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
@@ -147,24 +166,19 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 					}
 				} else if (tempInOps.isEmpty() && !deferredMpuQueue.isEmpty()) {
 					// We might have no actionable work (MPU permits are exhausted, or deferred queue is full and inOpQueue is blocked).
-					dispatchLock.lock();
-					try {
-						boolean childEmpty = childOpQueue.isEmpty();
-						boolean inEmpty = inOpQueue.isEmpty();
-						boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
+					boolean childEmpty = childOpQueue.isEmpty();
+					boolean inEmpty = inOpQueue.isEmpty();
+					boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
 
-						if (childEmpty && (inEmpty || !canDrainIn)) {
-							if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
-								dispatchReady.await();
-							} else {
-								// We acquired a permit just now, we can process a deferred op
-								if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
-									buff.add(deferredMpuQueue.poll());
-								}
+					if (childEmpty && (inEmpty || !canDrainIn)) {
+						if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
+							awaitDispatchSignal();
+						} else {
+							// We acquired a permit just now, we can process a deferred op
+							if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
+								buff.add(deferredMpuQueue.poll());
 							}
 						}
-					} finally {
-						dispatchLock.unlock();
 					}
 					if (buff.size() < batchSize) {
 						drainChildOperations(batchSize - buff.size());
@@ -224,21 +238,13 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				}
 				// Backpressure: submit made no progress (no permits available).
 				// Wait for a completion to free capacity.  The double-check
-				// inside the lock prevents a lost-signal race: a completion may
-				// release a permit AND call signalDispatch() between submit()
-				// returning false and this lock acquisition — the signal is lost
-				// because nobody is in await() yet.  Checking availablePermits
-				// under the lock detects that case (the permit release happened-
-				// before the lock acquisition), so we skip the await and retry.
-				if (!submitted) {
-					dispatchLock.lock();
-					try {
-						if (!storageDriver.hasAvailableDispatchCapacity()) {
-							dispatchReady.await();
-						}
-					} finally {
-						dispatchLock.unlock();
-					}
+				// prevents a lost-signal race: a completion may release a permit
+				// AND call signalDispatch() between submit() returning false and
+				// this point.  Either the permit is already visible here (skip the
+				// wait and retry) or the unpark permit is already set (park returns
+				// immediately), so the wake-up cannot be lost.
+				if (!submitted && !storageDriver.hasAvailableDispatchCapacity()) {
+					awaitDispatchSignal();
 				}
 			}
 		} catch (final IllegalStateException e) {

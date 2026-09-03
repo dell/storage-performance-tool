@@ -88,14 +88,10 @@ class NettyCompletionPathTest {
 		childQueueField.setAccessible(true);
 		childQueueField.set(driver, new ArrayBlockingQueue<>(100));
 
-		// dispatch lock and condition
+		// dispatch lock
 		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
 		lockField.setAccessible(true);
-		final var lock = new ReentrantLock();
-		lockField.set(driver, lock);
-		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		condField.setAccessible(true);
-		condField.set(driver, lock.newCondition());
+		lockField.set(driver, new ReentrantLock());
 
 		// opResultOut — mock that accepts anything
 		opResultOut = mock(Output.class);
