@@ -396,7 +396,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					assertOutputRange("Throttle permit", permittedCount, pendingOpCount, opBuff.size());
 
 					// try to output
-					var outputProgress = false;
+					var acceptedCount = 0;
 					if (permittedCount > 0 && isAdmissionOpen()) {
 						if (permittedCount == 1) { // single mode branch
 							try {
@@ -410,7 +410,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 									} else {
 										opBuff.remove(0);
 									}
-									outputProgress = true;
+									acceptedCount = 1;
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
@@ -434,9 +434,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								for (var i = 0; i < writtenCount; i++) {
 									bufferedOperations.remove(identityKey(opBuff.get(i)));
 								}
-								if (writtenCount > 0) {
-									outputProgress = true;
-								}
+								acceptedCount = writtenCount;
 								if (writtenCount < pendingOpCount) {
 									opBuff.removeFirst(writtenCount);
 								} else {
@@ -460,11 +458,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					// Backpressure relief: if we had ops to send but made no output progress
 					// (either throttle denied permits or output queue was full), park the
 					// task thread to avoid a CPU-burning spin loop. The park grows while the
-					// output stays blocked so a full queue is not polled at tens of kHz.
-					if (outputProgress) {
-						outputBackoff.reset();
-					} else {
+					// output stays blocked so a full queue is not polled at tens of kHz, and
+					// only a fully accepted output (not the one-slot trickle a full queue
+					// yields per completion) shortens it again.
+					if (acceptedCount == 0) {
 						LockSupport.parkNanos(outputBackoff.nextParkNanos());
+					} else {
+						outputBackoff.onProgress(acceptedCount, permittedCount);
 					}
 				} else if (retryFlag) {
 					// Nothing pending to dispatch (e.g. item input just exhausted). With

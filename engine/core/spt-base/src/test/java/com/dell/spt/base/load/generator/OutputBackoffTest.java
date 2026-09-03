@@ -29,15 +29,41 @@ class OutputBackoffTest {
 	}
 
 	@Test
-	void progressResetsToTheShortWait() {
+	void fullAcceptanceResetsToTheShortWait() {
 		final var backoff = new OutputBackoff();
 		for (var i = 0; i < 10; i++) {
 			backoff.nextParkNanos();
 		}
 
-		backoff.reset();
+		backoff.onProgress(32, 32);
 
 		assertEquals(OutputBackoff.INITIAL_NANOS, backoff.nextParkNanos());
+	}
+
+	@Test
+	void partialAcceptanceHoldsTheCurrentWait() {
+		// A full queue frees one slot per completion, so the generator sees one-operation
+		// successes between refusals. Those must not restart the short wait.
+		final var backoff = new OutputBackoff();
+		for (var i = 0; i < 10; i++) {
+			backoff.nextParkNanos();
+		}
+
+		backoff.onProgress(1, 32);
+		assertEquals(OutputBackoff.MAX_NANOS, backoff.nextParkNanos());
+
+		backoff.onProgress(4, 32);
+		assertEquals(OutputBackoff.MAX_NANOS, backoff.nextParkNanos());
+	}
+
+	@Test
+	void partialAcceptanceDoesNotGrowTheWaitEither() {
+		final var backoff = new OutputBackoff();
+		assertEquals(50_000L, backoff.nextParkNanos()); // next would be 100 us
+
+		backoff.onProgress(1, 32);
+
+		assertEquals(100_000L, backoff.nextParkNanos());
 	}
 
 	@Test

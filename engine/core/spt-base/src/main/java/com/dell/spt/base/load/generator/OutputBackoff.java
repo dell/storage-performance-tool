@@ -8,7 +8,13 @@ package com.dell.spt.base.load.generator;
  * state every 50 µs costs ~10K timed-park wake-ups per second on a core the transport threads
  * share. The park therefore starts short, so a briefly full queue or a throttle refusal is
  * re-checked promptly, and doubles on each consecutive no-progress iteration up to a cap that
- * is still far below the drain interval. Any progress resets it.
+ * is still far below the drain interval.
+ *
+ * <p>Only a fully accepted output resets the wait. While the queue is full the dispatcher
+ * frees one slot per completed operation, so the generator sees a trickle of one-operation
+ * successes between refusals; treating each as "unblocked" would restart the short wait
+ * every time and keep the wake-up rate at request frequency. A partial acceptance therefore
+ * holds the current wait, which at the cap lets several slots accumulate per wake-up.
  *
  * <p>Not used for the recycle wait: recycled operations return at request-latency cadence
  * (hundreds of microseconds at low concurrency), where a growing park would sit directly on
@@ -28,8 +34,14 @@ final class OutputBackoff {
 		return current;
 	}
 
-	/** Progress was made; the next no-progress wait starts short again. */
-	void reset() {
-		nextNanos = INITIAL_NANOS;
+	/**
+	 * Records that {@code accepted} of {@code requested} operations were output. A complete
+	 * acceptance means the output is no longer blocked and the next wait starts short again; a
+	 * partial one leaves the wait unchanged.
+	 */
+	void onProgress(final int accepted, final int requested) {
+		if (accepted >= requested) {
+			nextNanos = INITIAL_NANOS;
+		}
 	}
 }
