@@ -788,6 +788,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);
+			signalDispatchCapacityAvailable();
 		}
 		handleCompleted(op);
 	}

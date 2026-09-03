@@ -18,6 +18,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.Queue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
@@ -65,6 +66,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 	private final Queue<O> deferredMpuQueue;
 	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
+	private volatile Thread dispatchThread;
 
 	public OperationDispatchTask(
 					final ThreadTaskExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
@@ -95,8 +97,16 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doInit() {
+		dispatchThread = Thread.currentThread();
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+	}
+
+	void unpark() {
+		final var thread = this.dispatchThread;
+		if (thread != null) {
+			LockSupport.unpark(thread);
+		}
 	}
 
 	@Override

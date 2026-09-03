@@ -818,6 +818,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * for nanoseconds (double-check before await), so contention is negligible.
 	 */
 	private void signalDispatch() {
+		final var task = this.opDispatchTask;
+		if (task != null) {
+			task.unpark();
+		}
 		dispatchLock.lock();
 		try {
 			dispatchReady.signal();
