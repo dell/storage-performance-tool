@@ -123,7 +123,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
-		if (!prepare(op)) {
+		if (inOpQueue.remainingCapacity() == 0 || !prepare(op)) {
 			return false;
 		}
 		admissionLock.lock();
@@ -149,6 +149,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		var i = from;
 		while (i < to && isStarted()) {
+			if (inOpQueue.remainingCapacity() == 0) {
+				break;
+			}
 			final O nextOp = ops.get(i);
 			if (!prepare(nextOp)) {
 				break;
@@ -179,7 +182,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		var n = 0;
 		for (final var nextOp : ops) {
-			if (!isStarted() || !prepare(nextOp)) {
+			if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
 				break;
 			}
 			admissionLock.lock();

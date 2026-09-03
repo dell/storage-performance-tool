@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -632,9 +633,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		return true;
 	}
 
-	@SuppressWarnings("ThreadPriorityCheck") // intentional cooperative scheduler hint
 	private static void yieldThread() {
-		Thread.yield();
+		LockSupport.parkNanos(50_000);
 	}
 
 	private void assertOutputRange(
