@@ -59,7 +59,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				implements LoadGenerator<I, O> {
 
 	private static final String CLS_NAME = LoadGeneratorImpl.class.getSimpleName();
-	private static final long NO_PROGRESS_BACKOFF_NANOS = 50_000L;
 
 	private static final class IdentityKey<T> {
 		private final T value;
@@ -121,6 +120,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
 	private final AtomicReference<SchedulingExhaustion> schedulingExhaustion = new AtomicReference<>();
 	private final AtomicBoolean admissionOpen = new AtomicBoolean(true);
+	private final OutputBackoff outputBackoff = new OutputBackoff();
 	private volatile long admissionDeadlineNanos;
 	private volatile boolean admissionDeadlineSet;
 	private final AtomicBoolean assemblerFinished = new AtomicBoolean(false);
@@ -458,10 +458,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						}
 					}
 					// Backpressure relief: if we had ops to send but made no output progress
-					// (either throttle denied permits or output queue was full), briefly
-					// yield the task thread to avoid a CPU-burning spin loop.
-					if (!outputProgress) {
-						yieldThread();
+					// (either throttle denied permits or output queue was full), park the
+					// task thread to avoid a CPU-burning spin loop. The park grows while the
+					// output stays blocked so a full queue is not polled at tens of kHz.
+					if (outputProgress) {
+						outputBackoff.reset();
+					} else {
+						LockSupport.parkNanos(outputBackoff.nextParkNanos());
 					}
 				} else if (retryFlag) {
 					// Nothing pending to dispatch (e.g. item input just exhausted). With
@@ -635,12 +638,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	/**
-	 * No-progress back-off. A timed park (rather than {@code Thread.yield()}) frees the core
-	 * while the driver's input queue is full; the queue is drained in batches, so a sub-millisecond
-	 * wake-up is ample to keep it fed.
+	 * Short fixed wait for states that resolve at request-latency cadence (recycled operations
+	 * returning, in-flight retries settling). A timed park rather than {@code Thread.yield()}
+	 * frees the core instead of spinning. The full-output wait uses {@link OutputBackoff}.
 	 */
 	private static void yieldThread() {
-		LockSupport.parkNanos(NO_PROGRESS_BACKOFF_NANOS);
+		LockSupport.parkNanos(OutputBackoff.INITIAL_NANOS);
 	}
 
 	private void assertOutputRange(
