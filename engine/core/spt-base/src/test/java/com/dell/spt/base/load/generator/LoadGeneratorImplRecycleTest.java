@@ -23,6 +23,7 @@ import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.github.akurilov.commons.concurrent.throttle.Throttle;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import java.io.IOException;
@@ -105,6 +106,45 @@ class LoadGeneratorImplRecycleTest {
 		assertSame(op, output.received.get(0));
 		assertTrue(generator.isNothingToRecycle());
 		assertEquals(1, generator.generatedOpCount());
+	}
+
+	/**
+	 * {@code RateThrottle.tryAcquire(int)} returns the schedule deficit (a negative count) once
+	 * the quota is exhausted instead of zero. The generator must treat that as a refusal and keep
+	 * running, not fail its permit-range contract and die.
+	 */
+	@Test
+	void negativeThrottlePermitCountIsARefusalNotAContractFailure() throws Exception {
+		final var permits = new AtomicInteger(-32_437);
+		final Throttle deficitThrottle = new Throttle() {
+			@Override
+			public boolean tryAcquire() {
+				return permits.get() > 0;
+			}
+
+			@Override
+			public int tryAcquire(final int requested) {
+				return Math.min(requested, permits.get());
+			}
+		};
+		final var throttled = new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, List.of(deficitThrottle), output, BATCH_SIZE, 0, 1000, true, false);
+		try {
+			throttled.doWork(); // exhaust item input
+			final DataOperation<DataItem> op = newOp("item-1");
+			throttled.recycle(op);
+
+			assertDoesNotThrow(throttled::doWork, "a negative permit count must be treated as zero");
+			assertEquals(0, output.received.size(), "nothing may be output while the throttle refuses");
+			assertFalse(throttled.isStopped(), "the generator must survive the refusal");
+
+			permits.set(1);
+			throttled.doWork();
+			assertEquals(1, output.received.size(), "output resumes once permits return");
+			assertSame(op, output.received.get(0));
+		} finally {
+			throttled.close();
+		}
 	}
 
 	/**
