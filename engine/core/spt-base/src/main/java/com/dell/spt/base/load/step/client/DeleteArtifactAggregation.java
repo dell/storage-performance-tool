@@ -651,8 +651,8 @@ final class DeleteArtifactAggregation {
 						&& !DeleteArtifacts.VERIFICATION_PRESENCE_ABSENT.equals(postPresence);
 		final boolean expectedInconclusive = !DeleteArtifacts.TARGET_OUTCOME_UNATTEMPTED.equals(outcome)
 						&& DeleteArtifacts.VERIFICATION_PRESENCE_UNRESOLVED.equals(postPresence);
-		final boolean expectedResidual = postEnabled
-						&& !DeleteArtifacts.VERIFICATION_PRESENCE_UNATTEMPTED.equals(postPresence)
+		final boolean expectedResidual = (postEnabled
+						&& !DeleteArtifacts.VERIFICATION_PRESENCE_UNATTEMPTED.equals(postPresence))
 										? !DeleteArtifacts.VERIFICATION_PRESENCE_ABSENT.equals(postPresence)
 										: !DeleteArtifacts.TARGET_OUTCOME_ACCEPTED.equals(outcome);
 		if (correctness != expectedCorrectness || inconclusive != expectedInconclusive

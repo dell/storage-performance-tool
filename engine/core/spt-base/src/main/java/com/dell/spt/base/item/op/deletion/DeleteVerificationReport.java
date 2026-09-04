@@ -125,14 +125,16 @@ public final class DeleteVerificationReport implements Serializable, AutoCloseab
 	}
 
 	static byte encode(final DeleteVerificationProbe.Presence value) {
-		return (byte) value.ordinal();
+		return value.code();
 	}
 
 	static DeleteVerificationProbe.Presence decode(final byte value) {
-		if (value < 0 || value >= PRESENCE_VALUES.length) {
-			throw new IllegalStateException("DELETE verification evidence contains an invalid presence");
+		for (final var presence : PRESENCE_VALUES) {
+			if (presence.code() == value) {
+				return presence;
+			}
 		}
-		return PRESENCE_VALUES[value];
+		throw new IllegalStateException("DELETE verification evidence contains an invalid presence");
 	}
 
 	private static Path writePresenceFixture(final DeleteVerificationProbe.Presence[] values) {

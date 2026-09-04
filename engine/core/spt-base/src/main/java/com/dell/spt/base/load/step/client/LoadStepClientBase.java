@@ -698,7 +698,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								}
 								try {
 									if (!completion.complete(slice)) {
-										throw DeleteInventoryPhasePending.INSTANCE;
+										throw new DeleteInventoryPhasePending();
 									}
 								} catch (final DeleteInventoryPhasePending pending) {
 									throw pending;
@@ -756,7 +756,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final boolean allowPending) {
 		IntegrityTerminalException phaseFailure = null;
 		for (final Throwable failure : result.failures()) {
-			if (allowPending && failure == DeleteInventoryPhasePending.INSTANCE) {
+			if (allowPending && failure instanceof DeleteInventoryPhasePending) {
 				continue;
 			}
 			phaseFailure = appendTerminalFailure(
@@ -766,7 +766,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							failure);
 		}
 		if (!result.completedAll() && phaseFailure == null
-						&& result.failures().stream().noneMatch(failure -> failure == DeleteInventoryPhasePending.INSTANCE)) {
+						&& result.failures().stream().noneMatch(failure -> failure instanceof DeleteInventoryPhasePending)) {
 			phaseFailure = terminalFailure(
 							category,
 							"Standalone DELETE " + phase + " did not complete across distributed slices",
@@ -779,7 +779,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private static final class DeleteInventoryPhasePending extends Exception {
 		private static final long serialVersionUID = 1L;
-		private static final DeleteInventoryPhasePending INSTANCE = new DeleteInventoryPhasePending();
 
 		private DeleteInventoryPhasePending() {
 			super("DELETE inventory phase remains active", null, false, false);

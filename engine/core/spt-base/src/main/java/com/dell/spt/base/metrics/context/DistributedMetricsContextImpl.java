@@ -205,9 +205,9 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 						&& snapshots.size() == expectedCount
 						&& expectedCount > 0;
 		final boolean identitiesComplete = expectedContributors == null
-						|| expectedContributors.size() == expectedCount
+						|| (expectedContributors.size() == expectedCount
 										&& freshContributors.size() == expectedCount
-										&& new HashSet<>(freshContributors).size() == expectedCount;
+										&& new HashSet<>(freshContributors).size() == expectedCount);
 		final boolean contributorsAuthoritative = snapshotsComplete && identitiesComplete;
 		final boolean deleteDetailsExpected = metadata.containsKey(METADATA_DELETE_METRICS);
 		final boolean deleteDetailsComplete = !deleteDetailsExpected || opType() != OpType.DELETE
