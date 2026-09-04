@@ -16,6 +16,11 @@ package com.dell.spt.base.load.generator;
  * every time and keep the wake-up rate at request frequency. A partial acceptance therefore
  * holds the current wait, which at the cap lets several slots accumulate per wake-up.
  *
+ * <p>A rate throttle refusing permits is not backpressure: permits return on the configured
+ * period (hundreds of microseconds at typical limits), so that wait stays at the short fixed
+ * duration and leaves the queue back-off untouched. Growing it there capped the generator's
+ * wake-up rate below the permit rate and collapsed rate-limited throughput.
+ *
  * <p>Not used for the recycle wait: recycled operations return at request-latency cadence
  * (hundreds of microseconds at low concurrency), where a growing park would sit directly on
  * the re-admission path.
@@ -26,6 +31,24 @@ final class OutputBackoff {
 	static final long MAX_NANOS = 1_000_000L;
 
 	private long nextNanos = INITIAL_NANOS;
+
+	/**
+	 * Decides the wait after one output attempt. Returns the nanoseconds to park, or zero when
+	 * operations were accepted and the generator should continue immediately.
+	 *
+	 * @param permitted operations the throttles allowed this iteration
+	 * @param accepted operations the output actually took
+	 */
+	long parkNanosAfterOutput(final int permitted, final int accepted) {
+		if (permitted <= 0) {
+			return INITIAL_NANOS;
+		}
+		if (accepted <= 0) {
+			return nextParkNanos();
+		}
+		onProgress(accepted, permitted);
+		return 0L;
+	}
 
 	/** Returns the park duration for this no-progress iteration and grows the next one. */
 	long nextParkNanos() {

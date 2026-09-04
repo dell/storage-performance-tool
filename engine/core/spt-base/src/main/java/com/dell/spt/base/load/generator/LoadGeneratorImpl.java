@@ -455,16 +455,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						}
 					}
-					// Backpressure relief: if we had ops to send but made no output progress
-					// (either throttle denied permits or output queue was full), park the
-					// task thread to avoid a CPU-burning spin loop. The park grows while the
-					// output stays blocked so a full queue is not polled at tens of kHz, and
-					// only a fully accepted output (not the one-slot trickle a full queue
-					// yields per completion) shortens it again.
-					if (acceptedCount == 0) {
-						LockSupport.parkNanos(outputBackoff.nextParkNanos());
-					} else {
-						outputBackoff.onProgress(acceptedCount, permittedCount);
+					// Backpressure relief: if we had ops to send but made no output progress,
+					// park the task thread instead of spinning. A throttle refusal waits a
+					// fixed short interval (permits return on the rate period); a full output
+					// queue grows the wait so it is not polled at tens of kHz, and only a
+					// fully accepted output (not the one-slot trickle a full queue yields per
+					// completion) shortens it again.
+					final var parkNanos = outputBackoff.parkNanosAfterOutput(permittedCount, acceptedCount);
+					if (parkNanos > 0) {
+						LockSupport.parkNanos(parkNanos);
 					}
 				} else if (retryFlag) {
 					// Nothing pending to dispatch (e.g. item input just exhausted). With
