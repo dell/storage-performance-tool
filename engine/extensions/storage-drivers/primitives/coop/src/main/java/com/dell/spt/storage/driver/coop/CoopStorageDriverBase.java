@@ -43,6 +43,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	static final int MAX_PART_RETRIES = 3;
 	static final String CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY = "spt.mpu.child.enqueue.timeout.millis";
 	static final long DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS = 30_000L;
+	/** Experimental: completion-driven direct dispatch for built-in transport drivers. */
+	static final String DIRECT_DISPATCH_PROPERTY = "spt.dispatch.direct";
 	private static final String KEY_FINALIZATION_ENQUEUED = "sptFinalizationEnqueued";
 
 	protected final Semaphore concurrencyThrottle;
@@ -59,6 +61,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
+	private final boolean directDispatchEnabled = Boolean.getBoolean(DIRECT_DISPATCH_PROPERTY);
 	private volatile boolean mpuSchedulingInitialized = false;
 	/**
 	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
@@ -261,6 +264,59 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return Math.max(
 						0,
 						Math.min(bufferedOperationCount, concurrencyThrottle.availablePermits()));
+	}
+
+	/**
+	 * Returns whether completion-driven direct dispatch is enabled for this driver. Read once from
+	 * {@value #DIRECT_DISPATCH_PROPERTY}; off by default so the dispatcher path is unchanged.
+	 */
+	protected final boolean directDispatchEnabled() {
+		return directDispatchEnabled;
+	}
+
+	/** Operations the dispatch task has drained but not yet submitted. */
+	protected final int dispatcherBacklog() {
+		final var task = this.opDispatchTask;
+		return task == null ? 0 : task.backlog();
+	}
+
+	/**
+	 * Takes the next plain operation for a caller which already holds a concurrency permit and a
+	 * transport channel, crossing the dispatch boundary under the admission lock. Returns
+	 * {@code null} when the caller must instead release its permit and wake the dispatcher: the
+	 * queue is empty, the head is composite, partial or NOOP work, child operations are pending,
+	 * the dispatcher retains a backlog, or admission has closed. A returned operation is already
+	 * {@code DISPATCHED}; the caller owns starting its transport or completing it as failed.
+	 */
+	protected final O pollForDirectDispatch() {
+		if (admissionLock == null || !isStarted() || dispatcherBacklog() > 0) {
+			return null;
+		}
+		admissionLock.lock();
+		try {
+			if (!admissionOpen || !childOpQueue.isEmpty()) {
+				return null;
+			}
+			final O head = inOpQueue.peek();
+			if (head == null || !isDirectDispatchEligible(head)) {
+				return null;
+			}
+			inOpQueue.poll();
+			if (markDispatchOwnership(head)) {
+				return head;
+			}
+			operationLifecycle().unattempted(head);
+			return null;
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	/** Plain operations only: composite and partial work keeps the dispatcher's MPU accounting. */
+	protected static boolean isDirectDispatchEligible(final Operation<?> op) {
+		return !(op instanceof CompositeOperation)
+						&& !(op instanceof PartialOperation)
+						&& !OpType.NOOP.equals(op.type());
 	}
 
 	/** Returns whether new transport dispatch may begin. */

@@ -66,6 +66,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final Queue<O> deferredMpuQueue;
 	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
 	private volatile Thread dispatchThread;
+	private volatile int backlog;
 
 	/**
 	 * The {@code dispatchReady} condition is retained in the descriptor for existing extensions
@@ -124,10 +125,32 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	 * {@link #stop()} still terminates the work loop promptly.
 	 */
 	private void awaitDispatchSignal() throws InterruptedException {
+		publishBacklog();
 		LockSupport.park(this);
 		if (Thread.currentThread().isInterrupted()) {
 			throw new InterruptedException();
 		}
+	}
+
+	/**
+	 * Operations this task has drained from the shared queues but not yet submitted, plus deferred
+	 * multipart work. Published before every park and after every iteration so a transport
+	 * completion can yield its permit to buffered work instead of dispatching past it.
+	 */
+	int backlog() {
+		return backlog;
+	}
+
+	private void publishBacklog() {
+		backlog = buff.size() + tempInOps.size() + deferredMpuQueue.size();
+	}
+
+	private int incomingDrainLimit(final int maxCount) {
+		// With completion-driven dispatch the event loop serves queued work directly, so the task
+		// takes only what it can submit now and leaves the rest visible in the shared queue.
+		return storageDriver.directDispatchEnabled()
+						? storageDriver.dispatchAttemptLimit(maxCount)
+						: maxCount;
 	}
 
 	@Override
@@ -151,6 +174,12 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				drainIncomingOperations(Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
 				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
 					if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
+						awaitDispatchSignal();
+					} else if (childOpQueue.isEmpty()
+									&& storageDriver.directDispatchEnabled()
+									&& !storageDriver.hasAvailableDispatchCapacity()) {
+						// Queued work exists but every permit is in flight; completions will either
+						// dispatch it directly or release a permit and unpark this task.
 						awaitDispatchSignal();
 					}
 					// Drain again after waking
@@ -204,6 +233,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 					buff.add(op);
 				}
 			}
+			tempInOps.clear();
 
 			// submit all buffered ops (including retries from prior iterations)
 			final int buffSize = buff.size();
@@ -254,16 +284,18 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 							storageDriver.toString(), storageDriver.state());
 		} finally {
 			tempInOps.clear();
+			publishBacklog();
 		}
 	}
 
 	private void drainIncomingOperations(final int maxCount) {
-		if (maxCount <= 0) {
+		final int limit = incomingDrainLimit(maxCount);
+		if (limit <= 0) {
 			return;
 		}
 		dispatchLock.lock();
 		try {
-			inOpQueue.drainTo(tempInOps, maxCount);
+			inOpQueue.drainTo(tempInOps, limit);
 		} finally {
 			dispatchLock.unlock();
 		}

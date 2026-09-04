@@ -405,6 +405,82 @@ class OperationDispatchTaskTest {
 	}
 
 	@Test
+	void directDispatchCapsIncomingDrainAtAvailableCapacity() throws Exception {
+		when(driverMock.directDispatchEnabled()).thenReturn(true);
+		when(driverMock.dispatchAttemptLimit(anyInt()))
+						.thenAnswer(invocation -> Math.min(1, (int) invocation.getArgument(0)));
+		final var submitted = new ArrayList<Operation<Item>>();
+		captureSubmittedOps(submitted);
+		for (var i = 0; i < 4; i++) {
+			inOpQueue.add(mock(Operation.class));
+		}
+
+		task.doWork();
+
+		assertEquals(1, submitted.size(), "only the op which can take a permit is drained");
+		assertEquals(3, inOpQueue.size(), "the rest stay visible to completion-driven dispatch");
+		assertEquals(0, task.backlog());
+	}
+
+	@Test
+	void directDispatchParksWhenQueuedWorkHasNoCapacity() throws Exception {
+		when(driverMock.directDispatchEnabled()).thenReturn(true);
+		when(driverMock.dispatchAttemptLimit(anyInt())).thenReturn(0);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
+		inOpQueue.add(mock(Operation.class));
+
+		final var returned = new AtomicBoolean();
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+				returned.set(true);
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(100);
+
+		assertFalse(returned.get(), "dispatcher must park rather than spin while the event loop owns every permit");
+		verify(driverMock, never()).submit(any(Operation.class));
+		assertEquals(1, inOpQueue.size());
+
+		task.unpark();
+		worker.join(5000);
+		assertTrue(returned.get());
+	}
+
+	@Test
+	void backlogPublishesRetainedBufferedOps() throws Exception {
+		final Operation<Item> op = mock(Operation.class);
+		when(driverMock.submit(any(Operation.class)))
+						.thenReturn(false)
+						.thenReturn(true);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
+		inOpQueue.add(op);
+		assertEquals(0, task.backlog());
+
+		final var worker = Thread.ofVirtual().start(() -> {
+			try {
+				task.doWork();
+			} catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		});
+		Thread.sleep(50);
+
+		assertEquals(1, task.backlog(),
+						"a refused op retained in the buffer is published before the dispatcher parks");
+
+		task.unpark();
+		worker.join(5000);
+		assertEquals(1, task.backlog());
+
+		task.doWork();
+
+		assertEquals(0, task.backlog());
+	}
+
+	@Test
 	void backpressureRetainsBufferedOp() throws Exception {
 		final Operation<Item> op = mock(Operation.class);
 		when(driverMock.submit(any(Operation.class)))
@@ -546,7 +622,9 @@ class OperationDispatchTaskTest {
 		// Wait until the first attempt has entered backpressure before signaling the completion.
 		// Otherwise a busy suite may deliver this signal before the dispatcher starts awaiting it.
 		verify(driverMock, timeout(1000)).submit(any(Operation.class));
-		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(true);
+		// doReturn: the dispatcher thread is invoking this mock concurrently, so when(...) could
+		// bind the stub to whichever call the other thread made last.
+		doReturn(true).when(driverMock).hasAvailableDispatchCapacity();
 		task.unpark();
 
 		// Should eventually succeed on retry
